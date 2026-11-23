@@ -97,14 +97,21 @@ through the GitHub App and deleting only what the install added and nobody has c
 (`packages/runner-cloud/src/engineRemovalPr.ts`); nothing in the product calls it yet.
 
 The protocol (version 27) also defines the signed jobs, commands and capabilities for
-setting a project up on a person's own machine; the cloud's shapes are merged and the runner does
-not act on them yet (`packages/runner-protocol/src/machineJobs.ts`). The cloud does keep what
+setting a project up on a person's own machine (`packages/runner-protocol/src/machineJobs.ts`).
+The runner now takes one such job at a time and acts on `project_setup` only: it fetches the
+engine and the approved plan, runs the engine's coldstart in a microVM or, on a machine
+without one, in the OS sandbox, and reports each step (`packages/fx-runner/src/setup/`,
+`packages/fx-runner/src/daemon/machineJobs.ts`); pushing the result is not built yet. The cloud
+issues the job, serves the plan and can retry a failed install
+(`packages/runner-cloud/src/setupJobs.ts`). The cloud does keep what
 each machine last said about its free memory, free disk, running setups and whether it holds
 model credentials, for placement and display only (`packages/runner-cloud/src/machineFacts.ts`).
-Placement is written as library code with no route or screen on it yet: it puts a project on
+Placement puts a project on
 one machine (one engine per machine, held by a unique index), picks the best machine that is
 live, signed in to Claude and has enough free memory and disk, and moves a project from one
-machine to another in one transaction (`packages/runner-cloud/src/placement.ts`). Carrying the
+machine to another in one transaction (`packages/runner-cloud/src/placement.ts`). Confirming a
+project, public repositories included, is one transaction behind
+`POST /api/runners/repos/{id}/place` (`packages/runner-cloud/src/projectConfirm.ts`). Carrying the
 team's saved memory to the new machine is refused for now (`state_carry_unavailable`). The Machines app
 (`apps/workspace/apps/runners/`) lists the account's machines and moves a project from one to another through
 `GET /api/machines` and `POST /api/runners/repos/{id}/move` (`packages/runner-cloud/src/machines.ts`).
@@ -209,8 +216,8 @@ packages/
                       tokens, merge-gate GraphQL documents
   hetzner/            typed, strict client for the Hetzner Cloud API (servers,
                       firewalls, SSH keys, pricing, snapshots and servers from an image,
-                      and the probe that checks a customer's token); only the API's
-                      token route uses it
+                      the probe that checks a customer's token, and the fake that
+                      staging serves); used by the API's machine routes and the web app
   model-call/         server-side model calls over the account's own key
   model-connection/   bring-your-own-key connections: encryption, validation
   model-router/       Postgres-backed model routing, escalation, floors
@@ -326,6 +333,7 @@ Numbering blocks with files at HEAD:
 | `0600`–`0627` | API core, session epoch and execution mode, work-item stages, API tokens, the Discussions/spec/work-item store, rate limiting, KPI views, the webhook outbox |
 | `0628`–`0799` | role settings, run actions, the runner tables and leases, runner modes and consent, the sandbox reaper settings, EnvSpec, onboarding preview, plan import, repo pairing |
 | `0800`–`1049` | decision asks and context rules, the plane push and merge queue sweeps, discovery analyses, the capacity queue, the assistant's conversations, memory proposals, the post-merge verify stage (`1003_verify_stage.sql` onward), the site kit's two routing roles (`1017_sitekit_role_routing.sql`), the `no_change` reason on run checks (`1018_run_checks_reason_no_change.sql`), the site kit's one-time preview (`1019_sitekit_preview.sql`), the runner's saved verify sign-in state (`1020_verify_sign_in_expiry.sql`), overlap facts on a blocked plane merge order (`1021_plane_merge_overlap_facts.sql`), a person's sign-off record for criteria a reviewer could not verify (`1022_criteria_verifications.sql`), the check names a merge round remembers (`1023_merge_conflict_round_expected_signals.sql`), the run's protocol version at claim time (`1025_runner_protocol_at_claim.sql`) and the engine bridge: audit actions (`1026`), the event store and read model (`1027_engine_bridge.sql`), commands (`1029`), decisions (`1030`), the halt marker (`1031`), the plan snapshot (`1032`), an index for the answers to one ask (`1033_engine_commands_ask_index.sql`) and the exact halt epoch on a command (`1034_engine_halt_stamp_exact.sql`); `1028` is not used. `1035_machine_tables.sql` adds the machine tables (a sealed Hetzner token, managed servers, project placements, sealed sign-in requests, daily usage), a sealed-credential reader and retention prunes. `1036_onboarding_tables.sql` adds the onboarding tables (the track an account chose, a repository's setup, the plan draft a person reviews, the published engine versions) and the table of pending device codes, and `1037_device_registration.sql` adds the functions that start, look up, approve, deny and poll a device code. `1038_engine_halt_by.sql` records who set an engine halt, and `1039_engine_notice_panels.sql` makes each engine change notice name the panels it touches and wakes open streams on it. `1040_runner_sandbox_inventory.sql` stores the sandbox list and host limits a runner reports, and `1041_sandbox_commands.sql` stores the signed stop, delete and reap commands queued for a runner's sandboxes. `1042_engine_bridge_connect.sql` adds the Connect and Disconnect commands and what a runner says it bridges, `1043_engine_watch.sql` the watch command, the slim status and the detail session, `1044_runner_sandbox_status_microvm_reasons.sql` the four reasons a microVM runner gives for not claiming, `1045_runner_host_load_model_auth.sql` a machine's last reported load and whether it holds model credentials, `1046_engine_ack_incomplete.sql` the flag that says a checkout search was cut short, `1047_runner_kvm_fact.sql` whether a machine said it has a usable KVM device (display only), `1048_engine_quantity.sql` the engine quantity an account pays for, whether it pays for a hosted plan and a flag for a quantity below the engines running, and `1049_engine_watch_leases.sql` who holds a live view of an engine and the right of any member to ask for one |
+| `1050`–`1064` | the rented-server work and the machine jobs: the address a provisioning token is bound to (`1050`), the preflight codes a runner reports (`1051`), the heartbeat sandbox inventory (`1052`), the machine job claim path (`1053_machine_jobs.sql`), a create key on a managed server (`1054`), server lifecycle, orphans and delete (`1055`), who may issue `project_setup` (`1057`), the survey draft (`1059`), the index behind each Team panel's own time (`1061`), the machine-linked notice (`1062_machine_link_notice.sql`), the usage rollup into `machine_usage_daily` (`1063_machine_usage_rollup.sql`) and the staging fake provider's state (`1064_fake_provider_state.sql`); `1056`, `1058` and `1060` are not used |
 
 **Ordering rule:** every migration file a pull request adds has to sort after
 every file already on its base, and no two files share a four-digit prefix.
@@ -378,7 +386,7 @@ Migrations run under a non-superuser, Neon-shaped owner role;
 (opened, synchronize, reopened) and on merge-queue checks (`merge_group`). Its
 jobs are `pr-gates` (public pull requests only: what the body may cite and that
 the diff adds no overlay path), `check` (runs `scripts/check.sh`, 90-minute
-timeout, 175 in a merge-queue run while `ROLLUP_ENABLED` is `true`), `workspace-e2e` (pull requests and merge groups) and `e2e-runner`.
+timeout, 175 in a merge-queue run while `ROLLUP_ENABLED` is `true`), `workspace-e2e` (pull requests and merge groups, three Playwright shards for each of the three viewport projects, with a `workspace-e2e-required` job that reports the required names once every shard passed) and `e2e-runner`.
 Each job is skipped when the repository variable `CI_DISABLED` is `true`, and
 `runs-on` is `ubuntu-latest` on a public repository.
 On a hosted runner Nix is installed with `fallback = true`, so a throttled Actions cache

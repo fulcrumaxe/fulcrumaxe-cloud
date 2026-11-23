@@ -1,6 +1,6 @@
 # @fx/hetzner
 
-A typed, strict client for the Hetzner Cloud API, and a small provider-neutral seam on top of it. The client covers locations, server types, pricing, servers, firewalls, SSH keys and actions. It is a library. The one thing outside the package that uses it is the token probe described below.
+A typed, strict client for the Hetzner Cloud API, and a small provider-neutral seam on top of it. The client covers locations, server types, pricing, servers, firewalls, SSH keys and actions. It is a library, and it also ships a small in-memory fake of the API that staging serves (see "The staging fake").
 
 Sources:
 - `packages/hetzner/package.json`
@@ -9,6 +9,12 @@ Sources:
 - `packages/hetzner/src/parse.ts`
 - `packages/hetzner/src/provider.ts`
 - `packages/hetzner/src/probe.ts`
+- `packages/hetzner/src/fake.ts`
+- `packages/hetzner/src/fakeGate.ts`
+- `packages/api/src/machines/servers.ts`
+- `packages/api/src/machines/lifecycle.ts`
+- `apps/web/app/api/%5Ffake/hetzner/[...path]/handler.ts`
+- `apps/web/app/api/health/handler.ts`
 - `packages/hetzner/vitest.config.ts`
 - `packages/hetzner/test/`
 - `packages/hetzner/test/helpers/strictHetzner.ts`
@@ -23,7 +29,13 @@ The package is private (`"private": true`, `"license": "UNLICENSED"` in `package
 
 ## What depends on it
 
-Only `packages/api/package.json` lists `@fx/hetzner`, and the one import is `createHetznerCredentialProbe` in `packages/api/src/routes/machine-credential.ts` (#1057). No app and no server-creating code calls the client or the provider seam yet. Its only workspace dependency is `@fx/net-guard` (`packages/hetzner/package.json`), whose `resolveChecked` and `isBlockedAddress` the client uses to resolve `api.hetzner.cloud` and refuse a blocked address (`packages/hetzner/src/client.ts`). Treat the client and the provider seam below as unwired.
+`packages/api/package.json` and `apps/web/package.json` list `@fx/hetzner`. Its callers are:
+
+- `createHetznerCredentialProbe` in `packages/api/src/routes/machine-credential.ts` (#1057), the token probe below.
+- The machine server code in `packages/api/src/machines/servers.ts` (quote and create, #1177) and `packages/api/src/machines/lifecycle.ts` (following a server after it is made, delete, and the sweep for leftovers, #1182). They build a client per call from the person's stored token and use it for the quote, create and delete of a server.
+- The staging fake route and the health check in `apps/web` (below).
+
+Its only workspace dependency is `@fx/net-guard` (`packages/hetzner/package.json`), whose `resolveChecked` and `isBlockedAddress` the client uses to resolve the Hetzner host and refuse a blocked address (`packages/hetzner/src/client.ts`).
 
 ## The client
 
@@ -51,9 +63,17 @@ Everything above is exported from `packages/hetzner/src/index.ts`, along with th
 
 `HetznerError` (`packages/hetzner/src/client.ts`) carries a closed `code`: `unauthorized`, `forbidden`, `resource_limit_exceeded`, `resource_unavailable`, `placement_error`, `rate_limit_exceeded`, `uniqueness_error`, `invalid_input`, `server_error`, `unavailable` or `not_found`. Any other code Hetzner sends, and every network, TLS, timeout or shape failure, becomes `unavailable`. `extra` holds the HTTP `status`, Hetzner's own `hetznerCode`, `retryAfter`, a `reason`, and `ambiguous`, which is true when the request may or may not have taken effect.
 
+## The staging fake
+
+`packages/hetzner/src/fake.ts` exports `handleFake`, a pure function over a JSON state (`emptyFakeState`, `FakeState`) that answers the Hetzner paths the client uses: locations, server types, pricing, servers and their power and image actions, firewalls, images and SSH keys (#1196). It is written from Hetzner's published reference and is not recorded from the live API. Its header comment lists what it does not model: actions finish at once, a new server is `initializing` for one poll, an image finishes on its second poll, there is a two-entry catalogue, and there are no rate limits. It keeps at most `FAKE_LIMITS` of each thing (10 servers, 20 of the rest, 50 rules) and answers 403 `resource_limit_exceeded` past that. `fakeAuthOk` accepts any non-empty bearer token except one that looks like a real Hetzner token (64 letters and digits).
+
+`apps/web/app/api/%5Ffake/hetzner/[...path]/handler.ts` serves it at `/api/_fake/hetzner/v1/*`, keeping the state in one row of `fake_provider_state` under a row lock. The folder name is `%5Ffake` because Next treats a folder starting with `_` as private. The handler refuses a body over 64 KiB and answers a plain 404 unless the gate below is open.
+
+The gate is `fakeProviderAllowed` in `packages/hetzner/src/fakeGate.ts`: `FX_MACHINE_PROVIDER_FAKE` must be exactly `1` and `FX_DEPLOY_KIND` exactly `staging`. The client option `fakeBaseUrl` points `createHetznerClient` at such a route; the client refuses it, and the route answers 404, whenever the gate is closed, and the usual DNS, TLS and address checks still apply. `fakeProviderInProduction` names the misconfiguration of the variable being set on a deployment that is not staging, and `apps/web/app/api/health/handler.ts` reports it as `fake_provider_in_production`. The variable is declared in `apps/web/env-manifest.ts`.
+
 ### The provider seam
 
-`packages/hetzner/src/provider.ts` defines `MachineProvider`, an interface whose types carry no Hetzner field names, so another provider could sit behind it. It has `quote`, `create`, `get`, `delete`, `listByLabel`, `createFirewall`, `listFirewalls` and `deleteFirewall`. Ids are opaque strings; the Hetzner implementation turns them into numbers and refuses one that is not a positive integer. `create` returns `{ machine, reused, settled }`, where `settled` is false while the create action is still running. Hetzner Cloud is the only implementation, built by `createHetznerProvider(client)`.
+`packages/hetzner/src/provider.ts` defines `MachineProvider`, an interface whose types carry no Hetzner field names, so another provider could sit behind it. It has `quote`, `create`, `get`, `delete`, `listByLabel`, `createFirewall`, `listFirewalls` and `deleteFirewall`. Ids are opaque strings; the Hetzner implementation turns them into numbers and refuses one that is not a positive integer. `create` returns `{ machine, reused, settled }`, where `settled` is false while the create action is still running. Hetzner Cloud is the only implementation, built by `createHetznerProvider(client)`. No code outside the package's tests builds it yet: `packages/api/src/machines/servers.ts` calls the client directly.
 
 Every provider method throws `MachineProviderError`, never `HetznerError`. Callers switch on its `code`, one of `unavailable`, `not_found`, `conflict`, `rate_limited`, `invalid_input`, `unauthorized`, `in_use` or `mismatch`. The provider's own code goes in `extra.providerCode`, and `extra` also carries `status`, `retryAfter` and `ambiguous` when they apply. `toMachineProviderError` does the mapping:
 
@@ -81,6 +101,6 @@ pnpm --filter @fx/hetzner typecheck
 
 `packages/hetzner/vitest.config.ts` runs `test/**/*.test.ts` with `packages/test-guard/src/setup.ts`. There is no Postgres and no network: every test talks to `startStrictHetzner` in `packages/hetzner/test/helpers/strictHetzner.ts`, a local fake of the Hetzner API served over real TLS. The certificate names `api.hetzner.cloud` and is passed to the client as its `ca`, through the `testTarget` option. The client refuses `testTarget` unless `NODE_ENV` is exactly `test`.
 
-The fake refuses what the real API refuses: the `/v1` prefix, a bearer token it knows, JSON bodies on writes, the `{error:{code,message,details}}` shape, paging limits, rate-limit headers with a gradual refill and a 429 at zero, label patterns, a taken server name or SSH-key fingerprint (409 `uniqueness_error`), the account server limit, a type not offered in a location, and `user_data` over 32 KiB. Failures can be injected through `world.failNext`. Its header comment states what it does not model: boot timing, real prices and the type catalogue, per-endpoint rate limits, image and network validation, firewall application and the exact wording of messages. It is also marked unrecorded: written from Hetzner's published reference, not captured from the live API. The one test that would compare parsed fields to a recorded response is an empty, skipped placeholder in `packages/hetzner/test/client.test.ts`.
+The fake refuses what the real API refuses: the `/v1` prefix, a bearer token it knows, JSON bodies on writes, the `{error:{code,message,details}}` shape, paging limits, rate-limit headers with a gradual refill and a 429 at zero, label patterns, a taken server name or SSH-key fingerprint (409 `uniqueness_error`), the account server limit, a type not offered in a location, and `user_data` over 32 KiB. Failures can be injected through `world.failNext`, optionally only for one path and after a number of passes. `world.deleteSteps` makes a server delete finish only after that many polls of its action, with the firewall still applied until then, and `world.priceMonthlyDelta` moves every monthly price, to test a price that changed between a quote and a create. Its header comment states what it does not model: boot timing, real prices and the type catalogue, per-endpoint rate limits, image and network validation, firewall application and the exact wording of messages. It is also marked unrecorded: written from Hetzner's published reference, not captured from the live API. The one test that would compare parsed fields to a recorded response is an empty, skipped placeholder in `packages/hetzner/test/client.test.ts`.
 
 `packages/hetzner/test/helpers/createFlow.ts` is the flow a caller builds on the seam alone (quote, firewall, machine). `packages/hetzner/test/provider.test.ts` and `packages/hetzner/test/hetznerProvider.test.ts` run it against the interface and against the Hetzner implementation.
