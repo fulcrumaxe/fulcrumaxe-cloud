@@ -126,7 +126,7 @@ package deep-imports the specific file it needs, for example
 - `runs/read.ts`: `RunsReadCtx`, `RunDTO`, `getRun(ctx, id)`, `ListRunsInput`, `ListRunsResult`, `listRuns(ctx, input)`
 - `engine/panels.ts`: `readEngineRepos`, `readAgents`, `readLanes`, `readGates`, `readAsks`, `readLog`, `readRepoStats`, `livenessOf`, `agentStateOf`, `LIVE_WITHIN_S`, `UNKNOWN_AFTER_S`
 - `engine/read.ts`: `readEngineUsage`, `readEngineAgentStats`, `engineApiEquivalentUsd`
-- `engine/plan.ts`: `readEnginePlan(client, repoId)`, `getEnginePlan(ctx, repoId)`, `EnginePlanView`
+- `engine/plan.ts`: `readEnginePlan(client, repoId, accountId)`, `getEnginePlan(ctx, repoId)`, `EnginePlanView`
 - `work-items/read.ts`: `WorkItemsReadCtx`, `WorkItemDTO`, `getWorkItem(ctx, id)`, `ListWorkItemsInput`, `ListWorkItemsResult`, `listWorkItems(ctx, input)`
 
 ## How it works

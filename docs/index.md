@@ -15,7 +15,7 @@ Sources:
 
 - [README](../README.md) — the pipeline from proposal to browser check in one page, repo layout, getting set up, commands, the database migration scheme, and CI.
 - [Architecture](architecture.md) — the two repository planes, workspace project dependency graph, how a request moves from browser to Postgres, the pipeline (merge gate, merge queue, post-merge verify, the cloud's own `fx-gate1`, where an agent runs, the engine bridge, verdict envelopes) and the assistant.
-- [Status](status.md) — what the pipeline does today (including the post-merge browser check, the Engine plan and the live view of an engine), what is built but off until configured, which parts of the machine and microVM work are library code with no caller yet (such as project placement), and every workspace project with its test evidence.
+- [Status](status.md) — what the pipeline does today (including the post-merge browser check, the Engine plan and the live view of an engine), what is built but off until configured, which parts of the machine and microVM work are not built yet (such as pushing a project setup's result), and every workspace project with its test evidence.
 - [Testing](testing.md) — what `scripts/check.sh` runs, how CI scopes a pull request (including the test edges and repository-wide scans that select extra packages), the repository-wide guard tests, e2e projects, and how test fakes stay as strict as the real services.
 - [Decisions](decisions.md) — a log of specific technical decisions, why they were made, and where they still hold at HEAD.
 - [Builder guide](agents/builder-guide.md) — the working checklist for anyone, human or agent, changing this repo: the check, the guard tests, migrations, database tests, fakes, UI work and the pull request. The root `AGENTS.md` points to it.
@@ -29,7 +29,7 @@ Sources:
 - [`@fx/billing`](packages/billing.md) — Stripe billing: the hosted plans, the Engine plan's per-engine quantity item on the same subscription, and the pinned customer portal.
 - [`@fx/partners`](packages/partners.md) — partner layer.
 - [`@fx/decisions`](packages/decisions.md) — decision-type catalogue, presets, and the pure `decide()` resolver.
-- [`@fx/runner`](packages/runner.md) — per-role sandbox orchestration and the `ExecutionTarget` seam; also the local runner's engine bridge (including how `engine-bridge enable` finds the engine's checkout) and engine host (`fx-runner engine-host`), its platform support, the microVM engine (VM helper and its install plan, sandbox daemon and SDK adapter, egress proxy, the per-job VM lifecycle and the job's model token inside a VM), the clone size watch, sandbox inventory and signed sandbox commands, the machine onboarding shapes, and how the runner is installed and updated from signed release metadata.
+- [`@fx/runner`](packages/runner.md) — per-role sandbox orchestration and the `ExecutionTarget` seam; also the local runner's engine bridge (including how `engine-bridge enable` finds the engine's checkout) and engine host (`fx-runner engine-host`), its platform support, the microVM engine (VM helper and its install plan, sandbox daemon and SDK adapter, egress proxy, the per-job VM lifecycle and the job's model token inside a VM), the clone size watch, sandbox inventory and signed sandbox commands, the project setup job, in a microVM or in the OS sandbox, and how the runner is installed and updated from signed release metadata.
 - [`@fx/runtime`](packages/runtime.md) — model/runtime adapters.
 - [`@fx/model-router`](packages/model-router.md) — data-driven model routing, escalation, floors.
 - [`@fx/model-connection`](packages/model-connection.md) — customer bring-your-own-key model connections.
@@ -40,7 +40,7 @@ Sources:
 - [`@fx/sitekit-claims`](packages/sitekit-claims.md) — claim schema and the render-refuses-unverified gate.
 - [`@fx/sitekit-template`](packages/sitekit-template.md) — the fixed site template.
 - [`@fx/sitekit-checks`](packages/sitekit-checks.md) — deterministic mechanical checks over rendered output.
-- [`@fx/hetzner`](packages/hetzner.md) — typed Hetzner Cloud API client (servers, snapshots, images) the provider-neutral machine seam and the probe that checks a customer's token; the servers themselves are not wired into any app yet.
+- [`@fx/hetzner`](packages/hetzner.md) — typed Hetzner Cloud API client (servers, snapshots, images) the provider-neutral machine seam, the probe that checks a customer's token, and the fake of the API that staging serves; the API's machine routes use the client to quote, create and delete a server.
 - [`@fx/design`](packages/design.md) — the shared visual token/component layer.
 
 ## Apps
@@ -52,6 +52,6 @@ Sources:
 ## Cross-cutting
 
 - [Data model](data-model.md) — the tenant schema across all migrations.
-- [Security](security.md) — the tenancy, auth and RLS model, the engine bridge's trust rules (including checkout discovery), the device-code link flow, the Engine plan's billing and coverage rules, the live-view lease, the `/install.sh` route, and the VM helper, microVM policy and egress, the job token's handling inside a microVM, and signed sandbox commands.
+- [Security](security.md) — the tenancy, auth and RLS model, the engine bridge's trust rules (including checkout discovery), the device-code link flow, the Engine plan's billing and coverage rules, the live-view lease, the `/install.sh` route, and the VM helper, microVM policy and egress, the job token's handling inside a microVM, signed sandbox commands, the OS-sandbox guest for a project setup, and the staging fake's gate.
 - [Operations](operations.md) — running and operating this repo, including the CI jobs and the dormant merge-queue rollup switch.
 - Operator runbooks (hosted Postgres, billing, staging) are not part of this public tree.
