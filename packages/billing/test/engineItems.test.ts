@@ -203,7 +203,7 @@ describe('engine plan items (real Postgres, strict Stripe fake)', () => {
       const both = await billed([{ priceId: STARTER, quantity: 1 }, { priceId: ENGINE, quantity: 1 }]);
       // A different hosted plan is still refused; the exact plan held is an "already added" success (D#845), tested below.
       expect(await createCheckoutSession(ctx(both), input(both, { plan: 'team' }))).toEqual({ ok: false, reason: 'already_subscribed' });
-      expect(await createCheckoutSession(ctx(both), input(both, { plan: 'engine' }))).toMatchObject({ ok: true, itemAdded: true });
+      expect(await createCheckoutSession(ctx(both), input(both, { plan: 'engine' }))).toMatchObject({ ok: true, alreadyHeld: true });
       expect(writes()).toEqual([]);
     });
 
@@ -233,11 +233,44 @@ describe('engine plan items (real Postgres, strict Stripe fake)', () => {
       it('the reported account: engine item at 2, engine_quantity 0, requesting 1 -> ok, total stays 2, no provider write; the sync then mirrors 2', async () => {
         const t = await billed([{ priceId: STARTER, quantity: 1 }, { priceId: ENGINE, quantity: 2 }]);
         expect((await account(t.accountId)).engine_quantity).toBe(0);
-        expect(await createCheckoutSession(ctx(t), input(t, { plan: 'engine', quantity: 1 }))).toEqual({ ok: true, url: `${APP_ORIGIN}/billing/success`, itemAdded: true });
+        expect(await createCheckoutSession(ctx(t), input(t, { plan: 'engine', quantity: 1 }))).toEqual({ ok: true, url: `${APP_ORIGIN}/billing/success`, alreadyHeld: true });
         expect(ratio(t).quantity).toBe(2);
         expect(writes()).toEqual([]);
+        // The read the checkout made is mirrored at once: no webhook, no sync call.
+        expect((await account(t.accountId)).engine_quantity).toBe(2);
         await sync(t.sub);
         expect((await account(t.accountId)).engine_quantity).toBe(2);
+      });
+
+      it('a stale mirror and a held engine item: one read, no write, the mirror shows the held quantity, and a later webhook carrying older data does not regress it', async () => {
+        const t = await billed([{ priceId: STARTER, quantity: 1 }, { priceId: ENGINE, quantity: 1 }]);
+        expect((await account(t.accountId)).engine_quantity).toBe(0);
+        // An older read (what a delayed webhook would carry): the item at quantity 1, taken with an earlier clock.
+        const olderClock = await readFetchClock(ops);
+        const older = await stripeClient().subscriptions.retrieve(t.sub);
+        server.seen.length = 0;
+        expect(await createCheckoutSession(ctx(t), input(t, { plan: 'engine', quantity: 1 }))).toEqual({ ok: true, url: `${APP_ORIGIN}/billing/success`, alreadyHeld: true });
+        // Call counts: exactly the one subscription read #1211 already makes; no write, no other call.
+        expect(server.seen.map((r) => `${r.method} ${r.path.split('?')[0]}`)).toEqual([`GET /v1/subscriptions/${t.sub}`]);
+        expect(await account(t.accountId)).toMatchObject({ engine_quantity: 1, stripe_subscription_id: t.sub });
+        // Idempotent: the same call again changes nothing.
+        expect(await createCheckoutSession(ctx(t), input(t, { plan: 'engine', quantity: 1 }))).toMatchObject({ ok: true, alreadyHeld: true });
+        expect((await account(t.accountId)).engine_quantity).toBe(1);
+        // The older snapshot, claiming 0 engines, arrives late: refused by the stale-fetch guard.
+        const stale = { ...older, items: { ...older.items, data: older.items.data.filter((i) => i.price.id !== ENGINE) } } as typeof older;
+        const res = await applyFetchedSubscription({ platformOpsPool: ops, livemode: false, priceMap: buildPriceMap(), enginePriceIds: [ENGINE] }, stale, olderClock);
+        expect(res).toMatchObject({ applied: false, reason: 'stale_fetch' });
+        expect((await account(t.accountId)).engine_quantity).toBe(1);
+      });
+
+      it('a pending update is refused first: payment_pending, and nothing is mirrored', async () => {
+        const t = await billed([{ priceId: ENGINE, quantity: 2 }]);
+        server.world.paymentOutcome = 'requires_action';
+        expect(await createCheckoutSession(ctx(t), input(t, { plan: 'engine', quantity: 5 }))).toEqual({ ok: false, reason: 'payment_pending' });
+        server.seen.length = 0;
+        expect(await createCheckoutSession(ctx(t), input(t, { plan: 'engine', quantity: 1 }))).toEqual({ ok: false, reason: 'payment_pending' });
+        expect(writes()).toEqual([]);
+        expect((await account(t.accountId)).engine_quantity).toBe(0);
       });
 
       it('the same account requesting 3 ends at 3 with exactly one update call, paid before applied, and one idempotency key unique to the call', async () => {

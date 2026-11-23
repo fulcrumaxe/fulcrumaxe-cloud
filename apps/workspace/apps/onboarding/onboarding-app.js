@@ -169,6 +169,7 @@ function mountOnboarding(host) {
   const engineEnv = () => ({ ctx: { ...st.ctx, machine: machineFacts(), origin: window.location.origin, isAdmin: window.currentIsAdmin !== false, price: st.price, planBusy: st.planBusy, planNote: st.planNote, planAdded: st.planAdded === true, planLink: st.planLink }, price: st.price, announce: (t) => (live.textContent = t), canOpen, openApp, runAction: runPlanAction });
   // D#845 ON-22: the project step's purchase buttons. Checkout is the existing one (the server never sells a second subscription: an account that already pays gets the item added, and the answer is its own success path).
   // Returning from Stripe reloads the app, which reads the step again. "Add an engine" changes the quantity on the subscription and reads now; the account follows the provider's confirmation, so the step says so and refreshes when the app is shown again (no timer here).
+const HELD_NOTE = "You already have the Engine plan.";
 const ADDED_NOTE = "Engine added. This step updates when the provider confirms the change.";
   async function runPlanAction(id) {
     if (st.planBusy) return;
@@ -189,6 +190,14 @@ const ADDED_NOTE = "Engine added. This step updates when the provider confirms t
         return;
       }
       const res = await api("POST", "/api/v1/billing/checkout-session", { plan: "engine", quantity: 1, success_path: "/", cancel_path: "/" }, abort.signal);
+      if (res && res.already_held === true) {
+        // Nothing was written: the subscription already holds the engine and the server mirrored that read, so the step reads again and shows the current state.
+        st.planBusy = false;
+        st.planNote = HELD_NOTE;
+        st.planAdded = true; // shows the sentence in place of the purchase button until the step reads as ungated
+        await load();
+        return;
+      }
       if (res && res.added === true) {
         // The engine joined the subscription already paid for: stay here, say so and read the step again (a reload would offer "Choose plan" until the provider's confirmation lands).
         st.planBusy = false;
