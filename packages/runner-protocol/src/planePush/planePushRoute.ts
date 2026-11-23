@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { uncoveredRuleFiles, type RepoPairing } from "./repoPairing.js";
 import { PLANE_IDENTITY_EMAIL, PLANE_IDENTITY_NAME } from "./planePushIdentity.js";
 import { PLANE_TITLE_LINE } from "./planePushText.js";
+import { secretShaped } from "./planePushSecretShaped.js";
 
 /** The pairing as the route needs it: defined once, in ./repoPairing.ts (the cloud's core pairing module re-exports it). */
 export type { RepoPairing };
@@ -143,6 +144,12 @@ export interface PlaneRouteInput {
   identity: { name: string; email: string };
   /** Seconds since the epoch for author and committer dates. */
   commitTime: number;
+  /**
+   * `"export"` (ON-27c1, the private twin's publish): private paths are DROPPED from the change set instead of refused, a rule file may change
+   * between base and head (the rules are read at `privateHead`), binary files pass only under the pairing's `binaryGlobs`, and the always-on
+   * `secret_shaped` rule runs. Absent or `"refuse"`: D#598's mode, unchanged.
+   */
+  mode?: "refuse" | "export";
 }
 
 export interface PlaneRouteDeps {
@@ -188,6 +195,7 @@ function validateInput(i: PlaneRouteInput): void {
   };
   if (!OBJECT_ID.test(i.privateBase) || !OBJECT_ID.test(i.privateHead) || !OBJECT_ID.test(i.privateDefaultTip)) bad("the private base, head and default tip must be full 40-hex commit ids");
   if (!branchNameOk(i.branch)) bad("the branch name is not usable on the public repo");
+  if (i.mode !== undefined && i.mode !== "refuse" && i.mode !== "export") bad("the mode must be refuse or export");
   if (i.updateOf !== undefined && !OBJECT_ID.test(i.updateOf)) bad("the head to update must be a full 40-hex commit id");
   if (!GIT_SAFE_LINE.test(i.title) || i.title.trim() !== i.title) bad("the title must be one plain line of at most 256 characters");
   if (i.body.length === 0 || i.body.length > MAX_BODY || /\u0000/.test(i.body)) bad("the body must be non-empty text of at most 60000 characters");
@@ -339,7 +347,8 @@ function samePairing(a: RepoPairing, b: RepoPairing): boolean {
   return (
     a.enabled && b.enabled && a.codeRepo !== null && b.codeRepo !== null && sameRepo(a.codeRepo, b.codeRepo) &&
     a.identifierRulesPath === b.identifierRulesPath && a.planDataRulesPath === b.planDataRulesPath &&
-    a.overlayGlobs.length === b.overlayGlobs.length && a.overlayGlobs.every((g, n) => g === b.overlayGlobs[n])
+    a.overlayGlobs.length === b.overlayGlobs.length && a.overlayGlobs.every((g, n) => g === b.overlayGlobs[n]) &&
+    (a.binaryGlobs ?? []).length === (b.binaryGlobs ?? []).length && (a.binaryGlobs ?? []).every((g, n) => g === (b.binaryGlobs ?? [])[n])
   );
 }
 
@@ -357,12 +366,20 @@ export async function routeAndPush(input: PlaneRouteInput, deps: PlaneRouteDeps)
   }
 }
 
+/** The binary allow list as a matcher; an unusable list matches everything, so a move that depends on it refuses (the scan refuses the list itself). */
+function binaryGlobMatcher(globs: readonly string[]): (p: string) => boolean {
+  if (globs.length === 0) return () => false;
+  const compiled = compileOverlay([...globs]);
+  return "error" in compiled ? () => true : compiled.match;
+}
+
 async function routeAndPushOnce(input: PlaneRouteInput, deps: PlaneRouteDeps): Promise<PlaneRouteResult> {
   const pairing = await deps.loadPairing();
   const own = await deps.loadOwn();
   const decision = routeFor(pairing, own, input.defaultBranch);
   if (decision.plane === "single") return decision;
   validateInput(input);
+  const exportMode = input.mode === "export";
   const codeRepo = decision.repo;
   const { overlayGlobs } = decision.pairing;
 
@@ -377,14 +394,17 @@ async function routeAndPushOnce(input: PlaneRouteInput, deps: PlaneRouteDeps): P
   // The rules come from the default branch's tip. A rule file must be private, and nothing between the rule base and the item's head may
   // touch one (the item's own commits, or a stacked parent's unmerged ones): both before anything is built.
   assertRuleFilesPrivate(decision.pairing);
-  const ruleBase = await ruleBaseOf(input.repoDir, input.privateBase, input.privateDefaultTip);
+  // Export: a rule file may change, so the check runs from the head to itself (nothing to compare). Default mode: from the rule base, as always.
+  const ruleBase = exportMode ? input.privateHead : await ruleBaseOf(input.repoDir, input.privateBase, input.privateDefaultTip);
   await assertRuleFilesUnchanged(input.repoDir, ruleBase, input.privateHead, decision.pairing);
 
-  const changes = await itemChanges(input.repoDir, input.privateBase, input.privateHead);
+  const allChanges = await itemChanges(input.repoDir, input.privateBase, input.privateHead);
+  // Export: a change at a private path is not published and not refused. It is dropped here, before anything is built; the scan below still refuses an overlay path in the commit.
+  const changes = exportMode ? allChanges.filter((c) => !overlay.match(Buffer.from(c.key, "latin1").toString("utf8"))) : allChanges;
   if (changes.length === 0) throw new PlaneRouteError("no_changes", "the item changes no files");
   await assertNoBaseGap(input.repoDir, changes, input.privateBase, input.privateHead, tip, overlay.match);
   // Content that comes from a private-only path is refused whatever name it has on the public side (rename, copy, same blob, symlink).
-  const fromPrivate = await privateSourceRefusals(input.repoDir, changes, input.privateBase, input.privateHead, overlay.match);
+  const fromPrivate = await privateSourceRefusals(input.repoDir, changes, input.privateBase, input.privateHead, overlay.match, undefined, exportMode, exportMode ? binaryGlobMatcher(decision.pairing.binaryGlobs ?? []) : undefined);
   if (fromPrivate.length > 0) {
     throw new PlaneRouteError("private_path_change", `the change takes content from private-only paths and was not sent: ${fromPrivate.slice(0, 5).map((r) => r.message).join("; ")}${fromPrivate.length > 5 ? ` (and ${fromPrivate.length - 5} more)` : ""}`, fromPrivate.slice(0, 100));
   }
@@ -398,15 +418,16 @@ async function routeAndPushOnce(input: PlaneRouteInput, deps: PlaneRouteDeps): P
   const scan = await scanPlanePush({
     overlay: overlayGlobs,
     ruleFiles,
-    readRuleFile: (p) => readRuleFile(input.repoDir, input.privateDefaultTip, p),
+    readRuleFile: (p) => (exportMode ? readRuleFile(input.repoDir, input.privateHead, p) : readRuleFile(input.repoDir, input.privateDefaultTip, p)),
     source: gitCommitSource({ repoDir: input.repoDir, commit, base: tip }),
+    ...(exportMode ? { export: { binaryGlobs: decision.pairing.binaryGlobs ?? [], secretShaped } } : {}),
   });
   const refusals: Refusal[] = [...scan.refusals];
   if (scan.ok) {
     let identifierRules: IdentifierRuleSet | undefined;
     let planData: PlanData | undefined;
-    const idBytes = ruleFiles.identifierRules ? await readRuleFile(input.repoDir, input.privateDefaultTip, ruleFiles.identifierRules) : null;
-    const pdBytes = ruleFiles.planData ? await readRuleFile(input.repoDir, input.privateDefaultTip, ruleFiles.planData) : null;
+    const idBytes = ruleFiles.identifierRules ? await (exportMode ? readRuleFile(input.repoDir, input.privateHead, ruleFiles.identifierRules) : readRuleFile(input.repoDir, input.privateDefaultTip, ruleFiles.identifierRules)) : null;
+    const pdBytes = ruleFiles.planData ? await (exportMode ? readRuleFile(input.repoDir, input.privateHead, ruleFiles.planData) : readRuleFile(input.repoDir, input.privateDefaultTip, ruleFiles.planData)) : null;
     const idParsed = idBytes ? parseIdentifierRules(decoder.decode(idBytes)) : undefined;
     const pdParsed = pdBytes ? parsePlanData(decoder.decode(pdBytes)) : undefined;
     if (idParsed && !("error" in idParsed)) identifierRules = idParsed;

@@ -73,6 +73,18 @@ export { compileOverlay };
 export const MAX_SCAN_BYTES = 8_000_000;
 const MAX_LISTED = 100;
 
+/** A blob is binary, for the export allow list, when a NUL byte is in its first 8 KB. Decided from the content, never from the repo's attributes. */
+export const BINARY_PROBE_BYTES = 8192;
+export const hasNulInHead = (blob: Uint8Array): boolean => blob.subarray(0, BINARY_PROBE_BYTES).includes(0);
+const PRINTABLE_RUN = /[\x20-\x7e]{8,}/g;
+/** Wide text (UTF-16 LE/BE, UTF-32 LE/BE) is full of NULs, so it counts as binary and has no plain 8-byte run; these find 8+ printable characters in each encoding, with or without a BOM. */
+export const WIDE_RUNS: readonly RegExp[] = [
+  /(?:[\x20-\x7e]\x00){8,}/g,
+  /(?:\x00[\x20-\x7e]){8,}/g,
+  /(?:[\x20-\x7e]\x00{3}){8,}/g,
+  /(?:\x00{3}[\x20-\x7e]){8,}/g,
+];
+
 export type RefusalKind =
   | "overlay_list_invalid"
   | "no_changes"
@@ -89,6 +101,7 @@ export type RefusalKind =
   | "plan_data_hit"
   | "bad_identity"
   | "bad_ancestry"
+  | "secret_shaped"
   | "scan_failed";
 
 /** Thrown by a source that must refuse with a named reason rather than fail the scan. */
@@ -143,6 +156,12 @@ export interface PlanePushInput {
   /** Reads a declared rule file from the private repo; null means it does not exist there. */
   readRuleFile(path: string): Promise<Uint8Array | null>;
   source: PlanePushSource;
+  /**
+   * EXPORT mode (ON-27c1), off when absent: the always-on `secret_shaped` rule refuses any added line the run path's credential redactor
+   * (a predicate the caller supplies, so this module stays pure) would change, and a binary file is let through (unscanned, by name and size only) when its path matches `binaryGlobs`
+   * (the overlay matcher's grammar). Everything else, overlay paths included, is refused as in the default mode.
+   */
+  export?: { binaryGlobs: readonly string[]; secretShaped: (line: string) => boolean };
 }
 
 export interface PlanePushResult {
@@ -453,6 +472,16 @@ export async function scanPlanePush(input: PlanePushInput): Promise<PlanePushRes
     return finish();
   }
 
+  let binaryAllowed: ((path: string) => boolean) | undefined;
+  if (input.export && input.export.binaryGlobs.length > 0) {
+    const compiled = compileOverlay(input.export.binaryGlobs);
+    if ("error" in compiled) {
+      refuse({ kind: "overlay_list_invalid", message: `the binary allow list is unusable: ${compiled.error}` });
+      return finish();
+    }
+    binaryAllowed = compiled.match;
+  }
+
   try {
     let identifier: IdentifierRuleSet | undefined;
     let plan: PlanData | undefined;
@@ -524,25 +553,53 @@ export async function scanPlanePush(input: PlanePushInput): Promise<PlanePushRes
         refuse({ kind: "file_too_large", path: shown, message: `${shown} is over ${MAX_SCAN_BYTES} bytes and cannot be scanned` });
         continue;
       }
-      if (c.binary) {
+      const allowedBinary = binaryAllowed?.(c.path) === true;
+      // Default mode: the attribute-aware numstat verdict or any NUL refuses, as before. Export, allow-listed path: only the content decides (a NUL
+      // in the first 8 KB), so an attribute line in the repo cannot turn text into an unscanned binary.
+      if (c.binary && !allowedBinary) {
         refuse({ kind: "binary_file", path: shown, message: `${shown} is a binary file and cannot be scanned` });
         continue;
       }
       const blob = await input.source.readBlob(ordinal);
-      if (blob.includes(0)) {
-        refuse({ kind: "binary_file", path: shown, message: `${shown} is a binary file and cannot be scanned` });
+      if (allowedBinary ? hasNulInHead(blob) : blob.includes(0)) {
+        if (!allowedBinary) {
+          refuse({ kind: "binary_file", path: shown, message: `${shown} is a binary file and cannot be scanned` });
+          continue;
+        }
+        // An allowed binary still gets its printable runs (8 or more printable ASCII bytes, like `strings`) checked: one NUL byte must not let text through.
+        scans.files++;
+        const hit = new Set<string>();
+        const latin = Buffer.from(blob).toString("latin1");
+        const runs = [...(latin.match(PRINTABLE_RUN) ?? [])];
+        for (const rx of WIDE_RUNS) for (const w of latin.match(rx) ?? []) runs.push(w.replace(/\x00/g, ""));
+        for (const run of runs) {
+          for (const r of identifier?.rules ?? []) if (!hit.has(r.key) && ruleHits(r.rx, run)) hit.add(r.key);
+          if (input.export?.secretShaped(run)) hit.add("secret_shaped");
+        }
+        for (const rule of hit) {
+          refuse(rule === "secret_shaped" ? { kind: "secret_shaped", path: shown, rule, message: `${shown} (printable text in a binary file) matches secret_shaped` } : { kind: "identifier_hit", path: shown, rule, message: `${shown} (printable text in a binary file) matches ${rule}` });
+        }
         continue;
       }
       scans.files++;
-      scans.addedLines += c.addedLines.length;
       const text = decoder.decode(blob);
+      // A file git calls binary only by an attribute but with no NUL is text: all of its lines are published, so all are scanned.
+      const addedLinesOf = c.binary ? Array.from({ length: text.split("\n").length }, (_, i) => i + 1) : c.addedLines;
+      scans.addedLines += addedLinesOf.length;
       const rawLines = text.split("\n");
       const lines = rawLines.map((l) => l.replace(/\r$/, ""));
-      const added = new Set(c.addedLines);
+      const added = new Set(addedLinesOf);
       for (const r of identifier?.rules ?? []) {
         if (c.existedAtBase && r.exemptUnder.some((u) => c.path.startsWith(u))) continue;
         for (const n of added) {
           if (ruleHits(r.rx, lines[n - 1] ?? "") || ruleHits(r.rx, rawLines[n - 1] ?? "")) refuse({ kind: "identifier_hit", path: shown, line: n, rule: r.key, message: `${shown}:${n} matches ${r.key}` });
+        }
+      }
+      if (input.export) {
+        for (const n of added) {
+          const raw = rawLines[n - 1] ?? "";
+          const line = lines[n - 1] ?? "";
+          if (input.export.secretShaped(raw) || input.export.secretShaped(line)) refuse({ kind: "secret_shaped", path: shown, line: n, rule: "secret_shaped", message: `${shown}:${n} matches secret_shaped` });
         }
       }
       if (plan) {
