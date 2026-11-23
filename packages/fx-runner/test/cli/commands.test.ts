@@ -4,9 +4,11 @@ import { describe, expect, it, vi } from "vitest";
 import { runCli } from "../../src/cli.js";
 import { KEY_FILE, REGISTRATION_FILE } from "../../src/config.js";
 import { writeApiKey } from "../../src/credentials.js";
+import { writeVmToken } from "../../src/credentials/vmToken.js";
 import { CODE, useRig } from "./harness.js";
 
 const rig = useRig();
+const uid = process.getuid!();
 const mode = (p: string): number => statSync(p).mode & 0o777;
 const stateFiles = (): string[] => (existsSync(rig.dir) ? readdirSync(rig.dir).sort() : []);
 
@@ -214,6 +216,30 @@ describe("revoke", () => {
     expect(result.out).toContain("The stored API key file is left in place; to remove it run: fx-runner credentials clear-api-key");
     expect(result.out).not.toContain("REVOKEKEY");
     expect(stateFiles()).toEqual(["credentials"]);
+  });
+
+  it("says a VM token file is still on this machine when there is one, and shows nothing of it", async () => {
+    await rig.register();
+    const token = ["sk-ant-", "oat01-", "REVOKEVMTOKEN0123456789abcdef"].join(""); // gitleaks:allow
+    writeVmToken(rig.dir, uid, token);
+    const result = await rig.run(["revoke"], { uid });
+    expect(result.code).toBe(0);
+    expect(result.out).toContain("The VM token file is still on this machine; run fx-runner credentials clear-vm-token to remove it");
+    expect(result.out + result.err).not.toContain("REVOKEVMTOKEN");
+    expect(stateFiles()).toEqual(["credentials"]);
+  });
+
+  it("says nothing about a VM token file when there is none, with or without --local", async () => {
+    await rig.register();
+    rmSync(path.join(rig.dir, "credentials"), { recursive: true, force: true }); // the rig keeps earlier tests' files
+    const result = await rig.run(["revoke"], { uid });
+    expect(result.code).toBe(0);
+    expect(result.out).not.toContain("VM token");
+    rig.cloud.validCodes.add(CODE);
+    await rig.register();
+    rmSync(path.join(rig.dir, "credentials"), { recursive: true, force: true });
+    const local = await rig.run(["revoke", "--local"], { uid });
+    expect(local.out).not.toContain("VM token");
   });
 
   it("sends an empty message with no reason, and refuses a reason the protocol would refuse before sending", async () => {
