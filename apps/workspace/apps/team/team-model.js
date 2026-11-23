@@ -136,7 +136,8 @@ export const WORDS = {
   mergedWindow: "merged in the last 30 days",
   noFigure: "no figure", noUsage: "No usage reported yet", usageMore: "More rows exist than are shown.", usageWindow: "Window: ",
   allUsage: "API-equivalent for the window",
-  sendRefusals: { repo_not_runner_local: "That repository isn't on one of your runners.", repo_visibility_unknown: "GitHub didn't say whether that repository is public or private. Try again in a minute." },
+  sendRefusals: { repo_not_runner_local: "That repository isn't on one of your runners.", repo_visibility_unknown: "GitHub didn't say whether that repository is public or private. Try again in a minute.",
+    operate_public_pending: "Operate isn't available for public repos yet. The engine can watch this repo, but won't act on it.", placement_busy: "Another change to this machine is in progress. Try again." },
 };
 
 const LANE_STATE = { queued: "Queued", testing: "Testing", merged: "Merged", failed: "Failed", dequeued: "Removed from the queue", refused: "Refused" };

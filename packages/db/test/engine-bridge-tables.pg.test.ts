@@ -308,7 +308,7 @@ describe('engine bridge tables [pg]', () => {
       expect(c.rowCount).toBe(0);
       await admin.query(`DELETE FROM engine_bridge_settings WHERE account_id = $1`, [a.accountId]);
       await admin.query(`DELETE FROM engine_bridge_repos WHERE account_id = $1`, [a.accountId]);
-      const run = (patch: Parameters<typeof setEngineBridgeSettings>[2]) => withTenant(appPool, a.accountId, a.userId, (cl) => setEngineBridgeSettings(cl, a.userId, patch));
+      const run = (patch: Parameters<typeof setEngineBridgeSettings>[2]) => withTenant(appPool, a.accountId, a.userId, (cl) => setEngineBridgeSettings(cl, a.userId, patch, new Map([[a.repoId.toLowerCase(), 'private' as const]])));
       expect(await withTenant(appPool, a.accountId, a.userId, (cl) => readEngineBridgeSettings(cl))).toEqual({ watch_enabled: false, operate_enabled: false, repo_ids: [] });
       expect(await run({ watch_enabled: true, repo_ids: [a.repoId] })).toEqual({ watch_enabled: true, operate_enabled: false, repo_ids: [a.repoId] });
       expect(await run({ watch_enabled: true, repo_ids: [a.repoId] })).toEqual({ watch_enabled: true, operate_enabled: false, repo_ids: [a.repoId] });
@@ -326,12 +326,29 @@ describe('engine bridge tables [pg]', () => {
       await run({ watch_enabled: true, repo_ids: [a.repoId] });
     });
 
+    it('operate on with no read of the repo is refused and nothing is written; turning operate off or changing watch needs no read', async () => {
+      await admin.query(`DELETE FROM engine_bridge_settings WHERE account_id = $1`, [a.accountId]);
+      await admin.query(`DELETE FROM engine_bridge_repos WHERE account_id = $1`, [a.accountId]);
+      const run = (patch: Parameters<typeof setEngineBridgeSettings>[2]) => withTenant(appPool, a.accountId, a.userId, (cl) => setEngineBridgeSettings(cl, a.userId, patch, new Map()));
+      const audits = async () => (await audit(a.accountId, 'engine_bridge.settings_changed')).length;
+      await run({ watch_enabled: true, repo_ids: [a.repoId] });
+      const n = await audits();
+      await expect(run({ operate_enabled: true })).rejects.toMatchObject({ code: 'repo_visibility_unknown' });
+      expect(await withTenant(appPool, a.accountId, a.userId, (cl) => readEngineBridgeSettings(cl))).toEqual({ watch_enabled: true, operate_enabled: false, repo_ids: [a.repoId] });
+      expect(await audits()).toBe(n);
+      // Watch and ticks alone, and operate going off, pass with an empty map.
+      expect(await run({ watch_enabled: true, repo_ids: [] })).toEqual({ watch_enabled: true, operate_enabled: false, repo_ids: [] });
+      await withTenant(appPool, a.accountId, a.userId, (cl) => setEngineBridgeSettings(cl, a.userId, { operate_enabled: true, repo_ids: [a.repoId] }, new Map([[a.repoId.toLowerCase(), 'private' as const]])));
+      expect(await run({ operate_enabled: false })).toMatchObject({ operate_enabled: false });
+      await run({ watch_enabled: true, repo_ids: [a.repoId] });
+    });
+
     it('a member cannot change them, and nothing is written or audited', async () => {
       const memberId = randomUUID();
       await admin.query(`INSERT INTO users (id, email) VALUES ($1, $2)`, [memberId, `${memberId}@example.test`]);
       await admin.query(`INSERT INTO account_members (account_id, user_id, role) VALUES ($1, $2, 'member')`, [a.accountId, memberId]);
       const before = (await audit(a.accountId, 'engine_bridge.settings_changed')).length;
-      await expect(withTenant(appPool, a.accountId, memberId, (cl) => setEngineBridgeSettings(cl, memberId, { watch_enabled: false }))).rejects.toMatchObject({ code: '42501' });
+      await expect(withTenant(appPool, a.accountId, memberId, (cl) => setEngineBridgeSettings(cl, memberId, { watch_enabled: false }, new Map()))).rejects.toMatchObject({ code: '42501' });
       expect((await audit(a.accountId, 'engine_bridge.settings_changed')).length).toBe(before);
     });
 

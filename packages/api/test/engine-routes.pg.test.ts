@@ -632,6 +632,52 @@ describe('engine read routes and settings [pg]', () => {
     await q(`UPDATE engine_bridge_settings SET watch_enabled = false, operate_enabled = false WHERE account_id = $1`, [A.accountId]);
   });
 
+  it('settings: CWE-367, a write that turns operate on with a stale pre-lock read is refused under the lock when another write ticked a public repo in between, and writes nothing', async () => {
+    const pub = randomUUID();
+    await q(`INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product, gh_owner, gh_name, execution_mode) SELECT $1, account_id, installation_id, 9302, 'team', 'acme', 'racepub', 'runner_local' FROM repos WHERE id = $2`, [pub, A.repoId]);
+    // The visibility answer for the public repo is `public`, but B never asks: its read happened before the repo was ticked.
+    const asked: string[] = [];
+    engineSettingsDeps.getVisibility = () => async (_a: string, id: string) => { asked.push(id); return id === pub ? 'public' : 'private'; };
+    await q(`UPDATE engine_bridge_settings SET watch_enabled = true, operate_enabled = false WHERE account_id = $1`, [A.accountId]);
+    await q(`DELETE FROM engine_bridge_repos WHERE account_id = $1 AND repo_id <> $2`, [A.accountId, A.repoId]);
+    const state = async () => ({
+      operate: (await q(`SELECT operate_enabled FROM engine_bridge_settings WHERE account_id = $1`, [A.accountId])).rows[0].operate_enabled as boolean,
+      ticked: (await q(`SELECT repo_id FROM engine_bridge_repos WHERE account_id = $1 ORDER BY repo_id`, [A.accountId])).rows.map((r) => r.repo_id as string).sort(),
+    });
+    try {
+      // PUT A (watch-only: the public repo is ticked with operate off) is open: it holds the bridge lock and has written its tick.
+      let release!: () => void;
+      const held = new Promise<void>((r) => { release = r; });
+      let entered!: () => void;
+      const inside = new Promise<void>((r) => { entered = r; });
+      const writerA = withTenant(appUserPool, A.accountId, A.userId, async (client) => {
+        await lockEngineBridge(client);
+        await client.query(`INSERT INTO engine_bridge_repos (account_id, repo_id, enabled_by) VALUES ($1, $2, $3)`, [A.accountId, pub, A.userId]);
+        entered();
+        await held;
+      });
+      await inside;
+      // PUT B reads the settings (only A.repoId ticked), reads that repo as private, and then waits for the lock.
+      let settled = false;
+      const putB = call(owner(), 'PUT', '/engine/settings', { operate_enabled: true }).finally(() => { settled = true; });
+      await new Promise((r) => setTimeout(r, 600));
+      expect(settled, "B waits on A's lock").toBe(false);
+      release();
+      await writerA;
+      const b = await putB;
+      expect(b).toMatchObject({ status: 409, body: { error: { code: 'repo_visibility_unknown' } } });
+      expect(asked, 'B never asked about the public repo').not.toContain(pub);
+      expect(await state()).toEqual({ operate: false, ticked: [A.repoId, pub].sort() });
+      // The refusal was the stale read's, not a stuck state: a fresh call that reads the public repo says so.
+      expect(await call(owner(), 'PUT', '/engine/settings', { operate_enabled: true })).toMatchObject({ status: 409, body: { error: { code: 'operate_public_pending' } } });
+      expect((await state()).operate).toBe(false);
+    } finally {
+      engineSettingsDeps.getVisibility = null;
+      await q(`UPDATE engine_bridge_settings SET watch_enabled = false, operate_enabled = false WHERE account_id = $1`, [A.accountId]);
+      await q(`DELETE FROM engine_bridge_repos WHERE account_id = $1 AND repo_id <> $2`, [A.accountId, A.repoId]);
+    }
+  });
+
   it('delete-data: an owner removes every engine row and writes its audit row; the switches stay', async () => {
     await q(`INSERT INTO engine_lanes (account_id, session_id, pr, state, updated_at) VALUES ($1, $2, 1, 'queued', now())`, [A.accountId, engineSession]);
     const r = await call(owner(), 'PUT', '/engine/settings/delete-data');
