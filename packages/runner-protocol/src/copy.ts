@@ -156,7 +156,7 @@ export const GIT_PATH_LINES = {
   vm_admission_refused: "The runner machine had no room to start a virtual machine for this run (its limits or free memory), so the run did not start. Free memory or raise the VM limits in the runner's settings, then Build again.",
   vm_boot_failed: "The runner could not start or reach the virtual machine for this run, so the run was stopped. Check that the VM helper is installed and ready on that machine (fx-runner doctor), then Build again.",
   vm_egress_unavailable: "The runner could not open the network path for this run's virtual machine, so the run did not start. Check the VM helper and its socket on that machine (fx-runner doctor), then Build again.",
-  vm_token_delivery_failed: "The runner could not hand the model credential to the virtual machine, so the agent did not start. Sign in to Claude again on that machine, then Build again.",
+  vm_token_delivery_failed: "The runner could not hand a Claude token to the virtual machine, so the agent did not start. If this machine has no token set for virtual machines, run fx-runner credentials set-vm-token there, then Build again. Otherwise run fx-runner doctor on it.",
   vm_workspace_failed: "The runner could not move the working copy into or out of the virtual machine, so the run was stopped. Nothing was published. Build again.",
   vm_teardown_incomplete: "The runner could not confirm that this run's virtual machine was fully cleaned up. The machine was shut down and the run's work was not kept. Run fx-runner doctor on that machine, then Build again.",
   // The cloud has no git ticket key, so the fault is on the cloud side; the runner needs no change.
