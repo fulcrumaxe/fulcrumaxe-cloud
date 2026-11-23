@@ -165,6 +165,14 @@ describe("the mirrors root (git path B, correction C25 section 2)", () => {
     expect(s.filesystem.denyRead).toEqual([...new Set([HOME, STATE, BIN, base.workspaceRoot, base.tempRoot, MIRRORS, ...SHARED_TEMP])]);
   });
 
+  it("denies reads of each deny-read root as given, grants nothing, and refuses a relative, unnormalised or file-system-root path", () => {
+    const s = block({ denyReadRoots: ["/srv/xdg/fx-runner"] });
+    expect(s.filesystem.denyRead).toEqual([...new Set([HOME, STATE, BIN, base.workspaceRoot, base.tempRoot, ...SHARED_TEMP, "/srv/xdg/fx-runner"])]);
+    expect(s.filesystem.allowRead).toEqual([base.workspace, base.tempDir]);
+    expect(s.filesystem.allowWrite).toEqual([base.workspace, base.tempDir]);
+    for (const bad of ["srv/xdg", "/srv/xdg/../x", "/"]) expect(() => block({ denyReadRoots: [bad] }), bad).toThrow(TypeError);
+  });
+
   it("changes nothing when no mirrors root is given", () => {
     expect(block().filesystem.denyWrite).toEqual([STATE, BIN]);
     expect(() => block({ extraReadPaths: [OBJECTS] })).toThrow(SandboxGrantRefused);

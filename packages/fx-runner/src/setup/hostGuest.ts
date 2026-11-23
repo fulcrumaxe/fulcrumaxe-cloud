@@ -140,6 +140,10 @@ export function createHostGuest(deps: HostGuestDeps, name: string, root: string)
   // the proxy's socket lives OUTSIDE the root the guest can write (see the threat model): a runner-owned directory per job, sandboxed read-only
   const egressRoot = egressRootOf(deps.jobsRoot);
   ensureRunnerDir(egressRoot, deps.uid);
+  // The runner's whole cache directory (mirrors, workspaces, tmp, spill, launch, setup-guests, setup-egress) wherever `XDG_CACHE_HOME` put it: denied for reads, so
+  // naming only the home directory would leave other repos' mirrors and other jobs' files readable when the cache sits outside it. Its own root and egress directory are
+  // the narrower grants (a narrower allow wins).
+  const cacheDir = path.dirname(path.normalize(deps.jobsRoot));
   const egressDir = path.join(egressRoot, path.basename(root));
   removeRoot(egressDir); // a directory a crashed run left under this name
   const socket = egressSocketPath(egressDir);
@@ -163,7 +167,7 @@ export function createHostGuest(deps: HostGuestDeps, name: string, root: string)
       if (deps.wsl.interopEntry() || table === undefined || table.trim() === "") throw new HostGuestRefused("sandbox_unavailable");
       wslDeny = [...new Set([...deps.wsl.clearance.denyPaths, ...wslDenyPaths(deps.wsl)])];
     }
-    const settings = sandboxSettings({ workspace: root, tempDir, home: deps.home, stateDir: deps.stateDir, binaryDir: deps.binaryDir, workspaceRoot: deps.jobsRoot, tempRoot: deps.jobsRoot, spillRoot: egressRoot, extraReadPaths: [egressDir], ...(wslDeny === undefined ? {} : { wslDenyPaths: wslDeny }) });
+    const settings = sandboxSettings({ workspace: root, tempDir, home: deps.home, stateDir: deps.stateDir, binaryDir: deps.binaryDir, workspaceRoot: deps.jobsRoot, tempRoot: deps.jobsRoot, spillRoot: egressRoot, extraReadPaths: [egressDir], denyReadRoots: [cacheDir], ...(wslDeny === undefined ? {} : { wslDenyPaths: wslDeny }) });
     assertEnabledSandbox(settings);
     return settings;
   };
