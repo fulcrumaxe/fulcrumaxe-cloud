@@ -166,7 +166,7 @@ function mountOnboarding(host) {
     const m = st.parsed && st.parsed.engine ? st.parsed.engine[0] : null;
     return m ? { ...(m.kvm ? { kvm: m.kvm } : {}), ...(m.helper_missing ? { helper_missing: true } : {}), ...(m.preflight ? { preflight: m.preflight } : {}) } : {};
   };
-  const engineEnv = () => ({ ctx: { ...st.ctx, machine: machineFacts(), origin: window.location.origin, isAdmin: window.currentIsAdmin !== false, price: st.price, planBusy: st.planBusy, planNote: st.planNote, planLink: st.planLink }, price: st.price, announce: (t) => (live.textContent = t), canOpen, openApp, runAction: runPlanAction });
+  const engineEnv = () => ({ ctx: { ...st.ctx, machine: machineFacts(), origin: window.location.origin, isAdmin: window.currentIsAdmin !== false, price: st.price, planBusy: st.planBusy, planNote: st.planNote, planAdded: st.planAdded === true, planLink: st.planLink }, price: st.price, announce: (t) => (live.textContent = t), canOpen, openApp, runAction: runPlanAction });
   // D#845 ON-22: the project step's purchase buttons. Checkout is the existing one (the server never sells a second subscription: an account that already pays gets the item added, and the answer is its own success path).
   // Returning from Stripe reloads the app, which reads the step again. "Add an engine" changes the quantity on the subscription and reads now; the account follows the provider's confirmation, so the step says so and refreshes when the app is shown again (no timer here).
 const ADDED_NOTE = "Engine added. This step updates when the provider confirms the change.";
@@ -174,6 +174,7 @@ const ADDED_NOTE = "Engine added. This step updates when the provider confirms t
     if (st.planBusy) return;
     st.planBusy = true;
     st.planNote = "";
+    st.planAdded = false;
     st.planLink = false;
     render();
     try {
@@ -183,10 +184,19 @@ const ADDED_NOTE = "Engine added. This step updates when the provider confirms t
         await api("POST", "/api/v1/billing/engine-quantity", { quantity }, abort.signal);
         st.planBusy = false;
         st.planNote = ADDED_NOTE;
+        st.planAdded = true;
         await load();
         return;
       }
       const res = await api("POST", "/api/v1/billing/checkout-session", { plan: "engine", quantity: 1, success_path: "/", cancel_path: "/" }, abort.signal);
+      if (res && res.added === true) {
+        // The engine joined the subscription already paid for: stay here, say so and read the step again (a reload would offer "Choose plan" until the provider's confirmation lands).
+        st.planBusy = false;
+        st.planNote = ADDED_NOTE;
+        st.planAdded = true;
+        await load();
+        return;
+      }
       if (!res || typeof res.url !== "string" || !res.url.startsWith("https://")) throw new Error("link");
       window.location.assign(res.url); // Stripe's own page, or this app's success path when the item was added to the existing subscription
       return;

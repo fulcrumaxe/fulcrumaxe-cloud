@@ -44,6 +44,7 @@ describe('engine plan items (real Postgres, strict Stripe fake)', () => {
     appPool = createPool(process.env.BILLING_DATABASE_URL_APP_USER!);
     server = await startStrictStripe({ pinnedVersion: STRIPE_API_VERSION, keys: { [SK]: 'secret' } });
     process.env.APP_ORIGIN = APP_ORIGIN;
+    process.env.STRIPE_SECRET_KEY = SK;
     process.env.STRIPE_PRICE_ID_STARTER = STARTER;
     process.env.STRIPE_PRICE_ID_TEAM = TEAM;
     process.env.STRIPE_PRICE_ID_SCALE = 'price_test_scale';
@@ -55,7 +56,7 @@ describe('engine plan items (real Postgres, strict Stripe fake)', () => {
     await adminPool.end();
     await ops.end();
     await appPool.end();
-    for (const k of ['APP_ORIGIN', 'STRIPE_PRICE_ID_STARTER', 'STRIPE_PRICE_ID_TEAM', 'STRIPE_PRICE_ID_SCALE', 'STRIPE_PRICE_ID_ENGINE']) delete process.env[k];
+    for (const k of ['APP_ORIGIN', 'STRIPE_SECRET_KEY', 'STRIPE_PRICE_ID_STARTER', 'STRIPE_PRICE_ID_TEAM', 'STRIPE_PRICE_ID_SCALE', 'STRIPE_PRICE_ID_ENGINE']) delete process.env[k];
   });
   beforeEach(() => {
     server.seen.length = 0;
@@ -70,6 +71,7 @@ describe('engine plan items (real Postgres, strict Stripe fake)', () => {
     server.world.priceProducts.clear();
     server.world.paymentOutcome = 'paid';
     server.world.ignoreWrites = false;
+    server.world.dropWriteReplies = 0;
     server.world.onRequest = undefined;
     delete process.env.STRIPE_PORTAL_CONFIGURATION_ID;
     resetPortalConfigurationCache();
@@ -80,6 +82,8 @@ describe('engine plan items (real Postgres, strict Stripe fake)', () => {
   });
 
   const writes = () => server.seen.filter((r) => r.method === 'POST');
+  /** Distinct write requests: the transport may replay one with the same idempotency key after a dropped connection, which the provider answers once. */
+  const distinctWrites = () => new Set(writes().map((w) => w.headers['idempotency-key'])).size;
   const input = (t: { accountId: string }, o: { plan: string; quantity?: number; stripe?: StripeLike }) => ({
     accountId: t.accountId, plan: o.plan, ...(o.quantity !== undefined ? { quantity: o.quantity } : {}), successPath: '/billing/success', cancelPath: '/billing/cancel', stripe: o.stripe ?? like(),
   });
@@ -197,9 +201,8 @@ describe('engine plan items (real Postgres, strict Stripe fake)', () => {
 
     it('already_subscribed now means a HOSTED plan is held (the same one or another); an engine checkout on held engines is an adjust, never already_subscribed (ON-22c)', async () => {
       const both = await billed([{ priceId: STARTER, quantity: 1 }, { priceId: ENGINE, quantity: 1 }]);
-      for (const plan of ['starter', 'team']) {
-        expect(await createCheckoutSession(ctx(both), input(both, { plan })), plan).toEqual({ ok: false, reason: 'already_subscribed' });
-      }
+      // A different hosted plan is still refused; the exact plan held is an "already added" success (D#845), tested below.
+      expect(await createCheckoutSession(ctx(both), input(both, { plan: 'team' }))).toEqual({ ok: false, reason: 'already_subscribed' });
       expect(await createCheckoutSession(ctx(both), input(both, { plan: 'engine' }))).toMatchObject({ ok: true, itemAdded: true });
       expect(writes()).toEqual([]);
     });
@@ -813,6 +816,127 @@ describe('engine plan items (real Postgres, strict Stripe fake)', () => {
       expect(results.every((r) => r.ok)).toBe(true);
       expect(t.fake.items!.filter((i) => i.priceId === ENGINE)).toHaveLength(1);
       expect(t.fake.items!.find((i) => i.priceId === ENGINE)!.quantity).toBe(3);
+    });
+  });
+
+  describe('D#845: charged but told it failed - the answer is what the provider holds', () => {
+    const raiseTo = (t: { accountId: string; userId: string }, quantity: number) => setEngineQuantity(ctx(t), { liveEngines: live(t), accountId: t.accountId, quantity, stripe: like() });
+    const engineItem = (t: { fake: FakeSubscription }) => t.fake.items!.find((i) => i.priceId === ENGINE)!;
+
+    it('a connection error AFTER the provider applied a raise answers ok, and the account mirror shows it at once (no sync, no webhook)', async () => {
+      const t = await billed([{ priceId: STARTER, quantity: 1 }, { priceId: ENGINE, quantity: 2 }]);
+      server.world.dropWriteReplies = 1;
+      expect(await raiseTo(t, 5)).toEqual({ ok: true });
+      expect(engineItem(t).quantity).toBe(5);
+      expect((await account(t.accountId)).engine_quantity).toBe(5);
+    });
+
+    it('the same for an item add whose answer was lost: ok, one write, and the mirror holds the new item', async () => {
+      const t = await billed([{ priceId: STARTER, quantity: 1 }]);
+      server.world.dropWriteReplies = 1;
+      expect(await createCheckoutSession(ctx(t), input(t, { plan: 'engine', quantity: 2 }))).toEqual({ ok: true, url: `${APP_ORIGIN}/billing/success`, itemAdded: true });
+      expect(distinctWrites()).toBe(1);
+      expect(engineItem(t).quantity).toBe(2);
+      expect((await account(t.accountId)).engine_quantity).toBe(2);
+    });
+
+    it('an error BEFORE the provider applied anything answers 502 with nothing applied and the mirror untouched', async () => {
+      const t = await billed([{ priceId: STARTER, quantity: 1 }, { priceId: ENGINE, quantity: 2 }]);
+      server.world.onRequest = (req) => {
+        if (req.method === 'POST') server.world.failNext.push(500);
+      };
+      expect(await raiseTo(t, 5)).toEqual({ ok: false, reason: 'stripe_unavailable' });
+      expect(engineItem(t).quantity).toBe(2);
+      expect((await account(t.accountId)).engine_quantity).toBe(0);
+    });
+
+    it('a lost answer for a raise the card did not pay is 402 payment_pending (the pending update is read back), never 502, and nothing is mirrored', async () => {
+      const t = await billed([{ priceId: STARTER, quantity: 1 }, { priceId: ENGINE, quantity: 2 }]);
+      server.world.paymentOutcome = 'requires_action';
+      server.world.dropWriteReplies = 1;
+      expect(await raiseTo(t, 5)).toEqual({ ok: false, reason: 'payment_pending' });
+      expect(t.fake.pending_update).toBeTruthy();
+      expect(engineItem(t).quantity).toBe(2);
+      expect((await account(t.accountId)).engine_quantity).toBe(0);
+    });
+
+    it('a failed read-back is tried once more; two failed reads in a row are the only case that answers 502 for an applied change', async () => {
+      const t = await billed([{ priceId: STARTER, quantity: 1 }, { priceId: ENGINE, quantity: 2 }]);
+      let posted = false;
+      let failGets = 1;
+      server.world.onRequest = (req) => {
+        if (req.method === 'POST') posted = true;
+        else if (posted && failGets > 0) {
+          failGets -= 1;
+          server.world.failNext.push(500);
+        }
+      };
+      expect(await raiseTo(t, 4)).toEqual({ ok: true });
+      expect((await account(t.accountId)).engine_quantity).toBe(4);
+      posted = false;
+      failGets = 2;
+      expect(await raiseTo(t, 6)).toEqual({ ok: false, reason: 'stripe_unavailable' });
+      expect(engineItem(t).quantity).toBe(6); // applied, and truly unreadable: the only 502 left
+    });
+
+    it('the mirror write keeps the stale-fetch guard: a webhook that already wrote a newer standing is not overwritten by the read-back', async () => {
+      const t = await billed([{ priceId: STARTER, quantity: 1 }, { priceId: ENGINE, quantity: 2 }]);
+      await admin.query(`UPDATE accounts SET engine_quantity = 9, stripe_synced_at = now() + interval '1 hour' WHERE id = $1`, [t.accountId]);
+      expect(await raiseTo(t, 5)).toEqual({ ok: true });
+      expect((await account(t.accountId)).engine_quantity).toBe(9);
+    });
+
+    it('a hosted plan whose first answer was lost is added once; the retry with the exact price held is a success with no second write', async () => {
+      const t = await billed([{ priceId: ENGINE, quantity: 1 }]);
+      server.world.dropWriteReplies = 1;
+      expect(await createCheckoutSession(ctx(t), input(t, { plan: 'team' }))).toMatchObject({ ok: true, itemAdded: true });
+      expect(distinctWrites()).toBe(1);
+      expect((await account(t.accountId)).plan).toBe('team');
+      // The retry finds the plan already held: a distinct answer (the screen says "You already have this plan"), not a second "added".
+      const retry = await createCheckoutSession(ctx(t), input(t, { plan: 'team' }));
+      expect(retry).toEqual({ ok: true, url: `${APP_ORIGIN}/billing/success`, alreadyHeld: true });
+      expect(distinctWrites()).toBe(1);
+      expect(t.fake.items!.filter((i) => i.priceId === TEAM)).toHaveLength(1);
+    });
+
+    it('the mode check is the configured key\'s: a live-mode key refuses a test-mode subscription at the mirror, and the answer is still ok', async () => {
+      const t = await billed([{ priceId: STARTER, quantity: 1 }, { priceId: ENGINE, quantity: 2 }]);
+      process.env.STRIPE_SECRET_KEY = ['sk', 'live', 'mismatch_0001'].join('_');
+      try {
+        server.world.dropWriteReplies = 1;
+        expect(await raiseTo(t, 5)).toEqual({ ok: true });
+      } finally {
+        process.env.STRIPE_SECRET_KEY = SK;
+      }
+      expect(engineItem(t).quantity).toBe(5);
+      expect((await account(t.accountId)).engine_quantity).toBe(0);
+    });
+
+    it('more concurrent writes than the pool has connections all complete: the lock holder never waits on a second connection', async () => {
+      const small = createPool(process.env.BILLING_DATABASE_URL_PLATFORM_OPS!);
+      small.options.max = 2;
+      try {
+        const owners = await Promise.all(Array.from({ length: 8 }, () => billed([{ priceId: STARTER, quantity: 1 }, { priceId: ENGINE, quantity: 1 }])));
+        server.world.onRequest = async (req) => {
+          if (req.method === 'POST') await new Promise((r) => setTimeout(r, 150)); // every writer is inside its lock at once
+        };
+        const results = await Promise.race([
+          Promise.all(owners.map((t) => setEngineQuantity({ pool: small, principal: t }, { liveEngines: live(t), accountId: t.accountId, quantity: 3, stripe: like() }))),
+          new Promise<'hung'>((r) => setTimeout(() => r('hung'), 20_000)),
+        ]);
+        expect(results).not.toBe('hung');
+        expect(results).toEqual(owners.map(() => ({ ok: true })));
+        for (const t of owners) expect((await account(t.accountId)).engine_quantity).toBe(3);
+      } finally {
+        server.world.onRequest = undefined;
+        await small.end();
+      }
+    }, 40_000);
+
+    it('a different hosted plan than the one held is still already_subscribed', async () => {
+      const t = await billed([{ priceId: TEAM, quantity: 1 }]);
+      expect(await createCheckoutSession(ctx(t), input(t, { plan: 'starter' }))).toEqual({ ok: false, reason: 'already_subscribed' });
+      expect(writes()).toEqual([]);
     });
   });
 });

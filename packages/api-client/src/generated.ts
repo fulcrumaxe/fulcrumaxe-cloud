@@ -3119,6 +3119,8 @@ export interface Operations {
     };
     response: {
       url: string;
+      added?: true;
+      already_held?: true;
     };
   };
   setEngineQuantity: {

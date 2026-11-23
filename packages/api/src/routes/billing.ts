@@ -12,6 +12,8 @@ import { platformOpsPool } from "../sse/pools.js";
 
 /** D#31 API-7e: `{ url }` and nothing else -- never a Stripe session id, customer id or key. */
 export const billingLinkResponseSchema = z.object({ url: z.string().url() });
+/** The checkout answer: `added: true` marks an item added to the existing subscription (the url is then this app's own success path, not a Stripe page); absent for a real Checkout link. `already_held: true`: a hosted plan add that found this exact plan already on the subscription (nothing was written). */
+export const checkoutSessionResponseSchema = z.object({ url: z.string().url(), added: z.literal(true).optional(), already_held: z.literal(true).optional() });
 
 const portalSessionBodySchema = z.object({ return_path: z.string().optional(), flow: z.enum(["change_plan"]).optional() }).strict();
 const checkoutSessionBodySchema = z.object({ plan: z.string(), success_path: z.string(), cancel_path: z.string(), quantity: z.number().int().optional() }).strict();
@@ -272,10 +274,10 @@ export const billingRoutes: RouteEntry[] = [
     operationId: "createCheckoutSession",
     summary: "A Stripe Checkout link to subscribe to a plan",
     description:
-      "Session only, owner only. Plans are sold only through Checkout Sessions this route creates; it never accepts or returns a Payment Link. `success_path` and `cancel_path` are plain absolute paths on this app. `plan` is a hosted plan or `engine` (with `quantity`, 1 to 100). An account that already has a paying subscription never gets a second one: the plan or the engines join it as an item and the answer is the success path. An engine checkout on a subscription that already holds engines sets the total to the larger of what it holds and `quantity`, and writes nothing when nothing is raised. Returns only the `url`.",
+      "Session only, owner only. Plans are sold only through Checkout Sessions this route creates; it never accepts or returns a Payment Link. `success_path` and `cancel_path` are plain absolute paths on this app. `plan` is a hosted plan or `engine` (with `quantity`, 1 to 100). An account that already has a paying subscription never gets a second one: the plan or the engines join it as an item and the answer is the success path. An engine checkout on a subscription that already holds engines sets the total to the larger of what it holds and `quantity`, and writes nothing when nothing is raised. Returns the `url`, and `added: true` when the plan or engines joined the existing subscription, or `already_held: true` when a hosted plan was already on it and nothing was written (the `url` is then the success path, not a Checkout page).",
     extraResponses: linkErrors,
     bodySchema: checkoutSessionBodySchema,
-    responseSchema: billingLinkResponseSchema,
+    responseSchema: checkoutSessionResponseSchema,
     async handler(ctx, input) {
       const body = input.body as z.infer<typeof checkoutSessionBodySchema>;
       const stripe = billingLinkDeps.getStripe();
@@ -288,7 +290,7 @@ export const billingRoutes: RouteEntry[] = [
         stripe,
       });
       if (!result.ok) throw billingLinkError(result.reason);
-      return { url: result.url };
+      return { url: result.url, ...(result.itemAdded ? { added: true as const } : {}), ...(result.alreadyHeld ? { already_held: true as const } : {}) };
     },
   },
   {

@@ -162,6 +162,8 @@ const run = (id, label) => ({ id, label, run: true });
  */
 function planGate(v, gate, ctx) {
   const price = typeof ctx.price === "number" && Number.isFinite(ctx.price) ? " (" + usd(ctx.price) + " a month per engine)" : "";
+  // An engine was just added and the step has not caught up with the provider yet: say so instead of offering the purchase again.
+  if (ctx.planAdded && ctx.planNote && (gate === "plan_required" || gate === "engine_quantity")) { v.lines.push(ctx.planNote); return; }
   if (gate === "plan_required") { v.lines.push("Pick the Engine plan to run the engine" + price); v.actions.push(run("choose_plan", "Choose plan")); }
   else if (gate === "engine_quantity") { v.lines.push("Every engine on your plan is in use. Add an engine to place another project."); v.actions.push(run("add_engine", "Add an engine")); }
   else if (gate === "plan_ended") { v.lines.push("Plan ended: the engine is stopped"); v.actions.push(run("renew", "Renew")); }

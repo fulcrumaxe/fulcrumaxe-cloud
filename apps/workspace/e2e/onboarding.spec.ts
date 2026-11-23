@@ -1161,6 +1161,29 @@ test.describe("the engine track and the track choice (D#845 ON-6)", () => {
     await expect(choice).toHaveCount(0);
   });
 
+  test("Choose plan on an already-paid subscription answers added: the step says 'Engine added', offers no second purchase, and reads again (D#845)", async ({ page }) => {
+    const gated = () => {
+      const b = states({ machine: "done", claude: "done", github_app: "done", project: "active" });
+      b.tracks[1].steps = b.tracks[1].steps.map((s) => (s.step === "project" ? { ...s, plan_gate: "plan_required" } : s));
+      return b;
+    };
+    const m = mock({ onboarding: [json(gated())], enginePlan: { price_usd_month: 17 } });
+    await engineSetup(page, m, extra());
+    await page.route("**/api/v1/billing/checkout-session", (route) => {
+      m.checkouts.push(route.request().postDataJSON());
+      return route.fulfill({ json: { url: "https://app.test/", added: true } });
+    });
+    await bootToDesktop(page);
+    await expect(eng(page, "choose_plan")).toBeVisible();
+    const reads = count(m, "GET /api/v1/onboarding");
+    await eng(page, "choose_plan").click();
+    await expect(eng(page, "project").locator('[data-testid="ob-engine-line"]').filter({ hasText: "Engine added." })).toBeVisible();
+    await expect(eng(page, "choose_plan")).toHaveCount(0);
+    expect(count(m, "GET /api/v1/onboarding")).toBeGreaterThan(reads);
+    expect(m.checkouts).toEqual([{ plan: "engine", quantity: 1, success_path: "/", cancel_path: "/" }]);
+    await noPlaceholder(page);
+  });
+
   test("choosing the cloud-builds track shows the six pipeline steps", async ({ page }) => {
     const x = extra({ track: json({ track: "pipeline", chosen_at: "2026-11-20T10:00:00.000Z", created: true }) });
     const m = mock({ onboarding: [json(RAW_NEW)] });

@@ -113,6 +113,8 @@ export interface StripeWorld {
   priceProducts: Map<string, string>;
   portalConfigurations: FakePortalConfiguration[];
   portalSessions: FakePortalSession[];
+  /** The next N write (POST) requests are applied and then the connection is destroyed before any answer is sent: the caller sees a connection error for a change that did happen. */
+  dropWriteReplies: number;
   /** Run before each answer is built; lets a test land a webhook write "while the fetch is in flight". */
   onRequest?: (req: SeenRequest) => void | Promise<void>;
 }
@@ -168,7 +170,7 @@ function itemsOf(s: FakeSubscription): FakeItem[] {
 }
 
 export function newWorld(): StripeWorld {
-  return { customers: new Set(), prices: new Set(), subscriptions: [], failNext: [], paymentOutcome: 'paid', invoices: [], ignoreWrites: false, priceProducts: new Map(), portalConfigurations: [], portalSessions: [] };
+  return { customers: new Set(), prices: new Set(), subscriptions: [], failNext: [], paymentOutcome: 'paid', invoices: [], ignoreWrites: false, dropWriteReplies: 0, priceProducts: new Map(), portalConfigurations: [], portalSessions: [] };
 }
 
 export interface StrictStripeOptions {
@@ -512,6 +514,11 @@ export async function startStrictStripe(options: StrictStripeOptions, world: Str
       seen.push(seenReq);
       answer(seenReq).then(
         (r) => {
+          if (seenReq.method === 'POST' && world.dropWriteReplies > 0) {
+            world.dropWriteReplies -= 1;
+            req.socket.destroy();
+            return;
+          }
           res.writeHead(r.status, { 'content-type': 'application/json', 'request-id': `req_fake_${seen.length}`, ...(r.headers ?? {}) });
           res.end(JSON.stringify(r.body));
         },

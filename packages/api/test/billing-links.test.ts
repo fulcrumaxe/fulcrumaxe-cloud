@@ -428,9 +428,11 @@ describe('D#31 API-7e: billing links', () => {
       const owner = await billedOwner();
       const same = await post(CHECKOUT, owner, { ...checkoutBody, plan: 'engine', quantity: 2 });
       expect(same.status).toBe(200);
+      expect(await same.json()).toEqual({ url: `${APP_ORIGIN}/billing?ok=1`, added: true }); // the marker: an item was added to the subscription, this is no Checkout link
       expect(stripe.calls).toHaveLength(0);
       const up = await post(CHECKOUT, owner, { ...checkoutBody, plan: 'engine', quantity: 6 });
       expect(up.status).toBe(200);
+      expect(await up.json()).toEqual({ url: `${APP_ORIGIN}/billing?ok=1`, added: true });
       expect(stripe.calls.map((c) => c.kind)).toEqual(['item_update']);
       expect(stripe.engineQuantityNow).toBe(6);
     });
