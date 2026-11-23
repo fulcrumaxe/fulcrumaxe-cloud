@@ -1422,7 +1422,7 @@ test("ci.yml: an edit inside the check job is a full run without e2e; an edit th
   assert.equal(inCheck.mode, "full");
   assert.equal(inCheck.trigger, ".github/workflows/**");
   assert.equal(inCheck.e2e, false);
-  const inE2e = changeFrom(base, { [CI]: REAL_CI.replace("&& 125 || 40 }}", "&& 125 || 41 }}") });
+  const inE2e = changeFrom(base, { [CI]: REAL_CI.replace("&& 125 || 60 }}", "&& 125 || 61 }}") });
   assert.equal(inE2e.mode, "full");
   assert.equal(inE2e.e2e, true);
   const env = changeFrom(base, { [CI]: REAL_CI.replace('FX_FORBID_MODEL_CALLS: "1"', 'FX_FORBID_MODEL_CALLS: "1"\n  OTHER: "x"') });
