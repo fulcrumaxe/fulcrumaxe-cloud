@@ -1115,13 +1115,23 @@ test.describe("the engine track and the track choice (D#845 ON-6)", () => {
   const PLACEHOLDER = /\b(null|undefined|nan)\b/i;
   interface Extra { track: Reply; trackPuts: unknown[]; machine: { name: string; state: string; minutesAgo: number } | null }
   const extra = (o: Partial<Extra> = {}): Extra => ({ track: json({ track: "engine", chosen_at: "2026-11-20T10:00:00.000Z", created: true }), trackPuts: [], machine: { name: BOX, state: "online_idle", minutesAgo: 1 }, ...o });
+  const runnersAnswered = new WeakMap<Page, Promise<void>>();
   /** `setup` plus the read of the runners and the write of the choice that the engine track makes. `onPut` may change what the next read answers. */
   async function engineSetup(page: Page, m: Mock, x: Extra, onPut?: (track: string) => void) {
     const problems = await setup(page, m);
+    // The test must not end while this handler runs (it reads the page clock, then answers), so `settled` waits for the first answer.
+    let answered!: () => void;
+    runnersAnswered.set(page, new Promise<void>((r) => { answered = r; }));
     await page.route((u) => u.pathname === "/api/runners", async (route) => {
-      if (x.machine === null) return route.fulfill({ json: { runners: [] } });
-      const now = await page.evaluate(() => Date.now());
-      return route.fulfill({ json: { runners: [{ id: "r1", name: x.machine.name, state: x.machine.state, last_seen_at: new Date(now - x.machine.minutesAgo * 60000).toISOString() }] } });
+      try {
+        if (x.machine === null) return await route.fulfill({ json: { runners: [] } });
+        const now = await page.evaluate(() => Date.now());
+        return await route.fulfill({ json: { runners: [{ id: "r1", name: x.machine.name, state: x.machine.state, last_seen_at: new Date(now - x.machine.minutesAgo * 60000).toISOString() }] } });
+      } catch (e) {
+        if (!page.isClosed()) throw e; // a page that is gone has nobody left to answer
+      } finally {
+        answered();
+      }
     });
     await page.route((u) => u.pathname === "/api/v1/onboarding/track", async (route) => {
       const body = route.request().postDataJSON();
@@ -1132,6 +1142,14 @@ test.describe("the engine track and the track choice (D#845 ON-6)", () => {
     return problems;
   }
   const eng = (page: Page, id: string) => ob(page).locator(`[data-testid="ob-engine-${id}"]`);
+  /** The Onboarding window is up, its slide-in has finished and the machine list has been answered, so a snapshot of its text is the settled screen. */
+  const settled = async (page: Page) => {
+    await runnersAnswered.get(page);
+    await expect(ob(page)).toBeVisible();
+    await ob(page).evaluate((el) => Promise.all(el.getAnimations({ subtree: true }).map((a) => a.finished)));
+  };
+  /** The lines of one step, as an assertion that waits for the render instead of reading it once. */
+  const expectLines = (page: Page, id: string, expected: string[]) => expect(eng(page, id).locator('[data-testid="ob-engine-line"]')).toHaveText(expected);
   const lines = (page: Page, id: string) => eng(page, id).locator('[data-testid="ob-engine-line"]').allTextContents();
   /** The answer for an account that chose the engine track, with the engine's steps in these states. */
   const states = (o: Record<string, string>, opts: { tier?: string | null; code?: string; kvm?: "present" | "absent"; helper_missing?: true } = {}) => withEngine(ONB.new, engineTrack(o, opts));
@@ -1348,16 +1366,17 @@ test.describe("the engine track and the track choice (D#845 ON-6)", () => {
   test("machine done on microVM, claude open: the step asks for a Claude token on the machine, with a command to copy, and the next step is current", async ({ page }) => {
     await engineSetup(page, mock({ onboarding: [json(states({ machine: "done", claude: "active" }, { tier: "microvm" }))] }), extra());
     await bootToDesktop(page);
-    expect(await lines(page, "machine")).toEqual([`${BOX} connected · MicroVM isolation`]);
+    await settled(page);
+    await expectLines(page, "machine", [`${BOX} connected · MicroVM isolation`]);
     await expect(eng(page, "machine").locator('[data-testid="ob-engine-state"]')).toContainText("Done");
     await expect(eng(page, "machine").locator("time")).toHaveCount(1);
-    expect(await lines(page, "claude")).toEqual(["Virtual machine mode needs a Claude token on this machine. On that machine run fx-runner credentials set-vm-token.", "The token stays on that machine and is never sent to us."]);
+    await expectLines(page, "claude", ["Virtual machine mode needs a Claude token on this machine. On that machine run fx-runner credentials set-vm-token.", "The token stays on that machine and is never sent to us."]);
     await expect(eng(page, "claude").locator('[data-testid="ob-cmd"]')).toHaveText("fx-runner credentials set-vm-token");
     await expect(eng(page, "claude").locator("input, textarea")).toHaveCount(0); // no token field: the token is typed on the machine
-    expect(await eng(page, "claude").innerText()).not.toMatch(/sign in|signed in|undefined|null/i);
+    await expect(eng(page, "claude")).not.toContainText(/sign in|signed in|undefined|null/i, { useInnerText: true });
     await expect(ob(page).locator('[data-testid="ob-track-engine"] [aria-current="step"]')).toHaveAttribute("data-testid", "ob-engine-claude");
     await expect(ob(page).locator('[data-testid="ob-prereq"]')).toHaveCount(0); // the list is for before the first command
-    expect(await lines(page, "github_app")).toEqual(["Finish Give the machine a Claude token first"]);
+    await expectLines(page, "github_app", ["Finish Give the machine a Claude token first"]);
     await noPlaceholder(page);
   });
 
@@ -1386,11 +1405,12 @@ test.describe("the engine track and the track choice (D#845 ON-6)", () => {
   test("Standard isolation says nothing about KVM while the machine's facts do not (the tier follows the engine setting, not the hardware), with no failure styling, word or copy", async ({ page }) => {
     await engineSetup(page, mock({ onboarding: [json(states({ machine: "done", claude: "active" }, { tier: "standard" }))] }), extra());
     await bootToDesktop(page);
-    expect(await lines(page, "machine")).toEqual([`${BOX} connected · Standard isolation`]);
-    expect(await eng(page, "machine").innerText()).not.toMatch(/KVM/);
+    await settled(page);
+    await expectLines(page, "machine", [`${BOX} connected · Standard isolation`]);
+    await expect(eng(page, "machine")).not.toContainText(/KVM/, { useInnerText: true });
     await expect(eng(page, "machine")).not.toHaveClass(/ob-failed/);
     await expect(eng(page, "machine")).toHaveAttribute("data-state", "done");
-    expect(await eng(page, "machine").innerText()).not.toMatch(/fail|warn|error|problem|attention/i);
+    await expect(eng(page, "machine")).not.toContainText(/fail|warn|error|problem|attention/i, { useInnerText: true });
     await expect(ob(page).locator('[data-testid="ob-error"]')).toBeEmpty();
   });
 
@@ -1421,7 +1441,8 @@ test.describe("the engine track and the track choice (D#845 ON-6)", () => {
   test("claude open on a machine that is offline: how long ago it was last seen", async ({ page }) => {
     await engineSetup(page, mock({ onboarding: [json(states({ machine: "done", claude: "active" }, { tier: "microvm" }))] }), extra({ machine: { name: BOX, state: "offline", minutesAgo: 14 } }));
     await bootToDesktop(page);
-    expect(await lines(page, "claude")).toEqual([`${BOX} was last seen 14 min ago`]);
+    await settled(page);
+    await expectLines(page, "claude", [`${BOX} was last seen 14 min ago`]);
     await expect(eng(page, "claude").locator('[data-testid="ob-cmd"]')).toHaveCount(0);
   });
 
@@ -1471,7 +1492,7 @@ test.describe("the engine track and the track choice (D#845 ON-6)", () => {
     await engineSetup(page, mock({ access: "open", onboarding: [json(states(ALL_DONE, { tier: "microvm" }))] }), extra());
     await bootToDesktop(page);
     await page.evaluate(() => (window as unknown as Shell).FULCWM.open("onboarding"));
-    await expect(ob(page)).toBeVisible();
+    await settled(page);
     const team = eng(page, "live").locator('[data-testid="ob-engine-open_team"]');
     await expect(team).toHaveText("Open Team");
     await team.click();
