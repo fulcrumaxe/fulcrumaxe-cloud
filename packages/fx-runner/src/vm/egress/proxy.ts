@@ -49,6 +49,8 @@ export interface EgressProxyOptions {
   /** This host's own addresses; defaults to its interfaces. */
   ownAddresses?: () => Set<string>;
   onDecision?: (decision: Decision) => void;
+  /** The only client is a program running as this same user (the standard tier's guest): the socket's mode is left as `bind` made it and never changed by name. See `listenOnSocket`. */
+  ownerOnly?: boolean;
 }
 
 export interface EgressProxy {
@@ -109,8 +111,17 @@ export async function resolvePublic(host: string, lookup: Lookup, own: () => Set
   return { addresses };
 }
 
-/** Only a stale socket the runner itself owns is replaced (an lstat, which never follows a link); anything else at the name refuses the start. Then listen, mode 0666: who may reach it is decided by the 01770 directory. Shared by the tunnel and the reverse endpoint. */
-export async function listenOnSocket(server: http.Server, socketPath: string, uid: number): Promise<void> {
+/**
+ * Only a stale socket the runner itself owns is replaced (an lstat, which never follows a link); anything else at the name refuses the start. Then listen. Shared by the tunnel and the reverse endpoint.
+ *
+ * The socket's mode is one of two, by who connects:
+ *  - default (a microVM's vsock directory): 0666, so the sandbox's own user can connect; who may reach it is decided by the 01770 directory. That directory is made and owned by the runner's helper and the guest cannot
+ *    write to it, so the `chmod` (which follows a link) has nothing to follow but the socket just made; the name is looked at first, and a socket of another user, or anything that is not a socket, refuses.
+ *  - `ownerOnly` (the standard tier's guest, which runs as the runner's own user and CAN write its egress directory): no `chmod` at all. A `chmod` by name follows a link, and a link swapped in after the bind would have
+ *    had the runner change the mode of whatever it pointed at. The socket keeps the mode `bind` gave it (0777 less the umask), which its owner can always connect to; the name is checked once more and must still be this
+ *    user's socket with the owner's write bit.
+ */
+export async function listenOnSocket(server: http.Server, socketPath: string, uid: number, ownerOnly = false): Promise<void> {
   try {
     const existing = lstatSync(socketPath);
     if (!existing.isSocket() || existing.uid !== uid) throw new TypeError("egress proxy: something other than a socket of this user is at the socket path");
@@ -122,7 +133,18 @@ export async function listenOnSocket(server: http.Server, socketPath: string, ui
     server.once("error", reject);
     server.listen(socketPath, resolve);
   });
-  chmodSync(socketPath, 0o666);
+  try {
+    const made = lstatSync(socketPath);
+    if (!made.isSocket() || made.uid !== uid) throw new TypeError("egress proxy: the socket path is not a socket of this user");
+    if (ownerOnly) {
+      if ((made.mode & 0o200) === 0) throw new TypeError("egress proxy: the socket cannot be written by its owner");
+    } else {
+      chmodSync(socketPath, 0o666);
+    }
+  } catch (error) {
+    server.close();
+    throw error;
+  }
 }
 
 export async function startEgressProxy(o: EgressProxyOptions): Promise<EgressProxy> {
@@ -195,7 +217,7 @@ export async function startEgressProxy(o: EgressProxyOptions): Promise<EgressPro
     })().catch(() => client.destroy());
   });
 
-  await listenOnSocket(server, socketPath, o.uid);
+  await listenOnSocket(server, socketPath, o.uid, o.ownerOnly === true);
   return {
     socketPath,
     close: () =>

@@ -117,7 +117,7 @@ export interface InstallCaptured {
  * install started outlives it. Only the end of the output is kept; `onLine`, when given, is also called with every complete line of the whole output as it arrives
  * (a line is cut at `LINE_MAX_CHARS`), so a caller can pick facts out of output far longer than the tail it keeps.
  */
-export function runInstall(spawnFn: SpawnFn, command: string, args: readonly string[], env: Record<string, string>, cwd: string, timeoutMs: number, tailChars: number, signal?: AbortSignal, feed?: Buffer, onLine?: (line: string) => void): Promise<InstallCaptured> {
+export function runInstall(spawnFn: SpawnFn, command: string, args: readonly string[], env: Record<string, string>, cwd: string, timeoutMs: number, tailChars: number, signal?: AbortSignal, feed?: Buffer, onLine?: (line: string) => void, onData?: (stream: "stdout" | "stderr", chunk: Buffer) => void): Promise<InstallCaptured> {
   return new Promise((resolve) => {
     let tail = "";
     let timedOut = false;
@@ -162,8 +162,10 @@ export function runInstall(spawnFn: SpawnFn, command: string, args: readonly str
         for (const line of lines) onLine(line.slice(0, LINE_MAX_CHARS));
       };
     };
-    child.stdout?.on("data", splitter());
-    child.stderr?.on("data", splitter());
+    // `onData` (D#845 ON-8e) is the raw bytes of each stream as they arrive, for a caller that reads one stream whole (a status stream, a bundle) and not by line.
+    const lines = { stdout: splitter(), stderr: splitter() };
+    child.stdout?.on("data", (chunk: Buffer) => (lines.stdout(chunk), onData?.("stdout", chunk)));
+    child.stderr?.on("data", (chunk: Buffer) => (lines.stderr(chunk), onData?.("stderr", chunk)));
     child.on("error", () => finish(null));
     child.on("close", (code) => {
       void terminateGroup(child, 500).then(() => finish(code));

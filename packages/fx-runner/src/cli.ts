@@ -30,6 +30,7 @@ import { verifyBrowserServerCommand, type VerifyServerHost } from "./commands/ve
 import { verifyLoginCommand, type VerifyLoginHost } from "./commands/verifyLogin.js";
 import { takeoverPaneCommand, watchCommand } from "./commands/watchPane.js";
 import { purgeChildCommand } from "./commands/purgeChild.js";
+import { egressServeCommand, egressWaitCommand } from "./setup/egressServe.js";
 import { configCommand, updateCommand } from "./commands/update.js";
 import { engineHostCommand, type EngineHostRuntime } from "./commands/engineHost.js";
 import type { DiscoveryOps } from "./engineBridge/discover.js";
@@ -171,6 +172,9 @@ const COMMANDS: Readonly<Record<string, { flags: readonly string[]; switches: re
   __takeover: { flags: [], switches: [], positionals: 1 },
   // The macOS resumed-workspace purge child (daemon/resumePurgeSandbox.ts); not in --help.
   __purge: { flags: [], switches: [], positionals: 2 },
+  // The forwarder inside a standard-tier setup sandbox (setup/hostGuest.ts); not in --help.
+  "__egress-serve": { flags: [], switches: [], positionals: 1 },
+  "__egress-wait": { flags: [], switches: [], positionals: 0 },
   doctor: { flags: [], switches: ["sandbox-only"] },
   logs: { flags: [], switches: [], positionals: 1 },
   service: { flags: ["user"], switches: ["system"], positionals: 1 },
@@ -290,6 +294,8 @@ export async function runCli(io: CliIo): Promise<number> {
       return await verifyLoginCommand(flags, ctx, io.verifyLoginHost);
     }
     if (command === "__purge") return purgeChildCommand(positionals[0], positionals[1], ctx);
+    if (command === "__egress-serve") return await egressServeCommand(positionals[0], ctx);
+    if (command === "__egress-wait") return await egressWaitCommand();
     if (command === "doctor") {
       if (io.doctorHost === undefined) throw new CliError("doctor is only available from the fx-runner program");
       return await doctorCommand(ctx, io.doctorHost, { sandboxOnly: flags.has("sandbox-only") });

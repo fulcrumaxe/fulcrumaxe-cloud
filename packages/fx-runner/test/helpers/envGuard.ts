@@ -51,6 +51,10 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/setup/projectSetup.ts": ["fs", "path"],
   "src/setup/guestScripts.ts": ["crypto", "zlib"],
   "src/setup/setupRepos.ts": ["crypto", "fs", "path"],
+  // D#845 ON-8e: the standard tier's guest: a fresh 0700 job root (lstat, no-follow opens judged by the handle, removal), a name hash, a utf8 decoder for the command's output; every program starts through the injected process-group capture
+  "src/setup/hostGuest.ts": ["crypto", "fs", "path", "string_decoder"],
+  // D#845 ON-8e: the forwarder inside the sandbox: one loopback listener relaying to one Unix socket, and the wait probe of that port; no file, no process, no environment
+  "src/setup/egressServe.ts": ["net", "path"],
   "src/config.ts": ["crypto", "fs", "path"],
   "src/keys.ts": ["crypto"],
   // The engine bridge (EB-3): the runner's user id is given by the caller, never read from `process` here.

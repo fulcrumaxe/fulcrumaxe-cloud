@@ -16,7 +16,7 @@ import { checkProtected } from "./checkProtected.js";
 import { AgentRunFailed, failureOf, firstLineOf, startFailureOf } from "./agentOutcome.js";
 
 /** Where a Linux session keeps per-user sockets (the session bus among them). */
-const USER_RUNTIME_ROOT = ["", "run", "user"].join("/");
+export const USER_RUNTIME_ROOT = ["", "run", "user"].join("/");
 
 /**
  * The pnpm settings the check is given on top of the clean environment (see `checkLaunch`): offline, and no release-age lookup. Exported so the test that runs the real pnpm
