@@ -12,7 +12,7 @@ import { configuredWakeKey } from "./wakeToken.js";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const invalid = (): RunnerHttpError => new RunnerHttpError(400, "invalid_message", "the request does not match what this route takes");
 
-/** GET /api/machines (any member of the account): every machine that is not removed, with its tier, liveness, Claude readiness and the project placed on it. */
+/** GET /api/machines (any member of the account): every machine that is not removed, with its tier, the KVM fact it reported (or null), liveness, Claude readiness and the project placed on it. */
 export async function listMachines(deps: RunnerCloudDeps, principal: SessionPrincipal): Promise<RunnerHttpResponse> {
   const now = (deps.now ?? (() => new Date()))();
   const machines = await withTenant(deps.appUserPool, principal.accountId, principal.userId, async (client) => {
@@ -22,7 +22,7 @@ export async function listMachines(deps: RunnerCloudDeps, principal: SessionPrin
   return {
     status: 200,
     body: {
-      machines: machines.map((m) => ({ id: m.runner_id, name: m.name, tier: m.tier, live: m.live, claude: m.claude, running: m.running ? { repo_id: m.running.repo_id, name: m.running.name } : null })),
+      machines: machines.map((m) => ({ id: m.runner_id, name: m.name, tier: m.tier, kvm: m.kvm, live: m.live, claude: m.claude, running: m.running ? { repo_id: m.running.repo_id, name: m.running.name } : null })),
     },
     headers: { "cache-control": "no-store" },
   };

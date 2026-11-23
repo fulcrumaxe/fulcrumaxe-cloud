@@ -3,7 +3,7 @@
 // D#845 MC-10a: the Machines tab's logic against a fake call(). The words of every row, nothing null or undefined on screen, the last good list kept when a read
 // fails, and the commands the "A computer or server I have" choice shows. The DOM, axe and keys are in e2e/runners.spec.ts.
 import { describe, expect, it } from "vitest";
-import { KVM_NOTE, addSteps, createMachines, readMachine, readMachines, tierText } from "../apps/runners/runners-fleet.js";
+import { KVM_NOTE, VM_INSTALL_COMMAND, addSteps, createMachines, needsVmInstall, readMachine, readMachines, tierText, vmInstallLine } from "../apps/runners/runners-fleet.js";
 
 const R1 = "44444444-4444-4444-8444-444444444441";
 const wire = (over = {}) => ({ id: R1, name: "Desktop", tier: "microvm", live: true, claude: true, running: null, ...over });
@@ -11,9 +11,28 @@ const wire = (over = {}) => ({ id: R1, name: "Desktop", tier: "microvm", live: t
 describe("a machine row", () => {
   it("words the tier, never guesses one a machine has not reported", () => {
     expect(tierText("microvm")).toBe("MicroVM isolation");
-    expect(tierText("standard")).toBe("Standard isolation: one project on this machine (no KVM)");
+    expect(tierText("standard", "absent")).toBe("Standard isolation: one project on this machine (no KVM)");
+    expect(tierText("standard", "present")).toBe("Standard isolation: one project on this machine");
+    expect(tierText("standard", null)).toBe("Standard isolation: one project on this machine"); // an older runner that never reported: nothing said about KVM
+    expect(tierText("standard")).toBe("Standard isolation: one project on this machine");
+    expect(tierText("microvm", "absent")).toBe("MicroVM isolation");
+    expect(tierText(null, "present")).toBe("Isolation not reported yet");
     expect(tierText(null)).toBe("Isolation not reported yet");
     expect(readMachine(wire({ tier: "bogus" })).tier).toBeNull();
+  });
+
+  it("reads the KVM fact as present, absent or null, and never lets another value reach the screen (FU-225)", () => {
+    expect(readMachine(wire({ kvm: "present" })).kvm).toBe("present");
+    expect(readMachine(wire({ kvm: "absent" })).kvm).toBe("absent");
+    for (const bad of [undefined, null, "yes", true, 1, "PRESENT"]) expect(readMachine(wire({ kvm: bad })).kvm, String(bad)).toBeNull();
+    expect(readMachine({ id: R1 }).kvm).toBeNull();
+  });
+
+  it("shows the vm-install hint only for a standard machine that reported KVM present (the derivation engineTrack.ts uses)", () => {
+    expect(needsVmInstall("standard", "present")).toBe(true);
+    for (const [tier, kvm] of [["standard", "absent"], ["standard", null], ["microvm", "present"], [null, "present"], ["microvm", null]]) expect(needsVmInstall(tier, kvm), `${tier}/${kvm}`).toBe(false);
+    expect(VM_INSTALL_COMMAND).toBe("sudo fx-runner vm install");
+    expect(vmInstallLine("Desktop")).toBe("Desktop can run microVMs. Run sudo fx-runner vm install on it.");
   });
 
   it("reads capacity as Free or Running owner/name, and keeps a nameless machine and a nameless project readable", () => {
