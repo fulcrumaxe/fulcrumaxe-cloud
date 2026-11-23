@@ -53,6 +53,7 @@ export { gitTicketRun } from "./gitTicket.js";
 export { planeMergeClaimRun, planeMergeReportRun, planeMergeVerifyRun, settleAuthorizedOrder, type SettleHint, type SettleOutcome } from "./planeMerge.js";
 export { DEPLOY_ORDER_ELIGIBLE_SQL, deployOrderClaimRun, deployOrderReportRun, deployOrderWaiting } from "./deployOrder.js";
 export { machineJobClaimRun, offeredMachineJobs, setupProgressRun } from "./machineJob.js";
+export { ENGINE_SOURCE_REPO, buildPlanFile, engineTarballUrl, issueProjectSetup, retryInstall, setupPlanRun, type IssuedSetupJob } from "./setupJobs.js";
 export { memoryProposalsRun } from "./memoryProposals.js";
 export { PLANE_PUSH_REPORT_CODES, planePushPairingRun, planePushReportRun, planePushTokenRun } from "./planePush.js";
 export {

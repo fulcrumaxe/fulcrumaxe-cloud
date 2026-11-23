@@ -49,7 +49,7 @@ export async function issueTestJob(appPool: Pool, admin: PoolClient, o: IssueOpt
   const setupId = o.setupId === undefined ? null : o.setupId;
   const job = { v: 1, job_id: id, runner_id: o.runnerId, repo_gh_id: ghRepoId, ...(setupId ? { setup_id: setupId } : {}), requires_engine: o.requiresEngine ?? "any", issued_at: issued.toISOString(), expires_at: expires.toISOString(), kind, args: ARGS[kind] } as MachineJob;
   const signed = signMachineJob(job, JOB_KEY_ID, keys.privateKey);
-  const attempt = await withTenant(appPool, o.accountId, async (client) => {
+  const attempt = await withTenant(appPool, o.accountId, o.userId, async (client) => {
     const asked = { setup: o.callAs && "setupId" in o.callAs ? o.callAs.setupId : setupId, issued: new Date(issued.getTime() + (o.callAs?.issuedDeltaMs ?? 0)), expires: new Date(expires.getTime() + (o.callAs?.expiresDeltaMs ?? 0)) };
     const { rows } = await client.query<{ a: number }>("SELECT machine_job_issue($1, $2, $3, $4, $5, $6::jsonb, $7, $8) AS a", [id, o.runnerId, o.repoId, asked.setup, kind, JSON.stringify(signed), asked.issued, asked.expires]);
     return rows[0]!.a;

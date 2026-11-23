@@ -329,7 +329,7 @@ describe("machine job claim and setup progress [pg]", () => {
       const id = randomUUID();
       const job = { ...good.signed.job, job_id: id } as Record<string, unknown>;
       delete job[missing];
-      const call = withTenant(h.appPool, r.who.accountId, (c) =>
+      const call = withTenant(h.appPool, r.who.accountId, r.who.userId, (c) =>
         // Everything else the row is bound to agrees with the signed bytes, so only the missing key can be what refuses it.
         c.query("SELECT machine_job_issue($1, $2, $3, $4, 'project_setup', $5::jsonb, $6, $7)", [id, r.runnerId, r.who.repoId, r.setupId, JSON.stringify({ ...good.signed, job }), good.signed.job.issued_at, good.signed.job.expires_at]),
       );
