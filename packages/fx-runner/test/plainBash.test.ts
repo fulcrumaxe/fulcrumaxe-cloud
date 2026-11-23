@@ -57,9 +57,11 @@ describe("C44-5: plain Bash in the role tables", () => {
     // S4-f4: so is the discovery analyst (the same three, the same confinement).
     expect(roleToolsFor("proposal-verifier")).toEqual(["Read", "Glob", "Grep"]);
     expect(roleToolsFor("discovery-analyst")).toEqual(["Read", "Glob", "Grep"]);
+    // D#845 ON-10a: the surveyor holds the read tools and nothing else (no Bash of any kind, no Edit, no Write); ON-10c confines them.
+    expect(roleToolsFor("project-surveyor")).toEqual(["Read", "Glob", "Grep", "LS"]);
     // D#749 V2b: the deploy verifier holds the same three and the browser tools (no Bash, no Edit, no Write).
     expect(roleToolsFor("deploy-verifier")).toEqual(["Read", "Glob", "Grep", ...DEPLOY_VERIFIER_BROWSER_TOOLS]);
-    const others = RUNNER_ELIGIBLE_ROLES.filter((role) => !(PLAIN_BASH_ROLES as readonly string[]).includes(role) && role !== "proposal-verifier" && role !== "discovery-analyst" && role !== "deploy-verifier");
+    const others = RUNNER_ELIGIBLE_ROLES.filter((role) => !(PLAIN_BASH_ROLES as readonly string[]).includes(role) && role !== "proposal-verifier" && role !== "discovery-analyst" && role !== "deploy-verifier" && role !== "project-surveyor");
     expect(others.length).toBeGreaterThan(0);
     for (const role of others) {
       const tools = roleToolsFor(role);

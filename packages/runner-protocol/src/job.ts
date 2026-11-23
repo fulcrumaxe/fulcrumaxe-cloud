@@ -18,6 +18,7 @@ import { MAX_EXCLUDE_RULES, isRuleablePath } from "./excludeRules.js";
 import { MAX_JOB_PINS, isPinPath } from "./pinRules.js";
 import { CheckSchema, JobAllowancesSchema } from "./sandboxAllowances.js";
 import { BROWSER_CHROME_CAPABILITY, BROWSER_METHODS, BROWSER_PLAYWRIGHT_CAPABILITY, DEPLOY_ORDER_CAPABILITY, DEPLOY_VERIFIER_ROLE } from "./deployVerifier.js";
+import { SURVEY_ROLE } from "./projectDraft.js";
 import { DISCOVERY_ANALYST_ROLE, PROPOSAL_VERIFIER_ROLE } from "./verifierGuard.js";
 
 /** Largest `spec.text`, in characters. It matches the cap on a request body. */
@@ -46,7 +47,7 @@ export const RUNNER_ELIGIBLE_ROLES = [
   "executor", "project-manager", "technical-architect", "product-owner", "cost-analyst",
   "performance-expert", "security-expert", "docs-writer", "accessibility-reviewer",
   "code-reviewer", "security-reviewer", "acceptance-tester", "debater", PROPOSAL_VERIFIER_ROLE,
-  DISCOVERY_ANALYST_ROLE, DEPLOY_VERIFIER_ROLE,
+  DISCOVERY_ANALYST_ROLE, DEPLOY_VERIFIER_ROLE, SURVEY_ROLE,
 ] as const;
 export const RunnerRole = z.enum(RUNNER_ELIGIBLE_ROLES);
 
@@ -65,7 +66,7 @@ export const isReviewJobRole = (role: string): role is ReviewJobRole => (REVIEW_
  * only shares the field, so the runner checks out exactly that commit, detached. The deploy verifier (D#749 V2a) shares it too: its pinned commit is the merge commit, so the checkout holds the Spec it checks. A job of these roles without the field, or of any other role
  * with it, is refused on both sides.
  */
-export const PINNED_COMMIT_JOB_ROLES: readonly string[] = Object.freeze([...REVIEW_JOB_ROLES, PROPOSAL_VERIFIER_ROLE, DISCOVERY_ANALYST_ROLE, DEPLOY_VERIFIER_ROLE]);
+export const PINNED_COMMIT_JOB_ROLES: readonly string[] = Object.freeze([...REVIEW_JOB_ROLES, PROPOSAL_VERIFIER_ROLE, DISCOVERY_ANALYST_ROLE, DEPLOY_VERIFIER_ROLE, SURVEY_ROLE]);
 export const jobCarriesPinnedCommit = (role: string): boolean => PINNED_COMMIT_JOB_ROLES.includes(role);
 
 /**
@@ -154,7 +155,7 @@ export const TIP_PUBLISH_CAPABILITY = "tip_publish_v1" as const;
  */
 export const MEM_PROPOSAL_CAPABILITY = "mem_proposal_v1" as const;
 export type RunnerCapability = (typeof RUNNER_CAPABILITIES)[number];
-export const RUNNER_CAPABILITY_FOR_ROLE: Readonly<Partial<Record<(typeof RUNNER_ELIGIBLE_ROLES)[number], RunnerCapability>>> = Object.freeze({ [PROPOSAL_VERIFIER_ROLE]: "proposal_verifier", [DISCOVERY_ANALYST_ROLE]: "discovery_analyst" });
+export const RUNNER_CAPABILITY_FOR_ROLE: Readonly<Partial<Record<(typeof RUNNER_ELIGIBLE_ROLES)[number], RunnerCapability>>> = Object.freeze({ [PROPOSAL_VERIFIER_ROLE]: "proposal_verifier", [DISCOVERY_ANALYST_ROLE]: "discovery_analyst", [SURVEY_ROLE]: SURVEY_CAPABILITY });
 /**
  * D#749 V2c-1: a role that needs ANY ONE of several capabilities. The deploy verifier runs with either browser method, so a runner that lists neither never sees the role. Which of the two a given
  * job needs is the job's own signed `browser_method` (`BROWSER_CAPABILITY_FOR_METHOD`), which the claim's candidate query compares with the runner's list.
@@ -188,6 +189,8 @@ export const JOB_CLASS_BY_ROLE: Readonly<Record<(typeof RUNNER_ELIGIBLE_ROLES)[n
   // D#749 V2a: a browser job counts as heavy in the light and heavy accounting (the scarcer slot, so a machine short of room is never over-committed). The one-at-a-time rule
   // that is specific to it is BROWSER_JOB_SLOTS_PER_RUNNER (deployVerifier.ts), which the cloud's claim enforces; a runner may refuse a second one as well.
   [DEPLOY_VERIFIER_ROLE]: "heavy",
+  // D#845 ON-10a: the survey only reads the checkout.
+  [SURVEY_ROLE]: "light",
 };
 /** The runner-eligible roles of the light class; any other role (an unknown one included) is heavy, so the cloud's SQL can say `role = ANY(...)` for light and `NOT` for heavy. */
 export const LIGHT_JOB_ROLES: readonly string[] = RUNNER_ELIGIBLE_ROLES.filter((role) => JOB_CLASS_BY_ROLE[role] === "light");
@@ -434,6 +437,10 @@ export const SignedJobSchema = z
       }
       if ((job.role === DEPLOY_VERIFIER_ROLE) !== (job.browser_method !== undefined)) {
         ctx.addIssue({ code: z.ZodIssueCode.custom, message: "browser_method is on a deploy-verifier job and on no other", path: ["browser_method"] });
+      }
+      // D#845 ON-10a: the survey role runs a survey task and no other role does (the cloud's issuer and the runner both refuse the mix).
+      if ((job.role === SURVEY_ROLE) !== (job.task.kind === "survey")) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "the project-surveyor role and the survey task kind go together", path: ["task", "kind"] });
       }
     }),
     signature: z.string().regex(/^[A-Za-z0-9_-]{86}$/) }).strict();

@@ -100,7 +100,9 @@ export type FailureReason =
   /** D#6 R-CHK-3 (C47): the repository's approved check failed, timed out or could not start. The run ends with no pull request and a fix round follows (a limited number). */
   | "check_failed"
   /** D#599 HO-2b: the run stopped at a checkpoint (or at its deadline) so the other side can continue it. It ends `cancelled` with no result and no pull request; its work is on the run branch and the next run continues from there. */
-  | "handed_off";
+  | "handed_off"
+  /** D#845 ON-10a: a survey run's answer was missing or was not a valid project draft. The run ends `failed` with no draft stored; a survey is never retried as a run. */
+  | "survey_output_invalid";
 
 /** What a target reports once a dispatched run reaches a terminal
  * outcome. `SandboxTarget` builds this from the sandbox's last

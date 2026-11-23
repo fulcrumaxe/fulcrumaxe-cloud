@@ -10,7 +10,7 @@ import { CONTEXT_WINDOW_MAX_TOKENS } from "./contextLevers.js";
 import { MAX_ENVELOPE_INPUT_BYTES } from "./envelope.js";
 import { MEMORY_HIDDEN_CLASS, MEMORY_KEPT_JOINER } from "./memoryText.js";
 import { DeployOrderClaimMessage, DeployOrderReportMessage } from "./deployOrder.js";
-import { ENGINE_BRIDGE_CAPABILITY, HEARTBEAT_INVENTORY_HELLO_CAPABILITY, RUNNER_CAPABILITIES, SANDBOX_COMMAND_CAPABILITY, SESSION_ID_PATTERN } from "./job.js";
+import { ENGINE_BRIDGE_CAPABILITY, HEARTBEAT_INVENTORY_HELLO_CAPABILITY, RUNNER_CAPABILITIES, SANDBOX_COMMAND_CAPABILITY, SESSION_ID_PATTERN, SURVEY_CAPABILITY } from "./job.js";
 import { SandboxCommandAcks } from "./sandboxCommands.js";
 import { PREFLIGHT_CODES } from "./preflight.js";
 
@@ -481,6 +481,10 @@ export const HelloMessage = z
     }
     if (hello.capabilities?.includes(HEARTBEAT_INVENTORY_HELLO_CAPABILITY) && hello.protocol_version < SANDBOX_INVENTORY_MIN_PROTOCOL) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "heartbeat_inventory_v1 needs a protocol version that speaks the sandbox inventory", path: ["capabilities"] });
+    }
+    // D#845 ON-10a: a survey run is offered by role capability alone (the claim's role filter), so the hello says the version too: that keeps `taskKindOffered` and the filter one rule.
+    if (hello.capabilities?.includes(SURVEY_CAPABILITY) && hello.protocol_version < MACHINE_ONBOARDING_MIN_PROTOCOL) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "survey_v1 needs a protocol version that speaks machine onboarding", path: ["capabilities"] });
     }
     const f = hello.facts;
     if (f && (f.max_vms !== undefined || f.max_vcpus !== undefined || f.max_memory_mb !== undefined || f.bootable_templates !== undefined) && hello.protocol_version < SANDBOX_INVENTORY_MIN_PROTOCOL) {

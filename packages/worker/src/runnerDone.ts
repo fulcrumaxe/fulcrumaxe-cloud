@@ -1,8 +1,8 @@
 import type { Pool, PoolClient } from "pg";
-import { ITEM_PR_BRANCH, MAX_ENVELOPE_INPUT_BYTES, redactText, NOT_RECORDED_MEASURE, RUNNER_LEASE_SECONDS, SESSION_ID_PATTERN, contextLedgerFromWire, redactDeep, type ContextLedgerBody, type ContextSection, type DoneCheck, type StopReason, checkNotRunReason, readCheckFailedFiles, CHECK_FAILED_FILES_DROPPED } from "@fulcrumaxe/runner-protocol";
+import { ITEM_PR_BRANCH, MAX_ENVELOPE_INPUT_BYTES, SURVEY_ROLE, redactText, NOT_RECORDED_MEASURE, RUNNER_LEASE_SECONDS, SESSION_ID_PATTERN, contextLedgerFromWire, redactDeep, type ContextLedgerBody, type ContextSection, type DoneCheck, type StopReason, type SurveyFailureReason, checkNotRunReason, readCheckFailedFiles, CHECK_FAILED_FILES_DROPPED } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { RUNNER_RUN_BRANCH, insertRunEvent, noteRunnerActivityCap, readBoundItemBranch, recordContextFigure, recordContextLedger, writeRunStatusOn, type FailureReason } from "@fx/runner";
-import { normaliseCheck } from "@fx/runner-cloud";
+import { normaliseCheck, type RunnerLeaseOps } from "@fx/runner-cloud";
 import { readPlanePush } from "@fx/core/src/repos/planePushRecord.js";
 import { CLOUD_CLOSE_EVENT, SCOPE_REFUSAL_EVENT, cloudClosePayload, parseCloudClose, parseScopeRefusal, scopeRefusalPayload, type CloudClose, type ScopeRefusal } from "@fx/core/src/work-items/scopeRefusal.js";
 import { guarded, RunActionInputError } from "./runActions.js";
@@ -34,7 +34,7 @@ import { runnerLimits, type RunnerLimitsSource } from "./runnerLimits.js";
  */
 
 /** The reasons a `done` can end a run `failed` with. All are `FailureReason`s (checked at compile time). */
-export const DONE_FAILURE_REASONS = ["no_commit", "scope_unknown", "scope_violation", "pr_rejected", "internal_error", "taken_over", "check_failed"] as const satisfies readonly FailureReason[];
+export const DONE_FAILURE_REASONS = ["no_commit", "scope_unknown", "scope_violation", "pr_rejected", "internal_error", "taken_over", "check_failed", "survey_output_invalid"] as const satisfies readonly FailureReason[];
 export type DoneFailureReason = (typeof DONE_FAILURE_REASONS)[number];
 
 /** What the cloud decided about a run that sent `done`. */
@@ -64,6 +64,8 @@ export interface FinishRunnerDoneInput extends HeartbeatRunnerRunInput {
   sessionId?: string;
   /** The runner's own output envelope: advisory, stored after redaction and capped in bytes. */
   agentOutput?: Record<string, unknown>;
+  /** D#845 ON-10a: set exactly on a survey run's `done` (see the runner-cloud lease type). The draft is written in the finishing transaction; the run stores only `{draft_id}` or `{code}`, never `agentOutput`. */
+  survey?: Parameters<RunnerLeaseOps["finishRunnerDone"]>[0]["survey"];
 }
 
 export type BeginRunnerDoneResult = { kind: "proceed" } | { kind: "fenced"; reason: StopReason } | { kind: "replay"; verdict: RunnerDoneVerdict };
@@ -168,6 +170,22 @@ async function storedVerdict(client: PoolClient, i: HeartbeatRunnerRunInput): Pr
     ...(typeof p.prHttpStatus === "number" ? { prHttpStatus: p.prHttpStatus } : {}),
     ...(p.detail === "renamed" || p.detail === "unknown_change_type" || p.detail === "no_file_list" ? { detail: p.detail } : {}),
   };
+}
+
+/**
+ * D#845 ON-10a: a survey run's end. In the finishing transaction, under the fence: the draft is written by `survey_draft_record` (the run's runner and generation are the verified request's) and the run's envelope is only `{draft_id}`.
+ * No draft (the cloud's parse refused the answer, the database's checks refused it, or the setup no longer waits for this run) is `survey_fail` and an envelope of `{code}`: nothing of the answer is kept anywhere.
+ * An answer that is not a draft ends the run `failed` with `survey_output_invalid`, whatever verdict came in.
+ */
+async function recordSurvey(client: PoolClient, input: FinishRunnerDoneInput & { survey: NonNullable<FinishRunnerDoneInput["survey"]> }): Promise<{ verdict: RunnerDoneVerdict; envelope: Record<string, unknown> }> {
+  const s = input.survey;
+  let reason: SurveyFailureReason = "output_invalid";
+  if ("draft" in s) {
+    const { rows } = await client.query<{ id: string | null }>("SELECT survey_draft_record($1, $2, $3, $4, $5::jsonb) AS id", [input.runId, input.runnerId, input.leaseGeneration, s.draft.prd_md, JSON.stringify(s.draft.roadmap)]);
+    if (rows[0]?.id) return { verdict: input.verdict, envelope: { draft_id: rows[0].id } };
+  } else reason = s.failed;
+  await client.query("SELECT survey_fail($1, 'survey_failed', $2)", [input.runId, reason]);
+  return { verdict: { outcome: "failed", failureReason: "survey_output_invalid", prNumber: null }, envelope: { code: "survey_failed" } };
 }
 
 /** The log line a refused or failed ledger write leaves: a fixed word, never a value from the runner. */
@@ -324,7 +342,7 @@ export function createRunnerDoneFacade(runnerPool: Pool, deps: RunnerDoneDeps = 
         };
         if (input.sessionId !== undefined && (typeof input.sessionId !== "string" || !SESSION_ID_PATTERN.test(input.sessionId))) throw new RunActionInputError();
         // A taken-over run stores no envelope (D#6 R4a-7): nothing the agent said before the owner stopped it can count as a result.
-        const envelope = input.agentOutput === undefined || rec.verdict.failureReason === "taken_over" ? undefined : storedAgentOutput(input.agentOutput);
+        const envelope = input.agentOutput === undefined || rec.verdict.failureReason === "taken_over" || input.survey !== undefined ? undefined : storedAgentOutput(input.agentOutput);
         const at = new Date(now());
         return withTenant(runnerPool, input.accountId, async (client): Promise<FinishRunnerDoneResult> => {
           // Fenced again, in the transaction that writes: the lease may have ended while GitHub was being asked. The fence takes the run
@@ -335,8 +353,12 @@ export function createRunnerDoneFacade(runnerPool: Pool, deps: RunnerDoneDeps = 
             return stored ? { kind: "replay", verdict: stored } : { kind: "fenced", reason: stopReasonFor(held) };
           }
           if (held !== "ok") return { kind: "fenced", reason: stopReasonFor(held) };
-          const { verdict } = rec;
-          await requireBoundBranch(client, input, verdict);
+          const judged = rec.verdict;
+          await requireBoundBranch(client, input, judged);
+          // A survey run's answer is a draft and is stored as one or not at all; an `agentOutput` of a survey run that reached here without that path is refused, so the text can never land in `envelope` (ON-10a).
+          if (envelope !== undefined && (await client.query("SELECT 1 FROM agent_runs WHERE account_id = $1 AND id = $2 AND role = $3", [input.accountId, input.runId, SURVEY_ROLE])).rows.length > 0) throw new RunActionInputError();
+          const surveyed = input.survey === undefined ? undefined : await recordSurvey(client, { ...rec, survey: input.survey });
+          const verdict = surveyed?.verdict ?? judged;
           const moved = await writeRunStatusOn(client, {
             accountId: input.accountId,
             runId: input.runId,
@@ -344,7 +366,7 @@ export function createRunnerDoneFacade(runnerPool: Pool, deps: RunnerDoneDeps = 
             to: verdict.outcome,
             ...(verdict.failureReason === null ? {} : { failureReason: verdict.failureReason }),
             runnerDone: { prNumber: verdict.prNumber, ...(verdict.branch === undefined ? {} : { branch: verdict.branch }), ...(verdict.headOid === undefined ? {} : { headOid: verdict.headOid }), ...(verdict.prHttpStatus === undefined ? {} : { prHttpStatus: verdict.prHttpStatus }), ...(verdict.detail === undefined ? {} : { detail: verdict.detail }) },
-            result: { ...(envelope === undefined ? {} : { envelope }), ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId }) },
+            result: { ...(surveyed !== undefined ? { envelope: surveyed.envelope } : envelope === undefined ? {} : { envelope }), ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId }) },
           });
           // Held under the row lock, so this is a defence: the run was running a statement ago.
           if (!moved.updated) return { kind: "fenced", reason: "run_terminal" };
