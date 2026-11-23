@@ -67,6 +67,7 @@ export const catalogSchema = z.object({
 export const serverListSchema = z.object({ servers: z.array(serverSchema) });
 
 const serverCtx = (ctx: RouteContext): ServerCtx => ({ pool: ctx.pool, principal: { accountId: ctx.principal.accountId, userId: ctx.principal.userId } });
+const CREATE_409 = "Error `server_creating`: another server is already being made for this account (any key); wait and try again.";
 const EXTRA = {
   "409": "Error `price_changed`: the live price differs from `quoted` by any amount; nothing was created, and `data.live` holds the live price. Other 409s are `hetzner_*` codes (limit reached, size not available, name used) and `credential_invalid`.",
   "503": "Error `price_unavailable` or a `hetzner_*` code: Hetzner did not answer, and no price is shown. `not_configured` and `machine_kek_unset` mean Hetzner Cloud servers are off here.",
@@ -148,7 +149,7 @@ export const machineServerRoutes: RouteEntry[] = [
     bodySchema: createBody,
     responseSchema: serverSchema,
     successStatus: 201,
-    extraResponses: EXTRA,
+    extraResponses: { ...EXTRA, "409": `${EXTRA["409"]} ${CREATE_409}` },
     async handler(ctx, input) {
       const b = input.body as z.infer<typeof createBody>;
       if (!ctx.idempotencyKey) throw new ApiError(400, "idempotency_key_required", "an Idempotency-Key is required");

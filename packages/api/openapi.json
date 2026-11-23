@@ -15220,7 +15220,7 @@
             }
           },
           "409": {
-            "description": "Error `price_changed`: the live price differs from `quoted` by any amount; nothing was created, and `data.live` holds the live price. Other 409s are `hetzner_*` codes (limit reached, size not available, name used) and `credential_invalid`.",
+            "description": "Error `price_changed`: the live price differs from `quoted` by any amount; nothing was created, and `data.live` holds the live price. Other 409s are `hetzner_*` codes (limit reached, size not available, name used) and `credential_invalid`. Error `server_creating`: another server is already being made for this account (any key); wait and try again.",
             "content": {
               "application/json": {
                 "schema": {
