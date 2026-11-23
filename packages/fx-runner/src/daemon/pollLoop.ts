@@ -67,6 +67,11 @@ export interface PollDeps {
   /** D#749 V2b: the same for a deploy order (`deploy_order`): claims it, runs the machine owner's own deploy command and reports. One at a time, like a merge order. */
   onDeployOrder?: () => Promise<"handled" | "none">;
   /**
+   * D#845 ON-8c: the same for a machine job (`machine_job`): takes it, checks it and works it to its end, one at a time. A job can run for minutes, so it is started beside the loop (tracked, so the loop
+   * does not end under it) and never awaited on the poll path: the loop goes on claiming and sending the machine's load while it runs.
+   */
+  onMachineJob?: () => Promise<"handled" | "none">;
+  /**
    * Resource-aware admission. With it the loop keeps claiming while the machine has room, so several runs are in hand at once; each claim says what
    * could be taken now. Without it the loop holds one run at a time.
    */
@@ -177,6 +182,7 @@ export async function pollLoop(deps: PollDeps): Promise<PollEnd> {
   }
   const mergeOrders = orderRunner(deps.onMergeOrder);
   const deployOrders = orderRunner(deps.onDeployOrder);
+  const machineJobs = orderRunner(deps.onMachineJob);
   let heldKey = "none|none";
   /** One `held` event per change of what is held back. */
   function noteHeld(snapshot: Snapshot): void {
@@ -296,6 +302,7 @@ export async function pollLoop(deps: PollDeps): Promise<PollEnd> {
         start(reply);
         if (reply.mergeOrder === true) mergeOrders.start();
         if (reply.deployOrder === true) deployOrders.start();
+        if (reply.machineJob === true && deps.draining?.() !== true) machineJobs.start();
       } else if (reply.kind === "idle" || reply.kind === "rate_limited") {
         failures = 0;
         if (reply.kind === "idle") deps.wake?.onClaim(reply.wake, deps.clock.now().getTime());
@@ -309,6 +316,7 @@ export async function pollLoop(deps: PollDeps): Promise<PollEnd> {
         if (reply.kind === "idle" && reply.deployOrder === true && gate.open && deps.onDeployOrder !== undefined && !deps.signal.aborted && deps.draining?.() !== true) {
           if ((await deployOrders.run()) === "handled") continue;
         }
+        if (reply.kind === "idle" && reply.machineJob === true && gate.open && !deps.signal.aborted && deps.draining?.() !== true) machineJobs.start();
         if (reply.kind === "idle") await (gate.open ? waitIdle(reply.retryAfter) : waitForWork(reply.retryAfter));
         else await wait(reply.retryAfter);
       } else {

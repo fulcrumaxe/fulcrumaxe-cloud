@@ -78,6 +78,7 @@ import { createPushLog, PUSH_LOG_FILE, type PushLog } from "../daemon/pushLog.js
 import { cacheRootsFor, mirrorKeepClear, type RepoRef } from "../daemon/mirror.js";
 import { LaunchRefused, prepareDaemonDir } from "../launchDir.js";
 import { abortOnSignals, pollLoop, type PollEvent } from "../daemon/pollLoop.js";
+import { createMachineJobDispatcher, effectiveEngine, type MachineJobDispatcher } from "../daemon/machineJobs.js";
 import { WakeTracker } from "../daemon/wake.js";
 import { removeStaleLedgerTemp } from "../daemon/staleTemp.js";
 import { spillRootFor, sweepStaleSpill } from "../job/spillFiles.js";
@@ -420,6 +421,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     let cloudPreflight = false;
     // D#587 FU-179: true once a hello reply listed `heartbeat_inventory`; only then does a heartbeat carry the sandbox inventory.
     let cloudHeartbeatInventory = false;
+    // D#845 ON-8c: the machine-job dispatcher is built once the client exists; the host load reads its count of setups in hand through this.
+    let machineJobDispatcher: MachineJobDispatcher | undefined;
     // D#749 VERIFY-SIGNIN-EXPIRY: each ordinary claim says whether the saved verify sign-in is still good (dates only; nothing of the sign-in itself is read). Nothing is said while no verify address is set here.
     // D#587 B-7a: a runner that boots VMs reports its sandboxes (an empty list until the VM helper provides a source); one that does not says nothing, so its claim body is unchanged.
     // D#587 B-5b-3a: the one engine this run reports, gates jobs by and runs them in, decided once here from the machine's engine line and whether this build composed a live microVM stack.
@@ -434,7 +437,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     const inventoryReporter = vm !== undefined && readHostFacts(engine)?.sandbox_engine === "microvm" ? createInventoryReporter({ source: daemonInventorySource(vm.sdk), now: ctx.now }) : undefined;
     const client = createRunnerClient({ origin: registration.cloud_origin, key, now: ctx.now, fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass), protocolVersion: RUNNER_PROTOCOL_VERSION, sandboxCommands: createSandboxCommandReceiver({ keyring, runnerId: registration.runner_id, now: ctx.now, log: (line) => ctx.out(line), statePath: path.join(ctx.stateDir, "sandbox-commands-state.json"), uid: ctx.uid, ...(vm === undefined ? {} : { lifecycle: daemonSandboxLifecycle(vm.sdk) }) }), ...(inventoryReporter === undefined ? {} : { sandboxInventory: inventoryReporter, heartbeatInventory: () => cloudHeartbeatInventory }),
       // D#845 ON-1b: the machine's load rides the claim, but only for a build that advertises `project_setup_v1` (none does yet, so today the claim body is unchanged). No setup runs here yet: the count is 0.
-      ...((RUNNER_BUILD_CAPABILITIES as readonly string[]).includes(PROJECT_SETUP_CAPABILITY) ? { hostLoad: createHostLoadReporter({ probe: hooks.probe ?? realResourceProbe({ platform: host.platform, diskPaths: [workspaceRoot, path.dirname(mirrorsRoot)], vmStatText: () => vmStat }), setupsRunning: () => 0, now: ctx.now }) } : {}), verifySignIn: () => readSignInState({ settings: () => loadSettings(stateDir).verify, home, now: () => ctx.now().getTime() }) });
+      ...((RUNNER_BUILD_CAPABILITIES as readonly string[]).includes(PROJECT_SETUP_CAPABILITY) ? { hostLoad: createHostLoadReporter({ probe: hooks.probe ?? realResourceProbe({ platform: host.platform, diskPaths: [workspaceRoot, path.dirname(mirrorsRoot)], vmStatText: () => vmStat }), setupsRunning: () => machineJobDispatcher?.setupsRunning() ?? 0, now: ctx.now }) } : {}), verifySignIn: () => readSignInState({ settings: () => loadSettings(stateDir).verify, home, now: () => ctx.now().getTime() }) });
     // macOS: a resumed workspace's ignored build output is purged in a child under sandbox-exec that can write below the workspace only (D#6 RESUME-CLEAN-MAC).
     const sandboxedPurge = host.platform === "darwin" && host.selfCommand !== undefined ? createSandboxedPurge({ capture: host.engine.capture, selfCommand: host.selfCommand, stateDir, isFile: host.sandbox.isFile }) : undefined;
     const git = createGitPath({ platform: host.platform, pushLog, ...(sandboxedPurge === undefined ? {} : { sandboxedPurge }), capture: host.engine.capture, ...(host.engine.captureLarge === undefined ? {} : { captureLarge: host.engine.captureLarge }), envOptions, mirrorsRoot, stateDir, keepClear, signal: stopped.signal, log: (line) => ctx.out(line), ...(hooks.remoteUrl === undefined ? {} : { remoteUrl: hooks.remoteUrl }) });
@@ -734,6 +737,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
         takeHello(again);
       };
       const deployOrder = verifyLocal.deployOrderHandler(client);
+      // D#845 ON-8c: no kind has a handler yet, so a job the cloud hands over is reported `kind_unsupported`; the rows that build a kind add its handler here.
+      const machineJobs = (machineJobDispatcher = createMachineJobDispatcher({ client, keyring, runnerId: registration.runner_id, now: ctx.now, handlers: {}, sandboxEngine: () => effectiveEngine(engine, loadSettings(stateDir).sandboxEngine), signal: stopped.signal, log: (event) => ctx.out(`fx-runner: machine job ${event.event}`) }));
       // D#842 EB-3c: the engine bridge runs beside the claim loop, never under it: it is started here, nothing below awaits it, and it ends only when `finally` stops it.
       if (host.engineBridge !== undefined) {
         const cloud = { origin: registration.cloud_origin, key, now: ctx.now, fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass) };
@@ -778,6 +783,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
         draining: () => isDraining(stateDir),
         onClaimed: (claimed) => jobs.track(() => handle(claimed)),
         onMergeOrder: async () => ((await jobs.track(() => planeMerge())) === "none" ? "none" : "handled"),
+        onMachineJob: async () => ((await jobs.track(() => machineJobs.run())) === "none" ? "none" : "handled"),
         ...(deployOrder === undefined ? {} : { onDeployOrder: async () => ((await jobs.track(() => deployOrder())) === "none" ? "none" : "handled") }),
         betweenJobs: async () => {
           await sayHelloAgain();

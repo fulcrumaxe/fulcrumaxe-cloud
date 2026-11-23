@@ -3,7 +3,7 @@
  * the body digest, made with the runner's own key; no cookie, token or header other than the signature is sent.
  */
 import { randomBytes } from "node:crypto";
-import { CLAIM_PATH, MAX_CLAIM_REPLY_BYTES, signRequest } from "@fulcrumaxe/runner-protocol";
+import { CLAIM_PATH, MAX_CLAIM_REPLY_BYTES, MAX_PLAN_BYTES, signRequest } from "@fulcrumaxe/runner-protocol";
 import { CliError } from "./cliError.js";
 import { BYPASS_ENV_NAME, bypassHeaders } from "./protectionBypass.js";
 import type { RunnerKey } from "./keys.js";
@@ -16,7 +16,9 @@ const MAX_REPLY_BYTES = 64 * 1024;
  * A claim reply carries a whole signed job, which may be far bigger than any other reply: its bound is worked out from the job schema's own caps
  * (`MAX_CLAIM_REPLY_BYTES`), so a job the cloud was allowed to sign is never cut short. It is still a hard cap, never unbounded.
  */
-export const replyCapFor = (path: string): number => (path === CLAIM_PATH ? MAX_CLAIM_REPLY_BYTES : MAX_REPLY_BYTES);
+export const replyCapFor = (path: string): number => (path === CLAIM_PATH ? MAX_CLAIM_REPLY_BYTES : PLAN_PATH.test(path) ? MAX_PLAN_BYTES + 1 : MAX_REPLY_BYTES);
+/** D#845 ON-8c: the plan route's reply is the one other reply that may be big (up to `MAX_PLAN_BYTES`); one byte more is read so a body over the limit is told from one at it. */
+const PLAN_PATH = /^\/api\/runner\/setup\/[0-9a-f-]{36}\/plan\?version=\d{1,15}$/i;
 
 /** `https://host[:port]`, or `http://` only for a machine's own loopback address. Anything else is refused. */
 export function normaliseOrigin(input: string): string {
@@ -38,6 +40,8 @@ export interface CloudReply {
   status: number;
   /** The parsed JSON body, or undefined when it was not JSON. */
   body: unknown;
+  /** The body text exactly as read (capped), for a reply whose bytes are hashed before they are parsed. */
+  raw?: string;
   retryAfter: number | undefined;
   /** True for Vercel's own "Protected deployment" 401: the platform answered before the cloud's code ran. */
   protectedDeployment: boolean;
@@ -151,6 +155,7 @@ async function signedRequest(method: "GET" | "POST", text: string, extra: Record
   return {
     status: response.status,
     body,
+    raw,
     retryAfter: Number.isFinite(retry) && retry > 0 ? Math.min(retry, 86_400) : undefined,
     protectedDeployment: isProtectedDeployment(response.status, response.headers.get("server"), body),
   };
