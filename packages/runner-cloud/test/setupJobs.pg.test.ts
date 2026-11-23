@@ -217,7 +217,8 @@ describe("issuing project_setup and the plan route [pg]", () => {
     expect(await refusal(retryInstall(depsFor(), principal(r), "not-an-id"))).toEqual({ status: 404, code: "not_found" });
     expect(await refusal(retryInstall(depsFor(), principal(await rig()), r.setupId))).toEqual({ status: 404, code: "not_found" });
     // A job that lapsed (expired by the clock) can be retried; the definer marks it expired before the new attempt is made.
-    const past = { issued: new Date(Date.now() - 40 * 60_000).toISOString(), expires: new Date(Date.now() - 10 * 60_000).toISOString() };
+    const t0 = Date.now();
+    const past = { issued: new Date(t0 - 40 * 60_000).toISOString(), expires: new Date(t0 - 10 * 60_000).toISOString() };
     await h.admin.query(
       "UPDATE machine_jobs SET issued_at = $2::timestamptz, expires_at = $3::timestamptz, job = jsonb_set(jsonb_set(job, '{job,issued_at}', to_jsonb($2::text)), '{job,expires_at}', to_jsonb($3::text)) WHERE id = $1",
       [first.id, past.issued, past.expires],
@@ -242,8 +243,9 @@ describe("issuing project_setup and the plan route [pg]", () => {
 
   /** Moves a job's life into the past, in the row and in the signed bytes the row is bound to. */
   async function lapse(jobId: string, o: { delivered?: boolean; lastSeq?: number; progressAgoS?: number } = {}) {
-    const issued = new Date(Date.now() - 40 * 60_000).toISOString();
-    const expires = new Date(Date.now() - 10 * 60_000).toISOString();
+    const t0 = Date.now();
+    const issued = new Date(t0 - 40 * 60_000).toISOString();
+    const expires = new Date(t0 - 10 * 60_000).toISOString();
     await h.admin.query(
       "UPDATE machine_jobs SET issued_at = $2::timestamptz, expires_at = $3::timestamptz, job = jsonb_set(jsonb_set(job, '{job,issued_at}', to_jsonb($2::text)), '{job,expires_at}', to_jsonb($3::text)) WHERE id = $1",
       [jobId, issued, expires],
