@@ -375,7 +375,7 @@ describe("GET /api/health", () => {
     const anonymous = GET(new NextRequest("https://example.test/api/health"));
     expect(anonymous.status).toBe(503);
     expect(await anonymous.json()).toEqual({ ok: false, config: "incomplete", planData: "ok", outside_meter: "off", partners: "off", deploy_env: null });
-    const operator = GET(new NextRequest("https://example.test/api/health", { headers: { authorization: bearer(OPERATOR_SECRET) } }));
+    const operator = await GET(new NextRequest("https://example.test/api/health", { headers: { authorization: bearer(OPERATOR_SECRET) } }));
     expect(await operator.json()).toMatchObject({ missing: ["FX_CURSOR_KEY_V1"] });
   });
 });

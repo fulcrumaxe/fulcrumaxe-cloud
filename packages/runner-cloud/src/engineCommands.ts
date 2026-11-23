@@ -1,4 +1,4 @@
-import { BRIDGE_COMMAND_KINDS, BRIDGE_INCOMPLETE_ACK_PROTOCOL, BRIDGE_REFUSALS, ENGINE_COMMAND_PURPOSE, type SandboxCommand, type SignedSandboxCommand, EngineCommandAck, EngineCommandsPullReply, EngineCommandsPullRequest, commandSendableTo, engineCommandsPullSchemaFor, type EngineCommand, type EngineAllowedRepo, type SignedEngineCommand } from "@fulcrumaxe/runner-protocol";
+import { BRIDGE_COMMAND_KINDS, BRIDGE_INCOMPLETE_ACK_PROTOCOL, BRIDGE_REFUSALS, ENGINE_COMMAND_PURPOSE, type SandboxCommand, type SignedSandboxCommand, EngineCommandAck, EngineCommandsPullReply, EngineCommandsPullRequest, commandSendableTo, engineCommandsPullSchemaFor, type EngineCommand, type EngineAllowedRepo, type SignedEngineCommand, type MachineJob, type SignedMachineJob } from "@fulcrumaxe/runner-protocol";
 import { START_LIKE_KINDS, readHaltStates } from "@fx/db/src/engineCommands.js";
 import { writeEngineAudit } from "@fx/db/src/engineAudit.js";
 import type { PoolClient } from "pg";
@@ -17,6 +17,8 @@ export interface EngineCommandSigner {
   signEngineCommand(command: EngineCommand): SignedEngineCommand;
   /** D#587 B-7b: the same key and `key_id`, signing a sandbox command (its own purpose string). Absent in a deployment that signs none. */
   signSandboxCommand?(command: SandboxCommand): SignedSandboxCommand;
+  /** D#845 ON-8b: the same key and `key_id`, signing a machine job. Absent in a deployment that signs none (issuing a setup job is then 503). */
+  signMachineJob?(job: MachineJob): SignedMachineJob;
 }
 
 interface CoveredRepo {

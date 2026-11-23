@@ -55,6 +55,7 @@ runner/revoke/route.ts
 runner/rotate/route.ts
 runner/runs/[id]/done/route.ts
 runner/runs/[id]/events/route.ts
+runner/setup/[setup_id]/plan/route.ts
 runner/setup/[setup_id]/progress/route.ts
 runner/wake/route.ts
 runners/[id]/check/route.ts
@@ -90,3 +91,4 @@ v1/openapi.json/route.ts
 v1/runs/[id]/events/route.ts
 v1/runs/[id]/handoff/route.ts
 v1/repos/[id]/plan-imports/route.ts
+v1/setups/[id]/install/retry/route.ts

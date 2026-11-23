@@ -31,9 +31,12 @@ import {
   signJob,
   signEngineCommand,
   signSandboxCommand,
+  signMachineJob,
   HOSTED_CLAIM_REPLY_BUDGET_BYTES,
   worstCaseClaimReplyBytes,
   type AllowanceSet,
+  type MachineJob,
+  type SignedMachineJob,
   type BrowserMethod,
   DEPLOY_VERIFIER_ROLE,
   CHECK_FIX_SCOPE_EXTRA_MAX,
@@ -126,6 +129,8 @@ export interface JobSigner {
   signEngineCommand(command: EngineCommand): SignedEngineCommand;
   /** D#587 B-7b: signs a sandbox command (`purpose: sandbox_command_v1`) with the same key and `key_id`. */
   signSandboxCommand(command: SandboxCommand): SignedSandboxCommand;
+  /** D#845 ON-8b: signs a machine job with the same key and `key_id`. */
+  signMachineJob(job: MachineJob): SignedMachineJob;
 }
 
 /** A signer over an Ed25519 key the caller already holds. The key never leaves this closure. */
@@ -134,7 +139,7 @@ export function createJobSigner(input: { keyId: string; privateKey: KeyObject })
     throw new TypeError("createJobSigner: the key must be an Ed25519 private key");
   }
   const { keyId, privateKey } = input;
-  return { keyId, sign: (job) => signJob({ ...job, key_id: keyId }, privateKey), signEngineCommand: (command) => signEngineCommand(command, keyId, privateKey), signSandboxCommand: (command) => signSandboxCommand(command, keyId, privateKey) };
+  return { keyId, sign: (job) => signJob({ ...job, key_id: keyId }, privateKey), signEngineCommand: (command) => signEngineCommand(command, keyId, privateKey), signSandboxCommand: (command) => signSandboxCommand(command, keyId, privateKey), signMachineJob: (job) => signMachineJob(job, keyId, privateKey) };
 }
 
 /** The branch prefix of every run branch the executor works on. */
