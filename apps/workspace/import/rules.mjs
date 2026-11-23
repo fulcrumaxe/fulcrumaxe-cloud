@@ -394,7 +394,8 @@ export const SHIP_FORBIDDEN_SIGNIN_RULES = [
 // by EXACT path only, never by prefix or glob, and only for a file the
 // build classified as first-party. This list grows only by a D#37
 // Correction (the Vercel app's entry was added with D#598 P8d-3b).
-export const SHIP_PASSWORD_INPUT_ALLOWED_PATHS = Object.freeze(["apps/model-key/model-key-app.js", "apps/vercel/vercel-app.js"]);
+// The Machines app's Hetzner token box joined by D#37 Correction (D#845 Ruling 86): a provider token pasted once, masked, never shown back.
+export const SHIP_PASSWORD_INPUT_ALLOWED_PATHS = Object.freeze(["apps/model-key/model-key-app.js", "apps/vercel/vercel-app.js", "apps/runners/runners-app.js"]);
 
 /**
  * Runs SHIP_FORBIDDEN_SIGNIN_RULES against a file's raw bytes, decoded

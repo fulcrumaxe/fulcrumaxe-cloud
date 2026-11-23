@@ -262,6 +262,31 @@ export function startFixtureServer({ distDir = DEFAULT_DIST_DIR, port = DEFAULT_
       return;
     }
 
+    // D#845 MC-10b1: the Servers tab reads the Hetzner credential and the servers, and its create dialog the catalog and a quote. GET only, each body from its
+    // contract fixture (the same files packages/api/test/contract.test.ts checks against the route's schema). The fixture account has no token connected.
+    if (req.method === "GET" && urlPath.startsWith("/api/v1/machine-")) {
+      const query = new URLSearchParams((req.url || "").split("?")[1] || "");
+      const place = query.get("location");
+      const served = {
+        "/api/v1/machine-credentials/hetzner": ["getHetznerCredential", "200-none.json"],
+        "/api/v1/machine-servers": ["listHetznerServers", "200-list.json"],
+        "/api/v1/machine-servers/catalog": ["getHetznerCatalog", place === "fsn1" || place === "nbg1" ? `200-${place}.json` : "200-all-locations.json"],
+        "/api/v1/machine-servers/quote": ["quoteHetznerServer", "200-cx32-fsn1.json"],
+      }[urlPath];
+      if (served) {
+        readFile(join(V1_FIXTURES_DIR, served[0], served[1])).then(
+          (body) => {
+            res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+            res.end(body);
+          },
+          () => {
+            res.writeHead(500, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "fixture unreadable" }));
+          }
+        );
+        return;
+      }
+    }
+
     // D#37 WS-F1a: opening the Pipeline app lists work items (its repos read is the Repos block above).
     // GET only, body from the contract fixture; item, timeline and error cases are mocked by pipeline.spec.ts.
     if (urlPath === "/api/v1/work-items" && req.method === "GET") {

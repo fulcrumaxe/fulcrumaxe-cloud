@@ -1,0 +1,177 @@
+{
+  "currency": "EUR",
+  "locations": [
+    {
+      "name": "fsn1",
+      "description": "Falkenstein DC Park 1",
+      "city": "Falkenstein",
+      "country": "DE"
+    },
+    {
+      "name": "nbg1",
+      "description": "Nuremberg DC Park 1",
+      "city": "Nuremberg",
+      "country": "DE"
+    },
+    {
+      "name": "hel1",
+      "description": "Helsinki DC Park 1",
+      "city": "Helsinki",
+      "country": "FI"
+    }
+  ],
+  "server_types": [
+    {
+      "name": "cx22",
+      "description": "CX22",
+      "cores": 2,
+      "memory_gb": 4,
+      "disk_gb": 40,
+      "architecture": "x86",
+      "cpu_type": "shared",
+      "locations": [
+        {
+          "location": "fsn1",
+          "available": true,
+          "hourly_gross": "0.0040",
+          "monthly_gross": "2.8900",
+          "ipv4_monthly_gross": "0.5950"
+        },
+        {
+          "location": "nbg1",
+          "available": true,
+          "hourly_gross": "0.0040",
+          "monthly_gross": "2.8900",
+          "ipv4_monthly_gross": "0.5950"
+        },
+        {
+          "location": "hel1",
+          "available": true,
+          "hourly_gross": "0.0040",
+          "monthly_gross": "2.8900",
+          "ipv4_monthly_gross": "0.5950"
+        }
+      ]
+    },
+    {
+      "name": "cx32",
+      "description": "CX32",
+      "cores": 4,
+      "memory_gb": 8,
+      "disk_gb": 80,
+      "architecture": "x86",
+      "cpu_type": "shared",
+      "locations": [
+        {
+          "location": "fsn1",
+          "available": true,
+          "hourly_gross": "0.0070",
+          "monthly_gross": "4.5101",
+          "ipv4_monthly_gross": "0.5950"
+        },
+        {
+          "location": "nbg1",
+          "available": true,
+          "hourly_gross": "0.0070",
+          "monthly_gross": "4.5101",
+          "ipv4_monthly_gross": "0.5950"
+        },
+        {
+          "location": "hel1",
+          "available": true,
+          "hourly_gross": "0.0070",
+          "monthly_gross": "4.5101",
+          "ipv4_monthly_gross": "0.5950"
+        }
+      ]
+    },
+    {
+      "name": "cx42",
+      "description": "CX42",
+      "cores": 8,
+      "memory_gb": 16,
+      "disk_gb": 160,
+      "architecture": "x86",
+      "cpu_type": "shared",
+      "locations": [
+        {
+          "location": "fsn1",
+          "available": true,
+          "hourly_gross": "0.0160",
+          "monthly_gross": "9.9200",
+          "ipv4_monthly_gross": "0.5950"
+        },
+        {
+          "location": "nbg1",
+          "available": false,
+          "hourly_gross": "0.0160",
+          "monthly_gross": "9.9200",
+          "ipv4_monthly_gross": "0.5950"
+        },
+        {
+          "location": "hel1",
+          "available": true,
+          "hourly_gross": "0.0160",
+          "monthly_gross": "9.9200",
+          "ipv4_monthly_gross": "0.5950"
+        }
+      ]
+    },
+    {
+      "name": "cax21",
+      "description": "CAX21",
+      "cores": 4,
+      "memory_gb": 8,
+      "disk_gb": 80,
+      "architecture": "arm",
+      "cpu_type": "shared",
+      "locations": [
+        {
+          "location": "fsn1",
+          "available": true,
+          "hourly_gross": "0.0100",
+          "monthly_gross": "6.4900",
+          "ipv4_monthly_gross": "0.5950"
+        },
+        {
+          "location": "nbg1",
+          "available": true,
+          "hourly_gross": "0.0100",
+          "monthly_gross": "6.4900",
+          "ipv4_monthly_gross": "0.5950"
+        }
+      ]
+    },
+    {
+      "name": "ccx13",
+      "description": "CCX13",
+      "cores": 2,
+      "memory_gb": 8,
+      "disk_gb": 80,
+      "architecture": "x86",
+      "cpu_type": "dedicated",
+      "locations": [
+        {
+          "location": "fsn1",
+          "available": true,
+          "hourly_gross": "0.0200",
+          "monthly_gross": "12.4900",
+          "ipv4_monthly_gross": "0.5950"
+        },
+        {
+          "location": "nbg1",
+          "available": true,
+          "hourly_gross": "0.0200",
+          "monthly_gross": "12.4900",
+          "ipv4_monthly_gross": "0.5950"
+        }
+      ]
+    }
+  ],
+  "fetched_at": "2026-11-23T10:00:00.000Z",
+  "location": null,
+  "presets": {
+    "small": null,
+    "medium": null
+  }
+}

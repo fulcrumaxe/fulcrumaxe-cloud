@@ -75,3 +75,11 @@
 .runners-tabs [aria-selected="true"] { font-weight: 700; border-width: 2px; text-decoration: underline; }
 .runners-vmtoken { margin: 8px 0; padding: 8px; border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); }
 .runners-vmtoken p { margin: 0 0 6px; overflow-wrap: anywhere; }
+
+/* D#845 MC-10b1: the Servers tab. Plain boxes that wrap, so a phone shows one column and long names break instead of scrolling the page. */
+.runners-cred { margin: 0 0 10px; padding: 8px 10px; border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); }
+.runners-cred p { margin: 2px 0 6px; overflow-wrap: anywhere; }
+.runners-price { margin: 6px 0; padding: 6px 8px; border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); overflow-wrap: anywhere; }
+.runners-steps { margin: 4px 0 8px; padding-left: 20px; }
+.runners-create .runners-fieldset { max-height: none; }
+.runners-create .runners-choice span { overflow-wrap: anywhere; }
