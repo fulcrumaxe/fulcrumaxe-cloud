@@ -347,6 +347,17 @@ export function mountBudgetBilling(host) {
       setNotice("");
       try {
         const res = await api("POST", CHECKOUT, { plan: id, success_path: BACK_PATH, cancel_path: BACK_PATH }, abort.signal);
+        if (res && res.already_held === true) {
+          setNotice("You already have this plan.");
+          loadAll();
+          return;
+        }
+        if (res && res.added === true) {
+          // The plan joined the subscription already paid for: no page to go to; say so and read again.
+          setNotice("Plan added. This updates when the provider confirms the change.");
+          loadAll();
+          return;
+        }
         goTo(res && res.url);
       } catch (e) {
         if (isRateLimited(e)) {
@@ -409,6 +420,12 @@ export function mountBudgetBilling(host) {
       engineNotice.textContent = "";
       try {
         const res = await api("POST", CHECKOUT, { plan: "engine", quantity: 1, success_path: BACK_PATH, cancel_path: BACK_PATH }, abort.signal);
+        if (res && res.added === true) {
+          // The engine joined the subscription already paid for: no page to go to. Say so and read the row again (a reload would offer "Choose plan" again until the provider's confirmation lands).
+          engineNotice.textContent = ENGINE_COPY.added;
+          await read("engine", ENGINE);
+          return;
+        }
         goTo(res && res.url);
       } catch (e) {
         if (e && e.name === "AbortError") throw e;

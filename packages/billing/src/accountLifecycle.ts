@@ -500,7 +500,7 @@ export async function getBillingPortalUrl(
 }
 
 /** `itemAdded`: the plan joined the account's existing subscription as an item (no checkout), and `url` is the validated success url. */
-export type CheckoutSessionResult = { ok: true; url: string; itemAdded?: true } | { ok: false; reason: string };
+export type CheckoutSessionResult = { ok: true; url: string; itemAdded?: true; alreadyHeld?: true } | { ok: false; reason: string };
 
 export interface CreateCheckoutSessionInput {
   accountId: string;
@@ -603,7 +603,8 @@ export async function createCheckoutSession(
     const price = stripePriceIdFromEnv(input.plan as PlanId);
     // The held-items check and the write happen under the subscription's lock (ruling 35.6), and the charge is invoiced before the item applies (ruling 35.1).
     const added = await addItemToSubscription(ctx.pool, input.stripe, stored, { price, quantity, kind: 'hosted' }, enginePriceIds);
-    return added.ok ? { ok: true, url: successUrl, itemAdded: true } : added;
+    if (!added.ok) return added;
+    return added.alreadyHeld ? { ok: true, url: successUrl, alreadyHeld: true } : { ok: true, url: successUrl, itemAdded: true };
   }
 
   const priceId = isEngine ? stripeEnginePriceIdFromEnv() : stripePriceIdFromEnv(input.plan as PlanId);

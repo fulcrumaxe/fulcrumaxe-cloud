@@ -1031,6 +1031,31 @@ test.describe("D#845 ON-22c-2: Budget & Billing Engines row", () => {
     expect(seen.sent.find((x) => x.path === "/api/v1/billing/checkout-session")!.body).toEqual({ plan: "engine", quantity: 1, success_path: "/", cancel_path: "/" });
   });
 
+  test("Choose plan on an already-paid subscription: the answer marks the item as added, the row says so, reads again and does not leave the page", async ({ page }) => {
+    const seen = await boot(page, { owner: true, link: (route) => json(route, 200, { url: "https://app.test/", added: true }) });
+    await engineWorldRoutes(page, engineWorld({ state: "none", paid: 0, live: 0 }));
+    await reopen(page);
+    const reads = () => seen.sent.length;
+    const before = reads();
+    await tid(page, "bb-engine-choose").click();
+    await expect(tid(page, "bb-engine-notice")).toHaveText("Engine added. This updates when the provider confirms the change.");
+    expect(seen.sent.slice(before).map((x) => x.path)).toEqual(["/api/v1/billing/checkout-session"]);
+    await expect(page.locator(WIN)).toBeVisible();
+    expect(page.url()).not.toMatch(/app\.test/);
+  });
+
+  test("subscribing to a hosted plan the subscription already holds says so and stays on the page; an added plan says 'Plan added'", async ({ page }) => {
+    let answer: Record<string, unknown> = { url: "https://app.test/", already_held: true };
+    await boot(page, { owner: true, account: NO_SUBSCRIPTION, link: (route) => json(route, 200, answer) });
+    await tid(page, "bb-subscribe-team").click();
+    await expect(tid(page, "bb-notice")).toHaveText("You already have this plan.");
+    expect(page.url()).not.toMatch(/app\.test/);
+    answer = { url: "https://app.test/", added: true };
+    await tid(page, "bb-subscribe-team").click();
+    await expect(tid(page, "bb-notice")).toContainText("Plan added.");
+    expect(page.url()).not.toMatch(/app\.test/);
+  });
+
   test("a failed read says so, leaves the plan list standing, and Try again reads it", async ({ page }) => {
     const w = engineWorld();
     let fail = true;

@@ -2,9 +2,11 @@ import { randomUUID } from 'node:crypto';
 import { reportError } from '@fx/telemetry';
 import { enginePricePerMonthUsd } from '@fx/spend';
 import type Stripe from 'stripe';
+import type { PoolClient } from 'pg';
 import { withPlatformOps } from './pg.js';
+import { applyFetchedSubscription } from './subscriptionSync.js';
 import { authorizeAccountWrite } from './authorize.js';
-import { stripeEnginePriceIdFromEnv, stripeEnginePriceIdsFromEnv } from './env.js';
+import { stripeEnginePriceIdFromEnv, stripeEnginePriceIdsFromEnv, stripeKeyIsLive, stripeSecretKeyFromEnv } from './env.js';
 import { STRIPE_UNAVAILABLE_RESULT, type StripeLike } from './stripeClient.js';
 import type { BillingCtx } from './types.js';
 
@@ -20,7 +22,8 @@ export const MAX_ENGINE_QUANTITY = 100;
 /** Standings on which Stripe still bills the subscription; an item is added or changed only on one that is paying or in a paid-for trial. */
 const ITEM_CHANGE_STATUSES: ReadonlySet<string> = new Set(['active', 'trialing']);
 
-export type EngineResult = { ok: true } | { ok: false; reason: string };
+/** `alreadyHeld`: a hosted plan add whose exact price the subscription already held (nothing was written). */
+export type EngineResult = { ok: true; alreadyHeld?: true } | { ok: false; reason: string };
 export type StoredSubscription = { customerId: string; subscriptionId: string; status: string };
 
 /** Whether the Engine plan can be bought here: an engine price id is configured AND the plan data carries the plan's price. Either one missing means it is not offered (`engine_price_unset` on health). */
@@ -60,21 +63,60 @@ const isCardError = (err: unknown) => typeof err === 'object' && err !== null &&
  * One Postgres advisory lock per subscription, held across the read of its items and the write of the change (ruling 35.6): two adds on one subscription (a Starter and a Team at once, on an engine-only
  * subscription) both see "no hosted item" otherwise, and both succeed. Transaction-scoped, so a crashed caller releases it with its connection. Never nested: a second connection would wait on the first.
  */
-async function withSubscriptionLock<T>(pool: BillingCtx['pool'], subscriptionId: string, fn: () => Promise<T>): Promise<T> {
-  return withPlatformOps(pool, async (client) => {
+/** What runs inside the lock: the lock-holding connection (the only one it may use) and a way to queue work for after the lock is released. */
+interface LockScope {
+  client: PoolClient;
+  after: (fn: () => Promise<void>) => void;
+}
+async function withSubscriptionLock<T>(pool: BillingCtx['pool'], subscriptionId: string, fn: (scope: LockScope) => Promise<T>): Promise<T> {
+  const queued: (() => Promise<void>)[] = [];
+  const result = await withPlatformOps(pool, async (client) => {
     await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`subscription-items:${subscriptionId}`]);
-    return fn();
+    return fn({ client, after: (f) => void queued.push(f) });
   });
+  // The lock's connection is back in the pool: the mirror write takes its own connection without a lock held, so N writers on a pool of N connections cannot wait on each other.
+  for (const f of queued) await f();
+  return result;
 }
 
-/** The provider's current answer for the subscription after a write, to confirm what it applied (a replayed or dropped write is not an applied one). */
+/**
+ * The provider's current answer for the subscription after a write, to confirm what it applied (a replayed or dropped write is not an applied one). It is also the read-back after a write that ended in an
+ * error (a timeout, a dropped connection): the answer is whatever the provider holds, never the error. A failed read is tried once more before the outcome is called unreadable. A confirmed write is mirrored
+ * into the account at once through the reconciler's own apply step (its stale-fetch guard included), so a webhook that never arrives cannot hide a paid change; that mirror write is best effort and never changes the answer.
+ */
 type Confirmed = { ok: true } | { ok: false; result: { ok: false; reason: string } };
-async function confirm(stripe: StripeLike, stored: StoredSubscription, applied: (sub: Stripe.Subscription) => boolean): Promise<Confirmed> {
-  const sub = await fetchStored(stripe, stored);
+async function confirm(pool: BillingCtx['pool'], scope: LockScope, stripe: StripeLike, stored: StoredSubscription, applied: (sub: Stripe.Subscription) => boolean): Promise<Confirmed> {
+  let clock: string | null = null;
+  let sub: Stripe.Subscription | null = null;
+  for (let attempt = 0; attempt < 2 && !sub; attempt += 1) {
+    try {
+      // On the lock-holding connection, read BEFORE the fetch: a webhook that lands while it is in flight is never overwritten by this older read.
+      clock = (await scope.client.query<{ t: string }>('SELECT clock_timestamp()::text AS t')).rows[0]!.t;
+    } catch (err) {
+      reportError(err, { stage: 'billing.engine_confirm_clock' });
+      clock = null;
+    }
+    sub = await fetchStored(stripe, stored);
+  }
   if (!sub) return { ok: false, result: STRIPE_UNAVAILABLE_RESULT };
-  if (applied(sub)) return { ok: true };
+  if (applied(sub)) {
+    const read = sub;
+    const at = clock;
+    if (at !== null) scope.after(() => mirrorConfirmed(pool, read, at));
+    return { ok: true };
+  }
   if (sub.pending_update) return { ok: false, result: PAYMENT_PENDING_RESULT };
   return { ok: false, result: STRIPE_UNAVAILABLE_RESULT };
+}
+
+async function mirrorConfirmed(pool: BillingCtx['pool'], sub: Stripe.Subscription, clock: string): Promise<void> {
+  try {
+    // The mode check is the configured key's, as in the reconciler: a subscription of the other mode is refused, never trusted from its own flag.
+    const res = await applyFetchedSubscription({ platformOpsPool: pool, livemode: stripeKeyIsLive(stripeSecretKeyFromEnv()), enginePriceIds: stripeEnginePriceIdsFromEnv() }, sub, clock);
+    if (!res.applied && res.reason && res.reason !== 'stale_fetch' && res.reason !== 'stale_subscription') reportError(new Error(`engine mirror not applied: ${res.reason}`), { stage: 'billing.engine_mirror' });
+  } catch (err) {
+    reportError(err, { stage: 'billing.engine_mirror' });
+  }
 }
 
 export interface NewItem {
@@ -85,12 +127,18 @@ export interface NewItem {
 }
 
 /** The add itself, on a subscription already fetched; the caller holds the subscription's lock. */
-async function addUnlocked(stripe: StripeLike, stored: StoredSubscription, sub: Stripe.Subscription, item: NewItem, engineIds: readonly string[]): Promise<EngineResult> {
+async function addUnlocked(pool: BillingCtx['pool'], scope: LockScope, stripe: StripeLike, stored: StoredSubscription, sub: Stripe.Subscription, item: NewItem, engineIds: readonly string[]): Promise<EngineResult> {
   // An earlier change is still waiting for payment: an add (hosted or engine) sends a non-empty `items` list, which voids that pending update and its invoice, so it is refused with no write (see changeEngineUnlocked).
+  // First, ahead of the held-price success path below: a pending update is never answered as success.
   if (sub.pending_update) return PAYMENT_PENDING_RESULT;
   if (!stripe.subscriptions.update) return STRIPE_UNAVAILABLE_RESULT;
   const items = sub.items?.data ?? [];
-  if (items.some((i) => i.price?.id === item.price)) return { ok: false, reason: 'already_subscribed' };
+  // The exact price is already held: an earlier call (or its retry after a lost answer) added it. That is a success, after the same read-back as a fresh add.
+  const held = (s: Stripe.Subscription) => (s.items?.data ?? []).some((i) => i.price?.id === item.price && (i.quantity ?? 1) === item.quantity);
+  if (items.some((i) => i.price?.id === item.price)) {
+    const again = await confirm(pool, scope, stripe, stored, (s) => (s.items?.data ?? []).some((i) => i.price?.id === item.price));
+    return again.ok ? { ok: true, alreadyHeld: true } : again.result;
+  }
   if (item.kind === 'hosted' && items.some((i) => !isEngineItem(i, engineIds))) return { ok: false, reason: 'already_subscribed' };
   if (item.kind === 'engine' && items.some((i) => isEngineItem(i, engineIds))) return { ok: false, reason: 'already_subscribed' };
   try {
@@ -99,9 +147,9 @@ async function addUnlocked(stripe: StripeLike, stored: StoredSubscription, sub: 
   } catch (err) {
     if (isCardError(err)) return PAYMENT_PENDING_RESULT;
     reportError(err, { stage: 'billing.engine_add_item' });
-    return STRIPE_UNAVAILABLE_RESULT;
+    // Any other error may still have been applied (a timeout after the provider wrote): the answer is what the provider holds.
   }
-  const confirmed = await confirm(stripe, stored, (s) => (s.items?.data ?? []).some((i) => i.price?.id === item.price && (i.quantity ?? 1) === item.quantity));
+  const confirmed = await confirm(pool, scope, stripe, stored, held);
   return confirmed.ok ? { ok: true } : confirmed.result;
 }
 
@@ -112,10 +160,10 @@ async function addUnlocked(stripe: StripeLike, stored: StoredSubscription, sub: 
  */
 export async function addItemToSubscription(pool: BillingCtx['pool'], stripe: StripeLike, stored: StoredSubscription, item: NewItem, engineIds: readonly string[]): Promise<EngineResult> {
   if (!stripe.subscriptions.update) return STRIPE_UNAVAILABLE_RESULT;
-  return withSubscriptionLock(pool, stored.subscriptionId, async () => {
+  return withSubscriptionLock(pool, stored.subscriptionId, async (scope) => {
     const sub = await fetchStored(stripe, stored);
     if (!sub) return STRIPE_UNAVAILABLE_RESULT;
-    return addUnlocked(stripe, stored, sub, item, engineIds);
+    return addUnlocked(pool, scope, stripe, stored, sub, item, engineIds);
   });
 }
 
@@ -148,10 +196,10 @@ export async function setEngineQuantity(ctx: BillingCtx, input: { accountId: str
     return { ok: false, reason: 'engine_quantity_in_use' };
   }
 
-  return withSubscriptionLock(ctx.pool, sub.subscriptionId, async () => {
+  return withSubscriptionLock(ctx.pool, sub.subscriptionId, async (scope) => {
     const fetched = await fetchStored(input.stripe, sub);
     if (!fetched) return STRIPE_UNAVAILABLE_RESULT;
-    return changeEngineUnlocked(input.stripe, sub, fetched, input.quantity, engineIds, false);
+    return changeEngineUnlocked(ctx.pool, scope, input.stripe, sub, fetched, input.quantity, engineIds, false);
   });
 }
 
@@ -159,13 +207,13 @@ export async function setEngineQuantity(ctx: BillingCtx, input: { accountId: str
  * The engine item's total set on a subscription already fetched; the caller holds the subscription's lock. With `raiseOnly` (an engine checkout on a subscription that may already hold the item)
  * the total becomes max(current, quantity): a request at or below what is held makes no provider write at all and still answers ok.
  */
-async function changeEngineUnlocked(stripe: StripeLike, stored: StoredSubscription, fetched: Stripe.Subscription, quantity: number, engineIds: readonly string[], raiseOnly: boolean): Promise<EngineResult> {
+async function changeEngineUnlocked(pool: BillingCtx['pool'], scope: LockScope, stripe: StripeLike, stored: StoredSubscription, fetched: Stripe.Subscription, quantity: number, engineIds: readonly string[], raiseOnly: boolean): Promise<EngineResult> {
   // An earlier raise is still waiting for payment (`pending_if_incomplete` holds it as `pending_update`, and the item's quantity has not moved). Every engine change is refused with `payment_pending`
   // and no write, a lowering included: Stripe voids the pending update and its invoice on any later update that carries a non-empty `items` list, so a lowering would silently cancel the raise the
   // customer is still paying for. The pending update is applied by payment or dropped by expiry; the caller retries after either. Read under the subscription's lock, so two raises cannot both pass.
   if (fetched.pending_update) return PAYMENT_PENDING_RESULT;
   const engineItems = (fetched.items?.data ?? []).filter((i) => isEngineItem(i, engineIds));
-  if (engineItems.length === 0) return addUnlocked(stripe, stored, fetched, { price: stripeEnginePriceIdFromEnv(), quantity, kind: 'engine' }, engineIds);
+  if (engineItems.length === 0) return addUnlocked(pool, scope, stripe, stored, fetched, { price: stripeEnginePriceIdFromEnv(), quantity, kind: 'engine' }, engineIds);
   // Two engine items (a retired price beside the current one) cannot be set to one total by one item update: fail closed and leave it to ops.
   const only = engineItems[0]!;
   if (engineItems.length > 1 || !stripe.subscriptionItems?.update) return STRIPE_UNAVAILABLE_RESULT;
@@ -177,18 +225,18 @@ async function changeEngineUnlocked(stripe: StripeLike, stored: StoredSubscripti
   } catch (err) {
     if (isCardError(err)) return PAYMENT_PENDING_RESULT;
     reportError(err, { stage: 'billing.engine_quantity' });
-    return STRIPE_UNAVAILABLE_RESULT;
+    // As in the add: read back what the provider holds before answering.
   }
-  const confirmed = await confirm(stripe, stored, (s) => (s.items?.data ?? []).some((i) => i.id === only.id && (i.quantity ?? 1) === quantity));
+  const confirmed = await confirm(pool, scope, stripe, stored, (s) => (s.items?.data ?? []).some((i) => i.id === only.id && (i.quantity ?? 1) === quantity));
   return confirmed.ok ? { ok: true } : confirmed.result;
 }
 
 /** An engine checkout on a subscription that may already hold the engine item (D#845 ON-22c): add it, or raise it to at least `quantity`, under the subscription's lock, paid before applied. */
 export async function raiseEngineToAtLeast(pool: BillingCtx['pool'], stripe: StripeLike, stored: StoredSubscription, quantity: number, engineIds: readonly string[]): Promise<EngineResult> {
-  return withSubscriptionLock(pool, stored.subscriptionId, async () => {
+  return withSubscriptionLock(pool, stored.subscriptionId, async (scope) => {
     const fetched = await fetchStored(stripe, stored);
     if (!fetched) return STRIPE_UNAVAILABLE_RESULT;
-    return changeEngineUnlocked(stripe, stored, fetched, quantity, engineIds, true);
+    return changeEngineUnlocked(pool, scope, stripe, stored, fetched, quantity, engineIds, true);
   });
 }
 
