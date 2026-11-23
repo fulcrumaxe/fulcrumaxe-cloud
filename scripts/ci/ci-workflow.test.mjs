@@ -2681,7 +2681,7 @@ test("same tree: required check names, timeouts and permissions are unchanged", 
   const t = (j) => doc.jobs[j]["timeout-minutes"];
   assert.deepEqual([t("check"), t("workspace-e2e"), t("e2e-runner")], [
     "${{ github.event_name == 'merge_group' && vars.ROLLUP_ENABLED == 'true' && 175 || 90 }}",
-    "${{ github.event_name == 'merge_group' && vars.ROLLUP_ENABLED == 'true' && 125 || 40 }}",
+    "${{ github.event_name == 'merge_group' && vars.ROLLUP_ENABLED == 'true' && 125 || 60 }}",
     "${{ github.event_name == 'merge_group' && vars.ROLLUP_ENABLED == 'true' && 115 || 30 }}",
   ]);
   for (const j of ["check", "workspace-e2e", "e2e-runner"]) assert.deepEqual(doc.jobs[j].permissions, { contents: "read", "pull-requests": "read" });
@@ -2727,7 +2727,7 @@ test("R3 before/after: any other edit to the workflow is reported (triggers, per
   mutate("types: [checks_requested]", "types: [checks_requested, destroyed]", "trigger");
   mutate("  contents: read\n", "  contents: write\n", "permissions");
   mutate("cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}", "cancel-in-progress: false", "concurrency");
-  mutate("&& 125 || 40 }}", "&& 125 || 41 }}", "timeout");
+  mutate("&& 125 || 60 }}", "&& 125 || 61 }}", "timeout");
   mutate(GUARD, "ubuntu-latest", "runs-on");
   mutate("(github.event_name != 'pull_request' || env.CI_SCOPE_RUNNER_PROTOCOL != 'false')", "(env.CI_SCOPE_RUNNER_PROTOCOL != 'false')", "the Node 22 step");
   mutate('echo "CI scope: full (push to main)"', 'echo "CI scope: full"', "the push-to-main summary");
@@ -2760,7 +2760,7 @@ test("R3: the compare script runs from the command line and exits non-zero on a 
     writeFileSync(path.join(dir, "after.yml"), ci);
     const run = (b, a) => spawnSync(process.execPath, [path.join(here, "compare-ci-workflow.mjs"), path.join(dir, b), path.join(dir, a)], { encoding: "utf8" });
     assert.equal(run("before.yml", "after.yml").status, 0);
-    writeFileSync(path.join(dir, "tampered.yml"), ci.replace("&& 125 || 40 }}", "&& 125 || 41 }}"));
+    writeFileSync(path.join(dir, "tampered.yml"), ci.replace("&& 125 || 60 }}", "&& 125 || 61 }}"));
     const bad = run("before.yml", "tampered.yml");
     assert.equal(bad.status, 1);
     assert.match(bad.stderr, /differs outside the two scope steps/);

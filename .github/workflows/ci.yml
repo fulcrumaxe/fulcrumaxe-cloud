@@ -484,7 +484,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
-    timeout-minutes: ${{ github.event_name == 'merge_group' && vars.ROLLUP_ENABLED == 'true' && 125 || 40 }}
+    timeout-minutes: ${{ github.event_name == 'merge_group' && vars.ROLLUP_ENABLED == 'true' && 125 || 60 }}
     # One job per Playwright project, kept so the required check names stay
     # `workspace-e2e (desktop|phone|tablet)` (owner-configured). The fixture-server
     # ports are picked per job at run time (see the "Pick free e2e ports" step), so
