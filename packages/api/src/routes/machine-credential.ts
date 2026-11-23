@@ -12,6 +12,7 @@ import {
 import type { RouteEntry } from "../registry.js";
 import { SESSION_LIMITS } from "../ratelimit/session.js";
 import { ApiError } from "../errors.js";
+import { withTenant } from "@fx/db/src/withTenant.js";
 
 /**
  * D#845 MC-2: `POST|DELETE /api/v1/machine-credentials/hetzner`, thin wrappers over the sealed Hetzner Cloud token (`@fx/model-connection` machineOps).
@@ -56,6 +57,13 @@ export function mapError(err: unknown): unknown {
   return new ApiError(STATUS_OF[err.code], err.code, err.message, ON_TOKEN.has(err.code) ? [{ path: "token", code: err.code }] : undefined);
 }
 
+export const hetznerCredentialStatusSchema = z.object({
+  status: z.enum(["connected", "invalid", "none"]),
+  token_hint: z.string().nullable(),
+  /** Counted once, when the token is connected (the connect answer carries it). It is not stored, and a read never calls Hetzner, so it is null here. */
+  unlabelled_server_count: z.number().int().nonnegative().nullable(),
+});
+
 const toDto = (v: HetznerCredentialView) => ({ ...v, created_at: v.created_at.toISOString() });
 const serviceCtx = (ctx: { pool: Parameters<typeof removeHetznerCredential>[0]["pool"]; principal: { accountId: string; userId: string } }) => ({
   pool: ctx.pool,
@@ -64,6 +72,29 @@ const serviceCtx = (ctx: { pool: Parameters<typeof removeHetznerCredential>[0]["
 });
 
 export const machineCredentialRoutes: RouteEntry[] = [
+  {
+    method: "GET",
+    path: "/api/v1/machine-credentials/hetzner",
+    operationId: "getHetznerCredential",
+    summary: "Whether a Hetzner Cloud token is connected: its status and its last four characters, never the token",
+    description: "Session only, owner or admin. Never 404: with no token the answer is 200 `status: none`. Reads the account's own row only; it does not open the token and does not call Hetzner.",
+    // principals omitted -> session-only.
+    minRole: "admin",
+    idempotency: "never",
+    rateClass: "read",
+    responseSchema: hetznerCredentialStatusSchema,
+    async handler(ctx) {
+      const { accountId, userId } = ctx.principal;
+      const row = await withTenant(ctx.pool, accountId, userId, async (c) =>
+        (await c.query<{ status: "ok" | "invalid"; token_hint: string }>(
+          `SELECT status, token_hint FROM machine_provider_credentials WHERE account_id = $1 AND provider = 'hetzner_cloud' AND removed_at IS NULL`,
+          [accountId],
+        )).rows[0],
+      );
+      if (!row) return { status: "none" as const, token_hint: null, unlabelled_server_count: null };
+      return { status: row.status === "ok" ? ("connected" as const) : ("invalid" as const), token_hint: row.token_hint, unlabelled_server_count: null };
+    },
+  },
   {
     method: "POST",
     path: "/api/v1/machine-credentials/hetzner",

@@ -173,6 +173,13 @@ export async function getServer(ctx: ServerCtx, id: string): Promise<ServerView 
   return row ? viewOf(row) : null;
 }
 
+/** The account's servers that are not deleted, newest first, with the fields of `getServer`. The account predicate is explicit, on top of row security. */
+export async function listServers(ctx: ServerCtx): Promise<ServerView[]> {
+  const { accountId, userId } = ctx.principal;
+  const rows = await withTenant(ctx.pool, accountId, userId, async (c) => (await c.query<Row>(`SELECT ${COLUMNS} FROM managed_servers WHERE account_id = $1 AND status <> 'deleted' ORDER BY created_at DESC, id LIMIT 500`, [accountId])).rows);
+  return rows.map(viewOf);
+}
+
 export interface CreateInput {
   /** The Idempotency-Key header: one key, one server. */
   idempotencyKey: string;
