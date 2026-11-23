@@ -1,4 +1,4 @@
-import { CHECK_FAILED_FILES_DROPPED, CHECK_FIX_SCOPE_EXTRA_MAX, checkFixScopeExtra, DONE_RETRY_AFTER_SECONDS, DoneMessage, DoneReply, DoneRetryReply, SignedJobSchema, privateOnlyEditsNotAllowed, readDerivedFresh, pathsOutsideScopeFresh, type DoneCheck, type Job, type StopReason } from "@fulcrumaxe/runner-protocol";
+import { CHECK_FAILED_FILES_DROPPED, CHECK_FIX_SCOPE_EXTRA_MAX, checkFixScopeExtra, DONE_RETRY_AFTER_SECONDS, DoneMessage, DoneReply, DoneRetryReply, SURVEY_ROLE, SignedJobSchema, privateOnlyEditsNotAllowed, readSurveyOutput, readDerivedFresh, pathsOutsideScopeFresh, type DoneCheck, type Job, type StopReason } from "@fulcrumaxe/runner-protocol";
 import type { CloudClose, ScopeRefusal } from "@fx/core/src/work-items/scopeRefusal.js";
 import { DERIVED_FILE_RULES } from "@fx/core/src/specs/derivedFileRules.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
@@ -13,6 +13,7 @@ import {
   requireLeases,
   type RunnerCloudDeps,
   type RunnerDoneStored,
+  type RunnerLeaseOps,
   type RunnerHttpRequest,
   type RunnerHttpResponse,
 } from "./http.js";
@@ -94,7 +95,7 @@ export async function doneRun(deps: RunnerCloudDeps, req: RunnerHttpRequest, run
   // Stored once the lease has held (not fenced, not a replay), before the verdict, so a retried `done` finds it; the same value again is a no-op.
   if (attestation?.store) await asRunner(() => storeConflictAttestation(deps, { accountId: runner.accountId, runId: message.run_id }, attestation.value));
 
-  const decided = await decide(deps, lease, message.check);
+  const decided = await decide(deps, lease, message.check, message.agentOutput);
   if (decided.kind === "retry") return retryReply();
   if (decided.kind === "stop") return stopReply(decided.reason);
 
@@ -103,7 +104,9 @@ export async function doneRun(deps: RunnerCloudDeps, req: RunnerHttpRequest, run
       ...lease,
       verdict: decided.verdict,
       ...(message.session_id === undefined ? {} : { sessionId: message.session_id }),
-      ...(message.agentOutput === undefined ? {} : { agentOutput: message.agentOutput }),
+      // A survey's answer is the draft: it is written as the draft and never stored a second time as the run's envelope (ON-10a).
+      ...(message.agentOutput === undefined || decided.survey !== undefined ? {} : { agentOutput: message.agentOutput }),
+      ...(decided.survey === undefined ? {} : { survey: decided.survey }),
       // D#600 CX-1b: checked by the strict schema above; absent from an older runner, which the store records as `partial`.
       ...(message.context_ledger === undefined ? {} : { contextLedger: message.context_ledger }),
       // D#6 R-CHK-3: recorded only when `decide` accepted it, that is when the run's own signed job carried a check.
@@ -125,10 +128,12 @@ const retryReply = (): RunnerHttpResponse => ({
   headers: { "retry-after": String(DONE_RETRY_AFTER_SECONDS) },
 });
 
-type Decision = { kind: "verdict"; verdict: RunnerDoneStored; check?: DoneCheck } | { kind: "retry" } | { kind: "stop"; reason: StopReason };
+type Decision = { kind: "verdict"; verdict: RunnerDoneStored; check?: DoneCheck; survey?: SurveyDone } | { kind: "retry" } | { kind: "stop"; reason: StopReason };
 const verdictOf = (verdict: RunnerDoneStored): Decision => ({ kind: "verdict", verdict });
 const failed = (failureReason: NonNullable<RunnerDoneStored["failureReason"]>, extra: Partial<RunnerDoneStored> = {}): Decision =>
   verdictOf({ outcome: "failed", failureReason, prNumber: null, ...extra });
+
+type SurveyDone = NonNullable<Parameters<RunnerLeaseOps["finishRunnerDone"]>[0]["survey"]>;
 
 /** What the verdict needs from our own rows, read once under the run's tenant. */
 interface DoneContext {
@@ -205,13 +210,20 @@ const PASSING_CHANGE_TYPES: ReadonlySet<string> = new Set(["ADDED", "MODIFIED", 
 /** D#6 R-CHK-3: a check passes only on exit 0 inside its cap. No exit status (never started) and a kill at the cap both fail, and so does a result the runner gave a reason for (R-CHK-3d: it was not run safely). */
 export const checkPassed = (check: DoneCheck): boolean => check.exit_code === 0 && !check.timed_out && check.reason === undefined;
 
-async function decide(deps: RunnerCloudDeps, i: { accountId: string; runnerId: string; runId: string; leaseGeneration: number }, runnerReported: DoneCheck | undefined): Promise<Decision> {
+async function decide(deps: RunnerCloudDeps, i: { accountId: string; runnerId: string; runId: string; leaseGeneration: number }, runnerReported: DoneCheck | undefined, agentOutput?: Record<string, unknown>): Promise<Decision> {
   const ctx = await withTenant(deps.appUserPool, i.accountId, (client) => loadContext(client, { accountId: i.accountId, runId: i.runId }));
   // A run that passed the fence has a row; if it vanished since, nothing here can be trusted.
   if (!ctx) return failed("internal_error");
   // A run its owner took over ends here, for every role, before any commit or pull request is looked at: no result is judged, nothing is opened,
   // and a reviewer's run can never count toward a merge gate (D#6 R4a-7). The envelope the facade stores for it is none.
   if (ctx.takenOver) return failed("taken_over");
+  // D#845 ON-10a: a survey run is judged on its answer alone: the cloud's own parse of `ProjectDraft`, after redaction. It opens no pull request and checks nothing on GitHub.
+  if (ctx.role === SURVEY_ROLE || ctx.job?.task.kind === "survey") {
+    if (ctx.role !== SURVEY_ROLE || ctx.job === null || ctx.job.role !== SURVEY_ROLE || ctx.job.task.kind !== "survey") return failed("internal_error");
+    const read = readSurveyOutput(agentOutput);
+    if (read.ok) return { kind: "verdict", verdict: { outcome: "succeeded", failureReason: null, prNumber: null }, survey: { draft: read.draft } };
+    return { kind: "verdict", verdict: { outcome: "failed", failureReason: "survey_output_invalid", prNumber: null }, survey: { failed: read.reason } };
+  }
   // Only the executor and the docs-writer push (C25 section 3.2). Every other role (the reviewers, the panel seats, the advisory roles) ends
   // `succeeded` on its done; its envelope is stored after redaction (C21 section 5.2).
   if (!RUNNER_PUSHING_ROLES.has(ctx.role)) return verdictOf({ outcome: "succeeded", failureReason: null, prNumber: null });

@@ -92,12 +92,12 @@ describe("RunnerTarget [pg]", () => {
       expect(await target(db.runWriterPool).target.admit(run, db.admin)).toEqual({ admitted: false, reason: "role_not_runner_eligible" });
     });
 
-    it("the eligible set is the runner-protocol list plus the four reviewers, the claim verifier (D#483 S4-b2c) and the discovery analyst (S4-f4), nothing else", () => {
+    it("the eligible set is the runner-protocol list plus the four reviewers, the claim verifier (D#483 S4-b2c), the discovery analyst (S4-f4), the deploy verifier and the project surveyor (D#845 ON-10a), nothing else", () => {
       expect([...RUNNER_TARGET_ROLES].sort()).toEqual(
         [
           "executor", "project-manager", "technical-architect", "product-owner", "cost-analyst", "performance-expert",
           "security-expert", "docs-writer", "accessibility-reviewer",
-          "code-reviewer", "security-reviewer", "acceptance-tester", "debater", "proposal-verifier", "discovery-analyst", "deploy-verifier",
+          "code-reviewer", "security-reviewer", "acceptance-tester", "debater", "proposal-verifier", "discovery-analyst", "deploy-verifier", "project-surveyor",
         ].sort(),
       );
     });

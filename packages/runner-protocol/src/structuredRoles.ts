@@ -1,3 +1,4 @@
+import { SURVEY_ROLE } from "./projectDraft.js";
 import { DISCOVERY_ANALYST_ROLE, PROPOSAL_VERIFIER_ROLE } from "./verifierGuard.js";
 
 /**
@@ -12,7 +13,7 @@ import { DISCOVERY_ANALYST_ROLE, PROPOSAL_VERIFIER_ROLE } from "./verifierGuard.
  *
  * Free-form roles have no entry: they keep the text envelope and no repair.
  */
-export const STRUCTURED_OUTPUT_ROLES: readonly string[] = Object.freeze([PROPOSAL_VERIFIER_ROLE, DISCOVERY_ANALYST_ROLE]);
+export const STRUCTURED_OUTPUT_ROLES: readonly string[] = Object.freeze([PROPOSAL_VERIFIER_ROLE, DISCOVERY_ANALYST_ROLE, SURVEY_ROLE]);
 
 /** The fixed categories (`TRIAGE_CATEGORIES` in the cloud's pipeline package; a parity test keeps the two equal). */
 export const STRUCTURED_TRIAGE_CATEGORIES: readonly string[] = Object.freeze(["critical", "feature", "small", "bug", "doc", "question", "project"]);
@@ -87,10 +88,14 @@ const ANALYST_SCHEMA = {
   },
 } as const;
 
+const SURVEY_SCHEMA = { type: "object", additionalProperties: false, required: ["v", "prd_md", "roadmap"], properties: { v: { const: 1 }, prd_md: { type: "string" }, roadmap: { type: "array" } } } as const;
+
 /** The JSON Schema the CLI is asked to enforce for this role's final answer, or undefined for a role with no fixed shape. */
 export function structuredSchemaFor(role: string): Record<string, unknown> | undefined {
   if (role === PROPOSAL_VERIFIER_ROLE) return VERIFIER_SCHEMA as unknown as Record<string, unknown>;
   if (role === DISCOVERY_ANALYST_ROLE) return ANALYST_SCHEMA as unknown as Record<string, unknown>;
+  // D#845 ON-10a: the top level of `ProjectDraft` only (it never rejects what the draft accepts); ON-10c replaces it with the full schema and its parity test over a corpus.
+  if (role === SURVEY_ROLE) return SURVEY_SCHEMA as unknown as Record<string, unknown>;
   return undefined;
 }
 
@@ -199,6 +204,8 @@ function analystFailures(envelope: unknown): StructuredFailureCode[] {
 export function structuredFailures(role: string, output: unknown): StructuredFailureCode[] {
   if (!STRUCTURED_OUTPUT_ROLES.includes(role)) return [];
   if (output === undefined) return ["no_envelope"];
+  // D#845 ON-10a: the survey's JSON Schema and field checks are ON-10c's; until then only the shape of the envelope is judged (never stricter than `ProjectDraft`, which the cloud decides with).
+  if (role === SURVEY_ROLE) return typeof output === "object" && output !== null && !Array.isArray(output) ? [] : ["not_an_object"];
   return role === PROPOSAL_VERIFIER_ROLE ? verifierFailures(output) : analystFailures(output);
 }
 

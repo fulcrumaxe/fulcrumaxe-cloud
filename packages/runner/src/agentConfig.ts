@@ -18,7 +18,7 @@
  * nor use a tool its role was not given. The boundary that matters is still the sandbox VM, the egress firewall and the
  * gh-proxy's push and PR rules; these lists are least privilege on top of them, not a replacement.
  */
-import { CONFINED_READ_ROLES, CONTEXT_WARNING_CODE, CONTEXT_WARNING_TEXT, CONTEXT_WARN_PCT, DEPLOY_VERIFIER_ROLE, DISCOVERY_ANALYST_ROLE, PROPOSAL_VERIFIER_ROLE, PROPOSAL_VERIFIER_RUNNER_TOOLS, deployVerifierToolsFor, excludeDenyRules, verifierReadGuardHook, type BrowserMethod } from "@fulcrumaxe/runner-protocol";
+import { CONFINED_READ_ROLES, CONTEXT_WARNING_CODE, CONTEXT_WARNING_TEXT, CONTEXT_WARN_PCT, DEPLOY_VERIFIER_ROLE, DISCOVERY_ANALYST_ROLE, PROPOSAL_VERIFIER_ROLE, PROPOSAL_VERIFIER_RUNNER_TOOLS, SURVEY_ROLE, deployVerifierToolsFor, excludeDenyRules, verifierReadGuardHook, type BrowserMethod } from "@fulcrumaxe/runner-protocol";
 // D#600 CX-5c: the exclude helpers live in the protocol package, so the local runner writes the very same rules. Re-exported here under the names this package always had.
 export { EXCLUDE_PROMPT_LINE, MAX_EXCLUDE_RULES, disabledToolsFor, escapeRulePath, excludeDenyRules } from "@fulcrumaxe/runner-protocol";
 
@@ -63,6 +63,7 @@ const LOOK_HELPERS = ["Bash(ls:*)", "Bash(cat:*)", "Bash(grep:*)", "Bash(find:*)
 export const EXECUTOR_TOOLS: readonly string[] = Object.freeze([...READ_TOOLS, "Edit", "MultiEdit", "Write", "NotebookEdit", "Bash"]);
 export const REVIEWER_TOOLS: readonly string[] = Object.freeze([...READ_TOOLS, "Bash"]);
 export const OTHER_ROLE_TOOLS: readonly string[] = Object.freeze([...READ_TOOLS, "Bash(curl:*)", "Bash(git:*)", ...LOOK_HELPERS]);
+const SURVEY_TOOLS: readonly string[] = Object.freeze([...READ_TOOLS]);
 
 const TOOLS_BY_ROLE: Readonly<Record<string, readonly string[]>> = Object.freeze({
   executor: EXECUTOR_TOOLS,
@@ -108,7 +109,7 @@ export { CONFINED_READ_ROLES };
  * The roles the platform itself runs that are not in the role manifest, each with its own settings below (today only the
  * claim verifier, `PROPOSAL_VERIFIER_ROLE`, and the discovery analyst, `DISCOVERY_ANALYST_ROLE`). Named here so the manifest parity check can allow exactly these and nothing else.
  */
-export const PLATFORM_ROLES: readonly string[] = Object.freeze([PROPOSAL_VERIFIER_ROLE, DISCOVERY_ANALYST_ROLE]);
+export const PLATFORM_ROLES: readonly string[] = Object.freeze([PROPOSAL_VERIFIER_ROLE, DISCOVERY_ANALYST_ROLE, SURVEY_ROLE]);
 
 /** The roles that have a tool list: the table's, in table order, then the platform roles. Every other name is refused by `toolsForRole`. */
 export const TOOL_LISTED_ROLES: readonly string[] = Object.freeze([...Object.keys(TOOLS_BY_ROLE), ...PLATFORM_ROLES]);
@@ -130,6 +131,8 @@ export function toolsForRole(role: string): readonly string[] {
   // D#749 V2b: the deploy verifier is a confined read role (runner-protocol) but a runner job only: the sandbox has no list for it, as before.
   if (RUNNER_ONLY_ROLES.includes(role)) throw new UnknownRoleError(role);
   if (CONFINED_READ_ROLES.has(role)) return VERIFIER_ALLOW;
+  // D#845 ON-10a: the survey reads the checkout and nothing else (no write tool, no Bash). ON-10c adds the confinement on the machine.
+  if (role === SURVEY_ROLE) return SURVEY_TOOLS;
   if (typeof role !== "string" || !Object.hasOwn(TOOLS_BY_ROLE, role)) throw new UnknownRoleError(role);
   return TOOLS_BY_ROLE[role]!;
 }

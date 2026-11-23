@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { CONFINED_READ_ROLES, DISCOVERY_ANALYST_ROLE, PLATFORM_ROLES, PROPOSAL_VERIFIER_ROLE, RUNNER_ONLY_ROLES, VERIFIER_DENY, VERIFIER_READ_GUARD, agentSettingsFor, runnerToolsForRole, toolsForRole } from "../src/agentConfig.js";
+import { SURVEY_ROLE } from "@fulcrumaxe/runner-protocol";
 import { roleToolsDigest } from "../src/targets/jobIssuer.js";
 
 /**
@@ -33,7 +34,8 @@ describe("S4f-5: the analyst's tools are exactly the confined Read, Glob and Gre
 
   it("exactly the two platform roles and the runner-only deploy verifier are confined, and a role outside the set is not", () => {
     expect([...CONFINED_READ_ROLES].sort()).toEqual(["deploy-verifier", "discovery-analyst", "proposal-verifier"]);
-    expect([...CONFINED_READ_ROLES].filter((role) => !RUNNER_ONLY_ROLES.includes(role)).sort()).toEqual([...PLATFORM_ROLES].sort());
+    // The surveyor is a platform role that ON-10c adds to the confined set with its machine-side guard; until then it holds the read tools unconfined (ON-10a).
+    expect([...CONFINED_READ_ROLES].filter((role) => !RUNNER_ONLY_ROLES.includes(role)).sort()).toEqual([...PLATFORM_ROLES].filter((role) => role !== SURVEY_ROLE).sort());
     for (const role of ["executor", "code-reviewer", "researcher", "", "__proto__", "Discovery-Analyst"]) expect(CONFINED_READ_ROLES.has(role), role).toBe(false);
   });
 

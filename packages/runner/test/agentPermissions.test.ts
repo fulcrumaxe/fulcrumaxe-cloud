@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { EXCLUDE_PROMPT_LINE, EXECUTOR_TOOLS, FX_AGENT_SETTINGS, MAX_EXCLUDE_RULES, OTHER_ROLE_TOOLS, DISCOVERY_ANALYST_ROLE, PLATFORM_ROLES, PROPOSAL_VERIFIER_ROLE, REVIEWER_TOOLS, TOOL_LISTED_ROLES, UnknownRoleError, agentSettingsFor, escapeRulePath, excludeDenyRules, toolsForRole } from "../src/agentConfig.js";
+import { SURVEY_ROLE } from "@fulcrumaxe/runner-protocol";
 
 /**
  * D#483 P3 (owner ruling): every role's settings carry an explicit tool allow list and `defaultMode: "dontAsk"`, the
@@ -55,11 +56,12 @@ describe("per-role tool permissions", () => {
       ...Object.fromEntries(OTHER_ROLE_NAMES.map((r) => [r, OTHER])),
       "proposal-verifier": VERIFIER,
       "discovery-analyst": VERIFIER,
+      "project-surveyor": ["Read", "Glob", "Grep", "LS"],
     };
     expect([...TOOL_LISTED_ROLES].sort()).toEqual(Object.keys(pinned).sort());
-    expect(TOOL_LISTED_ROLES).toHaveLength(28);
-    expect([...PLATFORM_ROLES]).toEqual(["proposal-verifier", "discovery-analyst"]);
-    expect(PLATFORM_ROLES).toEqual([PROPOSAL_VERIFIER_ROLE, DISCOVERY_ANALYST_ROLE]);
+    expect(TOOL_LISTED_ROLES).toHaveLength(29);
+    expect([...PLATFORM_ROLES]).toEqual(["proposal-verifier", "discovery-analyst", "project-surveyor"]);
+    expect(PLATFORM_ROLES).toEqual([PROPOSAL_VERIFIER_ROLE, DISCOVERY_ANALYST_ROLE, SURVEY_ROLE]);
     for (const [role, tools] of Object.entries(pinned)) expect([...toolsForRole(role)], role).toEqual(tools);
   });
 

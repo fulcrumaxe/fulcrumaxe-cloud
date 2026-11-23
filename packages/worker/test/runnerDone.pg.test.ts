@@ -460,6 +460,7 @@ describe("runner done [pg]", () => {
         { outcome: "failed", failureReason: "internal_error", prNumber: 9 },
         { outcome: "failed", failureReason: "taken_over", prNumber: null },
         { outcome: "failed", failureReason: "check_failed", prNumber: null },
+        { outcome: "failed", failureReason: "survey_output_invalid", prNumber: null },
       ];
       expect(new Set(cases.map((c) => c.failureReason))).toEqual(new Set(DONE_FAILURE_REASONS));
       for (const verdict of cases) {
@@ -1431,7 +1432,8 @@ describe("runner done [pg]", () => {
     });
 
     it("the role list the route judges is the protocol's: every eligible role other than the executor and the docs-writer ends succeeded without GitHub", async () => {
-      for (const role of RUNNER_ELIGIBLE_ROLES.filter((r) => r !== "executor" && r !== "docs-writer")) {
+      // The survey role is judged on its answer, not by this rule: its own suite (surveyDone.pg.test.ts) holds it.
+      for (const role of RUNNER_ELIGIBLE_ROLES.filter((r) => r !== "executor" && r !== "docs-writer" && r !== "project-surveyor")) {
         const id = await pending({ role });
         const g = await claimRoute(id);
         expect(DoneReply.parse((await done(id, g)).body).outcome, role).toBe("succeeded");

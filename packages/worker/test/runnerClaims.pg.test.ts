@@ -78,7 +78,7 @@ describe("runner claim, heartbeat and events [pg]", () => {
       role: (o.role ?? "executor") as Job["role"],
       mode: o.mode === "runner_verified" ? "verified" : "local",
       spec: null,
-      task: { kind: "implement", prompt: "p", prompt_sha256: sha256Text("p") },
+      task: { kind: o.role === "project-surveyor" ? "survey" : "implement", prompt: "p", prompt_sha256: sha256Text("p") },
       role_card: { text: "c", sha256: sha256Text("c") },
       role_tools_sha256: "a".repeat(64),
       continues: null,
@@ -344,7 +344,7 @@ describe("runner claim, heartbeat and events [pg]", () => {
         const fresh = await newRunner({ roles: [] });
         expect((await admin.query("SELECT allowed_roles FROM runners WHERE id = $1", [fresh])).rows[0].allowed_roles).toEqual([]);
         // D#483 S4-b2c: the claim verifier also needs the capability on the runner's latest hello (its own tests are below).
-        await capable(fresh, ["proposal_verifier", "discovery_analyst", "browser_chrome_v1"]);
+        await capable(fresh, ["proposal_verifier", "discovery_analyst", "browser_chrome_v1", "survey_v1"]);
         for (const role of RUNNER_ELIGIBLE_ROLES) {
           const id = await pending({ role });
           const result = await claim(fresh);

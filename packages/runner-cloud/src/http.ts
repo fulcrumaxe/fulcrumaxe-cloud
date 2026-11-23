@@ -1,5 +1,5 @@
 import type { Pool } from "pg";
-import { CURRENT_PROTOCOL_VERSION, MAX_CREATED_SKEW_SECONDS, MIN_SUPPORTED_PROTOCOL_VERSION, type ClaimCapacity, type ContextLedgerBody, type DoneCheck, type Job, type LocalOnlyEvent, type PlaneMergeOrderedConfig, type PlaneMergeOrderedFact, type SignedJob, type StopReason } from "@fulcrumaxe/runner-protocol";
+import { CURRENT_PROTOCOL_VERSION, MAX_CREATED_SKEW_SECONDS, MIN_SUPPORTED_PROTOCOL_VERSION, type ClaimCapacity, type ContextLedgerBody, type DoneCheck, type Job, type LocalOnlyEvent, type PlaneMergeOrderedConfig, type PlaneMergeOrderedFact, type SignedJob, type StopReason, type SurveyFailureReason } from "@fulcrumaxe/runner-protocol";
 import { reportError } from "@fx/telemetry";
 import type { CloudClose, ScopeRefusal } from "@fx/core/src/work-items/scopeRefusal.js";
 import type { EngineUsagePort } from "./ingestEngineEvents.js";
@@ -417,13 +417,18 @@ export interface RunnerLeaseOps {
     contextLedger?: ContextLedgerBody;
     /** D#6 R-CHK-3: the check result, passed on only when the run's own signed job carried a check; recorded with the verdict. */
     check?: DoneCheck;
+    /**
+     * D#845 ON-10a: set exactly on a survey run's `done`, from the run's own role. `draft` is the cloud-parsed answer (already redacted); `failed` is why there is none. The worker writes the draft (or the failure) in the
+     * same transaction as the verdict, and stores only `{draft_id}` or `{code}` as the run's envelope, never `agentOutput`.
+     */
+    survey?: { draft: { prd_md: string; roadmap: ReadonlyArray<Record<string, unknown>> } } | { failed: Extract<SurveyFailureReason, "no_output" | "output_invalid" | "output_too_large"> };
   }): Promise<{ kind: "recorded"; verdict: RunnerDoneStored } | { kind: "fenced"; reason: StopReason } | { kind: "replay"; verdict: RunnerDoneStored }>;
 }
 
 /** What a finished-by-`done` run stored (the shape of packages/worker `RunnerDoneVerdict`, which this package cannot import). */
 export interface RunnerDoneStored {
   outcome: "succeeded" | "failed";
-  failureReason: "no_commit" | "scope_unknown" | "scope_violation" | "pr_rejected" | "internal_error" | "taken_over" | "check_failed" | null;
+  failureReason: "no_commit" | "scope_unknown" | "scope_violation" | "pr_rejected" | "internal_error" | "taken_over" | "check_failed" | "survey_output_invalid" | null;
   prNumber: number | null;
   /** The run branch the verdict was judged on (`fx/<run>-g<generation>` for a fresh run, a continuation's own branch otherwise); set exactly when `prNumber` is (C25 section 1.2). */
   branch?: string;

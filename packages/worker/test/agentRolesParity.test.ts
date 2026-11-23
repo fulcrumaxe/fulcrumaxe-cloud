@@ -13,7 +13,7 @@ describe("agent tool lists follow the role manifest", () => {
 
   it("the runner's tool table names exactly the manifest's roles plus the named platform roles", () => {
     const manifest = ROLE_MANIFEST.map((r) => r.name);
-    expect([...PLATFORM_ROLES]).toEqual(["proposal-verifier", "discovery-analyst"]);
+    expect([...PLATFORM_ROLES]).toEqual(["proposal-verifier", "discovery-analyst", "project-surveyor"]);
     for (const role of PLATFORM_ROLES) expect(manifest, role).not.toContain(role);
     expect([...TOOL_LISTED_ROLES].sort()).toEqual([...manifest, ...PLATFORM_ROLES].sort());
   });
