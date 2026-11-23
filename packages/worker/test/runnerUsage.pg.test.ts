@@ -185,6 +185,28 @@ describe("runner run usage (API-equivalent figure) [pg]", () => {
       expect(Number(row.api_equivalent_usd)).toBe(computeUsd(rate(), { inputTokens: 1500, outputTokens: 250, cacheReadTokens: 5000, cacheWriteTokens: 7 }));
     });
 
+    it("MC-11a: the same counts reach machine_usage_daily (source run) once per stored event, under the run's repo and its model family; a replay adds nothing, and the account's other repo stays apart", async () => {
+      const id = await pending();
+      const g = await claimed(id);
+      const day = async (repo: string) => (await admin.query("SELECT source, model_tier, input_tokens::text, output_tokens::text, cache_read_tokens::text, cache_write_tokens::text, runner_id FROM machine_usage_daily WHERE account_id = $1 AND repo_id = $2", [A.accountId, repo])).rows;
+      const other = (await admin.query("INSERT INTO repos (account_id, installation_id, gh_repo_id, product, gh_owner, gh_name) VALUES ($1, NULL, $2, 'web', 'acme', 'other') RETURNING id", [A.accountId, 6_300_000 + Math.floor(Math.random() * 90_000)])).rows[0].id;
+      const first = [usageEvent(0, { input: 1000, output: 200, cache_read: 5000 })];
+      await send(id, g, first);
+      await send(id, g, first); // seq_not_increasing: nothing stored, nothing added
+      await send(id, g, [usageEvent(1, { input: 500, output: 50, cache_write: 7 })]);
+      expect(await day(A.repoId)).toEqual([{ source: "run", model_tier: "sonnet", input_tokens: "1500", output_tokens: "250", cache_read_tokens: "5000", cache_write_tokens: "7", runner_id: runner }]);
+      expect(await day(other)).toEqual([]);
+    });
+
+    it("MC-11a: a run whose dispatch repo was deleted still stores its usage; the daily rollup files it under no repo", async () => {
+      const id = await pending();
+      const g = await claimed(id);
+      await admin.query("DELETE FROM repos WHERE account_id = $1 AND id = $2", [A.accountId, A.repoId]);
+      expect(await send(id, g, [usageEvent(0, { input: 1000, output: 200 })])).toMatchObject({ outcome: "accepted", stored: 1 });
+      expect(await usageRow(id)).toMatchObject({ input_tokens: "1000", output_tokens: "200" });
+      expect((await admin.query("SELECT repo_id, source, input_tokens::text FROM machine_usage_daily WHERE account_id = $1 AND runner_id = $2", [A.accountId, runner])).rows).toEqual([{ repo_id: null, source: "run", input_tokens: "1000" }]);
+    });
+
     it("an event whose number another writer stored first (a race) is a duplicate or conflict and adds nothing", async () => {
       const id = await pending();
       const g = await claimed(id);

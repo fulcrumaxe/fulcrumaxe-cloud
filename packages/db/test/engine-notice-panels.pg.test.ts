@@ -18,14 +18,13 @@ const read = (rel: string): string => readFileSync(new URL(rel, import.meta.url)
 const MIGRATION_1027 = read('../migrations/1027_engine_bridge.sql');
 const MIGRATION_1032 = read('../migrations/1032_engine_plan.sql');
 const MIGRATION_1039 = read('../migrations/1039_engine_notice_panels.sql');
-const MIGRATION_1043 = read('../migrations/1043_engine_watch.sql');
 
 const ALL = [...ENGINE_NOTICE_PANELS];
 /**
  * Kinds the protocol accepts before the cloud's ingest knows them (D#845 ON-1 added `usage_tick`, ON-24a added `slim_status`, which migration 1043 taught; the migration that teaches `engine_kind_spec` and the panel map is a later row).
  * They are left out of the SQL comparisons below. A test at the end fails the moment the SQL names one, so the migration that adds it must also delete it from this list.
  */
-const PENDING_INGEST: readonly string[] = ['usage_tick'];
+const PENDING_INGEST: readonly string[] = [];
 const KINDS: readonly string[] = ENGINE_EVENT_KINDS.filter((k) => !PENDING_INGEST.includes(k));
 
 /** The `WHEN '<kind>'` literals of one SQL function body. */
@@ -40,11 +39,11 @@ function whenKinds(sql: string, fn: string): string[] {
  * The ingest function's current body: the newest migration (by its number prefix) that defines engine_events_ingest. 1027 created it and 1039 re-carried
  * it, so a later re-carry is picked up here without the test being edited.
  */
-function newestIngestMigration(): string {
+function newestIngestMigration(fn = 'engine_events_ingest'): string {
   const dir = new URL('../migrations/', import.meta.url);
   const files = readdirSync(dir).filter((f) => /^\d+_.*\.sql$/.test(f)).sort((a, b) => parseInt(a, 10) - parseInt(b, 10));
-  const defining = files.filter((f) => /CREATE (?:OR REPLACE )?FUNCTION engine_events_ingest\(/.test(readFileSync(new URL(f, dir), 'utf8')));
-  expect(defining.length, 'a migration defines engine_events_ingest').toBeGreaterThan(0);
+  const defining = files.filter((f) => new RegExp(`CREATE (?:OR REPLACE )?FUNCTION ${fn}\\(`).test(readFileSync(new URL(f, dir), 'utf8')));
+  expect(defining.length, `a migration defines ${fn}`).toBeGreaterThan(0);
   return readFileSync(new URL(defining[defining.length - 1]!, dir), 'utf8');
 }
 
@@ -150,8 +149,8 @@ describe('engine notice panels: the kind map (migration 1039)', () => {
 
   it('completeness: the runner protocol kinds, the 1027 body spec and the panel map are the same set, and the closed set is the one the SQL names', async () => {
     const sorted = (a: readonly string[]): string[] => [...a].sort();
-    expect(sorted(whenKinds(MIGRATION_1043, 'engine_kind_spec'))).toEqual(sorted(KINDS));
-    expect(sorted(whenKinds(MIGRATION_1043, 'engine_kind_panels'))).toEqual(sorted(KINDS));
+    expect(sorted(whenKinds(newestIngestMigration('engine_kind_spec'), 'engine_kind_spec'))).toEqual(sorted(KINDS));
+    expect(sorted(whenKinds(newestIngestMigration('engine_kind_panels'), 'engine_kind_panels'))).toEqual(sorted(KINDS));
     for (const kind of KINDS) {
       const p = await panelsOf(kind);
       expect(p, kind).not.toBeNull();
@@ -183,7 +182,7 @@ describe('engine notice panels: the kind map (migration 1039)', () => {
       expect(new Set(await panelsOf(kind)), kind).toEqual(expected);
     }
     // The kinds with no reader of their own, so the test fails if one gains a reader without moving off status.
-    expect(unreadAsStatus.sort()).toEqual(['bridge_dropped', 'bridge_heartbeat', 'checkin_tick', 'compaction_detected', 'engine_heartbeat', 'host_heartbeat', 'host_started', 'host_stopped', 'loop_tick', 'slim_status', 'spawn_blocked', 'tick_started'].sort());
+    expect(unreadAsStatus.sort()).toEqual(['bridge_dropped', 'bridge_heartbeat', 'checkin_tick', 'compaction_detected', 'engine_heartbeat', 'host_heartbeat', 'host_started', 'host_stopped', 'loop_tick', 'slim_status', 'spawn_blocked', 'tick_started', 'usage_tick'].sort());
     // The readers themselves: a reader nobody declared would leave its panel out of the closed set.
     expect(Object.keys(READERS).sort()).toEqual([...ALL].sort());
   });

@@ -1911,7 +1911,7 @@ check_runner_usage_definer_exception_shape() {
 # table-wide grant), owning exactly its two functions and nothing else (the table runner_run_usage is the migration role's).
 check_runner_usage_definer_role_shape() {
   local dbname="$1" out rc=0 problems
-  local expected="'column agent_runs.id SELECT','column agent_runs.account_id SELECT','column agent_runs.runtime SELECT','column agent_runs.runner_id SELECT','column agent_runs.model SELECT','column runners.id SELECT','column runners.account_id SELECT','column runners.credential_mode SELECT','table runner_run_usage SELECT','table runner_run_usage INSERT','table runner_run_usage UPDATE','schema public USAGE'"
+  local expected="'column agent_runs.id SELECT','column agent_runs.account_id SELECT','column agent_runs.runtime SELECT','column agent_runs.runner_id SELECT','column agent_runs.model SELECT','column agent_runs.dispatch_repo_id SELECT','table machine_usage_daily SELECT','table machine_usage_daily INSERT','table machine_usage_daily UPDATE','column runners.id SELECT','column runners.account_id SELECT','column runners.credential_mode SELECT','table runner_run_usage SELECT','table runner_run_usage INSERT','table runner_run_usage UPDATE','schema public USAGE'"
   out="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -c "
     WITH r AS (SELECT * FROM pg_roles WHERE rolname = 'runner_usage_definer'),
     held AS (
@@ -1926,7 +1926,7 @@ check_runner_usage_definer_role_shape() {
       CASE WHEN coalesce((SELECT bool_or(inherit_option OR set_option) FROM pg_auth_members WHERE roleid = r.oid AND member = 'fx_migrator'::regrole), false)
                 OR pg_has_role('fx_migrator', 'runner_usage_definer', 'USAGE') THEN 'fx_migrator holds a live membership' END,
       CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE member = r.oid) THEN 'is a member of another role' END,
-      CASE WHEN (SELECT count(*) FROM held) <> 12 OR EXISTS (SELECT 1 FROM held WHERE x <> ALL (ARRAY[$expected])) THEN 'privileges are not exactly the 12 granted by 0768' END,
+      CASE WHEN (SELECT count(*) FROM held) <> 16 OR EXISTS (SELECT 1 FROM held WHERE x <> ALL (ARRAY[$expected])) THEN 'privileges are not exactly the 16 granted by 0768 and 1063' END,
       CASE WHEN (SELECT count(*) FROM mine) <> 2
               OR EXISTS (SELECT 1 FROM mine WHERE oid <> ALL (ARRAY['public.runner_usage_add(uuid,uuid,uuid,bigint,bigint,bigint,bigint)'::regprocedure, 'public.runner_usage_price(uuid,uuid,numeric,text)'::regprocedure]::oid[]))
               OR EXISTS (SELECT 1 FROM pg_class c WHERE c.relowner = r.oid) OR EXISTS (SELECT 1 FROM pg_namespace n WHERE n.nspowner = r.oid)

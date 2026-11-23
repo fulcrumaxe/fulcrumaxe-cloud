@@ -12,6 +12,7 @@ const FNS = ['runner_usage_add(uuid,uuid,uuid,bigint,bigint,bigint,bigint)', 'ru
 /** Everything the role holds, exactly. */
 const EXPECTED_PRIVILEGES = [
   'column agent_runs.account_id SELECT',
+  'column agent_runs.dispatch_repo_id SELECT',
   'column agent_runs.id SELECT',
   'column agent_runs.model SELECT',
   'column agent_runs.runner_id SELECT',
@@ -20,6 +21,9 @@ const EXPECTED_PRIVILEGES = [
   'column runners.credential_mode SELECT',
   'column runners.id SELECT',
   'schema public USAGE',
+  'table machine_usage_daily INSERT',
+  'table machine_usage_daily SELECT',
+  'table machine_usage_daily UPDATE',
   'table runner_run_usage INSERT',
   'table runner_run_usage SELECT',
   'table runner_run_usage UPDATE',
