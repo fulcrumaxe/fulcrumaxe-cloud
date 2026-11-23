@@ -373,6 +373,14 @@ export function startFixtureServer({ distDir = DEFAULT_DIST_DIR, port = DEFAULT_
       return;
     }
 
+    // The Team app's live view (POST to start or renew, DELETE to release) is never asked for while the engine switch above is off. If a test does reach it, the answer is the real route's for a repo that is
+    // not ticked: 404 not_found (a start also needs a JSON body naming the browser, which the real route checks; the fixture does not read one).
+    if (/^\/api\/v1\/engine\/repos\/[^/]+\/watch$/.test(urlPath) && (req.method === "POST" || req.method === "DELETE")) {
+      req.resume();
+      req.on("end", () => res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" }).end(JSON.stringify({ error: { code: "not_found", message: "no such repo", request_id: "fixture" } })));
+      return;
+    }
+
     // Opening the Needs you app also lists the items that stopped on their own (GET only). None here: the rows of the other lists are what these tests look at.
     if (urlPath === "/api/v1/stalled-items" && req.method === "GET") {
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" }).end(JSON.stringify({ items: [], not_shown: 0 }));

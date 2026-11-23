@@ -153,9 +153,9 @@ describe("agent state (L3): never running after a crash or after 3 h, or when th
 });
 
 describe("data age and liveness (L2)", () => {
-  it("every panel header reads as of HH:MM (N min ago)", () => {
+  it("every panel header reads As of HH:MM (N min ago)", () => {
     const env = readEnvelope(F.envelope([], { as_of: F.iso(7 * 60 + 5) }));
-    expect(asOfWords(env, NOW)).toBe("as of " + hm(F.iso(7 * 60 + 5)) + " (7 min ago)");
+    expect(asOfWords(env, NOW)).toBe("As of " + hm(F.iso(7 * 60 + 5)) + " (7 min ago)");
     expect(asOfWords(null, NOW)).toBe(WORDS.noData);
   });
   it("stale means: not live, no heartbeat age, or more than 450 s (1.5 times the bridge's 300 s status interval)", () => {
@@ -712,7 +712,7 @@ describe("log (EB-6b)", () => {
     const v = t.view().log;
     expect(v.rows).toEqual([{ id: "0123456789abcdef", time: hm(F.iso(180)), role: "team-lead", category: "merged", discussion: 42, discussionLink: "https://github.com/acme-labs/widgets/discussions/42", pr: 7, prLink: "https://github.com/acme-labs/widgets/pull/7" }]);
     expect(v.note).toBe("Log text stays on your machine; the cloud receives only what kind of line it was.");
-    expect(v.asOf).toMatch(/^as of \d\d:\d\d \(0 min ago\)$/);
+    expect(v.asOf).toMatch(/^As of \d\d:\d\d \(0 min ago\)$/);
   });
   it("a line from an earlier day carries its date; an odd kind reads other, a hostile role stays text", () => {
     expect(logRow(F.logLine({ ts: F.iso(2 * 86400) }), 0, "a/b", NOW).time).toMatch(/^\d\d-\d\d \d\d:\d\d$/);
@@ -814,7 +814,7 @@ describe("plan (EB-6b)", () => {
       { discussion: 43, link: "https://github.com/acme-labs/widgets/discussions/43", ordinal: "2", state: "Planned" },
     ]);
     expect(p.view.rows.map((r) => [r.key, r.discussion, r.status])).toEqual([["EB-6b", 42, "In progress"], ["(no key)", 44, "Done"]]);
-    expect(p.asOf).toMatch(/^as of \d\d:\d\d \(0 min ago\)$/);
+    expect(p.asOf).toMatch(/^As of \d\d:\d\d \(0 min ago\)$/);
   });
   it("each of the six item states has its own words; one it does not know reads Unknown, and the roadmap's own words are a different list", () => {
     const words = { planned: "Planned", in_progress: "In progress", pr_open: "Pull request open", merged: "Merged", blocked: "Blocked", dropped: "Dropped" };
@@ -970,7 +970,7 @@ describe("cost (EB-6b.6): the server's figures, as sent, through the one formatt
     const { t } = team();
     await t.load();
     const u = t.view().usage;
-    expect(u).toMatchObject({ failed: false, asOf: expect.stringMatching(/^as of \d\d:\d\d \(0 min ago\)$/) });
+    expect(u).toMatchObject({ failed: false, asOf: expect.stringMatching(/^As of \d\d:\d\d \(0 min ago\)$/) });
     expect(u.view.headline).toBe("$12.3456");
     expect(u.view.rows.map((r) => [r.label, r.value])).toEqual([
       ["Agent · sonnet-5 · on your Claude plan", "$1.2345"],
@@ -1020,7 +1020,7 @@ describe("cost (EB-6b.6): the server's figures, as sent, through the one formatt
     expect(t.view().banner).toBe("Events missing since " + hm(F.iso(400)) + " (3 events)");
     expect(t.view().notices).toEqual(["loop not updated for 2 h"]);
     expect(t.view().usage.warn).toBe("last seen 15 min ago");
-    expect(t.view().usage.asOf).toMatch(/^as of /);
+    expect(t.view().usage.asOf).toMatch(/^As of /);
   });
 });
 
@@ -1318,8 +1318,8 @@ describe("operate: the command list and what became of each command", () => {
   it("the list shows its own as-of time, and no data yet before the first read", async () => {
     const { t } = await operating();
     await t.refresh();
-    expect(t.view().operate.commands.asOf).toMatch(/^as of \d\d:\d\d \(\d+ min ago\)$/);
-    expect(t.view().operate.dials.asOf).toMatch(/^as of \d\d:\d\d \(\d+ min ago\)$/);
+    expect(t.view().operate.commands.asOf).toMatch(/^As of \d\d:\d\d \(\d+ min ago\)$/);
+    expect(t.view().operate.dials.asOf).toMatch(/^As of \d\d:\d\d \(\d+ min ago\)$/);
     const none = team({}, { ["GET " + SETTINGS_URL]: ON().settings, ["GET " + REPOS_URL]: ON().repos, ["GET " + commandsUrl(REPO_A) + "?limit=50"]: fail(500, "server_error") });
     await none.t.load();
     expect(none.t.view().operate.commands).toMatchObject({ asOf: "no data yet", failed: true, rows: [] });

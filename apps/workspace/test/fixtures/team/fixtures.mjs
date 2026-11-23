@@ -1,5 +1,5 @@
 // Fixtures for the Team app, in exactly the shapes the engine read routes document: the per-repo list envelope
-// ({items, next_cursor, as_of, heard_age_s, source_ages_s, gaps, missing_events}), the settings read, and the repo list row.
+// ({items, next_cursor, as_of, heard_age_s, source_ages_s, gaps, missing_events, held_events, oldest_seq}), the settings read, and the repo list row.
 // Everything is relative to `nowMs`, so a unit test (a fixed time) and a browser test (the real clock) build the same states.
 // Names are made up: no real repository, runner or person appears here.
 
@@ -14,7 +14,7 @@ export function makeFixtures(nowMs) {
   const iso = (agoS) => new Date(nowMs - agoS * 1000).toISOString();
   const envelope = (items, over = {}) => ({
     items, next_cursor: null, as_of: iso(30), heard_age_s: 20,
-    source_ages_s: { loop: 60, team_log: 120, plan: 3600, merge_queue: 300 }, gaps: [], missing_events: 0, ...over,
+    source_ages_s: { loop: 60, team_log: 120, plan: 3600, merge_queue: 300 }, gaps: [], missing_events: 0, held_events: 0, oldest_seq: null, ...over,
   });
   const repo = (over = {}) => ({
     repo_id: REPO_A, full_name: "acme-labs/widgets", runner_id: "9d2c7b1e-5f3a-4e8b-8a6d-1c2b3a4d5e66", runner_name: "Workshop laptop",

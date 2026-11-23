@@ -149,6 +149,8 @@ export async function api(method, path, body, signal, opts) {
       if (data && Number.isInteger(data.index) && data.index >= 0) failure.index = data.index;
       // A 409 estimate_changed names the live figure beside the error (data.current_estimate_usd): a number, never text.
       if (data && data.data && Number.isFinite(data.data.current_estimate_usd) && data.data.current_estimate_usd >= 0) failure.currentEstimateUsd = data.data.current_estimate_usd;
+      // A 429 watch_limit names the cap that was hit beside the error (data.cap, data.limit, data.in_use): a word from a closed pair and two numbers, never text.
+      if (data && data.data && (data.data.cap === "repo" || data.data.cap === "account") && Number.isInteger(data.data.limit) && Number.isInteger(data.data.in_use)) failure.limit = { cap: data.data.cap, limit: data.data.limit, inUse: data.data.in_use };
       // A 409 envelope_below_first_run names the smallest limit that would be accepted (data.minimum_usd): a number, never text.
       if (data && data.data && Number.isFinite(data.data.minimum_usd) && data.data.minimum_usd >= 0) failure.minimumUsd = data.data.minimum_usd;
       throw failure;

@@ -16,6 +16,7 @@ const SERVER_TEXT = "server text that must never be shown";
 const THEMES = ["classic-crt", "retro-amber", "nord", "corporate", "modern-flat", "crystal", "orchard", "cyberpunk"];
 const WIN = `#windows-container .fulc-window[data-app-id="team"]`;
 const BASE = "/api/v1/engine";
+const LEASE = "5a1f3c52-7a0e-4c1a-9a53-0b1d2e3f4a55";
 type Obj = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 
 interface Mock {
@@ -71,6 +72,8 @@ interface Mock {
   bridgeDeletes: number;
   bridgeStatus: number;
   bridgeCode: string;
+  /** The live view (ON-25b): every POST body and DELETE query to the watch route, the answer a POST gets (200 with `answer`, or an error status with `code` and `data`), and every opened watch stream's URL. */
+  watch: { posts: Obj[]; deletes: string[]; status: number; code: string; data?: Obj; answer: Obj; streams: string[]; failStream: boolean };
 }
 const json = (route: Route, status: number, body: unknown) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 
@@ -85,7 +88,7 @@ function fresh(over: Partial<Mock> = {}): Mock {
     plan: F.plan(), stats: F.stats(), usage: F.usage(), logPage: null,
     puts: [], reads: [], fail: [], putStatus: 200, putCode: "", streaming: false, streamFrame: null,
     commands: { commands: [] }, dials: F.dials(), posts: [], deletes: [], postStatus: 201, postCode: "", dialStatus: 200, dialCode: "", halts: [], haltStatus: 200, haltCode: "", haltPends: true, runners: F.fleet([F.runner()]),
-    bridgePosts: [], bridgeDeletes: 0, bridgeStatus: 201, bridgeCode: "", ...over, bridge: { phase: "idle", plan: "send", runners: [{ id: BRIDGE_RUNNER, name: "Workshop laptop", has_name: true, online: true, protocol_ok: true, last_seen_at: F.iso(120) }], connected: null, command: null, ...(over.bridge ?? {}) },
+    bridgePosts: [], bridgeDeletes: 0, bridgeStatus: 201, bridgeCode: "", watch: { posts: [], deletes: [], status: 200, code: "", answer: { lease_id: LEASE, expires_at: new Date(Date.now() + 90_000).toISOString(), session_ends_at: new Date(Date.now() + 4 * 3600_000).toISOString(), limits: { per_repo: 2, per_account: 4 }, command: "held", machine: "online", last_seen: new Date().toISOString(), detail_as_of: null }, streams: [], failStream: false }, ...over, bridge: { phase: "idle", plan: "send", runners: [{ id: BRIDGE_RUNNER, name: "Workshop laptop", has_name: true, online: true, protocol_ok: true, last_seen_at: F.iso(120) }], connected: null, command: null, ...(over.bridge ?? {}) },
   };
 }
 
@@ -106,7 +109,17 @@ async function setup(page: Page, mock: Mock, opts: { clock?: boolean; stream?: b
       w.__push = (t) => { if (ctrl) ctrl.enqueue(new TextEncoder().encode(t)); };
       window.fetch = (input, init) => {
         const url = typeof input === "string" ? input : input instanceof Request ? input.url : String(input);
-        if (new URL(url, location.href).pathname !== "/api/v1/events") return real(input, init);
+        const u = new URL(url, location.href);
+        if (u.pathname !== "/api/v1/events") return real(input, init);
+        if (u.searchParams.has("watch")) { // the Team app's live view opens a stream of its own: the test pushes its bytes with __watchPush and closes it with __watchEnd
+          const x = window as unknown as { __watchPush: (t: string) => void; __watchEnd: () => void; __watchOpened: string[] };
+          x.__watchOpened = (x.__watchOpened ?? []).concat(u.search);
+          let wc: ReadableStreamDefaultController<Uint8Array> | null = null;
+          x.__watchPush = (t) => { try { wc?.enqueue(new TextEncoder().encode(t)); } catch { /* the page closed this stream already (dead or dropped): nothing to push into */ } };
+          x.__watchEnd = () => { try { wc?.close(); } catch { /* closed */ } };
+          const wb = new ReadableStream<Uint8Array>({ start(c) { wc = c; init?.signal?.addEventListener("abort", () => { try { c.error(new DOMException("aborted", "AbortError")); } catch { /* closed */ } }); } });
+          return Promise.resolve(new Response(wb, { status: 200, headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-store" } }));
+        }
         const body = new ReadableStream<Uint8Array>({
           pull() { w.__pulls += 1; },
           start(c) { ctrl = c; w.__opened += 1; init?.signal?.addEventListener("abort", () => { try { c.error(new DOMException("aborted", "AbortError")); } catch { /* closed */ } }); },
@@ -127,6 +140,12 @@ async function setup(page: Page, mock: Mock, opts: { clock?: boolean; stream?: b
     const body = mock.streamFrame ?? "event: idle\ndata: {}\n\n";
     mock.streamFrame = null;
     await route.fulfill({ status: 200, contentType: "text/event-stream", headers: { "cache-control": "no-store" }, body });
+  });
+  // The live view's own stream (the lease rides on its URL): left open and silent, or refused when a test asks (failStream). With `stream: true` the page's own fetch answers it instead (window.__watchPush).
+  await page.route((u) => u.pathname === "/api/v1/events" && u.searchParams.has("watch"), async (route) => {
+    mock.watch.streams.push(new URL(route.request().url()).search);
+    if (mock.watch.failStream) return route.fulfill({ status: 503, contentType: "application/json", body: "{}" });
+    return new Promise<void>(() => {});
   });
   await page.route((u) => u.pathname.startsWith("/api/v1/repos/") && u.pathname.includes("/decision-settings"), async (route) => {
     const req = route.request();
@@ -160,6 +179,12 @@ async function setup(page: Page, mock: Mock, opts: { clock?: boolean; stream?: b
       if (m) return json(route, 200, mock[m[2] as "agents" | "lanes" | "gates" | "log" | "stats" | "usage"]);
       if (/\/repos\/[^/]+\/bridge$/.test(url.pathname)) return json(route, 200, mock.bridge);
       if (url.pathname.endsWith("/commands")) return json(route, 200, mock.commands);
+    }
+    if (/\/repos\/[^/]+\/watch$/.test(url.pathname) && (req.method() === "POST" || req.method() === "DELETE")) {
+      if (req.method() === "DELETE") { mock.watch.deletes.push(url.search); return json(route, 200, { released: true }); }
+      mock.watch.posts.push(req.postDataJSON());
+      if (mock.watch.status !== 200) return json(route, mock.watch.status, { error: { code: mock.watch.code, message: SERVER_TEXT, request_id: "r" }, ...(mock.watch.data ? { data: mock.watch.data } : {}) });
+      return json(route, 200, mock.watch.answer);
     }
     if (/\/repos\/[^/]+\/bridge$/.test(url.pathname) && (req.method() === "POST" || req.method() === "DELETE")) {
       const enable = req.method() === "POST";
@@ -286,8 +311,8 @@ test.describe("Team app", () => {
     await expect(merged).toContainText("Merged today");
     await expect(merged.locator('[data-testid="tm-lane"]')).toHaveCount(1);
     await expect(merged.locator('[data-testid="tm-pr"]')).toHaveText("PR #5");
-    await expect(t(page, "tm-agents-asof")).toHaveText(/^as of \d\d:\d\d \(\d+ min ago\)$/);
-    await expect(t(page, "tm-lanes-asof")).toHaveText(/^as of \d\d:\d\d \(\d+ min ago\)$/);
+    await expect(t(page, "tm-agents-asof")).toHaveText(/^As of \d\d:\d\d \(\d+ min ago\)$/);
+    await expect(t(page, "tm-lanes-asof")).toHaveText(/^As of \d\d:\d\d \(\d+ min ago\)$/);
     await expect(t(page, "tm-banner")).toBeHidden();
     await expect(t(page, "tm-agents-warn")).toHaveCount(0);
     await clean(page, errors);
@@ -427,7 +452,7 @@ test.describe("Team app", () => {
     await open(page);
     await expect(t(page, "tm-agents-empty")).toHaveText("No agents running");
     await expect(t(page, "tm-lanes-empty")).toHaveText("No pull requests in the merge lane");
-    await expect(t(page, "tm-agents-asof")).toHaveText(/^as of /);
+    await expect(t(page, "tm-agents-asof")).toHaveText(/^As of /);
     await clean(page, errors);
   });
 
@@ -1046,7 +1071,7 @@ test.describe("Team app", () => {
     await expect(t(page, "tm-cmd")).toHaveCount(3);
     await expect(t(page, "tm-cmd").first().locator('[data-testid="tm-cmd-state"]')).toHaveText("Pending");
     await expect(t(page, "tm-cmd").first()).toContainText("Resume the loop");
-    await expect(t(page, "tm-cmds-asof")).toHaveText(/^as of \d\d:\d\d \(\d+ min ago\)$/);
+    await expect(t(page, "tm-cmds-asof")).toHaveText(/^As of \d\d:\d\d \(\d+ min ago\)$/);
     await expect(page.locator(`${WIN} .tm-app ul:not([role="list"])`)).toHaveCount(0);
     await clean(page, errors);
   });
@@ -1271,7 +1296,7 @@ test.describe("Team app", () => {
     await expect(t(page, "tm-dial")).toHaveCount(3);
     await expect(t(page, "tm-dial").nth(1)).toContainText("Server label for engine_merge");
     await expect(t(page, "tm-dial-select").nth(2).locator("option")).toHaveText(["Go ahead", "Ask me first"]);
-    await expect(t(page, "tm-dials-asof")).toHaveText(/^as of \d\d:\d\d \(\d+ min ago\)$/);
+    await expect(t(page, "tm-dials-asof")).toHaveText(/^As of \d\d:\d\d \(\d+ min ago\)$/);
     // A choice not yet applied is kept while the panels are read again, even across a minute.
     await t(page, "tm-dial-select").first().selectOption("act");
     const before = mock.reads.filter((r) => r.endsWith("/lanes")).length;
@@ -1647,7 +1672,7 @@ test.describe("Team app", () => {
     await expect(rows.nth(0).locator("a").nth(1)).toHaveAttribute("href", "https://github.com/acme-labs/widgets/pull/7");
     await expect(rows.nth(2)).toContainText("gate passed");
     await expect(rows.nth(1).locator("a")).toHaveCount(1); // no PR on this line
-    await expect(t(page, "tm-log-asof")).toHaveText(/^as of \d\d:\d\d \(\d+ min ago\)$/);
+    await expect(t(page, "tm-log-asof")).toHaveText(/^As of \d\d:\d\d \(\d+ min ago\)$/);
     await expect(t(page, "tm-log-older")).toHaveAttribute("aria-disabled", "true");
     await expect(t(page, "tm-log-older")).toHaveText("No older lines");
     await expect(t(page, "tm-log-list")).toHaveAttribute("tabindex", "0");
@@ -1813,7 +1838,7 @@ test.describe("Team app", () => {
     await expect(t(page, "tm-usage-value")).toHaveText(["$1,234.50", "Usage was not recorded for this tick. That is not the same as $0."]);
     await expect(t(page, "tm-usage-row").nth(0)).toContainText("Agent · sonnet-5 · on your Claude plan");
     await expect(t(page, "tm-usage-row").nth(1)).toContainText("Tick · unknown model");
-    await expect(t(page, "tm-usage-asof")).toHaveText(/^as of \d\d:\d\d \(0 min ago\)$/);
+    await expect(t(page, "tm-usage-asof")).toHaveText(/^As of \d\d:\d\d \(0 min ago\)$/);
     await expect(t(page, "tm-usage-window")).toHaveText(/^Window: \d{4}-\d\d-\d\d to \d{4}-\d\d-\d\d$/);
     expect((await t(page, "tm-usage").innerText()).replace(/That is not the same as \$0\./i, "")).not.toMatch(/\$0(?!\.\d*[1-9])/);
     await clean(page, errors);
@@ -1907,7 +1932,7 @@ test.describe("Team app", () => {
     await expect(rows.nth(0)).toContainText("EB-6b");
     await expect(t(page, "tm-roadmap-counts").nth(0)).toHaveText("1 merged in the last 30 days · 3 planned");
     await expect(rows.nth(1)).toContainText("(no key)");
-    await expect(t(page, "tm-plan-asof")).toHaveText(/^as of \d\d:\d\d \(\d+ min ago\)$/);
+    await expect(t(page, "tm-plan-asof")).toHaveText(/^As of \d\d:\d\d \(\d+ min ago\)$/);
     await clean(page, errors);
   });
 
@@ -1954,7 +1979,7 @@ test.describe("Team app", () => {
     const rows = t(page, "tm-stat");
     await expect(rows).toHaveText([/Agents by role: executor 2, code-reviewer 1 \(from 6 events\)/, /Duration: median 120.5 s, p90 300 s \(from 3 events\)/, /Merges: 4 \(from 4 events\)/, /Gates passed: 3 of 4 \(from 1 event\)/]);
     await expect(t(page, "tm-stats-window")).toHaveText(/^Window: \d{4}-\d\d-\d\d to \d{4}-\d\d-\d\d$/);
-    await expect(t(page, "tm-stats-asof")).toHaveText(/^as of /);
+    await expect(t(page, "tm-stats-asof")).toHaveText(/^As of /);
     await clean(page, errors);
     void F;
   });
@@ -2455,5 +2480,151 @@ test.describe("Team app", () => {
     expect(mock.puts).toEqual([{ path: `${BASE}/settings`, body: { watch_enabled: true } }]);
     await noSideways(page);
     await clean(page, errors);
+  });
+  test.describe("the live view (D#845 ON-25b)", () => {
+    const pill = (page: Page) => t(page, "tm-watch-pill");
+    const heardAgo = (s: number) => new Date(Date.now() - s * 1000).toISOString();
+    const ready = async (page: Page, mock: Mock) => {
+      await setup(page, mock, { stream: true });
+      await expect.poll(() => page.evaluate(() => { window.dispatchEvent(new Event("pointerdown")); return (window as unknown as { __opened: number }).__opened; }), { timeout: 30_000 }).toBeGreaterThan(0);
+      await page.clock.install();
+      await open(page);
+      await expect(t(page, "tm-agent")).toHaveCount(2);
+    };
+    const hidden = (page: Page, on: boolean) => page.evaluate((h) => {
+      Object.defineProperty(document, "hidden", { configurable: true, get: () => h });
+      Object.defineProperty(document, "visibilityState", { configurable: true, get: () => (h ? "hidden" : "visible") });
+      document.dispatchEvent(new Event("visibilitychange"));
+    }, on);
+
+    test("opening asks once with input; the pill is Live only after the stream has lived 10 s with bytes and only while the repo was heard from under 90 s ago", async ({ page }) => {
+      const F = makeFixtures(Date.now());
+      const mock = fresh({ repos: [F.repo({ last_heard_at: heardAgo(2) }), F.repo({ repo_id: REPO_B, full_name: "acme-labs/site" })] });
+      await ready(page, mock);
+      await expect.poll(() => mock.watch.posts.length).toBe(1);
+      expect(mock.watch.posts[0]).toMatchObject({ active: true });
+      expect(mock.watch.posts[0].browser_id).toMatch(/^[0-9a-f-]{36}$/);
+      await expect.poll(() => page.evaluate(() => (window as unknown as { __watchOpened?: string[] }).__watchOpened ?? [])).toEqual([`?watch=${LEASE}`]);
+      await expect(pill(page)).not.toHaveText("Live"); // the stream has lived no time
+      await page.evaluate(() => (window as unknown as { __watchPush: (t: string) => void }).__watchPush(": hb\n\n"));
+      await page.clock.runFor(11_000);
+      await expect(pill(page)).toHaveText("Live");
+      await expect(pill(page)).toHaveAttribute("data-state", "live");
+      await page.clock.runFor(100_000); // no word from the repo for over 90 s: the stream is fine, the data is not
+      await expect(pill(page)).toHaveText(/^Updated \d+ min ago$/);
+      await expect(pill(page)).toHaveAttribute("data-state", "summary");
+    });
+
+    test("offline: the exact sentence, every panel labelled As of <time>, and no Live pill anywhere", async ({ page }) => {
+      const F = makeFixtures(Date.now());
+      const mock = fresh({ repos: [F.repo({ last_heard_at: heardAgo(900), liveness: "stale" }), F.repo({ repo_id: REPO_B, full_name: "acme-labs/site" })] });
+      mock.watch.answer = { ...mock.watch.answer, machine: "offline", command: "issued", last_seen: heardAgo(900) };
+      const { errors } = await setup(page, mock);
+      await open(page);
+      await expect(t(page, "tm-watch-offline")).toHaveText("The machine is offline. Details appear when it reconnects.");
+      await expect(pill(page)).toHaveText(/^Updated 1\d min ago$/);
+      for (const k of ["agents", "lanes", "log", "stats", "usage", "plan"]) await expect(t(page, `tm-${k}-asof`)).toHaveText(/^As of \d\d:\d\d \(\d+ min ago\)$/);
+      await expect(page.locator(`${WIN} [data-state="live"]`)).toHaveCount(0);
+      await expect(page.locator(WIN)).not.toContainText(/\bLive\b(?! view)/); // the chip says "Stale", never Live
+      await noSideways(page);
+      await clean(page, errors);
+    });
+
+    test("at the cap: the exact sentence and Try again, and no request goes out until it is clicked", async ({ page }) => {
+      const mock = fresh();
+      mock.watch.status = 429;
+      mock.watch.code = "watch_limit";
+      mock.watch.data = { cap: "repo", limit: 2, in_use: 2 };
+      const { errors } = await setup(page, mock, { clock: true });
+      await open(page);
+      await expect(t(page, "tm-watch-cap")).toHaveText("Live view is in use by 2 people on this repo (your plan allows 2). You're seeing the summary; it refreshes every 2 minutes.");
+      await expect(pill(page)).toHaveText(/^Updated /);
+      await expect(t(page, "tm-watch-retry")).toHaveText("Try again");
+      expect(mock.watch.posts).toHaveLength(1);
+      await page.clock.runFor(330_000);
+      await page.waitForTimeout(300);
+      expect(mock.watch.posts).toHaveLength(1); // past the 5-minute renewal: not one retry
+      expect(mock.watch.streams).toEqual([]);
+      mock.watch.status = 200;
+      await press(t(page, "tm-watch-retry"));
+      await expect.poll(() => mock.watch.posts.length).toBe(2);
+      expect(mock.watch.posts[1]).toMatchObject({ active: true });
+      await expect(t(page, "tm-watch-cap")).toHaveCount(0);
+      await noSideways(page);
+      await clean(page, errors);
+    });
+
+    test("hiding the tab frees the slot within 10 s; showing it starts a new view that is not Live at once", async ({ page }) => {
+      const F = makeFixtures(Date.now());
+      const mock = fresh({ repos: [F.repo({ last_heard_at: heardAgo(2) }), F.repo({ repo_id: REPO_B, full_name: "acme-labs/site" })] });
+      await ready(page, mock);
+      await expect.poll(() => mock.watch.posts.length).toBe(1);
+      await page.evaluate(() => (window as unknown as { __watchPush: (t: string) => void }).__watchPush(": hb\n\n"));
+      await page.clock.runFor(11_000);
+      await expect(pill(page)).toHaveText("Live");
+      await hidden(page, true);
+      await page.clock.runFor(6_000);
+      await expect.poll(() => mock.watch.deletes.length).toBe(1);
+      expect(mock.watch.deletes[0]).toMatch(/^\?browser_id=[0-9a-f-]{36}$/);
+      expect(mock.watch.posts).toHaveLength(1);
+      await hidden(page, false);
+      await expect.poll(() => mock.watch.posts.length).toBe(2);
+      expect(mock.watch.posts[1]).toMatchObject({ active: true });
+      await expect(pill(page)).not.toHaveText("Live"); // a view that has just begun has no healthy stream, whatever the last as-of said
+    });
+
+    test("a dropped stream: the lease is taken again before the stream reopens, and not Live until it has lived; after 5 min idle the drop ends the view", async ({ page }) => {
+      const F = makeFixtures(Date.now());
+      const mock = fresh({ repos: [F.repo({ last_heard_at: heardAgo(2) }), F.repo({ repo_id: REPO_B, full_name: "acme-labs/site" })] });
+      await ready(page, mock);
+      await expect.poll(() => mock.watch.posts.length).toBe(1);
+      await page.evaluate(() => (window as unknown as { __watchPush: (t: string) => void }).__watchPush(": hb\n\n"));
+      await page.clock.runFor(11_000);
+      await expect(pill(page)).toHaveText("Live");
+      await page.evaluate(() => (window as unknown as { __watchEnd: () => void }).__watchEnd());
+      await expect.poll(() => mock.watch.posts.length).toBe(2);
+      expect(mock.watch.posts[1]).toMatchObject({ active: true });
+      await expect.poll(() => page.evaluate(() => (window as unknown as { __watchOpened?: string[] }).__watchOpened?.length)).toBe(2);
+      await expect(pill(page)).not.toHaveText("Live");
+      await page.clock.runFor(400_000); // well past 5 minutes with no input
+      mock.watch.status = 409;
+      mock.watch.code = "watch_ended";
+      await page.evaluate(() => (window as unknown as { __watchPush: (t: string) => void }).__watchPush(": hb\n\n"));
+      await page.evaluate(() => (window as unknown as { __watchEnd: () => void }).__watchEnd());
+      await page.clock.runFor(70_000); // past the reconnect back-off
+      await expect(t(page, "tm-watch-note")).toHaveText(/The live view has ended/);
+    });
+
+    test("log lines held on the machine: the sentence, and Load older asks for the lines before the lowest uploaded one", async ({ page }) => {
+      const F = makeFixtures(Date.now());
+      const mock = fresh({ log: F.envelope([F.logLine()], { held_events: 3, oldest_seq: 41 }) });
+      const { errors } = await setup(page, mock);
+      await open(page);
+      await expect(t(page, "tm-log-held")).toContainText("3 older lines are on the machine and were not uploaded");
+      await press(t(page, "tm-log-held-older"));
+      await expect.poll(() => mock.watch.posts.length).toBe(2);
+      expect(mock.watch.posts[1]).toMatchObject({ active: true, before: 41 });
+      await noSideways(page);
+      await clean(page, errors);
+    });
+
+    test("no held lines, no sentence", async ({ page }) => {
+      const { mock } = await setup(page, fresh());
+      await open(page);
+      await expect(t(page, "tm-log-held")).toHaveCount(0);
+      expect(mock.watch.posts).toHaveLength(1);
+    });
+
+    test("after 10 refused streams the pill says Updating every minute", async ({ page }) => {
+      const mock = fresh();
+      mock.watch.failStream = true;
+      await setup(page, mock, { clock: true });
+      await open(page);
+      test.setTimeout(300_000);
+      for (let i = 0; i < 6; i++) await page.clock.runFor(120_000); // ten refused attempts with their back-off take about 7 minutes
+      await expect(pill(page)).toHaveText("Updating every minute");
+      await expect(pill(page)).toHaveAttribute("data-state", "polling");
+      expect(mock.watch.streams.length).toBeGreaterThanOrEqual(10);
+    });
   });
 });
