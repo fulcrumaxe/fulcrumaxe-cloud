@@ -111,6 +111,9 @@ export const ENGINE_COPY = {
   paymentPending: "The charge wasn't collected, so nothing changed. Update your payment method and try again.",
   noSubscription: "This account has no paying plan yet.",
 };
+/** Subscribe answered 402 `payment_pending`: an earlier change still waits for its payment. The second sentence names the control only where it is on screen. */
+export const PAYMENT_PENDING = "An earlier change is waiting for payment, so nothing changed. Finish or update the payment, then try again.";
+export const PAYMENT_PENDING_BILLING = "An earlier change is waiting for payment, so nothing changed. Finish or update the payment in Manage billing, then try again.";
 /** A refused change, by the server's closed `code` first and then by status; `hint` says what the row then offers. Nothing the server wrote is shown. */
 export const ENGINE_REFUSED = {
   engine_quantity_in_use: { text: "More engines are running than that number. Park or stop an engine first." },
@@ -171,8 +174,8 @@ export function engineNode(m, body, act, notice, busy) {
     m.kind === "loading" || m.kind === "failed" ? null : [
       m.price ? h("p", { class: "bb-muted", "data-testid": "bb-engine-price" }, m.price) : null,
       h("dl", { class: "bb-facts" },
-        m.paid === null ? null : h("div", { class: "bb-row" }, h("dt", { class: "bb-label" }, "Engines paid for"), h("dd", { class: "bb-value", "data-testid": "bb-engine-paid" }, String(body.paid_quantity))),
-        h("div", { class: "bb-row" }, h("dt", { class: "bb-label" }, "Engines live"), h("dd", { class: "bb-value", "data-testid": "bb-engine-live" }, String(body.live_count)))),
+        m.paid === null ? null : h("div", { class: "bb-row" }, h("dt", { class: "bb-label" }, "Engines paid for:"), h("dd", { class: "bb-value", "data-testid": "bb-engine-paid" }, String(body.paid_quantity))),
+        h("div", { class: "bb-row" }, h("dt", { class: "bb-label" }, "Engines live:"), h("dd", { class: "bb-value", "data-testid": "bb-engine-live" }, String(body.live_count)))),
       m.paid === null ? null : h("p", { class: "bb-muted", "data-testid": "bb-engine-summary" }, body.paid_quantity + " paid, " + body.live_count + " live"),
       m.lines.map((t) => h("p", { class: "bb-muted", "data-testid": "bb-engine-line" }, t)),
       h("div", { class: "bb-inline" },
@@ -352,6 +355,8 @@ export function mountBudgetBilling(host) {
           setNotice("This account already has a subscription. Use Manage billing to change it.", true);
         } else if (e instanceof ApiFailure && e.status === 403) {
           setNotice("Only the account owner can subscribe.", true);
+        } else if (e instanceof ApiFailure && e.status === 402 && e.code === "payment_pending") {
+          setNotice(isOwner() && !partnerBilled() ? PAYMENT_PENDING_BILLING : PAYMENT_PENDING, true);
         } else if (e && e.name !== "AbortError") {
           setNotice("Checkout couldn't be opened. Try again.", true);
         }

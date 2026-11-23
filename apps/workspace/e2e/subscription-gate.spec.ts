@@ -385,6 +385,15 @@ test.describe("D#37 WS-F6: the gate screen's plan list (mocked API)", () => {
     expect(await page.locator("#subscription-gate-screen").innerText()).not.toContain("SECRET-SERVICE-TEXT");
   });
 
+  test("a 402 payment_pending says an earlier change is waiting for payment, without naming a control the gate does not have", async ({ page }) => {
+    await bootGate(page, { viewer: { is_owner: true, partner_billed: false }, checkout: (route) => gateJson(route, 402, { error: { code: "payment_pending", message: "SECRET-SERVICE-TEXT" } }) });
+    const btn = page.locator('[data-plan="team"] .subscription-gate-subscribe');
+    await btn.click();
+    await expect(page.locator(".subscription-gate-error")).toHaveText("An earlier change is waiting for payment, so nothing changed. Finish or update the payment, then try again.");
+    await expect(btn).toBeEnabled();
+    expect(await page.locator("#subscription-gate-screen").innerText()).not.toContain("SECRET-SERVICE-TEXT");
+  });
+
   test("a 429 on Subscribe counts down from Retry-After, keeps the button off until it ends, then works again", async ({ page }) => {
     let limited = true;
     const seen = await bootGate(page, {

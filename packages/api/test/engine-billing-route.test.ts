@@ -199,6 +199,7 @@ describe('D#845 ON-22c-2: GET /api/v1/billing/engine', () => {
     const me = await owner({ status: 'active', quantity: 1 });
     const v = await read(me);
     expect(v.offered).toBe(false);
+    expect(v.price_usd_month).toBeNull();
     expect(touched).toEqual([]);
   });
 

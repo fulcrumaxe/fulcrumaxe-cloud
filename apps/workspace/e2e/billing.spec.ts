@@ -368,6 +368,9 @@ test.describe("D#37 WS-F6: Budget & Billing (mocked API)", () => {
     await boot(page, { admin: true, owner: true, account: NO_SUBSCRIPTION, link: (route) => reply(route) });
     await tid(page, "bb-subscribe-starter").click();
     await expect(tid(page, "bb-notice")).toHaveText("This account already has a subscription. Use Manage billing to change it.");
+    reply = (route) => json(route, 402, err("payment_pending"));
+    await tid(page, "bb-subscribe-starter").click();
+    await expect(tid(page, "bb-notice")).toHaveText("An earlier change is waiting for payment, so nothing changed. Finish or update the payment in Manage billing, then try again.");
     reply = (route) => json(route, 200, { url: "javascript:alert(1)" });
     await tid(page, "bb-subscribe-starter").click();
     await expect(tid(page, "bb-notice")).toHaveText("Checkout couldn't be opened. Try again.");

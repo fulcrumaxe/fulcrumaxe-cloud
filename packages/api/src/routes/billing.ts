@@ -78,7 +78,7 @@ const linkRoute: Pick<RouteEntry, "method" | "minRole" | "idempotency" | "rateCl
 
 const linkErrors = {
   "409": "`no_billing_account` (portal: the account has no Stripe customer yet), `already_subscribed` (checkout: the account already has this plan), `no_subscription`, `subscription_not_paying` (the stored standing is past due, unpaid, incomplete or paused, or its ids are missing) or `engine_quantity_in_use` (engine quantity).",
-  "402": "`payment_pending` (engine quantity or an item added to the subscription: the charge for the change was not collected, so nothing changed).",
+  "402": "`payment_pending` (engine quantity, an item added to the subscription, or a checkout: an earlier change is still waiting for payment, or the charge for this change was not collected, so nothing changed).",
   "422": "`invalid_return_url` (a path that is not a plain absolute path on this app), `invalid_plan` or `invalid_quantity`.",
   "502": "`internal_error`: the billing provider could not be reached. No detail is returned.",
   "503": "`billing_not_configured`: Stripe is not set up on this deployment.",
@@ -178,9 +178,11 @@ export const billingRoutes: RouteEntry[] = [
       const { accountId, userId } = ctx.principal;
       const view = await withTenant(ctx.pool, accountId, userId, (client) => readEngineBilling(client, accountId));
       if (!view) throw new ApiError(404, "not_found", "not found");
-      const price = enginePricePerMonthUsd();
+      const offered = enginePlanOffered();
+      // The price is shown only when the plan is offered: a configured price with no engine price id would otherwise leak a number for a hidden row.
+      const price = offered ? enginePricePerMonthUsd() : null;
       return {
-        offered: enginePlanOffered(),
+        offered,
         price_usd_month: price,
         paid_quantity: view.paid_quantity,
         live_count: view.live_count,

@@ -131,6 +131,10 @@
     })
       .then((res) => {
         if (res.status === 429) return Promise.reject(Object.assign(new Error('rate_limited'), { waitSeconds: waitFrom(res) }));
+        if (res.status === 402) {
+          // An earlier change still waits for its payment: the gate has no billing control, so the line names none.
+          return res.json().catch(() => null).then((b) => Promise.reject(new Error(b && b.error && b.error.code === 'payment_pending' ? 'payment_pending' : 'checkout')));
+        }
         return res.ok ? res.json() : Promise.reject(new Error('checkout'));
       })
       .then((body) => {
@@ -142,7 +146,9 @@
         btn.disabled = false;
         // Disabling the focused button dropped focus to the page; give it back so the retry is one keypress.
         btn.focus();
-        errEl.textContent = "Checkout couldn't be opened. Try again.";
+        errEl.textContent = err && err.message === 'payment_pending'
+          ? 'An earlier change is waiting for payment, so nothing changed. Finish or update the payment, then try again.'
+          : "Checkout couldn't be opened. Try again.";
       });
   }
 
