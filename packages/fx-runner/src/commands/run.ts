@@ -34,7 +34,8 @@ import { isDraining, isPaused, loadSettings, omitsDevToken, setDraining } from "
 import { completeCaps, engineLineOf, engineMismatchClaimBlock, limitsClaimBlock, type ClaimBlock, type SandboxEngine, type VmHostFacts } from "../vm/limits.js";
 import { createLiveMicrovm, type LiveMicrovm, type LiveMicrovmParts } from "../vm/sandboxd/live.js";
 import { createSetupVmParts, createVmClaimGuard, createVmJobDeps, runEventHooks, type VmRunBlock } from "../daemon/vmJobDeps.js";
-import { createProjectSetupHandler } from "../setup/projectSetup.js";
+import { createProjectSetupHandler, setupHandlerFor } from "../setup/projectSetup.js";
+import { createHostSetupVm } from "../setup/hostGuest.js";
 import { createSetupRepos } from "../setup/setupRepos.js";
 import { daemonInventorySource, daemonSandboxLifecycle } from "../vm/sandboxd/management.js";
 import { createMicrovmGate } from "../daemon/microvmGate.js";
@@ -753,10 +754,14 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
         takeHello(again);
       };
       const deployOrder = verifyLocal.deployOrderHandler(client);
-      // D#845 ON-8d: `project_setup` runs on the microVM engine only (a job that requires one is refused on any other engine by the dispatcher); every other kind has no handler yet and is reported `kind_unsupported`.
-      const setupParts = vmDeps === undefined ? undefined : createSetupVmParts({ stateDir, capture: host.engine.capture, captureLarge: host.engine.captureLarge, envOptions });
-      const mirrors = setupParts === undefined ? undefined : createMirrors({ git: setupParts.git, mirrorsRoot, stateDir, keepClear, signal: stopped.signal, ...(hooks.remoteUrl === undefined ? {} : { remoteUrl: hooks.remoteUrl }) });
-      const setupHandler = vmDeps === undefined || setupParts === undefined || mirrors === undefined ? undefined : createProjectSetupHandler({ client, vm: vmDeps, apply: setupParts.apply, logDir: path.join(home, ".local", "state", "fx-runner", "setup"), repos: createSetupRepos({ git: setupParts.git, gitLarge: setupParts.gitLarge, mirrors, workspaceRoot, scratchDir: setupParts.scratch }) });
+      // D#845 ON-8d/ON-8e: `project_setup` runs the same fixed guest commands on either engine, in a microVM or in the OS sandbox through the host guest (`setup/hostGuest.ts`). The engine is read fresh for each job, as the
+      // dispatcher's own gate reads it; every other kind has no handler yet and is reported `kind_unsupported`.
+      const setupParts = createSetupVmParts({ stateDir, capture: host.engine.capture, captureLarge: host.engine.captureLarge, envOptions });
+      const mirrors = createMirrors({ git: setupParts.git, mirrorsRoot, stateDir, keepClear, signal: stopped.signal, ...(hooks.remoteUrl === undefined ? {} : { remoteUrl: hooks.remoteUrl }) });
+      const setupWith = (slice: Parameters<typeof createProjectSetupHandler>[0]["vm"]) => createProjectSetupHandler({ client, vm: slice, apply: setupParts.apply, logDir: path.join(home, ".local", "state", "fx-runner", "setup"), repos: createSetupRepos({ git: setupParts.git, gitLarge: setupParts.gitLarge, mirrors, workspaceRoot, scratchDir: setupParts.scratch }) });
+      const guestPath = cleanEnv(credentials, envOptions).PATH ?? searchPath;
+      const standardVm = host.engine.installCapture === undefined || host.selfCommand === undefined ? undefined : createHostSetupVm({ start: host.engine.installCapture, host: host.sandbox, platform: host.platform, home, stateDir, binaryDir: path.dirname(binaryPath), jobsRoot: path.join(path.dirname(mirrorsRoot), "setup-guests"), searchPath: guestPath, selfCommand: host.selfCommand, uid: host.uid, wsl: host.sandbox.wsl });
+      const setupHandler = setupHandlerFor({ microvm: vmDeps === undefined ? undefined : setupWith(vmDeps), standard: standardVm === undefined ? undefined : setupWith(standardVm) }, () => effectiveEngine(engine, loadSettings(stateDir).sandboxEngine));
       const machineJobs = (machineJobDispatcher = createMachineJobDispatcher({ client, keyring, runnerId: registration.runner_id, now: ctx.now, handlers: setupHandler === undefined ? {} : { project_setup: setupHandler },sandboxEngine: () => effectiveEngine(engine, loadSettings(stateDir).sandboxEngine), signal: stopped.signal, log: (event) => ctx.out(`fx-runner: machine job ${event.event}`) }));
       // D#842 EB-3c: the engine bridge runs beside the claim loop, never under it: it is started here, nothing below awaits it, and it ends only when `finally` stops it.
       if (host.engineBridge !== undefined) {

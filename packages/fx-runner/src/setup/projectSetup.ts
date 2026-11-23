@@ -36,7 +36,8 @@ export interface SetupRepos {
 
 export interface ProjectSetupDeps {
   client: Pick<RunnerClient, "setupPlan">;
-  vm: Pick<NonNullable<JobHandlerDeps["vm"]>, "guestOf" | "lifecycle">;
+  /** `pathsOf`: the standard tier's guest has its paths below a per-job root named from the sandbox name (`hostGuest.ts`); a microVM's are the image's own. */
+  vm: Pick<NonNullable<JobHandlerDeps["vm"]>, "guestOf" | "lifecycle"> & { pathsOf?(name: string): GuestPaths };
   repos: SetupRepos;
   apply: (input: { bundle: Buffer; base: string; mirrorDir: string; workspace: string }) => Promise<AppliedBundle>;
   logDir: string;
@@ -90,12 +91,25 @@ export function createProjectSetupHandler(deps: ProjectSetupDeps): MachineJobHan
   };
 }
 
+/**
+ * The handler for each job's engine (`sandbox_engine`): a microVM runner uses the microVM guest, any other the OS sandbox's host guest (`hostGuest.ts`); nothing else in the handler differs. The engine is asked again for
+ * each job. A guest this build has none of is the closed `engine_unsupported`, and nothing is started. Undefined when neither exists, so the dispatcher reports `kind_unsupported`.
+ */
+export function setupHandlerFor(handlers: { microvm: MachineJobHandler<"project_setup"> | undefined; standard: MachineJobHandler<"project_setup"> | undefined }, engine: () => "microvm" | "os_sandbox"): MachineJobHandler<"project_setup"> | undefined {
+  if (handlers.microvm === undefined && handlers.standard === undefined) return undefined;
+  return async (context) => {
+    const chosen = engine() === "microvm" ? handlers.microvm : handlers.standard;
+    if (chosen === undefined) await context.reporter.report({ sub_step: SETUP_RUNNER_STEPS[0], state: "failed", failure_code: "engine_unsupported", failure_reason: "no_guest" });
+    else await chosen(context);
+  };
+}
+
 async function setUp(deps: ProjectSetupDeps, job: MachineJobOf<"project_setup">, prepared: Extract<Prepared, { ready: true }>, reporter: StepReporter, signal: AbortSignal): Promise<void> {
   const life = deps.vm.lifecycle;
   const limits = deps.limitsMs ?? DEFAULT_LIMITS;
-  const paths = deps.paths ?? DEFAULT_GUEST_PATHS;
   const { setup } = prepared.plan;
   const names = { agent: `su-${job.job_id}`, check: `sc-${job.job_id}` };
+  const paths = deps.paths ?? deps.vm.pathsOf?.(names.agent) ?? DEFAULT_GUEST_PATHS;
   const log = openLog(deps.logDir, job.setup_id);
   let copy: SetupRepoCopy | undefined;
   let current: RunnerStep = "sandbox_boot";
