@@ -10,6 +10,8 @@
   },
   "gaps": [],
   "missing_events": 0,
+  "held_events": 0,
+  "oldest_seq": null,
   "window": {
     "from": "2026-10-17T00:00:00.000Z",
     "to": "2026-11-16T00:00:00.000Z"

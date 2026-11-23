@@ -403,6 +403,57 @@ describe('engine read routes and settings [pg]', () => {
     expect(freeText({ items: [{ note: 'free text here', row_key: 'any thing', runner_name: 'My box' }] })).toEqual(['$.items[0].note="free text here"']);
   });
 
+  it('every panel route answers its own as_of, held_events and oldest_seq (D#845 ON-25a); a second repo of the same account and another account read none of them', async () => {
+    const ev = (session: string, seq: number, kind: string, body: object, agoS: number) =>
+      q(`INSERT INTO engine_events (session_id, seq, account_id, ts, kind, body, received_at) VALUES ($1, $2, $3, now() - interval '9 days', $4, $5::jsonb, $6)`, [session, seq, A.accountId, kind, JSON.stringify(body), ago(agoS)]);
+    const detail = randomUUID();
+    await q(
+      `INSERT INTO engine_sessions (id, account_id, runner_id, repo_id, engine_instance_id, engine_version, first_event_at, last_event_at, last_heard_at, last_heartbeat_at, session_kind)
+       VALUES ($1, $2, $3, $4, $5, '1.0.0', now(), now(), now(), now(), 'detail')`,
+      [detail, A.accountId, runnerId, A.repoId, randomUUID()],
+    );
+    await ev(engineSession, 0, 'ask_raised', { ask_id: 'a'.repeat(16), ask_kind: 'owner_decision', source: 'team_log' }, 3000);
+    await ev(engineSession, 1, 'merge_lane', { pr: 5, state: 'queued', discussion: 3 }, 2500);
+    await ev(engineSession, 2, 'gate_receipt', { pr: 5, gate: 'gate1', result: 'pass', head_sha: 'a'.repeat(40) }, 2000);
+    await ev(engineSession, 3, 'agent_started', { spawn_id: 'toolu_01AbC', role: 'executor', background: true, isolation: 'worktree', discussion: 12, model: 'sonnet-5' }, 1500);
+    await ev(engineSession, 4, 'agent_stopped', { agent_id: 'agent-1', role: 'executor', verdict: 'pass', credential_mode: 'subscription', duration_s: 4, usage: { input: 1, output: 2, cache_read: 3, cache_write: 4 } }, 1000);
+    await ev(detail, 20, 'team_log_line', { line_id: 'c'.repeat(16), actor_role: 'team-lead', category: 'merged', pr: 5 }, 500);
+    await ev(detail, 25, 'team_log_line', { line_id: 'd'.repeat(16), actor_role: 'team-lead', category: 'merged', pr: 6 }, 400);
+    await q(`UPDATE engine_session_gaps SET held = true WHERE session_id = $1`, [engineSession]); // the 5-event hole of the fixture is now one the machine holds back
+    await q(`INSERT INTO engine_session_gaps (account_id, session_id, from_seq, to_seq, held) VALUES ($1, $2, 30, 31, true)`, [A.accountId, engineSession]);
+    const secondRepo = (await q(`INSERT INTO repos (account_id, installation_id, gh_repo_id, product) VALUES ($1, NULL, $2, 'web') RETURNING id`, [A.accountId, Math.floor(Math.random() * 1e9)])).rows[0].id as string;
+    await q(`INSERT INTO engine_bridge_repos (account_id, repo_id) VALUES ($1, $2)`, [A.accountId, secondRepo]);
+    const session2 = randomUUID();
+    await q(`INSERT INTO engine_sessions (id, account_id, runner_id, repo_id, engine_instance_id, engine_version, first_event_at, last_event_at, last_heard_at, last_heartbeat_at, session_kind) VALUES ($1, $2, $3, $4, $5, '1.0.0', now(), now(), now(), now(), 'engine')`, [session2, A.accountId, runnerId, secondRepo, randomUUID()]);
+    await ev(session2, 0, 'team_log_line', { line_id: 'e'.repeat(16), actor_role: 'team-lead', category: 'merged', pr: 9 }, 5);
+    await q(`INSERT INTO engine_session_gaps (account_id, session_id, from_seq, to_seq, held) VALUES ($1, $2, 0, 99, true)`, [A.accountId, session2]);
+    const expected: Record<string, number> = { agents: 1000, lanes: 2500, gates: 2000, asks: 3000, log: 400, usage: 1000, stats: 1000 };
+    const paths: Record<string, string> = { agents: 'agents', lanes: 'lanes', gates: 'gates', asks: 'asks', log: 'log', usage: 'usage', stats: 'stats' };
+    for (const [panel, agoS] of Object.entries(expected)) {
+      const r = await call(owner(), 'GET', `/engine/repos/${A.repoId}/${paths[panel]}${panel === 'asks' ? '?state=all' : ''}`);
+      expect(r.status, panel).toBe(200);
+      // The panel's own newest event, to the second the fixture wrote it.
+      expect(Math.abs(Date.parse(r.body.as_of) - (Date.now() - agoS * 1000)), `${panel} as_of ${r.body.as_of}`).toBeLessThan(5000);
+      expect(r.body.held_events, panel).toBe(5 + 2);
+      expect(r.body.oldest_seq, panel).toBe(20);
+      expect(r.body.missing_events, panel).toBe(0);
+    }
+    // The second repo of the same account: its own log event and its own held hole, none of the first repo's.
+    const other2 = await call(owner(), 'GET', `/engine/repos/${secondRepo}/log`);
+    expect(other2.status).toBe(200);
+    expect(Math.abs(Date.parse(other2.body.as_of) - (Date.now() - 5000))).toBeLessThan(5000);
+    expect(other2.body).toMatchObject({ held_events: 100, oldest_seq: null });
+    // A panel with no event of its own keeps the repo-wide stamp (its session was last heard now), never nothing.
+    expect(Math.abs(Date.parse((await call(owner(), 'GET', `/engine/repos/${secondRepo}/asks?state=all`)).body.as_of) - Date.now())).toBeLessThan(5000);
+    // Another account is a 404 on every panel route, never a figure.
+    for (const panel of Object.keys(paths)) expect((await call(other, 'GET', `/engine/repos/${A.repoId}/${paths[panel]}`)).status, panel).toBe(404);
+    // The repo list is not a panel: no held events, no cursor.
+    expect((await call(owner(), 'GET', '/engine/repos')).body).toMatchObject({ held_events: 0, oldest_seq: null });
+    await q(`DELETE FROM engine_sessions WHERE id = $1`, [session2]);
+    await q(`DELETE FROM engine_bridge_repos WHERE repo_id = $1`, [secondRepo]);
+    await q(`DELETE FROM repos WHERE id = $1`, [secondRepo]);
+  });
+
   it('another account, an unticked repo and a malformed id are all 404', async () => {
     expect((await call(other, 'GET', `/engine/repos/${A.repoId}/agents`)).status).toBe(404);
     expect((await call(owner(), 'GET', `/engine/repos/${randomUUID()}/agents`)).status).toBe(404);

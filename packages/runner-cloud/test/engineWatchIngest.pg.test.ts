@@ -215,7 +215,7 @@ describe("engine events ingest, watch mode [pg]", () => {
 
   describe("holes in the engine's session when a runner holds events back", () => {
     const holes = async () => (await h.admin.query(`SELECT held FROM engine_session_gaps WHERE account_id = $1`, [A.accountId])).rows.map((r) => r.held);
-    const freshness = () => readEngineRepoFreshness(h.admin, A.repoId);
+    const freshness = () => readEngineRepoFreshness(h.admin, A.repoId, A.accountId);
 
     it("a runner at the watch protocol: the hole is recorded, flagged held, left out of the missing count and the gap list, and not in seq_gaps", async () => {
       const e = randomUUID();

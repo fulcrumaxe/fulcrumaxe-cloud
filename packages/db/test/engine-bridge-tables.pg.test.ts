@@ -401,7 +401,7 @@ describe('engine bridge tables [pg]', () => {
       );
       return id;
     };
-    const fresh = () => withTenant(appPool, a.accountId, a.userId, (c) => readEngineRepoFreshness(c, a.repoId));
+    const fresh = () => withTenant(appPool, a.accountId, a.userId, (c) => readEngineRepoFreshness(c, a.repoId, a.accountId));
     beforeAll(async () => {
       await admin.query(`DELETE FROM engine_sessions WHERE repo_id = $1`, [a.repoId]);
     });
@@ -427,7 +427,7 @@ describe('engine bridge tables [pg]', () => {
       expect(f.source_ages_s).toEqual({ loop: 7 });
       expect(f.session_id).toBe(eng);
       expect(f.session_kind).toBe('engine');
-      expect(await withTenant(appPool, b.accountId, b.userId, (c) => readEngineRepoFreshness(c, a.repoId))).toBeNull();
+      expect(await withTenant(appPool, b.accountId, b.userId, (c) => readEngineRepoFreshness(c, a.repoId, b.accountId))).toBeNull();
     });
 
     it('as_of is the later of event and heartbeat within a session, and a bridge-only repo is answered from its bridge session', async () => {

@@ -17,5 +17,7 @@
     "merge_queue": 300
   },
   "gaps": [],
-  "missing_events": 0
+  "missing_events": 0,
+  "held_events": 0,
+  "oldest_seq": null
 }

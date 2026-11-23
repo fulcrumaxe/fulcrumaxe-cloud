@@ -47,7 +47,7 @@ const iso = (v: Date | string): string => new Date(v).toISOString();
  * The repo's newest complete plan snapshot, or null when it has none. Throws `NotFoundError` for a repo that is not the account's or is not ticked for the
  * bridge (the same answer for both, so a caller cannot tell whether another account's repo exists). Runs on the caller's tenant client.
  */
-export async function readEnginePlan(client: Pick<PoolClient, 'query'>, repoId: string): Promise<EnginePlanView | null> {
+export async function readEnginePlan(client: Pick<PoolClient, 'query'>, repoId: string, accountId: string): Promise<EnginePlanView | null> {
   const ticked = await client.query(`SELECT 1 FROM engine_bridge_repos WHERE repo_id = $1`, [repoId]);
   if (ticked.rows.length === 0) throw new NotFoundError(`repos ${repoId} not found`);
 
@@ -85,7 +85,7 @@ export async function readEnginePlan(client: Pick<PoolClient, 'query'>, repoId: 
       planned_prs: r.planned_prs === undefined ? null : Number(r.planned_prs),
     })),
     newer_partial: p ? { chunks_received: Number(p.received), chunk_count: Number(p.chunk_count), last_chunk_at: iso(p.last_at) } : null,
-    freshness: await readEngineRepoFreshness(client, repoId),
+    freshness: await readEngineRepoFreshness(client, repoId, accountId),
   };
 }
 
@@ -93,7 +93,7 @@ export async function readEnginePlan(client: Pick<PoolClient, 'query'>, repoId: 
 export async function getEnginePlan(ctx: { pool: Pool; principal: { accountId: string; userId: string } }, repoId: string): Promise<EnginePlanView | null> {
   const { accountId, userId } = ctx.principal;
   return withTenant(ctx.pool, accountId, userId, async (client) => {
-    const view = await readEnginePlan(client, repoId);
+    const view = await readEnginePlan(client, repoId, accountId);
     // The runner's wake stamp counts as hearing from it, the same as on every other engine panel.
     return view === null ? null : { ...view, freshness: await freshnessWithSeen(client, accountId, repoId, view.freshness) };
   });

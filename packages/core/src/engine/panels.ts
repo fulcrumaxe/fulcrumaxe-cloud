@@ -42,6 +42,10 @@ export interface Freshness {
   gaps: Array<{ from_seq: number; to_seq: number; before_ts: string | null }>;
   /** Events missing across every session of the repo (the sum over every hole, not only the 20 listed). */
   missing_events: number;
+  /** Events the runner holds back on its machine until someone watches (the held holes; never part of `missing_events`). */
+  held_events: number;
+  /** The lowest detail seq the cloud holds for the repo: the cursor "load older" asks before. Null while no detail has been uploaded. */
+  oldest_seq: number | null;
 }
 
 export interface Envelope<T> extends Freshness {
@@ -72,6 +76,8 @@ export function toFreshness(f: EngineRepoFreshness | null): Freshness {
     source_ages_s: f?.source_ages_s ?? {},
     gaps: f?.gaps ?? [],
     missing_events: f?.missing_events ?? 0,
+    held_events: f?.held_events ?? 0,
+    oldest_seq: f?.oldest_seq ?? null,
   };
 }
 

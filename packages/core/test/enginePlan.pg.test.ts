@@ -66,7 +66,7 @@ describe('engine plan sync [pg]', () => {
     await admin.query(`INSERT INTO engine_events (session_id, seq, account_id, ts, kind, body) VALUES ($1, $2, $3, $4, 'plan_snapshot', $5)`, [sess[k], seq, ref(k).accountId, o.ts ?? new Date().toISOString(), JSON.stringify(body)]);
     return seq;
   };
-  const read = (k: 'a' | 'b' = 'a') => withTenant(appPool, ref(k).accountId, ref(k).userId, (c) => readEnginePlan(c, ref(k).repoId));
+  const read = (k: 'a' | 'b' = 'a') => withTenant(appPool, ref(k).accountId, ref(k).userId, (c) => readEnginePlan(c, ref(k).repoId, ref(k).accountId));
   const count = async (table: string, k: 'a' | 'b' = 'a') => Number((await admin.query(`SELECT count(*) AS n FROM ${table} WHERE session_id = $1`, [sess[k]])).rows[0].n);
 
   it('applies a snapshot only when every chunk is here, in chunk order whatever the arrival order, and the chunks are gone afterwards', async () => {
@@ -258,7 +258,7 @@ describe('engine plan sync [pg]', () => {
   it('reads as not found for a repo that is not ticked and for another account\'s repo; none yet is null', async () => {
     await reset('a');
     expect(await read()).toBeNull();
-    await expect(withTenant(appPool, a.accountId, a.userId, (c) => readEnginePlan(c, b.repoId))).rejects.toBeInstanceOf(NotFoundError);
+    await expect(withTenant(appPool, a.accountId, a.userId, (c) => readEnginePlan(c, b.repoId, a.accountId))).rejects.toBeInstanceOf(NotFoundError);
     await admin.query(`DELETE FROM engine_bridge_repos WHERE repo_id = $1`, [a.repoId]);
     try {
       await expect(read()).rejects.toBeInstanceOf(NotFoundError);

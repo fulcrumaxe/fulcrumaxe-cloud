@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { PoolClient } from "pg";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { deleteEngineData, readEngineRepoFreshness, readEngineSettingsView, setEngineBridgeSettings } from "@fx/db/src/engineBridge.js";
+import { deleteEngineData, readEnginePanelAsOf, readEngineRepoFreshness, readEngineSettingsView, setEngineBridgeSettings, type EnginePanel } from "@fx/db/src/engineBridge.js";
 import { readEngineUsage } from "@fx/core/src/engine/read.js";
 import { markRunnerWork } from "@fx/core/src/pendingWork.js";
 import {
@@ -52,6 +52,8 @@ const freshnessShape = {
   source_ages_s: z.record(z.string(), z.number()),
   gaps: z.array(z.object({ from_seq: z.number(), to_seq: z.number(), before_ts: z.string().nullable() })),
   missing_events: z.number(),
+  held_events: z.number().int(),
+  oldest_seq: z.number().int().nullable(),
 };
 const envelope = <T extends z.ZodTypeAny>(item: T) => z.object({ items: z.array(item), ...freshnessShape });
 const num = z.number();
@@ -110,13 +112,18 @@ async function onRepo<T>(ctx: Parameters<RouteEntry["handler"]>[0], id: string, 
   }
 }
 
-/** The envelope's age and holes, with the runner's wake stamp folded into `heard_age_s` (the account's own runner only). */
-async function freshOf(ctx: Parameters<RouteEntry["handler"]>[0], client: PoolClient, id: string) {
-  return toFreshness(await freshnessWithSeen(client, ctx.principal.accountId, id, await readEngineRepoFreshness(client, id)));
+/**
+ * The envelope's age and holes, with the runner's wake stamp folded into `heard_age_s` (the account's own runner only). `as_of` is the panel's own: when the newest event that panel
+ * reads reached the cloud. A panel that has had no event yet keeps the repo-wide stamp, so it never reads "no time".
+ */
+async function freshOf(ctx: Parameters<RouteEntry["handler"]>[0], client: PoolClient, id: string, panel: EnginePanel) {
+  const { accountId } = ctx.principal;
+  const fresh = toFreshness(await freshnessWithSeen(client, accountId, id, await readEngineRepoFreshness(client, id, accountId)));
+  return { ...fresh, as_of: (await readEnginePanelAsOf(client, accountId, id, panel)) ?? fresh.as_of };
 }
 
-async function listOf<T>(ctx: Parameters<RouteEntry["handler"]>[0], id: string, read: (client: PoolClient) => Promise<{ items: T[]; next_cursor: string | null }>): Promise<Envelope<T>> {
-  return onRepo(ctx, id, async (client) => ({ ...(await read(client)), ...(await freshOf(ctx, client, id)) }));
+async function listOf<T>(ctx: Parameters<RouteEntry["handler"]>[0], id: string, panel: EnginePanel, read: (client: PoolClient) => Promise<{ items: T[]; next_cursor: string | null }>): Promise<Envelope<T>> {
+  return onRepo(ctx, id, async (client) => ({ ...(await read(client)), ...(await freshOf(ctx, client, id, panel)) }));
 }
 
 const q = <S extends z.ZodTypeAny>(input: { query: unknown }) => (input.query ?? {}) as z.infer<S>;
@@ -164,7 +171,7 @@ export const engineRoutes: RouteEntry[] = [
         const items = await readEngineRepos(client, accountId);
         const newest = items.map((i) => i.last_heard_at).filter((x): x is string => x !== null).sort().pop() ?? null;
         const heard = newest === null ? null : Math.max(0, Math.round((Date.now() - Date.parse(newest)) / 1000));
-        return { items, next_cursor: null, as_of: newest ?? new Date().toISOString(), heard_age_s: heard, source_ages_s: {}, gaps: [], missing_events: 0 };
+        return { items, next_cursor: null, as_of: newest ?? new Date().toISOString(), heard_age_s: heard, source_ages_s: {}, gaps: [], missing_events: 0, held_events: 0, oldest_seq: null };
       });
     },
   },
@@ -175,7 +182,7 @@ export const engineRoutes: RouteEntry[] = [
     handler: (ctx, input) => {
       const query = q<typeof listQuery>(input) as z.infer<typeof listQuery> & { state?: "running" | "recent" };
       const limit = parseLimit(query.limit);
-      return listOf(ctx, input.params.id!, (c) => readAgents(c, input.params.id!, query.state ?? "running", limit, query.cursor, ctx.principal.accountId));
+      return listOf(ctx, input.params.id!, "agents", (c) => readAgents(c, input.params.id!, query.state ?? "running", limit, query.cursor, ctx.principal.accountId));
     },
   },
   {
@@ -184,7 +191,7 @@ export const engineRoutes: RouteEntry[] = [
     paramsSchema: idParams, querySchema: listQuery, responseSchema: envelope(laneItem),
     handler: (ctx, input) => {
       const query = q<typeof listQuery>(input);
-      return listOf(ctx, input.params.id!, (c) => readLanes(c, input.params.id!, parseLimit(query.limit), query.cursor));
+      return listOf(ctx, input.params.id!, "lanes", (c) => readLanes(c, input.params.id!, parseLimit(query.limit), query.cursor));
     },
   },
   {
@@ -193,7 +200,7 @@ export const engineRoutes: RouteEntry[] = [
     paramsSchema: idParams, querySchema: listQuery.extend({ pr: z.string().regex(/^[1-9][0-9]{0,14}$/).optional() }), responseSchema: envelope(gateItem),
     handler: (ctx, input) => {
       const query = q<typeof listQuery>(input) as z.infer<typeof listQuery> & { pr?: string };
-      return listOf(ctx, input.params.id!, (c) => readGates(c, input.params.id!, query.pr === undefined ? null : Number(query.pr), parseLimit(query.limit), query.cursor));
+      return listOf(ctx, input.params.id!, "gates", (c) => readGates(c, input.params.id!, query.pr === undefined ? null : Number(query.pr), parseLimit(query.limit), query.cursor));
     },
   },
   {
@@ -203,7 +210,7 @@ export const engineRoutes: RouteEntry[] = [
     paramsSchema: idParams, querySchema: listQuery.extend({ state: z.enum(["open", "all"]).optional() }), responseSchema: envelope(askItem),
     handler: (ctx, input) => {
       const query = q<typeof listQuery>(input) as z.infer<typeof listQuery> & { state?: "open" | "all" };
-      return listOf(ctx, input.params.id!, (c) => readAsks(c, input.params.id!, query.state ?? "open", parseLimit(query.limit), query.cursor, ctx.principal.accountId));
+      return listOf(ctx, input.params.id!, "asks", (c) => readAsks(c, input.params.id!, query.state ?? "open", parseLimit(query.limit), query.cursor, ctx.principal.accountId));
     },
   },
   {
@@ -212,7 +219,7 @@ export const engineRoutes: RouteEntry[] = [
     paramsSchema: idParams, querySchema: listQuery, responseSchema: envelope(logItem),
     handler: (ctx, input) => {
       const query = q<typeof listQuery>(input);
-      return listOf(ctx, input.params.id!, (c) => readLog(c, input.params.id!, parseLimit(query.limit), query.cursor));
+      return listOf(ctx, input.params.id!, "log", (c) => readLog(c, input.params.id!, parseLimit(query.limit), query.cursor));
     },
   },
   {
@@ -225,7 +232,7 @@ export const engineRoutes: RouteEntry[] = [
       return onRepo(ctx, input.params.id!, async (client) => {
         const u = await readEngineUsage(client, { ...w, repoId: input.params.id! });
         return {
-          items: u.rows, next_cursor: null, ...(await freshOf(ctx, client, input.params.id!)),
+          items: u.rows, next_cursor: null, ...(await freshOf(ctx, client, input.params.id!, "usage")),
           window: { from: w.from.toISOString(), to: w.to.toISOString() }, totals: { api_equivalent_usd: u.total_api_equivalent_usd, tokens: sum(u.rows) },
         };
       });
@@ -239,7 +246,7 @@ export const engineRoutes: RouteEntry[] = [
       const w = resolveWindow(q<typeof windowQuery>(input), new Date());
       return onRepo(ctx, input.params.id!, async (client) => ({
         ...(await readRepoStats(client, input.params.id!, w.from, w.to)),
-        ...(await freshOf(ctx, client, input.params.id!)),
+        ...(await freshOf(ctx, client, input.params.id!, "stats")),
         window: { from: w.from.toISOString(), to: w.to.toISOString() },
       }));
     },
