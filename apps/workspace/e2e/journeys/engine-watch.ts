@@ -45,7 +45,7 @@ export class Engine {
   /** The answer to one engine read, or null for a path this stand-in does not know. */
   read(path: string, q: URLSearchParams): Obj | null | undefined {
     const F = this.F;
-    if (path === "settings") return F.settings({ watch_enabled: this.watch, repos: this.repos.map((r) => F.settingsRepo({ repo_id: r.id, full_name: r.name, enabled: r.on, eligible: r.ok, refusal: r.ok ? null : "public_repo" })) });
+    if (path === "settings") return F.settings({ watch_enabled: this.watch, repos: this.repos.map((r) => F.settingsRepo({ repo_id: r.id, full_name: r.name, enabled: r.on, eligible: r.ok, refusal: r.ok ? null : "repo_not_runner_local" })) });
     if (path === "repos") return { ...this.env([]), items: this.repos.filter((r) => r.on).map((r) => F.repo({ repo_id: r.id, full_name: r.name, liveness: this.heard > 180 ? "stale" : "live", last_heard_at: new Date(this.heardAt).toISOString(), session_id: SESSION })) };
     const kind = path.split("/")[2];
     if (kind === "agents") return this.env(this.agents.filter((a) => !a.stopped).map((a) => F.agent({ agent_id: a.id, role: a.role, discussion: a.d, started_at: new Date(a.at).toISOString() })));

@@ -23,7 +23,7 @@ export function makeFixtures(nowMs) {
   const settingsRepo = (over = {}) => ({ repo_id: REPO_A, full_name: "acme-labs/widgets", enabled: true, eligible: true, refusal: null, bridged_runner_id: null, ...over });
   const settings = (over = {}) => ({
     watch_enabled: true, operate_enabled: false, can_edit: true,
-    repos: [settingsRepo(), settingsRepo({ repo_id: REPO_B, full_name: "acme-labs/site", enabled: false, eligible: false, refusal: "public_repo" })], ...over,
+    repos: [settingsRepo(), settingsRepo({ repo_id: REPO_B, full_name: "acme-labs/site", enabled: false, eligible: false, refusal: "repo_not_runner_local" })], ...over,
   });
   const agent = (over = {}) => ({
     agent_id: "a1b2c3d4e5f60718", role: "executor", discussion: 42, background: false, started_at: iso(600), stopped_at: null, verdict: null, state: "running", model: "sonnet-5", credential_mode: "subscription", ...over,

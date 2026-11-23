@@ -489,7 +489,7 @@ test.describe("Team app", () => {
     await expect(t(page, "tm-repo-row")).toHaveCount(2);
     await expect(t(page, `tm-repo-${REPO_A}`)).toBeChecked();
     await expect(t(page, `tm-repo-${REPO_B}`)).toBeDisabled();
-    await expect(t(page, "tm-refusal")).toHaveText("Public repository");
+    await expect(t(page, "tm-refusal")).toHaveText("Not on one of your runners");
     await expect(t(page, `tm-repo-${REPO_B}`)).toHaveAttribute("aria-describedby", `tm-why-${REPO_B}`);
     await expect(t(page, "tm-refusal")).toHaveAttribute("id", `tm-why-${REPO_B}`);
     // Untick the repo that is on: one PUT with the new list, and the picker loses it.
@@ -499,9 +499,9 @@ test.describe("Team app", () => {
     await expect(t(page, `tm-repo-${REPO_A}`)).not.toBeChecked();
     // A refusal is said in the app's words, not the server's.
     mock.putStatus = 409;
-    mock.putCode = "public_repo";
+    mock.putCode = "repo_not_runner_local";
     await press(t(page, `tm-repo-${REPO_A}`));
-    await expect(t(page, "tm-live")).toHaveText("A public repository can't be watched.");
+    await expect(t(page, "tm-live")).toHaveText("That repository isn't on one of your runners.");
     await clean(page, errors);
   });
 
@@ -927,14 +927,14 @@ test.describe("Team app", () => {
     }, `${WIN} [data-testid="tm-live"]`);
     const said = () => page.evaluate(() => (window as unknown as { __said: number }).__said);
     mock.putStatus = 409;
-    mock.putCode = "public_repo";
+    mock.putCode = "repo_not_runner_local";
     await press(t(page, `tm-repo-${REPO_A}`));
-    await expect(t(page, "tm-live")).toHaveText("A public repository can't be watched.");
+    await expect(t(page, "tm-live")).toHaveText("That repository isn't on one of your runners.");
     const first = await said();
     expect(first).toBeGreaterThan(0);
     await press(t(page, `tm-repo-${REPO_A}`));
     await expect.poll(said).toBeGreaterThan(first);
-    await expect(t(page, "tm-live")).toHaveText("A public repository can't be watched.");
+    await expect(t(page, "tm-live")).toHaveText("That repository isn't on one of your runners.");
   });
 
   // ── Operate ───────────────────────────────────────────────────────────────────────────────────────────────────────

@@ -190,7 +190,7 @@ export async function autoPlaceProject(client: PoolClient, a: Actor, input: { re
   throw refuse(409, "no_eligible_machine", "no machine can take a project right now");
 }
 
-const lockRunners = async (client: PoolClient, ids: readonly string[]): Promise<void> => {
+export const lockRunners = async (client: PoolClient, ids: readonly string[]): Promise<void> => {
   // The lock the fleet's repository edit takes, in a fixed order, so a move and an edit of the same machine's list never interleave and two moves never deadlock.
   for (const id of [...ids].sort()) await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`runner_repos:${id.toLowerCase()}`]);
 };

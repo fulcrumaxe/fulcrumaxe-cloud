@@ -2,6 +2,8 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
+import { withTenant } from '@fx/db/src/withTenant.js';
+import { lockEngineBridge } from '@fx/db/src/engineBridge.js';
 import { SESSION_COOKIE_NAME, signSession } from '@fx/core/src/auth/session.js';
 import { agentStateOf, livenessOf, readAsks } from '@fx/core/src/engine/panels.js';
 import { WEBHOOK_EVENT_TYPES } from '@fx/webhooks';
@@ -461,7 +463,7 @@ describe('engine read routes and settings [pg]', () => {
     expect((await call(other, 'GET', '/engine/repos')).body.items).toEqual([]);
   });
 
-  it('settings: any member reads (can_edit by role); a member cannot write; public and non-runner repos are refused; operate needs watch; each change is audited', async () => {
+  it('settings: any member reads (can_edit by role); a member cannot write; a public repo is accepted, an unanswered visibility and a non-runner repo are refused; operate needs watch; each change is audited', async () => {
     engineSettingsDeps.getVisibility = () => async () => 'private';
     const read = (await call(member, 'GET', '/engine/settings')).body;
     expect(read).toMatchObject({ watch_enabled: true, operate_enabled: false, can_edit: false });
@@ -484,11 +486,18 @@ describe('engine read routes and settings [pg]', () => {
     for (const [id, gh, name, mode] of [[second, 9002, 'second', 'runner_local'], [third, 9003, 'third', 'sandbox']] as const) {
       await q(`INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product, gh_owner, gh_name, execution_mode) SELECT $1, account_id, installation_id, $2, 'team', 'acme', $3, $4 FROM repos WHERE id = $5`, [id, gh, name, mode, A.repoId]);
     }
+    // D#845 O-9: a public repo is eligible for the engine track; a visibility GitHub did not answer (or a missing reader) is not.
     engineSettingsDeps.getVisibility = () => async () => 'public';
-    expect(await call(owner(), 'PUT', '/engine/settings', { repo_ids: [A.repoId, second] })).toMatchObject({ status: 409, body: { error: { code: 'public_repo' } } });
-    expect((await call(owner(), 'GET', '/engine/settings')).body.repos.find((x: Json) => x.repo_id === second)).toMatchObject({ full_name: 'acme/second', eligible: false, refusal: 'public_repo' });
+    expect((await call(owner(), 'GET', '/engine/settings')).body.repos.find((x: Json) => x.repo_id === second)).toMatchObject({ full_name: 'acme/second', eligible: true, refusal: null });
+    const pub = await call(owner(), 'PUT', '/engine/settings', { repo_ids: [A.repoId, second] });
+    expect(pub.status).toBe(200);
+    expect(pub.body.repos.find((x: Json) => x.repo_id === second)).toMatchObject({ enabled: true });
+    await call(owner(), 'PUT', '/engine/settings', { repo_ids: [A.repoId] });
+    engineSettingsDeps.getVisibility = () => async () => 'unknown';
+    expect(await call(owner(), 'PUT', '/engine/settings', { repo_ids: [A.repoId, second] })).toMatchObject({ status: 409, body: { error: { code: 'repo_visibility_unknown' } } });
+    expect((await call(owner(), 'GET', '/engine/settings')).body.repos.find((x: Json) => x.repo_id === second)).toMatchObject({ eligible: false, refusal: 'repo_visibility_unknown' });
     engineSettingsDeps.getVisibility = null;
-    expect((await call(owner(), 'PUT', '/engine/settings', { repo_ids: [A.repoId, second] })).status).toBe(409);
+    expect(await call(owner(), 'PUT', '/engine/settings', { repo_ids: [A.repoId, second] })).toMatchObject({ status: 409, body: { error: { code: 'repo_visibility_unknown' } } });
     engineSettingsDeps.getVisibility = () => async () => 'private';
     expect(await call(owner(), 'PUT', '/engine/settings', { repo_ids: [A.repoId, third] })).toMatchObject({ status: 409, body: { error: { code: 'repo_not_runner_local' } } });
     const ok = await call(owner(), 'PUT', '/engine/settings', { repo_ids: [A.repoId, second] });
@@ -511,7 +520,7 @@ describe('engine read routes and settings [pg]', () => {
       'the reader factory throws': () => {
         throw new Error('no github client');
       },
-      'the reader answers something that is not private': () => async () => 'unknown',
+      'the reader answers unknown': () => async () => 'unknown',
     };
     try {
       const rowsBefore = await ticked();
@@ -519,11 +528,11 @@ describe('engine read routes and settings [pg]', () => {
       for (const [name, deps] of Object.entries(failures)) {
         engineSettingsDeps.getVisibility = deps;
         const put = await call(owner(), 'PUT', '/engine/settings', { repo_ids: [A.repoId, fresh] });
-        expect(put, name).toMatchObject({ status: 409, body: { error: { code: 'public_repo' } } });
+        expect(put, name).toMatchObject({ status: 409, body: { error: { code: 'repo_visibility_unknown' } } });
         expect(await ticked(), `${name}: nothing ticked`).toEqual(rowsBefore);
         expect(await audits(), `${name}: nothing audited`).toBe(auditsBefore);
         const view = (await call(owner(), 'GET', '/engine/settings')).body;
-        expect(view.repos.find((x: Json) => x.repo_id === fresh), `${name}: the read says refused`).toMatchObject({ eligible: false, refusal: 'public_repo' });
+        expect(view.repos.find((x: Json) => x.repo_id === fresh), `${name}: the read says refused`).toMatchObject({ eligible: false, refusal: 'repo_visibility_unknown' });
       }
       engineSettingsDeps.getVisibility = () => async () => 'private';
       expect((await call(owner(), 'PUT', '/engine/settings', { repo_ids: [A.repoId, fresh] })).status).toBe(200);
@@ -566,6 +575,60 @@ describe('engine read routes and settings [pg]', () => {
     expect((await call(owner(), 'GET', '/engine/settings')).status).toBe(200);
     expect(woken).toEqual([]);
     // Left as the earlier settings test leaves it, for the tests after this one.
+    await q(`UPDATE engine_bridge_settings SET watch_enabled = false, operate_enabled = false WHERE account_id = $1`, [A.accountId]);
+  });
+
+  it('settings: operate on a public repo is 409 operate_public_pending and writes nothing; watch-only of a public repo and operate on private repos are unchanged', async () => {
+    const pub = randomUUID();
+    await q(`INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product, gh_owner, gh_name, execution_mode) SELECT $1, account_id, installation_id, 9301, 'team', 'acme', 'pubrepo', 'runner_local' FROM repos WHERE id = $2`, [pub, A.repoId]);
+    engineSettingsDeps.getVisibility = () => async (_a: string, id: string) => (id === pub ? 'public' : 'private');
+    await q(`UPDATE engine_bridge_settings SET watch_enabled = true, operate_enabled = false WHERE account_id = $1`, [A.accountId]);
+    await q(`DELETE FROM engine_bridge_repos WHERE account_id = $1 AND repo_id <> $2`, [A.accountId, A.repoId]);
+    const state = async () => ({
+      operate: (await q(`SELECT operate_enabled FROM engine_bridge_settings WHERE account_id = $1`, [A.accountId])).rows[0].operate_enabled as boolean,
+      ticked: (await q(`SELECT repo_id FROM engine_bridge_repos WHERE account_id = $1 ORDER BY repo_id`, [A.accountId])).rows.map((r) => r.repo_id as string).sort(),
+    });
+    const refused = { status: 409, body: { error: { code: 'operate_public_pending' } } };
+    try {
+      // Watch-only: a public repo can be ticked while operate is off.
+      expect((await call(owner(), 'PUT', '/engine/settings', { repo_ids: [A.repoId, pub] })).status).toBe(200);
+      // Operate on with the public repo ticked, and operate together with the tick: both refused, nothing written.
+      expect(await call(owner(), 'PUT', '/engine/settings', { operate_enabled: true })).toMatchObject(refused);
+      expect((await state()).operate).toBe(false);
+      await call(owner(), 'PUT', '/engine/settings', { repo_ids: [A.repoId] });
+      expect(await call(owner(), 'PUT', '/engine/settings', { operate_enabled: true, repo_ids: [A.repoId, pub] })).toMatchObject(refused);
+      expect(await state()).toEqual({ operate: false, ticked: [A.repoId] });
+      // Private only: operate goes on as before. Then adding the public repo while operate is on is refused.
+      expect((await call(owner(), 'PUT', '/engine/settings', { operate_enabled: true })).status).toBe(200);
+      expect(await call(owner(), 'PUT', '/engine/settings', { repo_ids: [A.repoId, pub] })).toMatchObject(refused);
+      expect(await state()).toEqual({ operate: true, ticked: [A.repoId] });
+    } finally {
+      engineSettingsDeps.getVisibility = null;
+      await q(`UPDATE engine_bridge_settings SET watch_enabled = false, operate_enabled = false WHERE account_id = $1`, [A.accountId]);
+      await q(`DELETE FROM engine_bridge_repos WHERE account_id = $1 AND repo_id <> $2`, [A.accountId, A.repoId]);
+    }
+  });
+
+  it('settings: a write waits for the per-account bridge lock the project confirm also takes, and goes through once it is released', async () => {
+    engineSettingsDeps.getVisibility = () => async () => 'private';
+    await q(`UPDATE engine_bridge_settings SET watch_enabled = false, operate_enabled = false WHERE account_id = $1`, [A.accountId]);
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let entered!: () => void;
+    const inside = new Promise<void>((r) => { entered = r; });
+    const holder = withTenant(appUserPool, A.accountId, A.userId, async (client) => {
+      await lockEngineBridge(client);
+      entered();
+      await held;
+    });
+    await inside;
+    let settled = false;
+    const put = call(owner(), 'PUT', '/engine/settings', { watch_enabled: true }).finally(() => { settled = true; });
+    await new Promise((r) => setTimeout(r, 600));
+    expect(settled, 'the write waits on the lock').toBe(false);
+    release();
+    await holder;
+    expect((await put).status).toBe(200);
     await q(`UPDATE engine_bridge_settings SET watch_enabled = false, operate_enabled = false WHERE account_id = $1`, [A.accountId]);
   });
 

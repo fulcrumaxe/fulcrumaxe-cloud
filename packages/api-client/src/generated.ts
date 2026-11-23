@@ -6015,7 +6015,7 @@ export interface Operations {
         full_name: string;
         enabled: boolean;
         eligible: boolean;
-        refusal: ("repo_not_runner_local" | "public_repo") | (null);
+        refusal: ("repo_not_runner_local" | "repo_visibility_unknown") | (null);
         bridged_runner_id: (string) | (null);
       }>;
     };
@@ -6037,7 +6037,7 @@ export interface Operations {
         full_name: string;
         enabled: boolean;
         eligible: boolean;
-        refusal: ("repo_not_runner_local" | "public_repo") | (null);
+        refusal: ("repo_not_runner_local" | "repo_visibility_unknown") | (null);
         bridged_runner_id: (string) | (null);
       }>;
     };
