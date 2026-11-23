@@ -24,7 +24,7 @@ function onVisible(fn) {
 
 function mountApp(contentEl) {
   const ac = new AbortController();
-  const team = createTeam({ signal: ac.signal, onChange: () => paint() });
+  const team = createTeam({ signal: ac.signal, liveView: true, onChange: () => paint() });
   const root = h("div", { class: "tm-app", "data-testid": "tm-app" });
   contentEl.replaceChildren(root);
 
@@ -56,6 +56,7 @@ function mountApp(contentEl) {
   const sheetBtn = h("button", { type: "button", class: "tm-btn", "data-testid": "tm-settings-btn", "aria-expanded": "false", "aria-controls": "tm-sheet", onClick: () => team.toggleSheet() }, WORDS.settings);
   const bar = h("div", { class: "tm-bar" }, picker, chip, haltChip, runner, sheetBtn);
   const live = h("p", { class: "tm-live", role: "status", "aria-live": "polite", "data-testid": "tm-live" });
+  const watchBar = h("div", { class: "tm-watch", "data-testid": "tm-liveview" });
   const banner = h("p", { class: "tm-banner", "data-testid": "tm-banner", role: "note" });
   const notices = h("ul", { class: "tm-notices", role: "list", "data-testid": "tm-notices" });
   const note = h("p", { class: "tm-muted", "data-testid": "tm-refresh-failed" });
@@ -96,7 +97,7 @@ function mountApp(contentEl) {
   opWrap.hidden = true;
   const haltBox = h("section", { class: "tm-panel tm-halt", "aria-labelledby": "tm-halt-h", "data-testid": "tm-halt" });
   haltBox.hidden = true;
-  root.replaceChildren(h("div", { class: "tm-page" }, heading, bar, live, banner, notices, note, haltBox, sheet, body, opWrap));
+  root.replaceChildren(h("div", { class: "tm-page" }, heading, bar, watchBar, live, banner, notices, note, haltBox, sheet, body, opWrap));
 
   // A control that cannot be used right now keeps its place in the Tab order (aria-disabled, not disabled): focus stays on it through a save, and a member who tabs to it hears why.
   const box = (attrs, checked, enabled, why, set) => h("input", { type: "checkbox", checked, "aria-disabled": enabled ? null : "true", "aria-describedby": enabled ? null : why, onClick: (e) => { if (!enabled) e.preventDefault(); }, onChange: (e) => set(e.target.checked), ...attrs });
@@ -272,8 +273,8 @@ function mountApp(contentEl) {
   // The log: one scrolling list kept for good (its rows are swapped in place), with the note, the failure line and the two buttons around it.
   // data-preview-keep: a window preview (dock hover, Alt+Tab) keeps only the first 30 of the up to 400 rows.
   const logList = h("ul", { class: "tm-list tm-scroll", role: "list", tabindex: "0", "data-testid": "tm-log-list", "data-preview-keep": "30" });
-  const logTop = h("div"), logBar = h("div", { class: "tm-pager" });
-  P.log.body.replaceChildren(logTop, logList, logBar);
+  const logTop = h("div"), logBar = h("div", { class: "tm-pager" }), logHeld = h("div", { "data-testid": "tm-log-held-box" });
+  P.log.body.replaceChildren(logTop, logHeld, logList, logBar);
   const logItem = (l) => h("li", { class: "tm-item", "data-testid": "tm-log-line", "data-id": l.id },
     h("span", { class: "tm-time" }, l.time), " ", h("strong", { class: "tm-role" }, h("bdi", null, l.role)), " ", h("span", { class: "tm-cat" }, l.category),
     l.discussion ? " " : null, dLink(l.discussion, l.discussionLink), l.pr ? " " : null, l.pr ? link(l.prLink, "PR #" + l.pr, { "data-testid": "tm-log-pr" }) : null);
@@ -331,6 +332,10 @@ function mountApp(contentEl) {
     (async () => { while (at < rows.length) { await giveTurn(); if (job !== logJob || ac.signal.aborted) return; add(0); if (!placed) place(); } })();
   }
   function paintLog(p) {
+    // Lines the runner holds back: counted by the cloud, and "Load older" asks the machine for the ones before the oldest it has uploaded.
+    swap("p:log-held", logHeld, p.held, () => (p.held ? [h("p", { class: "tm-muted", "data-testid": "tm-log-held" }, p.held.text, " ",
+      h("button", { type: "button", class: "tm-btn", "data-testid": "tm-log-held-older", "data-focus": "log-held-older", onClick: () => team.watch.older(p.held.oldest) }, p.held.button)),
+      p.held.note ? h("span", { class: "tm-muted", role: "status", "data-testid": "tm-log-held-note" }, p.held.note) : null] : null));
     swap("p:log-top", logTop, [p.failed, p.rows.length, p.empty, p.note], () => [h("p", { class: "tm-muted", "data-testid": "tm-log-note" }, p.note), p.failed ? failedP("log") : p.rows.length === 0 ? h("p", { class: "tm-muted", "data-testid": "tm-log-empty" }, p.empty) : null]);
     logList.hidden = p.failed || p.rows.length === 0;
     logList.setAttribute("aria-label", p.label);
@@ -402,6 +407,12 @@ function mountApp(contentEl) {
       picker.value = (d.repos.find((r) => r.selected) || d.repos[0]).id;
       runner.replaceChildren(...(d.runner ? ["Runner: ", h("bdi", null, d.runner)] : []), ...(d.rv.connecting ? [d.runner ? " · " : "", h("span", { "data-testid": "tm-connecting-bar" }, d.rv.connecting)] : []));
     }
+    // The live view: one status word (Live, Connecting, Updated <time>, Updating every minute); a sentence when the machine is offline, the plan's watchers are all taken, or the view ended, with Try again where a click can ask once more.
+    const wv = hasRepos ? d.watch : null;
+    watchBar.hidden = !wv;
+    swap("watch", watchBar, wv, () => (wv ? [h("span", { class: "tm-pill", "data-testid": "tm-watch-pill", "data-state": wv.state }, wv.pill),
+      wv.banner ? h("span", { class: "tm-watch-note", role: "status", "data-testid": "tm-watch-" + (wv.state === "cap" ? "cap" : wv.state === "offline" ? "offline" : "note") }, " " + wv.banner) : null,
+      wv.retry ? h("button", { type: "button", class: "tm-btn", "data-testid": "tm-watch-retry", "data-focus": "watch-retry", onClick: () => { want = "watch-retry"; team.watch.again(); } }, wv.retry) : null] : null));
     setText(banner, hasRepos ? d.banner : "");
     banner.hidden = !(hasRepos && d.banner);
     notices.hidden = !(hasRepos && d.notices.length);
@@ -514,6 +525,7 @@ function mountApp(contentEl) {
     for (const el of opWrap.querySelectorAll("[data-sw]")) el.setAttribute("aria-disabled", o.sw.why || o.saving ? "true" : "false");
   }
 
+  for (const ev of ["pointerdown", "keydown", "wheel"]) root.addEventListener(ev, () => team.watch.touch(), { passive: true, signal: ac.signal }); // real input keeps the live view's idle clock running
   paint();
   team.load();
   team.start({ subscribe: onRefresh, listen: on, hidden: () => document.hidden, visibility: onVisible });

@@ -87,6 +87,10 @@ export async function serve(page: Page, engine: Engine) {
     const req = route.request();
     const u = new URL(req.url());
     const p = u.pathname.slice("/api/v1/".length);
+    if (/^engine\/repos\/[^/]+\/watch$/.test(p) && (req.method() === "POST" || req.method() === "DELETE")) { // the Team app's live view: a slot is always free in the stand-in
+      const now = Date.now();
+      return json(route, 200, req.method() === "DELETE" ? { released: true } : { lease_id: "5a1f3c52-7a0e-4c1a-9a53-0b1d2e3f4a55", expires_at: new Date(now + 90_000).toISOString(), session_ends_at: new Date(now + 4 * 3600_000).toISOString(), limits: { per_repo: 2, per_account: 4 }, command: "held", machine: "online", last_seen: new Date(now).toISOString(), detail_as_of: null });
+    }
     if (p.startsWith("engine/")) {
       if (req.method() === "PUT") { engine.write(p.slice(7), (req.postDataJSON() ?? {}) as Obj); return json(route, 200, { ok: true }); }
       const body = engine.read(p.slice(7), u.searchParams);

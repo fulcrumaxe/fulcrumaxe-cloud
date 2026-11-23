@@ -35,6 +35,7 @@ export const lanesUrl = (repoId, cursor) => panelUrl("lanes", repoId) + "?cursor
 export const commandsUrl = (repoId) => REPOS_URL + "/" + enc(repoId) + "/commands";
 export const commandUrl = (id) => "/api/v1/engine/commands/" + enc(id);
 export const bridgeUrl = (repoId) => REPOS_URL + "/" + enc(repoId) + "/bridge";
+export const watchUrl = (repoId) => REPOS_URL + "/" + enc(repoId) + "/watch";
 export const haltUrl = (repoId) => REPOS_URL + "/" + enc(repoId) + "/halt";
 export const clearHaltUrl = (repoId) => haltUrl(repoId) + "/clear";
 export const dialsUrl = (repoId) => "/api/v1/repos/" + enc(repoId) + "/decision-settings";
@@ -57,6 +58,8 @@ export function createTeamApi(call = api) {
     bridge: (repoId, signal) => call("GET", bridgeUrl(repoId), undefined, signal),
     connectBridge: (repoId, body, signal) => call("POST", bridgeUrl(repoId), body, signal),
     disconnectBridge: (repoId, signal) => call("DELETE", bridgeUrl(repoId), undefined, signal),
+    watch: (repoId, body, signal) => call("POST", watchUrl(repoId), body, signal),
+    unwatch: (repoId, browserId) => call("DELETE", watchUrl(repoId) + "?browser_id=" + enc(browserId)),
     halt: (repoId, signal) => call("POST", haltUrl(repoId), {}, signal),
     clearHalt: (repoId, signal) => call("POST", clearHaltUrl(repoId), {}, signal),
     dials: (repoId, signal) => call("GET", dialsUrl(repoId), undefined, signal),
@@ -174,7 +177,7 @@ export function readEnvelope(raw, listed = true) {
   const ages = {};
   if (isObj(raw.source_ages_s)) for (const k of SOURCE_ORDER) if (Number.isFinite(raw.source_ages_s[k]) && raw.source_ages_s[k] >= 0) ages[k] = raw.source_ages_s[k];
   const gaps = raw.gaps.filter((g) => isObj(g) && stamp(g.before_ts) !== null).map((g) => ({ before_ts: g.before_ts }));
-  return { items: listed ? raw.items.filter(isObj) : [], cursor: typeof raw.next_cursor === "string" ? raw.next_cursor : "", as_of: stamp(raw.as_of) === null ? "" : raw.as_of, heard_age_s: isInt(raw.heard_age_s) ? raw.heard_age_s : null, source_ages_s: ages, gaps, missing_events: raw.missing_events };
+  return { items: listed ? raw.items.filter(isObj) : [], cursor: typeof raw.next_cursor === "string" ? raw.next_cursor : "", as_of: stamp(raw.as_of) === null ? "" : raw.as_of, heard_age_s: isInt(raw.heard_age_s) ? raw.heard_age_s : null, source_ages_s: ages, gaps, missing_events: raw.missing_events, held: isInt(raw.held_events) ? raw.held_events : 0, oldest: isInt(raw.oldest_seq) ? raw.oldest_seq : null };
 }
 
 /** The plan route's body (a 204 never gets here: the caller treats null as "not synced"). The roadmap list is part of the shape. */
@@ -275,10 +278,10 @@ export function chipOf(repo) {
   if (repo.liveness === "stale") return repo.lastHeard && hm(repo.lastHeard) ? "Stale since " + hm(repo.lastHeard) : "Stale";
   return CHIP[repo.liveness] || "Unknown";
 }
-/** "as of HH:MM (N min ago)" from the envelope's own time. */
+/** "As of HH:MM (N min ago)" from the envelope's own time: the panel's own, the newest event it reads. */
 export function asOfWords(env, nowMs) {
   const m = env ? minutesSince(env.as_of, nowMs) : null;
-  return m === null ? WORDS.noData : "as of " + hm(env.as_of) + " (" + m + " min ago)";
+  return m === null ? WORDS.noData : "As of " + hm(env.as_of) + " (" + m + " min ago)";
 }
 /** The envelope says the engine has not been heard from within 450 s (or ever), or the list says the session is not live. */
 /** The list's own word (the status read) ages with the clock: a repo last heard long ago reads stale even when no panel has been read since. */
@@ -471,6 +474,7 @@ export function describe(st, nowMs) {
     kind: "ready", ...base, operate: describeOperate(shown, nowMs, repo, asOf, rows), halt: describeHalt(st, repo, nowMs),
     repos: st.repos.map((r) => ({ id: r.id, name: r.name, selected: r.id === repo.id })),
     chip: chipOf(repo), runner: repo.runner, banner: gapBanner(envs), notices: sourceNotices(envs, lanes),
+    watch: st.watchMod ? st.watchMod.watchView(st.watch, repo, nowMs) : null,
     agents: { ...head(agents), failed: !agents, rows, empty: WORDS.noAgents },
     lanes: { ...head(lanes), failed: !lanes, open: lane ? lane.open : [], merged: lane ? lane.merged : [], empty: WORDS.noLanes },
     plan: { ...(plan === "none" ? { asOf: WORDS.noData, warn: "" } : head(plan)), failed: !plan, none: plan === "none", view: planned, notSynced: WORDS.noPlan },
@@ -480,6 +484,8 @@ export function describe(st, nowMs) {
       ...head(log), failed: !log, rows: lg.rows.map((l, i) => logRow(l, i, repo.name, nowMs)), empty: WORDS.noLog, note: WORDS.logNote, label: WORDS.logLabel,
       older: lg.loading ? WORDS.olderLoading : lg.cursor ? WORDS.older : WORDS.olderNone, canOlder: !!lg.cursor && !lg.loading, olderFailed: lg.failed ? WORDS.olderFailed : "",
       newest: lg.released > 0 ? WORDS.newest + " (" + lg.released + " newer lines not shown)" : "", said: lg.said,
+      // Lines the runner holds back on its machine: said in the cloud's own count, with the cursor "Load older" asks before.
+      held: st.watchMod && isObj(log) && log.held > 0 ? { text: st.watchMod.WATCH_WORDS.held(log.held), button: st.watchMod.WATCH_WORDS.loadOlder, note: st.watch ? st.watch.older : "", oldest: log.oldest } : null,
     },
   };
 }
@@ -489,8 +495,8 @@ const NO_PANELS = { agents: null, lanes: null, gates: null, log: null, plan: nul
 const NO_LOG = { rows: [], cursor: "", pages: 0, released: 0, loading: false, failed: false, said: "" };
 const aborted = (e, signal) => (signal && signal.aborted) || (e && e.name === "AbortError");
 
-export function createTeam({ client = createTeamApi(), signal, onChange = () => {}, setTimer = setTimeout, clearTimer = clearTimeout, setRepeat = setInterval, clearRepeat = clearInterval, now = Date.now } = {}) {
-  let st = { status: "loading", settings: null, repos: [], selectedId: "", panels: NO_PANELS, log: NO_LOG, planPage: 0, provOpen: [], sheetOpen: false, saving: false, confirmDelete: false, notice: "", refreshFailed: false, failedKeys: [], op: NO_OP, draft: null, fleet: null, runnerPick: "", runnersMod: null, bridge: { repoId: "", data: null, failed: false, busy: false, notice: "", runnerPick: "", rootPick: "" }, bridgeMod: null };
+export function createTeam({ client = createTeamApi(), signal, liveView = false, onChange = () => {}, setTimer = setTimeout, clearTimer = clearTimeout, setRepeat = setInterval, clearRepeat = clearInterval, now = Date.now } = {}) {
+  let st = { status: "loading", settings: null, repos: [], selectedId: "", panels: NO_PANELS, log: NO_LOG, planPage: 0, provOpen: [], sheetOpen: false, saving: false, confirmDelete: false, notice: "", refreshFailed: false, failedKeys: [], op: NO_OP, draft: null, fleet: null, runnerPick: "", runnersMod: null, bridge: { repoId: "", data: null, failed: false, busy: false, notice: "", runnerPick: "", rootPick: "" }, bridgeMod: null, watch: null, watchMod: null };
   let safetyTimer = null, started = false, retryTimer = null, busy = false, queued = new Set(), lastFull = -Infinity, pick = 0, stopFn = null, saveVer = 0, hiddenFn = () => false;
   // Which parts a notice asked for, and when each may be read again. Every read, whoever asked for it, is marked here, so no part is read twice inside the gate.
   const gate = createCoalescer({ now, setTimer, clearTimer, run: (names) => { if (!hiddenFn()) refresh(new Set(names)); } });
@@ -516,6 +522,19 @@ export function createTeam({ client = createTeamApi(), signal, onChange = () => 
     const ctl = await bridgeOn();
     if (ctl && st.sheetOpen) await ctl.show(repo.id);
   }
+  // The live view lives in its own module, fetched when a repo is first shown. A module that cannot be fetched leaves the app on its summary reads.
+  let watchCtl = null, watchLoad = null;
+  async function watchSync() {
+    const repo = st.settings && st.settings.watch ? st.repos.find((r) => r.id === st.selectedId) : null;
+    const want = liveView && repo && repo.liveness !== "never" ? repo.id : "";
+    if (!want && !watchCtl) return;
+    if (!watchCtl) {
+      watchLoad = watchLoad || import("./team-runners.js").then((m) => { watchCtl = m.createWatch({ client, signal, get: () => st, set, refresh: () => refresh(), hidden: () => hiddenFn() }); set({ watchMod: m }); }, () => {}); // fx-swallow-ok: no module, no live view; the summary reads carry on
+      await watchLoad;
+    }
+    if (watchCtl && !(signal && signal.aborted)) watchCtl.sync(want);
+  }
+  const watchDo = (name) => (...args) => (watchCtl ? watchCtl[name](...args) : undefined);
   const bridgePoll = () => { if (!hiddenFn() && st.sheetOpen && bridgeCtl && bridgeCtl.waiting() && !st.bridge.busy) showBridge(); };
   const bridgeDo = (name) => (...args) => (bridgeCtl ? bridgeCtl[name](...args) : undefined);
 
@@ -567,6 +586,7 @@ export function createTeam({ client = createTeamApi(), signal, onChange = () => 
       if (changed) want = new Set(READ_NAMES); // another repo is shown now: all of it is read
       set({ status: "ready", settings, repos, fleet, selectedId, refreshFailed: selectedId ? st.refreshFailed : false, panels: changed ? NO_PANELS : st.panels, op: changed ? NO_OP : st.op, ...(changed ? { log: NO_LOG, planPage: 0, provOpen: [] } : {}) }); // the note stays up until the panels say otherwise, so a poll that fails again does not clear it and set it again
     }
+    watchSync();
     if (!selectedId) return;
     const token = pick;
     const stale = () => token !== pick || (signal && signal.aborted); // another repo was chosen, or the window closed, while a read was out
@@ -695,6 +715,7 @@ export function createTeam({ client = createTeamApi(), signal, onChange = () => 
     stopFn = () => { offs.forEach((off) => off()); clearRepeat(poll); started = false; armSafety(); };
   }
   function stop() {
+    if (watchCtl) { watchCtl.destroy(); watchCtl = null; watchLoad = null; }
     if (stopFn) stopFn();
     stopFn = null;
     gate.cancel();
@@ -712,6 +733,7 @@ export function createTeam({ client = createTeamApi(), signal, onChange = () => 
       if (st.sheetOpen && st.settings && st.settings.watch) readFleetSafe().then((fleet) => { if (!(signal && signal.aborted)) set({ fleet }); }, () => {});
       if (st.sheetOpen) showBridge();
     },
+    watch: { again: watchDo("again"), touch: watchDo("touch"), older: watchDo("older") },
     bridge: { connect: bridgeDo("connect"), disconnect: bridgeDo("disconnect"), cancel: bridgeDo("cancel"), pickRunner: bridgeDo("pickRunner"), pickRoot: bridgeDo("pickRoot") },
     setWatch: (on) => put(() => client.saveSettings({ watch_enabled: on }, signal), WORDS.saved, undefined, { watch: on, repos: {} }, (s) => ({ ...s, watch: on })),
     setRepo: (id, on) => put(() => client.saveSettings({ repo_ids: enabledIds(id, on) }, signal), WORDS.saved, undefined, { repos: { [id]: on } }, (s) => ({ ...s, repos: s.repos.map((r) => (r.id === id ? { ...r, enabled: on } : r)) })),
