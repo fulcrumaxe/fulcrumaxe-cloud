@@ -1,13 +1,12 @@
 import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { removeTree } from "../helpers/tempTree.js";
+import { removeTree, tempDir } from "../helpers/tempTree.js";
 
 // A clone the daemon has just made has no local change in the way, so "the merge is clean but the tree would not take it" cannot be produced with real git there;
 // the one test that needs it flips this switch, every other case runs the real merge.
@@ -48,7 +47,9 @@ const refsOf = (repo: string): string[] => sh("-C", repo, "for-each-ref", "--for
 const tip = (repo: string, ref: string): string => sh("-C", repo, "rev-parse", ref).trim();
 
 beforeEach(() => {
-  root = mkdtempSync(path.join(tmpdir(), "fxr-gitpath-"));
+  // Registered the moment it exists: if anything below throws, or a late write from a test that timed out makes the directory again
+  // after afterEach removed it, the file-level sweep in tempTree.ts removes it too (an afterEach alone cannot see either case).
+  root = tempDir("fxr-gitpath-");
   home = path.join(root, "home");
   mkdirSync(home);
   vi.stubEnv("HOME", home);
@@ -64,8 +65,11 @@ beforeEach(() => {
   remoteUrl = pathToFileURL(remote).href;
 });
 afterEach(() => {
-  vi.unstubAllEnvs();
-  removeTree(root);
+  try {
+    vi.unstubAllEnvs();
+  } finally {
+    removeTree(root);
+  }
 });
 
 interface Call {
