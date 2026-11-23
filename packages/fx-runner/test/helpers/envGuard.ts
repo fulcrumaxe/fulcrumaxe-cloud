@@ -76,6 +76,8 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/credentials/vmToken.ts": ["fs", "path"], // only an lstat of the file for its age, and path joins
   // D#597 CC-7a-1, the assistant link and its local tool proxy.
   "src/assistant/tokenFile.ts": ["crypto", "fs", "path"], // the token file: lstat checks, a no-follow open judged by the open handle, a random temp-file name, an exclusive 0600 create and one rename
+  "src/engineSession/operateMark.ts": ["fs", "path"], // D#845 ON-13a1: an lstat of the mark file (a link or a non-file is refused), then the bridge's no-follow read and atomic write; path joins
+  "src/engineSession/repoLookup.ts": ["fs"], // D#845 ON-13a1: an lstat of the repository's own mirror directory (a link is refused) before git reads its recorded origin
   "src/engineBridge/stateFiles.ts": ["crypto", "fs", "path"], // EB-11b: the engine bridge's local files (halt file, host handle): lstat checks, a no-follow open judged by the open handle, a random temp-file name, an exclusive 0600 create and one rename
   "src/daemon/sandboxCommands.ts": ["crypto", "fs"], // D#587 B-7b-i: the signed-command nonce history file (private state, not a secret): lstat check, a no-follow non-blocking open judged by the open handle (plain file, bounded size, one read), a random temp-file name for the exclusive 0600 create, fsync and one rename; crypto only names that temp file
   "src/engineHost/hostConfig.ts": ["fs", "path"], // EB-12c: the host's settings read: lstat, a no-follow open judged by the open handle, one bounded read

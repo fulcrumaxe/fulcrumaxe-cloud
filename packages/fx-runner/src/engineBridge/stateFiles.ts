@@ -67,6 +67,13 @@ export function writeJsonAtomic(dir: string, name: string, value: unknown, uid: 
     unlinkSync(tmp);
     throw error;
   }
+  // the rename itself is only durable once the directory is: without this a power loss can bring the old file (or none) back
+  const dirFd = openSync(dir, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try {
+    fsyncSync(dirFd);
+  } finally {
+    closeSync(dirFd);
+  }
 }
 
 /** Removes `<dir>/<name>` when it is a plain file; absent is fine, a link or another kind of entry is refused (a link is never followed or removed here). */

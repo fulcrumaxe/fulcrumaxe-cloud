@@ -86,6 +86,11 @@ export interface MicrovmSandbox extends SandboxPort {
   guestOf(handle: SandboxHandle): Promise<SdkSandbox>;
   /** Ends the agent and its process group and leaves the VM running: the quiet point before the runner reads or checks the working copy. Idempotent. */
   quiesce(handle: SandboxHandle): Promise<void>;
+  /**
+   * D#845 ON-13a1: boots a stopped persistent sandbox again from the disk its stop kept (B-3), closed (`deny-all`), and takes it into this port when this process did not make it (after a restart). A
+   * running one is left as it is. `SandboxNotFoundError` when the daemon no longer holds the name: nothing was kept (evicted, or never there), and the caller then makes a new one.
+   */
+  wake(handle: SandboxHandle, timeoutMs: number): Promise<void>;
 }
 
 interface Entry {
@@ -513,6 +518,12 @@ export function createMicrovmSandbox(config: MicrovmSandboxConfig): MicrovmSandb
     async quiesce(handle) {
       const entry = entries.get(handle.sandboxName);
       if (entry !== undefined) await stopAgent(entry, true);
+    },
+    async wake(handle, timeoutMs) {
+      const name = handle.sandboxName;
+      if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > MAX_TIMEOUT_MS) throw new MicrovmSandboxRefused("bad_request");
+      const guest = await open(name, true);
+      if (!entries.has(name)) entries.set(name, { timeoutMs, vmDeadline: Date.now() + (guest.timeout ?? timeoutMs + VM_BACKSTOP_MS), launchedAt: 0, running: false, busy: false, expired: false, policyTail: Promise.resolve() });
     },
   };
 }

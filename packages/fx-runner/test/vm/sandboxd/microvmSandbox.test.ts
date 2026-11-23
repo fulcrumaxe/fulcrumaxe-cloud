@@ -280,6 +280,34 @@ describe("the microVM engine's own promises", () => {
     expect(await state(Object.assign(new Error("x"), { response: { status: 404 } }))).toBe("gone");
   });
 
+  it("wake (D#845 ON-13a1): boots a stopped sandbox again with no agent, closed; a running one is left alone; a port that never made it takes it in with the given limit", async () => {
+    const { port, sdk, log } = setup();
+    const handle = await create(port, "m-wake-a");
+    await port.stop(handle);
+    expect(await port.sandboxState?.(handle)).toBe("stopped");
+    await port.wake(handle, 90_000);
+    expect(await port.sandboxState?.(handle)).toBe("running");
+    expect(log).not.toContain("runtime built");
+    expect(log).not.toContain("agent start");
+    await expect(port.wake(handle, 90_000)).resolves.toBeUndefined(); // already running
+    await port.stop(handle);
+    // a second port instance over the same daemon (a restarted runner) did not make the sandbox: wake registers it, with the limit it was given
+    const later = createMicrovmSandbox({ sdk: { create: (p) => sdk.create(p), get: (p) => sdk.get(p), setTimeoutMs: (n, t) => sdk.setTimeoutMs(n, t), armTimeoutAt: (n, r) => sdk.armTimeoutAt(n, r) }, makeRuntime: () => scriptedRuntime() });
+    expect(later.timeoutMsOf(handle)).toBeUndefined();
+    await later.wake(handle, 90_000);
+    expect(later.timeoutMsOf(handle)).toBe(90_000);
+    expect(await later.sandboxState?.(handle)).toBe("running");
+  });
+
+  it("wake: a name the daemon no longer holds is SandboxNotFoundError, and a limit that is not a whole number within the port's range is bad_request before anything is woken", async () => {
+    const { port } = setup();
+    const handle = await create(port, "m-wake-b");
+    await port.stop(handle);
+    await expect(port.wake({ runId: "", sandboxName: "m-nobody", sessionId: "" }, 60_000)).rejects.toMatchObject({ name: "SandboxNotFoundError" });
+    for (const bad of [0, -1, 1.5, Number.NaN, MAX_TIMEOUT_MS + 1]) await expect(port.wake(handle, bad)).rejects.toMatchObject({ code: "bad_request" });
+    expect(await port.sandboxState?.(handle)).toBe("stopped");
+  });
+
   it("a stop that comes while the sandbox is still waking waits for the agent to exist, then ends it", async () => {
     const runtime = scriptedRuntime({ hold: true });
     const { port } = setup(runtime);

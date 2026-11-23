@@ -17,7 +17,7 @@ import type { GuestBindings, RunEventHooks } from "./guestBindings.js";
 import type { Sandboxd } from "./sandboxd.js";
 
 export interface MicrovmVmPortParts {
-  sandbox: Pick<MicrovmSandbox, "createSandbox" | "stop" | "deleteSandbox" | "guestOf" | "sandboxState">;
+  sandbox: Pick<MicrovmSandbox, "createSandbox" | "stop" | "deleteSandbox" | "guestOf" | "sandboxState"> & Partial<Pick<MicrovmSandbox, "wake">>;
   /** The daemon's no-snapshot teardown (`Sandboxd.teardown`), by daemon id. */
   daemon: Pick<Sandboxd, "teardown" | "get">;
   /** The per-sandbox bindings the guest runtime and the token step read (`GuestBindings`): bound when a VM is created, unbound when it is ended. */
@@ -36,13 +36,16 @@ export interface MicrovmVmPortParts {
 
 /** Fixed words only: nothing a job, a path or a helper said travels in these. */
 export class VmPortRefused extends Error {
-  constructor(readonly code: "egress_down" | "guest_not_ready" | "vm_not_gone") {
+  constructor(readonly code: "egress_down" | "guest_not_ready" | "vm_not_gone" | "resume_unavailable") {
     super(code);
     this.name = "VmPortRefused";
   }
 }
 
-export function createMicrovmVmPort(parts: MicrovmVmPortParts): VmPort {
+/** The VM factory of a persistent sandbox that can also be woken from its kept disk (D#845 ON-13a1). */
+export type ResumableVmPort = VmPort & { resume(id: string): Promise<void> };
+
+export function createMicrovmVmPort(parts: MicrovmVmPortParts): ResumableVmPort {
   const handles = new Map<string, SandboxHandle>();
   const persistentIds = new Set<string>();
   const handleOf = (id: string): SandboxHandle => handles.get(id) ?? { runId: "", sandboxName: id, sessionId: "" };
@@ -58,10 +61,25 @@ export function createMicrovmVmPort(parts: MicrovmVmPortParts): VmPort {
       try {
         const hooks = parts.hooks?.(); // before the VM exists: a refusal leaves nothing to end
         handles.set(id, await parts.sandbox.createSandbox({ sandboxName: id, retention: { persistent }, timeoutMs: parts.timeoutMs }));
+        if (persistent) parts.bindings.unbind(id); // a session's earlier stop left its binding (a stop never unbinds): the handle in it is stale
         parts.bindings.bind(id, await parts.daemon.get(parts.idOf(id)), parts.timeoutMs, hooks); // the daemon's own handle: the token and the guest's streams go through it, by name
       } catch (err) {
         persistentIds.delete(id);
         throw err; // a VM that was made is ended by the caller's teardown (it was registered first)
+      }
+    },
+    async resume(id) {
+      // a VM that is up again is bound like one that was made: the token and the guest's streams go through the daemon's handle, by name
+      if (parts.sandbox.wake === undefined || parts.persistent !== true) throw new VmPortRefused("resume_unavailable");
+      persistentIds.add(id);
+      try {
+        const hooks = parts.hooks?.();
+        await parts.sandbox.wake(handleOf(id), parts.timeoutMs);
+        parts.bindings.unbind(id); // the stop that kept this disk left the old handle bound
+        parts.bindings.bind(id, await parts.daemon.get(parts.idOf(id)), parts.timeoutMs, hooks);
+      } catch (err) {
+        persistentIds.delete(id);
+        throw err;
       }
     },
     async startEgress(id) {

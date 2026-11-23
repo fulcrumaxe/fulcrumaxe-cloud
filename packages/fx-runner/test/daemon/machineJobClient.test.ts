@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MACHINE_JOB_CLAIM_PATH, MAX_PLAN_BYTES, MachineJobClaimMessage, SetupProgressBody, setupPlanPath, setupProgressPath } from "@fulcrumaxe/runner-protocol";
+import { MACHINE_JOB_CLAIM_PATH, MAX_PLAN_BYTES, MachineJobClaimMessage, SessionJobProgressBody, SetupProgressBody, machineJobProgressPath, setupPlanPath, setupProgressPath } from "@fulcrumaxe/runner-protocol";
 import { createRunnerClient } from "../../src/daemon/client.js";
 import { generateRunnerKey } from "../../src/keys.js";
 import { SETUP_ID, signedJob } from "../helpers/machineJobFixture.js";
@@ -62,6 +62,32 @@ describe("setupProgress", () => {
       expect(await c.client.setupProgress(SETUP_ID, bad as never)).toMatchObject({ kind: "error", code: "invalid_message" });
     }
     expect(await c.client.setupProgress("../../etc", body)).toMatchObject({ kind: "error", code: "invalid_message" });
+    expect(c.seen).toHaveLength(0);
+  });
+});
+
+describe("machineJobProgress (a session job's report, by its job id)", () => {
+  const session: SessionJobProgressBody = { seq: 0, step: "admission", state: "started" };
+  it("sends the strict body to the machine-job route and tells recorded from the cloud's closed refusals", async () => {
+    const ok = clientAnswering(200, { recorded: true });
+    expect(await ok.client.machineJobProgress(SETUP_ID, session)).toEqual({ kind: "recorded" });
+    expect(ok.seen[0]!.url).toBe(`https://cloud.example.test${machineJobProgressPath(SETUP_ID)}`);
+    expect(ok.seen[0]!.method).toBe("POST");
+    expect(SessionJobProgressBody.parse(JSON.parse(ok.seen[0]!.body))).toEqual(session);
+    expect(Object.keys(ok.seen[0]!.headers).some((h) => h.toLowerCase() === "signature")).toBe(true);
+    expect(await clientAnswering(409, errorBody("job_not_active")).client.machineJobProgress(SETUP_ID, session)).toEqual({ kind: "refused", status: 409, code: "job_not_active" });
+    expect(await clientAnswering(409, errorBody("seq_not_increasing")).client.machineJobProgress(SETUP_ID, session)).toEqual({ kind: "refused", status: 409, code: "seq_not_increasing" });
+    expect(await clientAnswering(404, errorBody("not_found")).client.machineJobProgress(SETUP_ID, session)).toEqual({ kind: "refused", status: 404, code: "not_found" });
+    expect(await clientAnswering(200, { recorded: false }).client.machineJobProgress(SETUP_ID, session)).toMatchObject({ kind: "error", code: "invalid_reply" });
+    expect(await clientAnswering(401, errorBody("unauthorized")).client.machineJobProgress(SETUP_ID, session)).toMatchObject({ kind: "error", status: 401 });
+  });
+
+  it("a body the protocol would refuse, or an id that is not a uuid, is never sent", async () => {
+    const c = clientAnswering(200, { recorded: true });
+    for (const bad of [{ ...session, step: "rm_rf" }, { ...session, state: "failed" }, { ...session, failure_reason: "free text here" }, { ...session, start_mode: "created" }, { ...session, extra: 1 }, { ...session, job_id: SETUP_ID }]) {
+      expect(await c.client.machineJobProgress(SETUP_ID, bad as never)).toMatchObject({ kind: "error", code: "invalid_message" });
+    }
+    expect(await c.client.machineJobProgress("../../etc", session)).toMatchObject({ kind: "error", code: "invalid_message" });
     expect(c.seen).toHaveLength(0);
   });
 });
