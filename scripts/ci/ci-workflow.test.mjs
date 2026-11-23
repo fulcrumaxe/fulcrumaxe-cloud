@@ -18,7 +18,10 @@ const noComments = (s) => s.replace(/^\s*#.*$/gm, "");
 const rerunScript = readFileSync(path.join(here, "rerun-ci-full.sh"), "utf8");
 
 const checkJob = ci.slice(ci.indexOf("\n  check:"), ci.indexOf("\n  workspace-e2e:"));
-const e2eJob = ci.slice(ci.indexOf("\n  workspace-e2e:"), ci.indexOf("\n  e2e-runner:"));
+// The key `workspace-e2e` is the SHARD job (check name `workspace-e2e-shard (<project> <n>/3)`); the required names
+// `workspace-e2e (<project>)` come from the summary job `workspace-e2e-required` that follows it.
+const e2eJob = ci.slice(ci.indexOf("\n  workspace-e2e:"), ci.indexOf("\n  workspace-e2e-required:"));
+const e2eRequiredJob = ci.slice(ci.indexOf("\n  workspace-e2e-required:"), ci.indexOf("\n  e2e-runner:"));
 const runnerE2eJob = ci.slice(ci.indexOf("\n  e2e-runner:"));
 
 /** Step blocks of a job, in order: [{ name, text }] (text without comment lines). */
@@ -60,12 +63,14 @@ test("no plain scalar value contains a colon and a space (the shape GitHub rejec
   });
 });
 
-test("the workflow parses as YAML and has its four jobs", () => {
+test("the workflow parses as YAML and has its five jobs", () => {
   const py = spawnSync("python3", ["-c", "import sys, json, yaml; print(json.dumps(yaml.safe_load(open(sys.argv[1]))))", path.join(repoRoot, ".github/workflows/ci.yml")], { encoding: "utf8" });
   assert.equal(py.status, 0, `ci.yml does not parse as YAML (or PyYAML is missing from the dev shell): ${py.stderr}`);
   const doc = JSON.parse(py.stdout);
-  assert.deepEqual(Object.keys(doc.jobs), ["pr-gates", "check", "workspace-e2e", "e2e-runner"]);
+  assert.deepEqual(Object.keys(doc.jobs), ["pr-gates", "check", "workspace-e2e", "workspace-e2e-required", "e2e-runner"]);
   assert.deepEqual(doc.jobs["workspace-e2e"].strategy.matrix.project, ["desktop", "phone", "tablet"]);
+  assert.deepEqual(doc.jobs["workspace-e2e"].strategy.matrix.shard, [1, 2, 3]);
+  assert.deepEqual(doc.jobs["workspace-e2e-required"].strategy.matrix.project, ["desktop", "phone", "tablet"]);
   const pr = (doc.on ?? doc.true).pull_request; // YAML 1.1 reads the key `on` as the boolean true
   assert.deepEqual(pr.types, ["opened", "synchronize", "reopened"]);
 });
@@ -350,7 +355,8 @@ test("rerun script: a missing token, repository or a malformed SHA is refused be
 test("ci.yml: the token stays read-only (top level contents read; jobs add at most pull-requests read; nothing that writes)", () => {
   assert.deepEqual(ciDoc.permissions, { contents: "read" });
   for (const [name, job] of Object.entries(ciDoc.jobs)) {
-    assert.deepEqual(job.permissions, { contents: "read", "pull-requests": "read" }, name);
+    // the summary job only reads `needs`, so it gets no token scopes at all
+    assert.deepEqual(job.permissions, name === "workspace-e2e-required" ? {} : { contents: "read", "pull-requests": "read" }, name);
   }
 });
 
@@ -462,10 +468,38 @@ test("check job: nothing is narrowed outside Run checks and the Node 22 step", (
 // ---- the e2e job -----------------------------------------------------------
 test("e2e job: the job-level if (pull requests only, any head repo, CI_DISABLED stands it down) and the matrix", () => {
   const head = e2eJob.slice(0, e2eJob.indexOf("\n    steps:"));
-  assert.match(head, /\n    name: workspace-e2e \(\$\{\{ matrix\.project \}\}\)\n/);
+  assert.match(head, /\n    name: workspace-e2e-shard \(\$\{\{ matrix\.project \}\} \$\{\{ matrix\.shard \}\}\/3\)\n/);
   assert.match(head, /\n    if: vars\.CI_DISABLED != 'true' && \(github\.event_name == 'pull_request' \|\| github\.event_name == 'merge_group'\)\n/);
-  assert.match(head, /\n        project: \[desktop, phone, tablet\](\n|$)/);
+  assert.match(head, /\n        project: \[desktop, phone, tablet\]\n/);
+  assert.match(head, /\n        shard: \[1, 2, 3\](\n|$)/);
   assert.match(head, /\n      fail-fast: false\n/);
+});
+
+test("e2e job: the run step passes the project and shard `n/3` to playwright, so the three shards together cover every spec once", () => {
+  const run = stepNamed(e2eSteps, "Run workspace e2e (${{ matrix.project }})").text;
+  assert.match(run, /E2E_SHARD: \$\{\{ matrix\.shard \}\}/);
+  assert.match(run, /pnpm --filter workspace e2e --project="\$E2E_PROJECT" --shard="\$E2E_SHARD\/3"/);
+});
+
+test("e2e summary job: reports the required names `workspace-e2e (desktop|phone|tablet)`, waits on every shard, and fails unless they all succeeded", () => {
+  const head = noComments(e2eRequiredJob.slice(0, e2eRequiredJob.indexOf("\n    steps:")));
+  assert.match(head, /\n    name: workspace-e2e \(\$\{\{ matrix\.project \}\}\)\n/);
+  assert.match(head, /\n        project: \[desktop, phone, tablet\](\n|$)/);
+  assert.match(head, /\n    needs: workspace-e2e\n/);
+  assert.match(head, /\n    timeout-minutes: 5\n/);
+  const doc = ciDoc.jobs["workspace-e2e-required"];
+  // same job-level condition as the shards, plus always() so a failed, cancelled or skipped shard still reports
+  assert.equal(doc.if, ciDoc.jobs["workspace-e2e"].if.replace("&& (", "&& always() && ("));
+  assert.ok(doc.if.startsWith("vars.CI_DISABLED != 'true'"));
+  assert.doesNotMatch(doc.if, /CI_SCOPE|overlay/i, "no scope in the job-level if: a scope skip is a success of every shard");
+  const steps = stepsOf(e2eRequiredJob);
+  assert.equal(steps.length, 1);
+  assert.doesNotMatch(steps[0].text, /\n {8}if:/, "the check step is unconditional");
+  assert.match(steps[0].text, /SHARDS_RESULT: \$\{\{ needs\.workspace-e2e\.result \}\}/);
+  assert.match(steps[0].text, /\[ "\$SHARDS_RESULT" = success \]/);
+  // skipped, cancelled and failure all fail the check; only success passes it
+  const passes = (result) => spawnSync("bash", ["-c", '[ "$SHARDS_RESULT" = success ]'], { env: { SHARDS_RESULT: result } }).status === 0;
+  assert.deepEqual(["success", "failure", "cancelled", "skipped"].map(passes), [true, false, false, false]);
 });
 
 test("e2e job: the skip is not a job-level if", () => {
@@ -787,7 +821,7 @@ test("the classifier's content rules still find what they look for in ci.yml", a
   assert.match(step[0].text, /\n {8}run: nix develop .#ci --command node --test( [A-Za-z0-9_./-]+\.test\.mjs)+\s*$/);
   assert.match(ci, new RegExp(`\\n  ${cw.unit_job}:\\n`));
   assert.match(ci, /\n {2}workspace-e2e:\n/);
-  // the e2e job does not read anything the check job produces
+  // the e2e shard job does not read anything the check job produces
   assert.doesNotMatch(noComments(e2eJob), /needs:/);
   // required checks: the e2e job still reports under its real names, because it never skips at job level (above)
   // end to end, on a scratch repository holding this very file
@@ -2214,7 +2248,7 @@ test("paired copy: heavy steps skip, the secret scan, migration lint and script 
   for (const n of ["Secret scan of the change", "Migration compatibility lint", "Migration lint and secret scan tests"]) assert.equal(ifOf(stepNamed(checkSteps, n)), null, n);
   // jobs keep their real names and have no job-level skip for this (the merge gate refuses a `skipped` required check)
   for (const [name] of COPY_JOBS) assert.doesNotMatch(String(ciDoc.jobs[name].if ?? ""), /PAIRED|Bot|fx\//);
-  assert.equal(ciDoc.jobs["workspace-e2e"].name, "workspace-e2e (${{ matrix.project }})");
+  assert.equal(ciDoc.jobs["workspace-e2e-required"].name, "workspace-e2e (${{ matrix.project }})");
 });
 
 test("paired copy: an ordinary private pull request, a fork lookalike and every public run are unchanged", () => {
@@ -2676,7 +2710,10 @@ test("same tree: required check names, timeouts and permissions are unchanged", 
   const py = spawnSync("python3", ["-c", "import sys, json, yaml; print(json.dumps(yaml.safe_load(open(sys.argv[1]))))", path.join(repoRoot, ".github/workflows/ci.yml")], { encoding: "utf8" });
   assert.equal(py.status, 0, py.stderr);
   const doc = JSON.parse(py.stdout);
-  assert.equal(doc.jobs["workspace-e2e"].name, "workspace-e2e (${{ matrix.project }})");
+  // the required check names come from the summary job; the shard job has its own name
+  assert.equal(doc.jobs["workspace-e2e-required"].name, "workspace-e2e (${{ matrix.project }})");
+  assert.equal(doc.jobs["workspace-e2e"].name, "workspace-e2e-shard (${{ matrix.project }} ${{ matrix.shard }}/3)");
+  assert.equal(doc.jobs["workspace-e2e-required"]["timeout-minutes"], 5);
   // Rollups (scripts/ci/rollup-position.mjs, DORMANT unless vars.ROLLUP_ENABLED is 'true'): only then do merge queue runs get the wait (settle + 80 min cap) on top; every other run keeps the old backstop.
   const t = (j) => doc.jobs[j]["timeout-minutes"];
   assert.deepEqual([t("check"), t("workspace-e2e"), t("e2e-runner")], [

@@ -476,17 +476,20 @@ jobs:
   # projects). check.sh does not run them, so a broken spec reached main
   # unseen. Pull requests only. A separate job so it runs beside `check`
   # rather than after it (on the single self-hosted runner they queue in turn).
+  #
+  # Each project runs as three Playwright shards (`--shard=<n>/3`): one project took 38 to 39 minutes in one job, and
+  # a shard takes about a third of that. The job KEY stays `workspace-e2e` (the shard job), but its check name is
+  # `workspace-e2e-shard (<project> <n>/3)`. The REQUIRED names `workspace-e2e (desktop|phone|tablet)` are reported by
+  # the `workspace-e2e-required` job below, which waits for the shards. Do not rename either name.
   workspace-e2e:
-    # Explicit so the check name stays `workspace-e2e (<project>)`.
-    name: workspace-e2e (${{ matrix.project }})
+    name: workspace-e2e-shard (${{ matrix.project }} ${{ matrix.shard }}/3)
     if: vars.CI_DISABLED != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
     runs-on: ${{ github.event.repository.private && (vars.CI_RUNS_ON || 'self-hosted') || 'ubuntu-latest' }}
     permissions:
       contents: read
       pull-requests: read
     timeout-minutes: ${{ github.event_name == 'merge_group' && vars.ROLLUP_ENABLED == 'true' && 125 || 60 }}
-    # One job per Playwright project, kept so the required check names stay
-    # `workspace-e2e (desktop|phone|tablet)` (owner-configured). The fixture-server
+    # One job per Playwright project and shard. The fixture-server
     # ports are picked per job at run time (see the "Pick free e2e ports" step), so
     # two runners on one machine, or a local e2e run on the 4319 default, cannot
     # collide.
@@ -494,6 +497,7 @@ jobs:
       fail-fast: false
       matrix:
         project: [desktop, phone, tablet]
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -646,7 +650,34 @@ jobs:
         if: env.CI_SCOPE_E2E == 'true'
         env:
           E2E_PROJECT: ${{ matrix.project }}
-        run: nix develop .#ci --command bash -euo pipefail -c 'pnpm install --frozen-lockfile && pnpm --filter workspace e2e --project="$E2E_PROJECT"'
+          E2E_SHARD: ${{ matrix.shard }}
+        run: nix develop .#ci --command bash -euo pipefail -c 'pnpm install --frozen-lockfile && pnpm --filter workspace e2e --project="$E2E_PROJECT" --shard="$E2E_SHARD/3"'
+
+  # The required checks `workspace-e2e (desktop|phone|tablet)`: one job per project that passes only when every shard
+  # passed. A shard whose specs were skipped by the scope step still ends `success`, so a skipped scope passes here
+  # as before. always() makes a failed, cancelled or skipped shard report a failure under the required name instead of
+  # leaving the check missing. The job-level `if` is the shards' own, so when the shards do not run at all
+  # (CI_DISABLED, a push) this job is skipped with them, as the old job was. `needs.<job>.result` covers the whole
+  # shard matrix: it is `success` only if all nine shards succeeded, so a failure in one project also fails the
+  # other two names. That is deliberate (the legs fail together and can never wrongly pass).
+  workspace-e2e-required:
+    name: workspace-e2e (${{ matrix.project }})
+    needs: workspace-e2e
+    if: vars.CI_DISABLED != 'true' && always() && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    runs-on: ${{ github.event.repository.private && (vars.CI_RUNS_ON || 'self-hosted') || 'ubuntu-latest' }}
+    permissions: {}
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [desktop, phone, tablet]
+    steps:
+      - name: All shards succeeded (${{ matrix.project }})
+        env:
+          SHARDS_RESULT: ${{ needs.workspace-e2e.result }}
+        run: |
+          echo "workspace-e2e shards: $SHARDS_RESULT"
+          [ "$SHARDS_RESULT" = success ]
 
   # The runner build path, end to end (D#6 R4d-6): one test that starts at the product's own Spec writer and ends at an opened pull request, with real
   # Postgres (the throwaway cluster the pg tests start from the ci shell's binaries, as in `check`) and real local repositories. The cloud's runner routes,
