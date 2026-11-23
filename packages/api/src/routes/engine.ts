@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { PoolClient } from "pg";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { deleteEngineData, readEnginePanelAsOf, readEngineRepoFreshness, readEngineSettingsView, setEngineBridgeSettings, type EnginePanel } from "@fx/db/src/engineBridge.js";
+import { deleteEngineData, readEnginePanelAsOf, readEngineRepoFreshness, readEngineSettingsView, setEngineBridgeSettings, EngineOperateRefusal, type EnginePanel } from "@fx/db/src/engineBridge.js";
 import { readEngineUsage } from "@fx/core/src/engine/read.js";
 import { markRunnerWork } from "@fx/core/src/pendingWork.js";
 import {
@@ -285,14 +285,22 @@ export const engineRoutes: RouteEntry[] = [
       // Operate on a public repo waits for the decide rule for work from strangers (D#845 S-8). The follow-up that replaces this gate stores `repos.is_private` (kept by the sync and
       // the webhooks) so decide can answer `ask` itself; that also covers a repo that turns public after operate is on, which this gate does not. The repos that would be operated
       // are read live when operate goes on (all of them) or when it is on and a repo is added (the new ones). Watch-only stays open.
+      // What this pre-lock read saw goes to the locked write, which works out the operated set again from the committed state and refuses any repo not read as private (CWE-367).
+      const operateRead = new Map<string, "private" | "public" | "unknown">();
       if (operate) {
         const finalSet = body.repo_ids === undefined ? [...ticked] : [...wanted];
         const toRead = !before.operate_enabled ? finalSet : finalSet.filter((id) => fresh.has(id));
         const seen = await Promise.all(toRead.map(async (id) => visibilityOf(accountId, id)));
+        toRead.forEach((id, i) => operateRead.set(id.toLowerCase(), seen[i]!));
         if (seen.includes("public")) throw new ApiError(409, "operate_public_pending", "Operate isn't available for public repos yet. The engine can watch this repo, but won't act on it.");
         if (seen.includes("unknown")) throw new ApiError(409, "repo_visibility_unknown", "GitHub didn't say whether that repository is public or private. Try again in a minute");
       }
-      await withTenant(ctx.pool, accountId, userId, (client) => setEngineBridgeSettings(client, userId, { watch_enabled: body.watch_enabled, operate_enabled: body.operate_enabled, repo_ids: body.repo_ids }));
+      try {
+        await withTenant(ctx.pool, accountId, userId, (client) => setEngineBridgeSettings(client, userId, { watch_enabled: body.watch_enabled, operate_enabled: body.operate_enabled, repo_ids: body.repo_ids }, operateRead));
+      } catch (error) {
+        if (error instanceof EngineOperateRefusal) throw new ApiError(409, error.code, error.message);
+        throw error;
+      }
       // The runner learns of a change to the switches or the ticked set through the wake path (its command pull is a 10-minute safety net now): without this,
       // turning a repo or the whole bridge off would stop the runner only at its next pull.
       const tickedChanged = body.repo_ids !== undefined && (wanted.size !== ticked.size || [...wanted].some((id) => !ticked.has(id)));

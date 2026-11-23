@@ -1,5 +1,5 @@
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { RunnerHttpError, type RunnerCloudDeps, type RunnerHttpResponse, type SessionPrincipal } from "./http.js";
+import { RunnerHttpError, pgCode, type RunnerCloudDeps, type RunnerHttpResponse, type SessionPrincipal } from "./http.js";
 import { requireMemberRole } from "./memberRole.js";
 import { moveProject, readMachineCapacity } from "./placement.js";
 import { configuredWakeKey } from "./wakeToken.js";
@@ -31,7 +31,7 @@ export async function listMachines(deps: RunnerCloudDeps, principal: SessionPrin
 /**
  * POST /api/runners/repos/:id/move with exactly `{ to_runner_id, carry_state? }`. Owner or admin only (`moveProject` reads the role). A repo id or machine id that is not a
  * UUID, and any other body, is 400 `invalid_message`. MC-9's refusals pass through with their own codes: 403 `forbidden` or the plan-holder code, 404 `not_found`, 409
- * `project_not_placed`, `machine_not_eligible`, `machine_single_project` and `state_carry_unavailable`. Answers 200 with the machine it left and the one it reached.
+ * `project_not_placed`, `machine_not_eligible`, `machine_single_project` and `state_carry_unavailable`; a deadlock with another change to the machine is 409 `placement_busy` (try again). Answers 200 with the machine it left and the one it reached.
  */
 export async function moveProjectRoute(deps: RunnerCloudDeps, principal: SessionPrincipal, repoId: string, input: unknown): Promise<RunnerHttpResponse> {
   if (!UUID.test(repoId)) throw invalid();
@@ -43,8 +43,15 @@ export async function moveProjectRoute(deps: RunnerCloudDeps, principal: Session
   if (typeof to !== "string" || !UUID.test(to)) throw invalid();
   if (body.carry_state !== undefined && typeof body.carry_state !== "boolean") throw invalid();
   const now = (deps.now ?? (() => new Date()))();
-  const moved = await withTenant(deps.appUserPool, principal.accountId, principal.userId, (client) =>
-    moveProject(client, { accountId: principal.accountId, userId: principal.userId }, { repoId, toRunnerId: to, carryState: body.carry_state === true, now, wakeEnabled: configuredWakeKey(deps.wakeKey) !== null }),
-  );
+  let moved: Awaited<ReturnType<typeof moveProject>>;
+  try {
+    moved = await withTenant(deps.appUserPool, principal.accountId, principal.userId, (client) =>
+      moveProject(client, { accountId: principal.accountId, userId: principal.userId }, { repoId, toRunnerId: to, carryState: body.carry_state === true, now, wakeEnabled: configuredWakeKey(deps.wakeKey) !== null }),
+    );
+  } catch (error) {
+    // 40P01: two changes to one machine waited on each other and Postgres ended this one, which wrote nothing. Retrying is safe (the same answer as a project confirm).
+    if (pgCode(error) === "40P01") throw new RunnerHttpError(409, "placement_busy", "Another change to this machine is in progress. Try again.");
+    throw error;
+  }
   return { status: 200, body: { repo_id: repoId, from_runner_id: moved.from_runner_id, to_runner_id: moved.to_runner_id }, headers: { "cache-control": "no-store" } };
 }

@@ -286,8 +286,13 @@ describe("settings", () => {
     await t.setRepo(REPO_A, false);
     expect(f.log.filter(([m]) => m === "PUT")[1][2]).toEqual({ repo_ids: [] });
   });
+  it("the public-operate and busy-machine refusals read as the routes word them, and only on a 409", () => {
+    expect(failureSentence(fail(409, "operate_public_pending"))).toBe("Operate isn't available for public repos yet. The engine can watch this repo, but won't act on it.");
+    expect(failureSentence(fail(409, "placement_busy"))).toBe("Another change to this machine is in progress. Try again.");
+    expect(failureSentence(fail(500, "operate_public_pending"))).toBe(WORDS.saveFailed);
+  });
   it("a refused write says why in the app's own words and changes nothing else", async () => {
-    for (const [e, sentence] of [[fail(403, "forbidden"), WORDS.forbidden], [fail(409, "repo_visibility_unknown"), WORDS.sendRefusals.repo_visibility_unknown], [fail(409, "repo_not_runner_local"), WORDS.sendRefusals.repo_not_runner_local], [fail(500, "server_error"), WORDS.saveFailed], [fail(409, "other"), WORDS.saveFailed]]) {
+    for (const [e, sentence] of [[fail(403, "forbidden"), WORDS.forbidden], [fail(409, "repo_visibility_unknown"), WORDS.sendRefusals.repo_visibility_unknown], [fail(409, "repo_not_runner_local"), WORDS.sendRefusals.repo_not_runner_local], [fail(409, "operate_public_pending"), WORDS.sendRefusals.operate_public_pending], [fail(409, "placement_busy"), WORDS.sendRefusals.placement_busy], [fail(500, "server_error"), WORDS.saveFailed], [fail(409, "other"), WORDS.saveFailed]]) {
       const { t, f } = team({}, { ["PUT " + SETTINGS_URL]: e });
       await t.load();
       f.log.length = 0;

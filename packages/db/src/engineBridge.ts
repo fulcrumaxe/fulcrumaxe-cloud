@@ -27,20 +27,48 @@ export async function lockEngineBridge(client: Pick<PoolClient, 'query'>): Promi
   await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('engine_bridge:' || NULLIF(current_setting('app.account_id', true), ''), 0))`);
 }
 
+/** Operate would cover a repo that was not read as private before the lock. `code` is the API's 409 code. */
+export class EngineOperateRefusal extends Error {
+  constructor(readonly code: 'operate_public_pending' | 'repo_visibility_unknown') {
+    super(code === 'operate_public_pending' ? "Operate isn't available for public repos yet. The engine can watch this repo, but won't act on it." : "GitHub didn't say whether that repository is public or private. Try again in a minute");
+  }
+}
+
+/**
+ * CWE-367: the caller reads each repo's visibility (a network read) before the lock, from the settings it saw then. Under the lock the committed state may differ, so the repos that
+ * this write would newly operate (all of the final set when operate was off, else only those not already ticked) are computed again, and any that the pre-lock read did not see
+ * as private is refused. A repo absent from `read` counts as unknown. Reads nothing itself.
+ */
+function refuseUnlessOperateRead(before: EngineBridgeSettings, repoIds: readonly string[] | undefined, read: ReadonlyMap<string, 'private' | 'public' | 'unknown'>): void {
+  const finalSet = repoIds ?? before.repo_ids;
+  const have = new Set(before.repo_ids.map((id) => id.toLowerCase()));
+  const need = before.operate_enabled ? finalSet.filter((id) => !have.has(id.toLowerCase())) : [...finalSet];
+  let unknown = false;
+  for (const id of need) {
+    const v = read.get(id.toLowerCase()) ?? 'unknown';
+    if (v === 'public') throw new EngineOperateRefusal('operate_public_pending');
+    if (v !== 'private') unknown = true;
+  }
+  if (unknown) throw new EngineOperateRefusal('repo_visibility_unknown');
+}
+
 /**
  * Applies a change to the switches and the ticked repos, one audit row per facet that actually changed (`engine_bridge.settings_changed`, payload `kind` of
  * `watch_on`, `watch_off`, `operate_on`, `operate_off`, `repo_added` or `repo_removed`, plus `repo_id` for the repo kinds). Turning watch off while operate is on
- * is refused by the table's own CHECK, so a caller turns operate off first. Whether a repo may be ticked at all (private, `runner_local`) is the route's to check.
+ * is refused by the table's own CHECK, so a caller turns operate off first. Whether a repo may be ticked at all (private, `runner_local`) is the route's to check. `operateRead` is required: with operate on after the write, a repo it does not list counts as unknown.
  */
 export async function setEngineBridgeSettings(
   client: Pick<PoolClient, 'query'>,
   userId: string,
   patch: { watch_enabled?: boolean; operate_enabled?: boolean; repo_ids?: readonly string[] },
+  operateRead: ReadonlyMap<string, 'private' | 'public' | 'unknown'>,
 ): Promise<EngineBridgeSettings> {
   await lockEngineBridge(client);
   const before = await readEngineBridgeSettings(client);
   const watch = patch.watch_enabled ?? before.watch_enabled;
   const operate = patch.operate_enabled ?? before.operate_enabled;
+  // Fail closed: the gate runs whenever operate is on after this write, and a caller with no read passes an empty map (every repo then counts as unknown).
+  if (operate) refuseUnlessOperateRead(before, patch.repo_ids, operateRead);
   await client.query(
     `INSERT INTO engine_bridge_settings (account_id, watch_enabled, operate_enabled, updated_by)
      VALUES (NULLIF(current_setting('app.account_id', true), '')::uuid, $1, $2, $3)

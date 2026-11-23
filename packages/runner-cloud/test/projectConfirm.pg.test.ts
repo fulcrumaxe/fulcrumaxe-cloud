@@ -8,7 +8,7 @@ import { withTenant } from "@fx/db/src/withTenant.js";
 import { setEngineBridgeSettings } from "@fx/db/src/engineBridge.js";
 import { firstLiveSetup } from "../src/projectConfirm.js";
 import { lockRunners } from "../src/placement.js";
-import { ENGINE_EVENTS_PATH, RunnerHttpError, ingestEngineEvents, moveProject, placeProjectRoute, toResponse, type RunnerCloudDeps } from "../src/index.js";
+import { ENGINE_EVENTS_PATH, RunnerHttpError, ingestEngineEvents, moveProject, moveProjectRoute, placeProjectRoute, toResponse, type RunnerCloudDeps } from "../src/index.js";
 import { harness, newKey, signed, type Harness, type TestKey } from "./helpers.js";
 
 /**
@@ -148,6 +148,26 @@ describe("confirming a project [pg]", () => {
     expect(await code(confirm(w, w.r1, { runner_id: w.m1 }))).toBe("ok");
   });
 
+  it("CWE-833, move side: a deadlock (40P01) in the move route is 409 placement_busy with the same sentence as confirm, and the move writes nothing", async () => {
+    const w = await world();
+    const m2 = await w.machine();
+    expect((await confirm(w, w.r1, { runner_id: w.m1 })).status).toBe(201);
+    const before = await snapshot(w);
+    const principal = { accountId: w.a.accountId, userId: w.a.o1 };
+    const move = () => moveProjectRoute(h.deps(), principal, w.r1, { to_runner_id: m2 });
+    await h.admin.query(`CREATE OR REPLACE FUNCTION on7_deadlock() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'deadlock detected' USING ERRCODE = '40P01'; END $$`);
+    await h.admin.query(`CREATE TRIGGER on7_move_deadlock BEFORE UPDATE ON project_placements FOR EACH ROW WHEN (NEW.account_id = '${w.a.accountId}') EXECUTE FUNCTION on7_deadlock()`);
+    try {
+      expect(await move().catch((e: RunnerHttpError) => e)).toMatchObject({ status: 409, code: "placement_busy", message: "Another change to this machine is in progress. Try again." });
+    } finally {
+      await h.admin.query(`DROP TRIGGER on7_move_deadlock ON project_placements`);
+    }
+    expect(await snapshot(w)).toEqual(before);
+    // Retrying works, and another failure is still not mapped to a busy answer.
+    expect((await move()).status).toBe(200);
+    expect(await code(moveProjectRoute(h.deps(), principal, w.r1, { to_runner_id: randomUUID() }))).toBe("404 not_found");
+  });
+
   it("lock order: a confirm onto a machine takes the machine's locks before its placement, so a change holding them first cannot deadlock it", async () => {
     const w = await world();
     const m2 = await w.machine();
@@ -200,7 +220,7 @@ describe("confirming a project [pg]", () => {
     let entered!: () => void;
     const inside = new Promise<void>((r) => { entered = r; });
     const put = withTenant(h.appPool, w.a.accountId, w.a.o1, async (c) => {
-      await setEngineBridgeSettings(c, w.a.o1, { repo_ids: [w.r2, r3] });
+      await setEngineBridgeSettings(c, w.a.o1, { repo_ids: [w.r2, r3] }, new Map());
       entered();
       await held;
     });

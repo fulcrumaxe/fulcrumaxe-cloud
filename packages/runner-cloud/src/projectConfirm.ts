@@ -2,7 +2,7 @@ import type { PoolClient } from "pg";
 import { markRunnerWork } from "@fx/core/src/pendingWork.js";
 import { emitSetupChanged } from "@fx/core/src/onboarding/engineTrack.js";
 import { writeEngineAudit } from "@fx/db/src/engineAudit.js";
-import { lockEngineBridge, readEngineBridgeSettings, setEngineBridgeSettings } from "@fx/db/src/engineBridge.js";
+import { EngineOperateRefusal, lockEngineBridge, readEngineBridgeSettings, setEngineBridgeSettings } from "@fx/db/src/engineBridge.js";
 import { assertMayAddReposToRunner, PlanHolderOnlyError } from "@fx/db/src/runnerPlanLoosen.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { RunnerHttpError, pgCode, type RunnerCloudDeps, type RunnerHttpResponse, type SessionPrincipal } from "./http.js";
@@ -163,7 +163,7 @@ export async function placeProjectRoute(deps: RunnerCloudDeps, principal: Sessio
       }
       // Operate is the account's one switch: with it on (already, or by this call), this repo is operated too.
       if (operate && seen === "public") throw publicPending();
-      if (!before.watch_enabled || operate !== before.operate_enabled) await setEngineBridgeSettings(client, userId, { watch_enabled: true, operate_enabled: operate });
+      if (!before.watch_enabled || operate !== before.operate_enabled) await setEngineBridgeSettings(client, userId, { watch_enabled: true, operate_enabled: operate }, new Map([...othersSeen, [repoId, seen]]));
 
       await client.query("SELECT audit_write('project.setup_started', $1::jsonb)", [JSON.stringify({ setup_id: setupId, repo_id: repoId, runner_id: runnerId, kind: input.kind })]);
       await emitSetupChanged(client, { accountId, setupId, repoId });
@@ -177,6 +177,7 @@ export async function placeProjectRoute(deps: RunnerCloudDeps, principal: Sessio
     };
   } catch (error) {
     if (error instanceof RunnerHttpError) throw error;
+    if (error instanceof EngineOperateRefusal) throw new RunnerHttpError(409, error.code, error.message);
     if (pgCode(error) === "42501") throw new RunnerHttpError(403, "forbidden", "only an owner or admin can place a project");
     // 40P01: two changes to one machine waited on each other and Postgres ended this one, which wrote nothing. Retrying is safe.
     if (pgCode(error) === "40P01") throw new RunnerHttpError(409, "placement_busy", "Another change to this machine is in progress. Try again.");
