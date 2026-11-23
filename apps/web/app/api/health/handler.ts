@@ -2,6 +2,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { NextResponse } from "next/server";
 import { sessionSecretProblems } from "@fx/core/src/auth/session";
 import { analysisSettings, envelopeDefaultMarginPct, hostedSandboxCapacityStatus, planDataStatus } from "@fx/plan-data";
+import { fakeProviderInProduction } from "@fx/hetzner";
 import { partnerLayerOn } from "@fx/partners/host";
 import { enginePricePerMonthUsd, outsideMeterOn } from "@fx/spend";
 import { ENV_MANIFEST } from "../../../env-manifest";
@@ -68,7 +69,10 @@ const MACHINE_FEATURE = "Hetzner Cloud machines";
 /** D#845 ON-8b: no engine release is published (or every one is withdrawn), so no setup job can be issued; named by this fixed code, in the operator's detail only. */
 export const ENGINE_RELEASE_UNSET = "engine_release_unset";
 
-function detail(report: EnvReport, engineReleaseUnset = false) {
+/** D#845 MC-13a: the staging fake provider switch is set on a deployment that is not staging (an unset kind counts as production). Operator detail only; the route and the client refuse it regardless. */
+export const FAKE_PROVIDER_IN_PRODUCTION = "fake_provider_in_production";
+
+function detail(report: EnvReport, env: EnvLike, engineReleaseUnset = false) {
   return {
     deploy_kind: report.kind,
     missing: report.missing,
@@ -77,7 +81,7 @@ function detail(report: EnvReport, engineReleaseUnset = false) {
     disabled: report.disabled,
     // D#483 S5-e1: a plan-data figure that is absent is named by a fixed code, never a value. Approval still works; the envelope pre-fill is the bare estimate.
     // D#598 P8b: the setup-request env-var check has no credential source bound yet, so it answers "unavailable" and Mark done is the way on.
-    unconfigured: [...(envelopeDefaultMarginPct() === null ? ["envelope_margin_unconfigured"] : []), ...(hostedSandboxCapacityStatus() === "ok" ? [] : ["hosted_sandbox_capacity_unconfigured"]), ...(analysisSettings().on ? [] : ["analysis_unconfigured"]), ...(productionVercelEnvSource.available ? [] : [VERCEL_ENV_SOURCE_UNCONFIGURED]), ...(report.disabled.some((d) => SIGNER_SETTINGS.has(d.name)) ? [BRANCH_CLEANUP_SIGNER_UNCONFIGURED] : []), ...(report.disabled.some((d) => d.feature === MACHINE_FEATURE) ? [MACHINE_KEK_UNSET] : []), ...(report.disabled.some((d) => d.name === "STRIPE_PRICE_ID_ENGINE") ? [ENGINE_PRICE_UNSET] : []), ...(report.disabled.some((d) => d.name === "STRIPE_RECONCILE_KEY") ? [STRIPE_RECONCILE_UNSET] : []), ...(enginePricePerMonthUsd() === null ? [ENGINE_PLAN_UNCONFIGURED] : []), ...(engineReleaseUnset ? [ENGINE_RELEASE_UNSET] : [])],
+    unconfigured: [...(envelopeDefaultMarginPct() === null ? ["envelope_margin_unconfigured"] : []), ...(hostedSandboxCapacityStatus() === "ok" ? [] : ["hosted_sandbox_capacity_unconfigured"]), ...(analysisSettings().on ? [] : ["analysis_unconfigured"]), ...(productionVercelEnvSource.available ? [] : [VERCEL_ENV_SOURCE_UNCONFIGURED]), ...(report.disabled.some((d) => SIGNER_SETTINGS.has(d.name)) ? [BRANCH_CLEANUP_SIGNER_UNCONFIGURED] : []), ...(report.disabled.some((d) => d.feature === MACHINE_FEATURE) ? [MACHINE_KEK_UNSET] : []), ...(report.disabled.some((d) => d.name === "STRIPE_PRICE_ID_ENGINE") ? [ENGINE_PRICE_UNSET] : []), ...(report.disabled.some((d) => d.name === "STRIPE_RECONCILE_KEY") ? [STRIPE_RECONCILE_UNSET] : []), ...(enginePricePerMonthUsd() === null ? [ENGINE_PLAN_UNCONFIGURED] : []), ...(engineReleaseUnset ? [ENGINE_RELEASE_UNSET] : []), ...(fakeProviderInProduction(env) ? [FAKE_PROVIDER_IN_PRODUCTION] : [])],
   };
 }
 
@@ -145,6 +149,6 @@ export function healthResponse(env: EnvLike, authHeader: string | null, nowMs: n
   const report = withHumanMergeOnlyProblem(withSessionSecretProblems(evaluateEnv(ENV_MANIFEST, env, deployKindOf(env)), env, nowMs));
   const body = { ok: report.ok, config: report.ok ? "ok" : "incomplete", planData: planDataStatus(), outside_meter: outsideMeterOn(env.FX_OUTSIDE_METER) ? "on" : "off", partners: partnerLayerOn(env) ? "on" : "off", ...identity(env) };
   const init = { status: report.ok ? 200 : 503, headers: { "Cache-Control": "no-store" } };
-  if (isOperator(authHeader, env.CRON_SECRET)) return NextResponse.json({ ...body, ...detail(report, engineReleaseUnset), ...(cron ? { cron } : {}) }, init);
+  if (isOperator(authHeader, env.CRON_SECRET)) return NextResponse.json({ ...body, ...detail(report, env, engineReleaseUnset), ...(cron ? { cron } : {}) }, init);
   return NextResponse.json(body, init);
 }

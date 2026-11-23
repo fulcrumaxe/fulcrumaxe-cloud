@@ -1,3 +1,4 @@
+%5Ffake/hetzner/[...path]/route.ts
 auth/github/callback/route.ts
 auth/github/route.ts
 auth/invitations/accept/route.ts
