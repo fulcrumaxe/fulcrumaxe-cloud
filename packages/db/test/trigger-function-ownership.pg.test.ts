@@ -25,6 +25,12 @@ const ALLOWLIST: ReadonlyArray<{ fn: string; owner: string; reason: string }> = 
     reason:
       "0786 (D#605 FL-6): stamps a demoted or removed minter's unused provisioning tokens revoked. SECURITY DEFINER, owned by a NOLOGIN role nothing can become. 0720's invoker-plus-helper shape needs EXECUTE for platform_ops, which migration 0765's platform_ops diff test refuses for any later migration.",
   },
+  {
+    fn: 'runner_link_facts_drop_trigger()',
+    owner: 'onboarding_ops',
+    reason:
+      "1062 (D#845 ON-2b): deletes a revoked runner's stored link address. SECURITY DEFINER, owned by the NOLOGIN role that holds the table's DELETE grant. It deletes only the row of the runner the trigger fired for. 0720's invoker-plus-helper shape needs EXECUTE for platform_ops and guard_definer, which the neon-shape exception check refuses.",
+  },
 ];
 
 describe('trigger function ownership (all migrations applied)', () => {

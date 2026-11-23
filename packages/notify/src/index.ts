@@ -1,3 +1,4 @@
+export { postAccountNotice } from "./accountNotice.js";
 export { loadNotifyConfig } from "./config.js";
 export type { NotifyConfig, NotifyOffReason } from "./config.js";
 export { notifyAsks, NOTIFY_WINDOW_SECONDS } from "./notifyAsks.js";

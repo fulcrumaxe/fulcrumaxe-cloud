@@ -1,3 +1,4 @@
+import { boundSourceIp } from "./boundSourceIp.js";
 import { createHash, createHmac, randomInt } from "node:crypto";
 import { effectivePlan } from "@fx/plan-data";
 import {
@@ -109,6 +110,8 @@ export async function startDevice(deps: RunnerCloudDeps, req: RunnerHttpRequest)
   }
   // The country is the platform's own header, for display; anything that is not two capital letters is left out.
   const country = req.headers["x-vercel-ip-country"];
+  // The address is the platform header's alone (boundSourceIp). It goes into a column of the code row that no session can read, and moves to the machine's link facts on approval.
+  const sourceIp = boundSourceIp(req.headers);
   const facts = { ...message.facts, ...(typeof country === "string" && /^[A-Z]{2}$/.test(country) ? { ip_country: country } : {}) };
   const jkt = ed25519Thumbprint(message.public_key_jwk.x);
   const ipHash = hashAddress(key, req.clientIp ?? "unknown");
@@ -119,7 +122,7 @@ export async function startDevice(deps: RunnerCloudDeps, req: RunnerHttpRequest)
     const deviceCode = newDeviceCode();
     const userCode = newUserCode();
     try {
-      const { rows } = await deps.appUserPool.query<{ expires_at: Date }>("SELECT runner_device_start($1, $2, $3::jsonb, $4, $5::jsonb, $6, $7, $8) AS expires_at", [
+      const { rows } = await deps.appUserPool.query<{ expires_at: Date }>("SELECT runner_device_start($1, $2, $3::jsonb, $4, $5::jsonb, $6, $7, $8, $9::inet) AS expires_at", [
         hashDeviceCode(deviceCode),
         hashUserCode(key, userCode),
         JSON.stringify({ kty: "OKP", crv: "Ed25519", x: message.public_key_jwk.x }),
@@ -128,6 +131,7 @@ export async function startDevice(deps: RunnerCloudDeps, req: RunnerHttpRequest)
         ipHash,
         DEVICE_START_PER_IP_PER_HOUR,
         globalLimit,
+        sourceIp ?? null,
       ]);
       const body = DeviceStartResponse.parse({
         device_code: deviceCode,
@@ -245,7 +249,10 @@ export async function approveDeviceCode(deps: SessionDeps, principal: SessionPri
     const planRow = (await client.query<{ plan: string; hosted_plan_paid: boolean }>("SELECT plan, hosted_plan_paid FROM accounts WHERE id = $1", [principal.accountId])).rows[0];
     // D#845 ON-22a (ruling 42): the runner tier's machine limit unless the account carries a paid hosted plan item.
     const max = maxRunnersOf(deps, planRow === undefined ? undefined : effectivePlan(planRow, "runner"));
-    return (await client.query<{ outcome: string; runner_id: string | null }>("SELECT outcome, runner_id FROM runner_device_approve($1, $2, $3)", [hash, parsed.name ?? null, max])).rows[0];
+    const approved = (await client.query<{ outcome: string; runner_id: string | null }>("SELECT outcome, runner_id FROM runner_device_approve($1, $2, $3)", [hash, parsed.name ?? null, max])).rows[0];
+    // The link facts and the owners' notice are part of the approval: if they cannot be written, the machine is not linked.
+    if (approved?.outcome === "ok") await client.query("SELECT machine_link_record($1::uuid)", [approved.runner_id]);
+    return approved;
   }).catch(forbidden);
   if (out?.outcome !== "ok") return refuse(out?.outcome ?? "");
   return { status: 200, body: { runner_id: out.runner_id }, headers: { "cache-control": "no-store" } };

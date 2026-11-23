@@ -169,7 +169,8 @@ describe('runner platform_ops definers (0724)', () => {
         `SELECT c.relname AS tbl, t.tgname AS trg, p.proname AS fn, p.proowner::regrole::text AS owner,
                 pg_has_role('platform_ops', p.proowner, 'MEMBER') AS ops_is_member
            FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_proc p ON p.oid = t.tgfoid
-          WHERE NOT t.tgisinternal AND c.relname = ANY($1)`,
+          WHERE NOT t.tgisinternal AND c.relname = ANY($1)
+            AND NOT (c.relname = 'runners' AND t.tgname = 'runner_link_facts_drop' AND p.proname = 'runner_link_facts_drop_trigger')`, // 1062's drop-on-revoke trigger is not a guard: matched on table, trigger and function together
         [TABLES],
       );
       expect(rows.map((r) => r.tbl).sort()).toEqual([...TABLES].sort()); // one guard trigger on each table
@@ -177,6 +178,17 @@ describe('runner platform_ops definers (0724)', () => {
         expect(row.ops_is_member, `${row.fn} on ${row.tbl}`).toBe(false);
         expect(row.owner, `${row.fn} on ${row.tbl}`).not.toBe('platform_ops');
       }
+    });
+
+    it("keeps 1062's drop-on-revoke trigger function owned by onboarding_ops, with platform_ops not a member of that role", async () => {
+      const { rows } = await admin.query<{ owner: string; ops_is_member: boolean; n: number }>(
+        `SELECT p.proowner::regrole::text AS owner, pg_has_role('platform_ops', p.proowner, 'MEMBER') AS ops_is_member, count(*) OVER ()::int AS n
+           FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_proc p ON p.oid = t.tgfoid
+          WHERE NOT t.tgisinternal AND c.relname = 'runners' AND t.tgname = 'runner_link_facts_drop' AND p.proname = 'runner_link_facts_drop_trigger'`,
+      );
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.owner).toBe('onboarding_ops');
+      expect(rows[0]!.ops_is_member).toBe(false);
     });
 
     it('cannot be dropped, altered, replaced or disabled by a platform_ops login, and the triggers survive', async () => {
