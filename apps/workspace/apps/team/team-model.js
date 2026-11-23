@@ -128,7 +128,7 @@ export const WORDS = {
   forbidden: "Only an owner or admin can change this.",
   deleteForbidden: "Only the account owner can delete engine data.",
   saveFailed: "That didn't save. Try again.",
-  refusals: { repo_not_runner_local: "Not on one of your runners", public_repo: "Public repository" },
+  refusals: { repo_not_runner_local: "Not on one of your runners", repo_visibility_unknown: "Visibility not known yet" },
   refusalOther: "Not available",
   noLog: "No log lines yet", logNote: "Log text stays on your machine; the cloud receives only what kind of line it was.", logLabel: "Log lines",
   older: "Load older", olderLoading: "Loading older lines…", olderNone: "No older lines", olderFailed: "Older lines couldn't be loaded.", newest: "Back to newest",
@@ -136,7 +136,7 @@ export const WORDS = {
   mergedWindow: "merged in the last 30 days",
   noFigure: "no figure", noUsage: "No usage reported yet", usageMore: "More rows exist than are shown.", usageWindow: "Window: ",
   allUsage: "API-equivalent for the window",
-  sendRefusals: { repo_not_runner_local: "That repository isn't on one of your runners.", public_repo: "A public repository can't be watched." },
+  sendRefusals: { repo_not_runner_local: "That repository isn't on one of your runners.", repo_visibility_unknown: "GitHub didn't say whether that repository is public or private. Try again in a minute." },
 };
 
 const LANE_STATE = { queued: "Queued", testing: "Testing", merged: "Merged", failed: "Failed", dequeued: "Removed from the queue", refused: "Refused" };

@@ -150,6 +150,11 @@ describe("the error-code allowlist", () => {
     for (const code of fromCore) expect(errorCodeOrOther(code), code).toBe(code);
   });
 
+  it("keeps the project-confirm busy code (D#845 ON-7a) instead of folding it into other", () => {
+    expect(errorCodeOrOther("placement_busy")).toBe("placement_busy");
+    expect(errorCodeOrOther("operate_public_pending")).toBe("operate_public_pending");
+  });
+
   it("has no duplicate in our own list", () => {
     expect(new Set(OWN_ERROR_CODES).size).toBe(OWN_ERROR_CODES.length);
   });

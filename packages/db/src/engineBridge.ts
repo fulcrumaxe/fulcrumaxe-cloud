@@ -19,6 +19,15 @@ export async function readEngineBridgeSettings(client: Pick<PoolClient, 'query'>
 }
 
 /**
+ * The per-account lock every writer of the bridge's switches and ticked repos takes before it reads them: `PUT /engine/settings` (through `setEngineBridgeSettings`) and the
+ * project confirm route. Both read the switches, decide, then write, so without one shared lock a confirm's consent check ("operate may go on for exactly these repos") can go
+ * stale between its read and its write (CWE-367). Held to the end of the transaction; taking it twice in one transaction is harmless.
+ */
+export async function lockEngineBridge(client: Pick<PoolClient, 'query'>): Promise<void> {
+  await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('engine_bridge:' || NULLIF(current_setting('app.account_id', true), ''), 0))`);
+}
+
+/**
  * Applies a change to the switches and the ticked repos, one audit row per facet that actually changed (`engine_bridge.settings_changed`, payload `kind` of
  * `watch_on`, `watch_off`, `operate_on`, `operate_off`, `repo_added` or `repo_removed`, plus `repo_id` for the repo kinds). Turning watch off while operate is on
  * is refused by the table's own CHECK, so a caller turns operate off first. Whether a repo may be ticked at all (private, `runner_local`) is the route's to check.
@@ -28,6 +37,7 @@ export async function setEngineBridgeSettings(
   userId: string,
   patch: { watch_enabled?: boolean; operate_enabled?: boolean; repo_ids?: readonly string[] },
 ): Promise<EngineBridgeSettings> {
+  await lockEngineBridge(client);
   const before = await readEngineBridgeSettings(client);
   const watch = patch.watch_enabled ?? before.watch_enabled;
   const operate = patch.operate_enabled ?? before.operate_enabled;
@@ -60,16 +70,16 @@ export interface EngineSettingsView {
   watch_enabled: boolean;
   operate_enabled: boolean;
   can_edit: boolean;
-  repos: Array<{ repo_id: string; full_name: string; enabled: boolean; eligible: boolean; refusal: 'repo_not_runner_local' | 'public_repo' | null; bridged_runner_id: string | null }>;
+  repos: Array<{ repo_id: string; full_name: string; enabled: boolean; eligible: boolean; refusal: 'repo_not_runner_local' | 'repo_visibility_unknown' | null; bridged_runner_id: string | null }>;
 }
 
 /**
  * The settings screen's read: the switches and every repo of the account with its `owner/name` (never an id or null on screen: a repo whose name is not known yet
- * reads "Unnamed repository (<first 8 of its id>)"), whether it is ticked, and whether it can be: only a private `runner_local` repo can. Whether a repo is public
- * is a GitHub read the route does and passes in as `publicRepoIds` (v1.7): a public one is `eligible: false` with `refusal: 'public_repo'`, and a repo that is not
- * `runner_local` is refused as `repo_not_runner_local` first. `can_edit` is the caller's, given by the route from the session's role.
+ * reads "Unnamed repository (<first 8 of its id>)"), whether it is ticked, and whether it can be: only a `runner_local` repo whose visibility GitHub answered can. A public repo
+ * is eligible (D#845 O-9; the engine track admits it, and its events hold ids and enums only). Whether GitHub answered is a read the route does and passes in as
+ * `unknownRepoIds`: such a repo is `eligible: false` with `refusal: 'repo_visibility_unknown'`, and a repo that is not `runner_local` is refused as `repo_not_runner_local` first. `can_edit` is the caller's, given by the route from the session's role.
  */
-export async function readEngineSettingsView(client: Pick<PoolClient, 'query'>, canEdit: boolean, publicRepoIds: ReadonlySet<string> = new Set()): Promise<EngineSettingsView> {
+export async function readEngineSettingsView(client: Pick<PoolClient, 'query'>, canEdit: boolean, unknownRepoIds: ReadonlySet<string> = new Set()): Promise<EngineSettingsView> {
   const s = await readEngineBridgeSettings(client);
   // `bridged_runner_id`: the runner whose bridge last reported for the repo (its newest engine session), or null when none ever has. The account's own
   // `account_id` predicate is explicit on both tables, on top of RLS. Nothing else about the session leaves here: no instance id, no version, no path.
@@ -86,7 +96,7 @@ export async function readEngineSettingsView(client: Pick<PoolClient, 'query'>, 
     operate_enabled: s.operate_enabled,
     can_edit: canEdit,
     repos: rows.map((r) => {
-      const refusal = r.execution_mode !== 'runner_local' ? ('repo_not_runner_local' as const) : publicRepoIds.has(r.id) ? ('public_repo' as const) : null;
+      const refusal = r.execution_mode !== 'runner_local' ? ('repo_not_runner_local' as const) : unknownRepoIds.has(r.id) ? ('repo_visibility_unknown' as const) : null;
       return { repo_id: r.id, full_name: r.full_name ?? `Unnamed repository (${r.id.slice(0, 8)})`, enabled: on.has(r.id), eligible: refusal === null, refusal, bridged_runner_id: r.bridged_runner_id };
     }),
   };

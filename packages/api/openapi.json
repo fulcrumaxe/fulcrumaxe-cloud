@@ -52690,7 +52690,7 @@
                                 "type": "string",
                                 "enum": [
                                   "repo_not_runner_local",
-                                  "public_repo"
+                                  "repo_visibility_unknown"
                                 ]
                               },
                               {
@@ -52808,7 +52808,7 @@
       "put": {
         "operationId": "setEngineSettings",
         "summary": "Turn the engine watch or operate switch on or off and tick repos (an owner or admin, on a session)",
-        "description": "A repo that is not on one of the person's runners, or is not private, is refused with 409 (`repo_not_runner_local`, `public_repo`). Operate needs watch, so turn operate off before watch.",
+        "description": "A repo that is not on one of the person's runners, or whose visibility GitHub did not answer, is refused with 409 (`repo_not_runner_local`, `repo_visibility_unknown`); a public repo is accepted. Operate needs watch, so turn operate off before watch.",
         "security": [
           {
             "session": []
@@ -52884,7 +52884,7 @@
                                 "type": "string",
                                 "enum": [
                                   "repo_not_runner_local",
-                                  "public_repo"
+                                  "repo_visibility_unknown"
                                 ]
                               },
                               {
@@ -52959,7 +52959,7 @@
             }
           },
           "409": {
-            "description": "A repo cannot be ticked (`repo_not_runner_local`, `public_repo`).",
+            "description": "A repo cannot be ticked (`repo_not_runner_local`, `repo_visibility_unknown`), or operate would cover a public repo (`operate_public_pending`).",
             "content": {
               "application/json": {
                 "schema": {

@@ -263,7 +263,7 @@ describe("settings", () => {
     await t.load();
     const sheet = t.view().sheet;
     expect(sheet.readOnly).toBe(WORDS.readOnly);
-    expect(sheet.repos).toEqual([{ id: REPO_A, name: "acme-labs/widgets", checked: true, refused: false, reason: "" }, { id: REPO_B, name: "acme-labs/site", checked: false, refused: true, reason: "Public repository" }]);
+    expect(sheet.repos).toEqual([{ id: REPO_A, name: "acme-labs/widgets", checked: true, refused: false, reason: "" }, { id: REPO_B, name: "acme-labs/site", checked: false, refused: true, reason: "Not on one of your runners" }]);
     const own = F.settings({ repos: [F.settingsRepo({ enabled: false, eligible: false, refusal: "repo_not_runner_local" }), F.settingsRepo({ repo_id: REPO_B, full_name: "x/y", enabled: false, eligible: false, refusal: "mystery" })] });
     const later = team({}, { ["GET " + SETTINGS_URL]: own });
     await later.t.load();
@@ -287,7 +287,7 @@ describe("settings", () => {
     expect(f.log.filter(([m]) => m === "PUT")[1][2]).toEqual({ repo_ids: [] });
   });
   it("a refused write says why in the app's own words and changes nothing else", async () => {
-    for (const [e, sentence] of [[fail(403, "forbidden"), WORDS.forbidden], [fail(409, "public_repo"), WORDS.sendRefusals.public_repo], [fail(409, "repo_not_runner_local"), WORDS.sendRefusals.repo_not_runner_local], [fail(500, "server_error"), WORDS.saveFailed], [fail(409, "other"), WORDS.saveFailed]]) {
+    for (const [e, sentence] of [[fail(403, "forbidden"), WORDS.forbidden], [fail(409, "repo_visibility_unknown"), WORDS.sendRefusals.repo_visibility_unknown], [fail(409, "repo_not_runner_local"), WORDS.sendRefusals.repo_not_runner_local], [fail(500, "server_error"), WORDS.saveFailed], [fail(409, "other"), WORDS.saveFailed]]) {
       const { t, f } = team({}, { ["PUT " + SETTINGS_URL]: e });
       await t.load();
       f.log.length = 0;
@@ -340,7 +340,7 @@ describe("a save and a refresh at the same time", () => {
   function server() {
     const s = { watch: true, operate: false, hold: null, release: null, failPut: null };
     const routes = {
-      ["GET " + SETTINGS_URL]: () => { const snap = F.settings({ watch_enabled: s.watch, operate_enabled: s.operate, ...(s.ids ? { repos: [F.settingsRepo({ enabled: s.ids.includes(REPO_A) }), F.settingsRepo({ repo_id: REPO_B, full_name: "acme-labs/site", enabled: false, eligible: false, refusal: "public_repo" })] } : {}), ...(s.other ? { repos: [F.settingsRepo(), F.settingsRepo({ repo_id: REPO_B, full_name: "acme-labs/site", enabled: true, eligible: true })] } : {}) }); return s.hold ? s.hold.then(() => snap) : snap; },
+      ["GET " + SETTINGS_URL]: () => { const snap = F.settings({ watch_enabled: s.watch, operate_enabled: s.operate, ...(s.ids ? { repos: [F.settingsRepo({ enabled: s.ids.includes(REPO_A) }), F.settingsRepo({ repo_id: REPO_B, full_name: "acme-labs/site", enabled: false, eligible: false, refusal: "repo_not_runner_local" })] } : {}), ...(s.other ? { repos: [F.settingsRepo(), F.settingsRepo({ repo_id: REPO_B, full_name: "acme-labs/site", enabled: true, eligible: true })] } : {}) }); return s.hold ? s.hold.then(() => snap) : snap; },
       ["PUT " + SETTINGS_URL]: (body) => {
         if (s.failPut) return s.failPut;
         const apply = () => { if ("watch_enabled" in body) s.watch = body.watch_enabled; if ("operate_enabled" in body) s.operate = body.operate_enabled; if ("repo_ids" in body) s.ids = body.repo_ids; };

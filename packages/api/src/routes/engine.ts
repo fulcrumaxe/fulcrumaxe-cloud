@@ -37,7 +37,7 @@ import { resolveWindow } from "./stats.js";
  *  - `engine.changed` (ids and the names of the changed panels only) reaches `/api/v1/events` (SSE and JSON) for the account; it is not a webhook type.
  */
 
-/** Whether a repo is private, asked of GitHub on every call and never remembered. Anything but a clear "private" is refused (fail closed). Production registers it. */
+/** Whether a repo is private, asked of GitHub on every call and never remembered. Anything but a clear "private" or "public" is refused (fail closed). Production registers it. */
 export const engineSettingsDeps: { getVisibility: (() => (accountId: string, repoId: string) => Promise<"private" | "public" | "unknown">) | null } = { getVisibility: null };
 
 const READ = { principals: ["session", "token"] as ("session" | "token")[], scope: "read" as const, minRole: "member" as const, idempotency: "never" as const, rateClass: "read" };
@@ -93,7 +93,7 @@ const statsResponse = freshOnly.extend({
 });
 const settingsResponse = z.object({
   watch_enabled: z.boolean(), operate_enabled: z.boolean(), can_edit: z.boolean(),
-  repos: z.array(z.object({ repo_id: z.string(), full_name: z.string(), enabled: z.boolean(), eligible: z.boolean(), refusal: z.enum(["repo_not_runner_local", "public_repo"]).nullable(), bridged_runner_id: z.string().uuid().nullable() })),
+  repos: z.array(z.object({ repo_id: z.string(), full_name: z.string(), enabled: z.boolean(), eligible: z.boolean(), refusal: z.enum(["repo_not_runner_local", "repo_visibility_unknown"]).nullable(), bridged_runner_id: z.string().uuid().nullable() })),
 });
 const settingsBody = z.object({ watch_enabled: z.boolean().optional(), operate_enabled: z.boolean().optional(), repo_ids: z.array(z.string().uuid()).max(500).optional() }).strict();
 
@@ -131,22 +131,22 @@ const sum = (rows: Array<{ tokens: { input: number; output: number; cache_read: 
   rows.reduce((t, r) => ({ input: t.input + (r.tokens?.input ?? 0), output: t.output + (r.tokens?.output ?? 0), cache_read: t.cache_read + (r.tokens?.cache_read ?? 0), cache_write: t.cache_write + (r.tokens?.cache_write ?? 0) }), { input: 0, output: 0, cache_read: 0, cache_write: 0 });
 
 /**
- * The settings read: the switches and every repo with whether it can be ticked. A repo is eligible only if it is `runner_local` AND private. GitHub is asked now
- * (never remembered) for each `runner_local` repo, or only for `only` when given, and the ids that are not clearly private go to `readEngineSettingsView` as its
- * `publicRepoIds` (fail closed: a missing reader, a rejected call or any answer but "private" counts as public).
+ * The settings read: the switches and every repo with whether it can be ticked. A repo is eligible if it is `runner_local` and GitHub answered whether it is public or
+ * private (D#845 O-9: public is accepted). GitHub is asked now (never remembered) for each `runner_local` repo, or only for `only` when given, and the ids with no clear
+ * answer go to `readEngineSettingsView` as its `unknownRepoIds` (fail closed: a missing reader, a rejected call, a 404 or a 5xx counts as unknown).
  */
 async function settingsView(ctx: Parameters<RouteEntry["handler"]>[0], canEdit: boolean, only?: ReadonlySet<string>) {
   const { accountId, userId } = ctx.principal;
   const base = await withTenant(ctx.pool, accountId, userId, (client) => readEngineSettingsView(client, canEdit));
-  const notPrivate = new Set<string>();
+  const unknown = new Set<string>();
   await Promise.all(
     base.repos
       .filter((r) => r.eligible && (only === undefined || only.has(r.repo_id)))
       .map(async (r) => {
-        if ((await visibilityOf(accountId, r.repo_id)) !== "private") notPrivate.add(r.repo_id);
+        if ((await visibilityOf(accountId, r.repo_id)) === "unknown") unknown.add(r.repo_id);
       }),
   );
-  return notPrivate.size === 0 ? base : withTenant(ctx.pool, accountId, userId, (client) => readEngineSettingsView(client, canEdit, notPrivate));
+  return unknown.size === 0 ? base : withTenant(ctx.pool, accountId, userId, (client) => readEngineSettingsView(client, canEdit, unknown));
 }
 
 /** One GitHub visibility question, failing closed: a missing reader, a reader that throws (even before it returns a promise) or rejects, all read as "unknown". */
@@ -260,8 +260,8 @@ export const engineRoutes: RouteEntry[] = [
   {
     method: "PUT", path: "/api/v1/engine/settings", operationId: "setEngineSettings",
     summary: "Turn the engine watch or operate switch on or off and tick repos (an owner or admin, on a session)",
-    description: "A repo that is not on one of the person's runners, or is not private, is refused with 409 (`repo_not_runner_local`, `public_repo`). Operate needs watch, so turn operate off before watch.",
-    extraResponses: { "409": "A repo cannot be ticked (`repo_not_runner_local`, `public_repo`)." },
+    description: "A repo that is not on one of the person's runners, or whose visibility GitHub did not answer, is refused with 409 (`repo_not_runner_local`, `repo_visibility_unknown`); a public repo is accepted. Operate needs watch, so turn operate off before watch.",
+    extraResponses: { "409": "A repo cannot be ticked (`repo_not_runner_local`, `repo_visibility_unknown`), or operate would cover a public repo (`operate_public_pending`)." },
     principals: ["session"], minRole: "admin", idempotency: "never", rateClass: "write",
     bodySchema: settingsBody, responseSchema: settingsResponse,
     async handler(ctx, input) {
@@ -280,7 +280,17 @@ export const engineRoutes: RouteEntry[] = [
       for (const id of fresh) {
         const r = known.get(id);
         if (!r) throw new NotFoundError(`repo ${id} not found`);
-        if (!r.eligible) throw new ApiError(409, r.refusal ?? "repo_not_runner_local", r.refusal === "public_repo" ? "a public repository cannot use the engine bridge" : "that repository does not run on one of your runners");
+        if (!r.eligible) throw new ApiError(409, r.refusal ?? "repo_not_runner_local", r.refusal === "repo_visibility_unknown" ? "GitHub didn't say whether that repository is public or private. Try again in a minute" : "that repository does not run on one of your runners");
+      }
+      // Operate on a public repo waits for the decide rule for work from strangers (D#845 S-8). The follow-up that replaces this gate stores `repos.is_private` (kept by the sync and
+      // the webhooks) so decide can answer `ask` itself; that also covers a repo that turns public after operate is on, which this gate does not. The repos that would be operated
+      // are read live when operate goes on (all of them) or when it is on and a repo is added (the new ones). Watch-only stays open.
+      if (operate) {
+        const finalSet = body.repo_ids === undefined ? [...ticked] : [...wanted];
+        const toRead = !before.operate_enabled ? finalSet : finalSet.filter((id) => fresh.has(id));
+        const seen = await Promise.all(toRead.map(async (id) => visibilityOf(accountId, id)));
+        if (seen.includes("public")) throw new ApiError(409, "operate_public_pending", "Operate isn't available for public repos yet. The engine can watch this repo, but won't act on it.");
+        if (seen.includes("unknown")) throw new ApiError(409, "repo_visibility_unknown", "GitHub didn't say whether that repository is public or private. Try again in a minute");
       }
       await withTenant(ctx.pool, accountId, userId, (client) => setEngineBridgeSettings(client, userId, { watch_enabled: body.watch_enabled, operate_enabled: body.operate_enabled, repo_ids: body.repo_ids }));
       // The runner learns of a change to the switches or the ticked set through the wake path (its command pull is a 10-minute safety net now): without this,
