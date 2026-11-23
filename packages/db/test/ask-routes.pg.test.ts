@@ -451,6 +451,7 @@ describe('ask_routes (0836)', () => {
       'project.removed',
       'engine_session.started',
       'engine_session.stopped',
+      'engine_session.deleted',
       'machine_credential.added',
       'machine_credential.removed',
       'server.create_confirmed',
