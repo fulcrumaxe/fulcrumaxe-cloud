@@ -1679,6 +1679,83 @@ check_engine_halt_definer_role_shape() {
   fi
 }
 
+# D#291 PI-3 (1065): the four SECURITY DEFINER functions owned by interview_session_definer, matched by exact signature. Prints their oids when each is pinned to
+# search_path=pg_catalog, public, pg_temp, has no PUBLIC entry and no grant option, and an ACL that holds exactly who calls it besides the owner: start, abandon and counts
+# app_user; the person guard nobody. SHAPE_FAIL:<count> when a definer owned by the role is not one of these; nothing when the role owns none.
+check_interview_session_definer_exception_shape() {
+  local dbname="$1" row rc=0 oids bad
+  row="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -F'|' -c "
+    SELECT coalesce(string_agg(oid::text, ', ') FILTER (WHERE ok), ''), count(*) FILTER (WHERE NOT ok) FROM (
+      SELECT p.oid, (p.oid = ANY (ARRAY['public.interview_session_start(text,text,uuid)'::regprocedure, 'public.interview_session_abandon(uuid,integer)'::regprocedure,
+                                        'public.interview_session_counts()'::regprocedure, 'public.interview_assert_person(text)'::regprocedure])
+        AND p.proconfig = ARRAY['search_path=pg_catalog, public, pg_temp'] AND p.proacl IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee = 0 OR a.is_grantable)
+        AND coalesce((SELECT array_agg(DISTINCT pg_get_userbyid(a.grantee) ORDER BY pg_get_userbyid(a.grantee))
+                        FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner), ARRAY[]::name[])
+            = CASE WHEN p.proname = 'interview_assert_person' THEN ARRAY[]::name[] ELSE ARRAY['app_user']::name[] END) AS ok
+      FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.prosecdef AND pg_get_userbyid(p.proowner) = 'interview_session_definer') x;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ "$(awk -F'|' '{print NF; exit}' <<<"$row")" != "2" ]; then
+    echo "SHAPE_FAIL:psql failed for check 'interview-session-definer-function-shape' on $dbname (exit $rc): $row"
+    return 0
+  fi
+  IFS='|' read -r oids bad <<<"$row"
+  if [ "$bad" != "0" ]; then
+    echo "SHAPE_FAIL:$bad SECURITY DEFINER function(s) owned by interview_session_definer fail the exception shape (not one of the four 1065 functions, a loose search_path, an EXECUTE grant beyond the ones 1065 makes, or a grant option)"
+    return 0
+  fi
+  echo "$oids"
+}
+
+# D#291 PI-3 (1065): role shape of interview_session_definer. A no-op when the role does not exist. Every problem is named: NOLOGIN and unprivileged, no member but the migration
+# role and no live membership for it, a member of no role, privileges exactly the 10 granted by 1065 (interview_sessions SELECT, INSERT and UPDATE; account_members account_id,
+# user_id and role SELECT; accounts id, deleted_at and hosted_plan_paid SELECT; USAGE on public), owning exactly its four functions and nothing else, no CREATE on public, its five
+# policies (interview_sessions select, insert and update; account_members and accounts select), and neither app_user nor platform_ops able to insert or delete a session directly.
+check_interview_session_definer_role_shape() {
+  local dbname="$1" out rc=0
+  out="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -c "
+    WITH r AS (SELECT * FROM pg_roles WHERE rolname = 'interview_session_definer'),
+    held AS (
+      SELECT 'table ' || c.relname || ' ' || a.privilege_type AS x FROM pg_class c, aclexplode(c.relacl) a, r WHERE a.grantee = r.oid
+      UNION ALL SELECT 'column ' || c.relname || '.' || t.attname || ' ' || a.privilege_type
+        FROM pg_class c JOIN pg_attribute t ON t.attrelid = c.oid, aclexplode(t.attacl) a, r WHERE a.grantee = r.oid
+      UNION ALL SELECT 'schema ' || n.nspname || ' ' || a.privilege_type FROM pg_namespace n, aclexplode(n.nspacl) a, r WHERE a.grantee = r.oid AND n.nspname = 'public'),
+    mine AS (SELECT p.oid FROM pg_proc p, r WHERE p.proowner = r.oid),
+    pol AS (SELECT tablename, cmd FROM pg_policies WHERE roles = ARRAY['interview_session_definer']::name[])
+    SELECT concat_ws('; ',
+      CASE WHEN r.rolcanlogin OR r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls THEN 'privileged attribute' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE roleid = r.oid AND member <> 'fx_migrator'::regrole) THEN 'has a member besides the migration role' END,
+      CASE WHEN coalesce((SELECT bool_or(inherit_option OR set_option) FROM pg_auth_members WHERE roleid = r.oid AND member = 'fx_migrator'::regrole), false)
+                OR pg_has_role('fx_migrator', 'interview_session_definer', 'USAGE') THEN 'fx_migrator holds a live membership' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE member = r.oid) THEN 'is a member of another role' END,
+      CASE WHEN (SELECT count(*) FROM held) <> 10 OR EXISTS (SELECT 1 FROM held WHERE x <> ALL (ARRAY[
+              'table interview_sessions SELECT','table interview_sessions INSERT','table interview_sessions UPDATE',
+              'column account_members.account_id SELECT','column account_members.user_id SELECT','column account_members.role SELECT',
+              'column accounts.id SELECT','column accounts.deleted_at SELECT','column accounts.hosted_plan_paid SELECT',
+              'schema public USAGE']))
+           THEN 'privileges are not exactly the 10 granted by 1065' END,
+      CASE WHEN (SELECT count(*) FROM mine) <> 4 OR EXISTS (SELECT 1 FROM mine WHERE oid <> ALL (ARRAY['public.interview_session_start(text,text,uuid)'::regprocedure,
+                'public.interview_session_abandon(uuid,integer)'::regprocedure, 'public.interview_session_counts()'::regprocedure, 'public.interview_assert_person(text)'::regprocedure]))
+              OR EXISTS (SELECT 1 FROM pg_class c WHERE c.relowner = r.oid) OR EXISTS (SELECT 1 FROM pg_namespace n WHERE n.nspowner = r.oid)
+              OR EXISTS (SELECT 1 FROM pg_type t WHERE t.typowner = r.oid) THEN 'does not own exactly its four functions and nothing else' END,
+      CASE WHEN has_schema_privilege('interview_session_definer', 'public', 'CREATE') THEN 'still has CREATE on public' END,
+      CASE WHEN (SELECT count(*) FROM pol) <> 5
+              OR (SELECT count(*) FROM pol WHERE tablename = 'interview_sessions') <> 3
+              OR (SELECT count(*) FROM pol WHERE tablename IN ('accounts', 'account_members') AND cmd = 'SELECT') <> 2
+           THEN 'its five policies are not interview_sessions select, insert and update plus accounts and account_members select' END,
+      CASE WHEN has_table_privilege('app_user', 'public.interview_sessions', 'INSERT,DELETE,TRUNCATE')
+              OR has_table_privilege('platform_ops', 'public.interview_sessions', 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE')
+           THEN 'app_user can insert or delete, or platform_ops can touch, interview_sessions directly' END)
+    FROM r;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "neon-shape ($dbname): psql failed for check 'interview_session_definer-shape' (exit $rc): $out" >&2
+    exit 1
+  fi
+  if [ -n "$out" ]; then
+    echo "neon-shape ($dbname): interview_session_definer role shape wrong: $out" >&2
+    exit 1
+  fi
+}
+
 # D#6 R2b-3 (0754, C21 section 11): the SECURITY DEFINER functions owned by runner_lease_definer. Prints their oids, comma separated,
 # when each is one of the seven exact signatures (matched by regprocedure, not by name), pinned to search_path=pg_catalog, public,
 # pg_temp, with an ACL that holds the one login that calls it (app_user for the throttle, agent_run_writer for the other six) and
