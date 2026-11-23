@@ -15,6 +15,8 @@ export interface RepoPairing {
   planDataRulesPath: string | null;
   /** The pull request body footer template, or null (none). Not part of the digest and not sent to the push hook; only the text builder reads it. */
   prFooter?: string | null;
+  /** EXPORT mode only (ON-27c1): binary files under these paths may be published unscanned. Absent or empty: every binary file refuses. Not part of the digest. */
+  binaryGlobs?: string[];
 }
 
 export type RuleFileField = "identifierRulesPath" | "planDataRulesPath";
