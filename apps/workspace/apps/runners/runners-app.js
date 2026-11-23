@@ -9,7 +9,7 @@ import { h, timeNode } from "../_lib/dom.js";
 import { onRefresh } from "../../core/cloud-live.js";
 import {
   CHECK_READ_FAILED, SANDBOX_ACTION, MODE_WORDS, ONLY_ADMINS, TTL_CHOICES, FLEET_REFRESH_MS, accountText, agoText, capacityText, controlList, createAdder, createFleet, factsText, NO_PREFLIGHT, PREFLIGHT_OK, preflightLines, heldBackText, loadRepoChoices, provText, runnerLimitText, sandboxCommandText, sandboxConfirm, sandboxControls, sandboxLine, sandboxQuotaLines, sandboxStatusText, stateParts, versionText,
-  KVM_NOTE, MACHINES_UNAVAILABLE, NO_MACHINES, ONLY_ADMINS_ADD, SERVERS_UNAVAILABLE, TABS, addSteps, createMachines, tierText, needsVmToken, VM_TOKEN_COMMAND, VM_TOKEN_LINE, VM_TOKEN_STAYS,
+  KVM_NOTE, MACHINES_UNAVAILABLE, NO_MACHINES, ONLY_ADMINS_ADD, SERVERS_UNAVAILABLE, TABS, addSteps, createMachines, tierText, needsVmInstall, vmInstallLine, VM_INSTALL_COMMAND, needsVmToken, VM_TOKEN_COMMAND, VM_TOKEN_LINE, VM_TOKEN_STAYS,
 } from "./runners-fleet.js";
 
 const FULC = window.FULC;
@@ -288,8 +288,10 @@ function mountApp(contentEl) {
   function machineRow(m) {
     return h("li", { class: "runners-row", "data-testid": "runners-machine", "data-state": m.live ? "live" : "offline" },
       h("h3", { class: "runners-name", "data-testid": "runners-machine-name" }, h("bdi", null, m.name)),
-      h("p", { class: "runners-state" }, h("span", { "data-testid": "runners-machine-tier" }, tierText(m.tier)), " · ", h("span", { "data-testid": "runners-machine-live" }, m.live ? "Online" : "Offline")),
+      h("p", { class: "runners-state" }, h("span", { "data-testid": "runners-machine-tier" }, tierText(m.tier, m.kvm)), " · ", h("span", { "data-testid": "runners-machine-live" }, m.live ? "Online" : "Offline")),
       h("dl", { class: "runners-facts" }, ...line("Kind", m.kind), ...line(m.tier === "microvm" ? "Claude token" : "Claude", m.claude ? "yes" : "no"), ...line("Capacity", h("span", { "data-testid": "runners-machine-capacity" }, m.running === null ? "Free" : ["Running ", h("bdi", null, m.running)]))),
+      needsVmInstall(m.tier, m.kvm) ? h("div", { class: "runners-vminstall", "data-testid": "runners-machine-vminstall" }, h("p", null, vmInstallLine(m.name)),
+        h("pre", { class: "runners-code", tabindex: "0", "aria-label": "Command" }, VM_INSTALL_COMMAND), button("Copy command", { "data-testid": "runners-machine-vminstall-copy" }, () => copyText(VM_INSTALL_COMMAND))) : null,
       needsVmToken(m.tier, m.claude) ? h("div", { class: "runners-vmtoken", "data-testid": "runners-machine-vmtoken" }, h("p", null, VM_TOKEN_LINE), h("p", { class: "runners-muted" }, VM_TOKEN_STAYS),
         h("pre", { class: "runners-code", tabindex: "0", "aria-label": "Command" }, VM_TOKEN_COMMAND), button("Copy command", { "data-testid": "runners-machine-vmtoken-copy" }, () => copyText(VM_TOKEN_COMMAND))) : null);
   }

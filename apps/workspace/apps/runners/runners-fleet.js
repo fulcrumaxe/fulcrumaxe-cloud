@@ -505,10 +505,18 @@ export const ONLY_ADMINS_ADD = "Only owners and admins can add a machine.";
 export const SERVERS_UNAVAILABLE = "Hetzner Cloud servers aren't available right now";
 export const TABS = [["machines", "Machines"], ["servers", "Servers"], ["fleet", "Fleet"]];
 
-/** The isolation chip. A machine that has not said what it can do reads as not reported, never as a guess. */
-export const tierText = (tier) =>
-  tier === "microvm" ? "MicroVM isolation" : tier === "standard" ? "Standard isolation: one project on this machine (no KVM)" : "Isolation not reported yet";
+/**
+ * The isolation chip. A machine that has not said what it can do reads as not reported, never as a guess. A standard machine says "(no KVM)" only when it reported
+ * the KVM fact as absent; one that reported nothing (an older runner) says nothing about KVM.
+ */
+export const tierText = (tier, kvm) =>
+  tier === "microvm" ? "MicroVM isolation" : tier === "standard" ? "Standard isolation: one project on this machine" + (kvm === "absent" ? " (no KVM)" : "") : "Isolation not reported yet";
 
+// D#845 FU-225: the vm-install hint a standard machine with KVM shows. The Onboarding app says the same words (onboarding-engine.js, microvm_helper_missing); a test pins that they match.
+export const VM_INSTALL_COMMAND = "sudo fx-runner vm install";
+export const vmInstallLine = (name) => name + " can run microVMs. Run " + VM_INSTALL_COMMAND + " on it.";
+/** The derivation the Onboarding read uses (engineTrack.ts): KVM reported present on a machine running the standard engine. */
+export const needsVmInstall = (tier, kvm) => kvm === "present" && tier === "standard";
 
 /** One machine, or null when the row is not a machine. Every text is a string a person can read: no null, undefined or id reaches the screen. */
 export function readMachine(m) {
@@ -518,6 +526,7 @@ export function readMachine(m) {
     name: typeof m.name === "string" && m.name.trim() !== "" ? m.name : "Unnamed machine",
     kind: "Computer",
     tier: m.tier === "microvm" || m.tier === "standard" ? m.tier : null,
+    kvm: m.kvm === "present" || m.kvm === "absent" ? m.kvm : null,
     live: m.live === true,
     claude: m.claude === true,
     running: m.running && typeof m.running.name === "string" && m.running.name !== "" ? m.running.name : m.running ? "a project" : null,

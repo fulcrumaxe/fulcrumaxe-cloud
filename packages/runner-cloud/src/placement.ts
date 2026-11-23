@@ -31,6 +31,8 @@ export interface MachineCapacity {
   /** The name the person gave, or "Unnamed machine". Never null. */
   name: string;
   tier: "microvm" | "standard" | null;
+  /** The machine's reported KVM fact (`runners.kvm`, the column Onboarding reads); null when it never reported one. */
+  kvm: "present" | "absent" | null;
   live: boolean;
   /** Set by a person: the machine takes no new work. */
   paused: boolean;
@@ -76,6 +78,7 @@ interface MachineRow {
   runner_id: string;
   name: string | null;
   sandbox_engine: string | null;
+  kvm: string | null;
   live: boolean;
   paused: boolean;
   draining: boolean;
@@ -91,7 +94,7 @@ export async function readMachineCapacity(client: PoolClient, accountId: string,
   const now = o.now ?? new Date();
   const live = runnerLiveSql({ runner: "rn", now: "$2", onlineSeconds: "$3", wakeEnabled: o.wakeEnabled === true });
   const { rows } = await client.query<MachineRow>(
-    `SELECT rn.id AS runner_id, st.name, f.sandbox_engine, COALESCE(${live}, false) AS live, (st.paused_at IS NOT NULL) AS paused, COALESCE(st.draining, false) AS draining, p.repo_id,
+    `SELECT rn.id AS runner_id, st.name, f.sandbox_engine, rn.kvm, COALESCE(${live}, false) AS live, (st.paused_at IS NOT NULL) AS paused, COALESCE(st.draining, false) AS draining, p.repo_id,
             COALESCE(NULLIF(g.gh_owner || '/' || g.gh_name, ''), 'a repository') AS repo_name
        FROM runners rn
             LEFT JOIN runner_settings st ON st.account_id = rn.account_id AND st.runner_id = rn.id
@@ -109,6 +112,7 @@ export async function readMachineCapacity(client: PoolClient, accountId: string,
       runner_id: r.runner_id,
       name: r.name ?? "Unnamed machine",
       tier: r.sandbox_engine === "microvm" ? "microvm" : r.sandbox_engine === "os_sandbox" ? "standard" : null,
+      kvm: r.kvm === "present" || r.kvm === "absent" ? r.kvm : null,
       live: r.live,
       paused: r.paused,
       draining: r.draining,

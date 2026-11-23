@@ -633,7 +633,7 @@ test.describe("D#845 MC-10a: the Machines app", () => {
     const { errors } = await setup(page, {
       machines: [
         machine({ running: { repo_id: REPO_WEB, name: "acme/web" } }),
-        machine({ id: R2, name: "", tier: "standard", live: false, claude: false }),
+        machine({ id: R2, name: "", tier: "standard", kvm: "absent", live: false, claude: false }),
         machine({ id: R3, name: "\u202Eevil", tier: null }),
       ],
     });
@@ -651,6 +651,34 @@ test.describe("D#845 MC-10a: the Machines app", () => {
     await expect(rows.nth(1).locator('[data-testid="runners-machine-capacity"]')).toHaveText("Free");
     await expect(rows.nth(2)).toContainText("Isolation not reported yet");
     await expect(page.locator(`${WIN} [data-testid="runners-machine-name"] bdi`)).toHaveCount(3);
+    await clean(page, errors);
+  });
+
+  test("a standard machine says no KVM only when it reported none; with KVM it shows the vm-install command to copy; one that never reported says nothing about KVM (FU-225)", async ({ page, context }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    const { errors } = await setup(page, {
+      machines: [
+        machine({ id: R1, name: "NoKvm", tier: "standard", kvm: "absent" }),
+        machine({ id: R2, name: "HasKvm", tier: "standard", kvm: "present" }),
+        machine({ id: R3, name: "Unreported", tier: "standard" }),
+      ],
+    });
+    await openMachines(page);
+    const rows = t(page, "runners-machine");
+    await expect(rows).toHaveCount(3);
+    const tier = (i: number) => rows.nth(i).locator('[data-testid="runners-machine-tier"]');
+    const hint = (i: number) => rows.nth(i).locator('[data-testid="runners-machine-vminstall"]');
+    await expect(tier(0)).toHaveText("Standard isolation: one project on this machine (no KVM)");
+    await expect(hint(0)).toHaveCount(0);
+    await expect(tier(1)).toHaveText("Standard isolation: one project on this machine");
+    await expect(hint(1)).toContainText("HasKvm can run microVMs. Run sudo fx-runner vm install on it.");
+    await expect(hint(1).locator("pre")).toHaveText("sudo fx-runner vm install");
+    await press(rows.nth(1).locator('[data-testid="runners-machine-vminstall-copy"]'));
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("sudo fx-runner vm install");
+    await expect(tier(2)).toHaveText("Standard isolation: one project on this machine");
+    await expect(hint(2)).toHaveCount(0);
+    await expect(rows.nth(2)).not.toContainText("KVM");
+    expect(await page.locator(WIN).innerText()).not.toMatch(/undefined|null/);
     await clean(page, errors);
   });
 

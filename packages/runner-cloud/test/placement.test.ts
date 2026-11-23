@@ -3,7 +3,7 @@ import { HOST_LOAD_MIN_INTERVAL_SECONDS } from "@fulcrumaxe/runner-protocol";
 import { LOAD_STALE_AFTER_INTERVALS, PLACEMENT_MIN_DISK_FREE_MB, PLACEMENT_MIN_MEM_AVAIL_MB, assessMachine, placementOrder, type MachineCapacity } from "../src/index.js";
 
 /** D#845 MC-9: the pure rules: who is eligible, and the order auto-placement tries machines in. */
-const base = { runner_id: "00000000-0000-4000-8000-000000000001", name: "alpha", tier: "microvm" as "microvm" | "standard" | null, live: true, paused: false, draining: false, load_age_s: 10 as number | null, claude: true, mem_avail_mb: 8000 as number | null, disk_free_mb: 50000 as number | null, running: null as { repo_id: string; name: string } | null };
+const base = { runner_id: "00000000-0000-4000-8000-000000000001", name: "alpha", tier: "microvm" as "microvm" | "standard" | null, kvm: null as "present" | "absent" | null, live: true, paused: false, draining: false, load_age_s: 10 as number | null, claude: true, mem_avail_mb: 8000 as number | null, disk_free_mb: 50000 as number | null, running: null as { repo_id: string; name: string } | null };
 const m = (over: Partial<typeof base> = {}): MachineCapacity => assessMachine({ ...base, ...over });
 
 describe("machine eligibility", () => {
