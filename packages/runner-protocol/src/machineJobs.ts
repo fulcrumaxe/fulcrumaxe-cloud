@@ -25,7 +25,7 @@ export const MACHINE_JOB_MAX_LIFE_S = 1800;
 export const MACHINE_JOB_MAX_CLOCK_SKEW_S = 60;
 /** The only hosts an engine tarball may be fetched from. */
 export const ENGINE_TARBALL_HOSTS = ["codeload.github.com", "github.com"] as const;
-export const ENGINE_STOP_REASONS = ["person", "halt", "move", "remove"] as const;
+export const ENGINE_STOP_REASONS = ["person", "halt", "move", "remove", "operate_off", "plan"] as const; // MC-6a1 still adds "park"
 export const MACHINE_ENGINE_REQUIREMENTS = ["microvm", "any"] as const;
 export const SETUP_MODES = ["pr", "direct"] as const;
 /** The install and update branches: `fx/engine-install-<version>` and `fx/engine-update-<version>`, the version digits and dots only. */
@@ -72,9 +72,10 @@ export const MachineJob = z
   .discriminatedUnion("kind", [
     job("project_setup", strict({ mode: z.enum(SETUP_MODES), base_sha: z.string().regex(SHA40_PATTERN), engine: EngineReleaseRef, plan_ref: PlanRef, branch: z.string().regex(ENGINE_INSTALL_BRANCH) })),
     job("engine_update", strict({ engine: EngineReleaseRef, branch: z.string().regex(ENGINE_UPDATE_BRANCH) })),
-    job("engine_session_start", strict({ at_sha: z.string().regex(SHA40_PATTERN), resume: z.boolean() })),
-    job("engine_session_stop", strict({ reason: z.enum(ENGINE_STOP_REASONS) })),
-    job("engine_session_delete", strict({})),
+    // Every session kind carries the operate epoch the cloud read when it issued the job (a start is never signed at 0: the first on-switch makes 1).
+    job("engine_session_start", strict({ at_sha: z.string().regex(SHA40_PATTERN), resume: z.boolean(), operate_epoch: safeInt.min(1) })),
+    job("engine_session_stop", strict({ reason: z.enum(ENGINE_STOP_REASONS), operate_epoch: safeInt.min(0) })),
+    job("engine_session_delete", strict({ operate_epoch: safeInt.min(0) })),
     job("project_remove", strict({ delete_sandbox: z.boolean(), removal_pr: z.boolean() })),
   ])
   .superRefine((j, ctx) => {
@@ -157,6 +158,40 @@ export const SetupProgressBody = strict({
 });
 export type SetupProgressBody = z.infer<typeof SetupProgressBody>;
 export const SetupProgressReply = strict({ recorded: z.literal(true) });
+
+/**
+ * D#845 ON-13a0: the report of a session job (`engine_session_start`, `_stop`, `_delete`), keyed by the signed `job_id` in the path and not by a setup. A session job has no setup row, so the setup route's fence does not
+ * apply; the definer `machine_job_progress_record` (migration 1066) holds its own. The runner reports a kind's steps in `SESSION_JOB_STEP_ORDER` (it may skip one, never go back); the definer refuses a step outside the kind's list.
+ */
+export const SESSION_JOB_KINDS = ["engine_session_start", "engine_session_stop", "engine_session_delete"] as const;
+export type SessionJobKind = (typeof SESSION_JOB_KINDS)[number];
+export const SESSION_JOB_STEPS = ["admission", "session_create", "seed", "session_boot", "credentials", "supervisor", "session_stop", "snapshot", "session_delete", "done"] as const;
+export type SessionJobStep = (typeof SESSION_JOB_STEPS)[number];
+export const SESSION_JOB_STEP_ORDER = {
+  engine_session_start: ["admission", "session_create", "seed", "session_boot", "credentials", "supervisor", "done"],
+  engine_session_stop: ["admission", "session_stop", "snapshot", "done"],
+  engine_session_delete: ["admission", "session_delete", "done"],
+} as const satisfies Record<SessionJobKind, readonly SessionJobStep[]>;
+/** How a start came up: `created` (no resume asked), `resumed` (the kept disk) or `fresh` (a resume was asked, but the sandbox or its disk was gone, so the runner seeded again). */
+export const SESSION_START_MODES = ["created", "resumed", "fresh"] as const;
+export const SESSION_FAILURE_CODES = ["machine_single_project", "vm_memory_low", "operate_stale", "snapshot_failed", "kind_unsupported", "engine_unsupported", ...SETUP_VM_JOB_CODES] as const;
+/** The three codes the cloud alone writes onto a job that went quiet; the runner never reports them. */
+export const SESSION_CLOUD_FAILURE_CODES = ["job_expired", "job_silent", "job_overran"] as const;
+export const SessionJobProgressBody = strict({
+  seq: safeInt.min(0),
+  step: z.enum(SESSION_JOB_STEPS),
+  state: z.enum(["started", "ok", "failed", "skipped"]),
+  failure_code: z.enum(SESSION_FAILURE_CODES).optional(),
+  failure_reason: z.string().regex(SETUP_FAILURE_REASON_PATTERN).optional(),
+  start_mode: z.enum(SESSION_START_MODES).optional(),
+}).superRefine((body, ctx) => {
+  // A failed step names its code and no other does; a reason needs a code. A start's mode rides on its `done` `ok` and nowhere else (the definer, which knows the kind, requires it there and refuses it on a stop or a delete).
+  if ((body.state === "failed") !== (body.failure_code !== undefined)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a failed step names its code and no other step does", path: ["failure_code"] });
+  if (body.failure_reason !== undefined && body.failure_code === undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a reason needs a code", path: ["failure_reason"] });
+  if (body.start_mode !== undefined && !(body.step === "done" && body.state === "ok")) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a start mode rides on the done step's ok report only", path: ["start_mode"] });
+});
+export type SessionJobProgressBody = z.infer<typeof SessionJobProgressBody>;
+export const machineJobProgressPath = (jobId: string): string => `/api/runner/machine-job/${jobId}/progress`;
 
 /** D#845 ON-8a: where a runner told `machine_job: true` on a claim reply takes its one job, and where it reports on a setup. */
 export const MACHINE_JOB_CLAIM_PATH = "/api/runner/machine-job/claim";

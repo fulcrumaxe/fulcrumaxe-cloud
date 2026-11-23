@@ -4,7 +4,7 @@ import { ENGINE_COMMAND_PURPOSE, signEngineCommand } from "../src/engineCommands
 import { JobSignatureError, canonicalJson } from "../src/jobSignature.js";
 import { HelloMessage, MACHINE_ONBOARDING_MIN_PROTOCOL, MIN_SUPPORTED_PROTOCOL_VERSION } from "../src/messages.js";
 import { COLDSTART_STEPS } from "../src/coldstartStatus.js";
-import { MACHINE_JOB_CAPABILITY, MACHINE_JOB_KINDS, MACHINE_JOB_MAX_LIFE_S, ENGINE_TARBALL_HOSTS, MachineJob, MachineJobClaimMessage, MachineJobClaimReply, MACHINE_JOB_FINAL_STEP, SETUP_FAILURE_CODES, SETUP_RUNNER_STEPS, SETUP_SUB_STEPS, SetupProgressBody, deviceFlowOffered, isEngineTarballUrl, loginCommandOffered, machineJobOffered, signMachineJob, taskKindOffered, verifyMachineJob, type MachineJob as Job, type RunnerOffer } from "../src/machineJobs.js";
+import { MACHINE_JOB_CAPABILITY, MACHINE_JOB_KINDS, MACHINE_JOB_MAX_LIFE_S, ENGINE_TARBALL_HOSTS, MachineJob, MachineJobClaimMessage, MachineJobClaimReply, MACHINE_JOB_FINAL_STEP, SETUP_FAILURE_CODES, SETUP_RUNNER_STEPS, SETUP_SUB_STEPS, SetupProgressBody, ENGINE_STOP_REASONS, SESSION_FAILURE_CODES, SESSION_JOB_KINDS, SESSION_JOB_STEPS, SESSION_JOB_STEP_ORDER, SESSION_START_MODES, SessionJobProgressBody, machineJobProgressPath, deviceFlowOffered, isEngineTarballUrl, loginCommandOffered, machineJobOffered, signMachineJob, taskKindOffered, verifyMachineJob, type MachineJob as Job, type RunnerOffer } from "../src/machineJobs.js";
 import { DEVICE_REGISTER_CAPABILITY, ENGINE_SESSION_CAPABILITY, MACHINE_LOGIN_CAPABILITY, PROJECT_SETUP_CAPABILITY, REPO_TOKEN_REFRESH_CAPABILITY, RUNNER_CAPABILITIES, SURVEY_CAPABILITY, TASK_KINDS, TASK_KIND_CAPABILITY } from "../src/job.js";
 
 const { publicKey, privateKey } = generateKeyPairSync("ed25519");
@@ -21,9 +21,9 @@ const base = { v: 1, job_id: ID, runner_id: RUNNER, repo_gh_id: 77, requires_eng
 const ARGS: Record<string, unknown> = {
   project_setup: { mode: "pr", base_sha: SHA, engine: ENGINE, plan_ref: { draft_id: ID, version: 2, sha256: HEX }, branch: "fx/engine-install-1.2.3" },
   engine_update: { engine: ENGINE, branch: "fx/engine-update-1.2.4" },
-  engine_session_start: { at_sha: SHA, resume: false },
-  engine_session_stop: { reason: "person" },
-  engine_session_delete: {},
+  engine_session_start: { at_sha: SHA, resume: false, operate_epoch: 1 },
+  engine_session_stop: { reason: "person", operate_epoch: 0 },
+  engine_session_delete: { operate_epoch: 0 },
   project_remove: { delete_sandbox: true, removal_pr: false },
 };
 const jobOf = (kind: string, over: Record<string, unknown> = {}): Job => ({ ...base, kind, args: ARGS[kind], ...over }) as Job;
@@ -73,9 +73,9 @@ describe("machine job schema", () => {
     expect(ok(jobOf("engine_session_stop", { requires_engine: "os_sandbox" }))).toBe(false);
     expect(ok(jobOf("engine_session_stop", { repo_gh_id: 0 }))).toBe(false);
     expect(ok(jobOf("engine_session_stop", { job_id: "x" }))).toBe(false);
-    expect(ok(jobOf("engine_session_start", { args: { at_sha: "A".repeat(40), resume: true } }))).toBe(false);
-    expect(ok(jobOf("engine_session_start", { args: { at_sha: SHA, resume: "yes" } }))).toBe(false);
-    expect(ok(jobOf("engine_session_stop", { args: { reason: "crash" } }))).toBe(false);
+    expect(ok(jobOf("engine_session_start", { args: { at_sha: "A".repeat(40), resume: true, operate_epoch: 1 } }))).toBe(false);
+    expect(ok(jobOf("engine_session_start", { args: { at_sha: SHA, resume: "yes", operate_epoch: 1 } }))).toBe(false);
+    expect(ok(jobOf("engine_session_stop", { args: { reason: "crash", operate_epoch: 0 } }))).toBe(false);
     expect(ok(jobOf("engine_update", { args: { engine: { ...ENGINE, version: "1.2" }, branch: "fx/engine-update-1.2.4" } }))).toBe(false);
   });
   it("lives at most 30 minutes, and never a negative life", () => {
@@ -95,7 +95,7 @@ describe("verifyMachineJob", () => {
   it("rejects a flipped byte anywhere in the signed job as bad_signature", () => {
     const s = signed(jobOf("engine_session_start"));
     failsWith(() => verifyMachineJob({ ...s, job: { ...s.job, repo_gh_id: 78 } }, keyring, RUNNER, NOW), "bad_signature");
-    failsWith(() => verifyMachineJob({ ...s, job: { ...s.job, args: { at_sha: "b".repeat(40), resume: false } } }, keyring, RUNNER, NOW), "bad_signature");
+    failsWith(() => verifyMachineJob({ ...s, job: { ...s.job, args: { at_sha: "b".repeat(40), resume: false, operate_epoch: 1 } } }, keyring, RUNNER, NOW), "bad_signature");
     failsWith(() => verifyMachineJob({ ...s, job: { ...s.job, requires_engine: "microvm" } }, keyring, RUNNER, NOW), "bad_signature");
     const flipped = s.signature.slice(0, 5) + (s.signature[5] === "A" ? "B" : "A") + s.signature.slice(6);
     failsWith(() => verifyMachineJob({ ...s, signature: flipped }, keyring, RUNNER, NOW), "bad_signature");
@@ -218,5 +218,74 @@ describe("setup progress body", () => {
     expect(MachineJobClaimReply.safeParse({ retry_after: 60, signed_job: signedJob }).success).toBe(false);
     expect(MachineJobClaimReply.safeParse({ retry_after: 0 }).success).toBe(false);
     expect(MachineJobClaimMessage.safeParse({ extra: 1 }).success).toBe(false);
+  });
+
+  // D#845 ON-13a0: the session kinds' operate epoch, the stop reasons and the session job report.
+  it("holds every session kind to its closed args: a missing or extra key is refused, a start never carries epoch 0, and the epoch is a safe integer", () => {
+    expect(ok(jobOf("engine_session_start"))).toBe(true);
+    expect(ok(jobOf("engine_session_start", { args: { at_sha: SHA, resume: false } }))).toBe(false);
+    expect(ok(jobOf("engine_session_start", { args: { at_sha: SHA, resume: false, operate_epoch: 0 } }))).toBe(false);
+    expect(ok(jobOf("engine_session_start", { args: { at_sha: SHA, resume: false, operate_epoch: 1.5 } }))).toBe(false);
+    expect(ok(jobOf("engine_session_start", { args: { at_sha: SHA, resume: false, operate_epoch: Number.MAX_SAFE_INTEGER + 1 } }))).toBe(false);
+    expect(ok(jobOf("engine_session_start", { args: { at_sha: SHA, resume: false, operate_epoch: 1, operate: true } }))).toBe(false);
+    expect(ok(jobOf("engine_session_stop", { args: { reason: "person" } }))).toBe(false);
+    expect(ok(jobOf("engine_session_stop", { args: { reason: "person", operate_epoch: -1 } }))).toBe(false);
+    expect(ok(jobOf("engine_session_stop", { args: { reason: "person", operate_epoch: 0, extra: 1 } }))).toBe(false);
+    expect(ok(jobOf("engine_session_delete", { args: {} }))).toBe(false);
+    expect(ok(jobOf("engine_session_delete", { args: { operate_epoch: 7 } }))).toBe(true);
+    expect(ok(jobOf("engine_session_delete", { args: { operate_epoch: 0, extra: 1 } }))).toBe(false);
+  });
+  it("pins the stop reasons, with the two new ones", () => {
+    expect([...ENGINE_STOP_REASONS]).toEqual(["person", "halt", "move", "remove", "operate_off", "plan"]);
+    for (const reason of ENGINE_STOP_REASONS) expect(ok(jobOf("engine_session_stop", { args: { reason, operate_epoch: 3 } })), reason).toBe(true);
+    expect(ok(jobOf("engine_session_stop", { args: { reason: "park", operate_epoch: 3 } }))).toBe(false);
+  });
+  it("lists each session kind's steps in order, inside the closed step list, and the kinds are the three session kinds", () => {
+    expect([...SESSION_JOB_KINDS]).toEqual(MACHINE_JOB_KINDS.filter((k) => k.startsWith("engine_session_")));
+    expect(SESSION_JOB_STEP_ORDER).toEqual({
+      engine_session_start: ["admission", "session_create", "seed", "session_boot", "credentials", "supervisor", "done"],
+      engine_session_stop: ["admission", "session_stop", "snapshot", "done"],
+      engine_session_delete: ["admission", "session_delete", "done"],
+    });
+    for (const kind of SESSION_JOB_KINDS) {
+      for (const step of SESSION_JOB_STEP_ORDER[kind]) expect((SESSION_JOB_STEPS as readonly string[]).includes(step)).toBe(true);
+      expect(SESSION_JOB_STEP_ORDER[kind].at(-1)).toBe("done");
+    }
+    expect([...SESSION_START_MODES]).toEqual(["created", "resumed", "fresh"]);
+    expect(machineJobProgressPath(ID)).toBe(`/api/runner/machine-job/${ID}/progress`);
+  });
+  describe("SessionJobProgressBody", () => {
+    const sgood = (value: unknown): boolean => SessionJobProgressBody.safeParse(value).success;
+    const sbody = (over: Record<string, unknown> = {}) => ({ seq: 0, step: "admission", state: "started", ...over });
+    it("takes a started, ok or skipped step of any session step, and a failed one with a runner code", () => {
+      expect(sgood(sbody())).toBe(true);
+      for (const step of SESSION_JOB_STEPS) for (const state of ["started", "ok", "skipped"]) expect(sgood(sbody({ step, state })), `${step} ${state}`).toBe(true);
+      for (const failure_code of SESSION_FAILURE_CODES) expect(sgood(sbody({ state: "failed", failure_code })), failure_code).toBe(true);
+      expect(sgood(sbody({ state: "failed", failure_code: "vm_memory_low", failure_reason: "low_memory" }))).toBe(true);
+    });
+    it("refuses a failed step with no code, a code on any other step, a reason with no code, and a code the runner may not send", () => {
+      expect(sgood(sbody({ state: "failed" }))).toBe(false);
+      for (const state of ["started", "ok", "skipped"]) expect(sgood(sbody({ state, failure_code: "vm_memory_low" })), state).toBe(false);
+      expect(sgood(sbody({ failure_reason: "low_memory" }))).toBe(false);
+      expect(sgood(sbody({ state: "failed", failure_code: "vm_memory_low", failure_reason: "Low Memory" }))).toBe(false);
+      for (const failure_code of ["job_expired", "job_silent", "job_overran", "bootstrap_failed", "disk_full"]) expect(sgood(sbody({ state: "failed", failure_code })), failure_code).toBe(false);
+      expect(sgood(sbody({ state: "done" }))).toBe(false);
+    });
+    it("takes a start mode on the done step's ok report only, from the closed list", () => {
+      for (const start_mode of SESSION_START_MODES) expect(sgood(sbody({ step: "done", state: "ok", start_mode })), start_mode).toBe(true);
+      expect(sgood(sbody({ step: "done", state: "ok", start_mode: "cold" }))).toBe(false);
+      expect(sgood(sbody({ step: "done", state: "started", start_mode: "created" }))).toBe(false);
+      expect(sgood(sbody({ step: "done", state: "failed", failure_code: "vm_memory_low", start_mode: "created" }))).toBe(false);
+      expect(sgood(sbody({ step: "supervisor", state: "ok", start_mode: "created" }))).toBe(false);
+    });
+    it("is closed: an unknown step, a bad sequence, and an extra key are refused (the job id lives in the path, not the body)", () => {
+      for (const step of ["engine_fetch", "Admission", "done ", "gh_labels"]) expect(sgood(sbody({ step })), step).toBe(false);
+      expect(sgood(sbody({ seq: -1 }))).toBe(false);
+      expect(sgood(sbody({ seq: 1.5 }))).toBe(false);
+      expect(sgood(sbody({ job_id: ID }))).toBe(false);
+      expect(sgood(sbody({ log: "text" }))).toBe(false);
+      expect(sgood(sbody({ bundle_bytes: 1 }))).toBe(false);
+      expect(sgood(null)).toBe(false);
+    });
   });
 });

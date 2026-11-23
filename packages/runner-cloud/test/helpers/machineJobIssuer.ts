@@ -18,9 +18,9 @@ const ENGINE = { version: "1.2.3", commit_sha: SHA, tarball_url: `https://codelo
 const ARGS: Record<MachineJobKind, Record<string, unknown>> = {
   project_setup: { mode: "pr", base_sha: SHA, engine: ENGINE, plan_ref: { draft_id: randomUUID(), version: 1, sha256: HEX }, branch: "fx/engine-install-1.2.3" },
   engine_update: { engine: ENGINE, branch: "fx/engine-update-1.2.4" },
-  engine_session_start: { at_sha: SHA, resume: false },
-  engine_session_stop: { reason: "person" },
-  engine_session_delete: {},
+  engine_session_start: { at_sha: SHA, resume: false, operate_epoch: 1 },
+  engine_session_stop: { reason: "person", operate_epoch: 0 },
+  engine_session_delete: { operate_epoch: 0 },
   project_remove: { delete_sandbox: true, removal_pr: false },
 };
 
