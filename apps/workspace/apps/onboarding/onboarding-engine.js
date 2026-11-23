@@ -13,6 +13,14 @@ export const LABELS = {
   machine: "Connect a machine", claude: "Sign in to Claude on the machine", github_app: "Install the GitHub App (write)", project: "Choose a project",
   plan: "Approve the plan", install: "Install the engine", live: "Go live",
 };
+// B-6-VMTOKEN: the words for a machine in virtual machine mode with no Claude token. The Machines app says the same (runners-fleet.js); a test pins that they match.
+export const VM_TOKEN_COMMAND = "fx-runner credentials set-vm-token";
+export const VM_TOKEN_LINE = "Virtual machine mode needs a Claude token on this machine. On that machine run " + VM_TOKEN_COMMAND + ".";
+export const VM_TOKEN_STAYS = "The token stays on that machine and is never sent to us.";
+/** The claude step reads differently for a machine in virtual machine mode: it gets a token, not a sign-in. The machine step carries the tier. */
+const vmMode = (steps) => (steps.find((s) => s.step === "machine") || {}).tier === "microvm";
+export const VM_CLAUDE_LABEL = "Give the machine a Claude token";
+const labelOf = (steps, key) => (key === "claude" && vmMode(steps) ? VM_CLAUDE_LABEL : LABELS[key]);
 export const STATE_WORDS = { done: "Done", active: "Up next", pending: "Waiting", failed: "Needs attention" };
 export const TIME_TO_LIVE = "usually 15–30 minutes"; // until J1 measures it
 export const NO_KVM = "This machine has no KVM, so jobs run in the OS sandbox. That's fine for one project.";
@@ -189,7 +197,7 @@ export function installDetail(row) {
 export function describeStep(steps, i, ctx = {}) {
   const step = steps[i];
   const nm = ctx.name || "your machine";
-  const v = { label: LABELS[step.step], state: step.state, word: STATE_WORDS[step.state], failed: step.state === "failed", lines: [], list: [], commands: [], actions: [] };
+  const v = { label: labelOf(steps, step.step), state: step.state, word: STATE_WORDS[step.state], failed: step.state === "failed", lines: [], list: [], commands: [], actions: [] };
   const fix = (code, d) => {
     const f = fixFor(code, nm, d);
     v.lines.push(f.text);
@@ -198,7 +206,7 @@ export function describeStep(steps, i, ctx = {}) {
   if (step.state === "failed") { fix(step.failure.code, ctx.detail); return v; }
   if (step.state === "pending") {
     const before = steps.slice(0, i).find((s) => s.state !== "done");
-    if (before) v.lines.push("Finish " + LABELS[before.step] + " first");
+    if (before) v.lines.push("Finish " + labelOf(steps, before.step) + " first");
     return v;
   }
   const m = ctx.machine || {};
@@ -229,8 +237,9 @@ export function describeStep(steps, i, ctx = {}) {
       }
       break;
     case "claude":
-      if (step.state === "done") v.lines.push("Claude is signed in on " + nm);
+      if (step.state === "done") v.lines.push(vmMode(steps) ? "A Claude token is set on " + nm : "Claude is signed in on " + nm);
       else if (ctx.offline) v.lines.push(Number.isInteger(ctx.last_seen_min) ? nm + " was last seen " + ctx.last_seen_min + " min ago" : nm + " is offline");
+      else if (vmMode(steps)) { v.lines.push(VM_TOKEN_LINE, VM_TOKEN_STAYS); v.commands.push({ label: "", text: VM_TOKEN_COMMAND }); }
       else fix("claude_signed_out");
       break;
     case "github_app":

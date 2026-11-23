@@ -38,6 +38,9 @@ Sources:
 - `packages/fx-runner/src/cli.ts`
 - `packages/fx-runner/src/codeSource.ts`
 - `packages/fx-runner/src/commands/doctor.ts`
+- `packages/fx-runner/src/credentials/vmToken.ts`
+- `packages/fx-runner/src/commands/credentials.ts`
+- `apps/workspace/apps/runners/runners-fleet.js`
 - `packages/fx-runner/src/vm/limits.ts`
 - `packages/fx-runner/scripts/vm-facts.mjs`
 - `packages/fx-runner/vmhelper/`
@@ -216,6 +219,19 @@ The runner supports Linux. macOS is a preview, not yet verified (jobs run in Cla
 - **How a job ends.** Six closed codes, none with free text, name how a job ends without a result at protocol 27 (details of a `runner_setup` end) (`vm_admission_refused`, `vm_boot_failed`, `vm_egress_unavailable`, `vm_token_delivery_failed`, `vm_workspace_failed`, `vm_teardown_incomplete`). A VM that could not be started ends the job `sandbox_unavailable`, never on the OS sandbox. A leftover token or VM turns whatever ended the job into `vm_teardown_incomplete`, so it shows in the cloud's result and not only in the operator's journal.
 - **Interrupts.** A sandbox counts its starts. An interrupt asked for just before a new start of the same sandbox sees the count move and stops nothing, so it can never end the new run (#1164, `src/vm/sandboxd/microvmSandbox.ts`).
 - **The real-VM workflow** (`.github/workflows/vmhelper-real-root.yml`) now fails when a helper-backed real suite ran no test: a suite that skips itself for a missing variable reports as passed, so the workflow reads the test report and names the variables the file needs (#1159).
+
+### The Claude token for a microVM job: set, rotate, expire, remove, revoke (#1209 and the follow-ups)
+
+A microVM job is not signed in through the machine's Claude login. It is handed a token the person minted on that machine with the Claude CLI's token command (the runner never runs that command) and stored with `fx-runner credentials set-vm-token`. The token never reaches the cloud; the cloud learns only a yes or no (`model_auth_present` in the runner's hello). The token command is allowed in the runner's source only for this local-machine mode, in one file (`src/credentials/vmToken.ts`); the managed-server sign-in does not use it.
+
+- **Set.** `fx-runner credentials set-vm-token` reads the token from a hidden prompt, or from standard input when piped, and never from an argument (a token on the command line is refused with fixed text and nothing is stored). It stores `<state dir>/credentials/claude-vm-token`, a plain file at mode 0600 in a directory at mode 0700, owned by the runner's user and never a link, and checks the shape before writing (`vm_token_format`). A prompt asks the person to clear the terminal scrollback afterwards, since the mint command printed the token there.
+- **Look.** `fx-runner credentials vm-token-status` prints `present` (with the file's age in days and where it came from), `missing` or `unsafe`, and never any part of the token. `fx-runner doctor` shows the same as the `VM model token` line: in `microvm` mode `missing` and `unsafe` are failures and the runner claims nothing, and a file over 300 days old is a warning. The Onboarding step and the Machines row for a microVM machine without a token say what to run on that machine; they have no field for the token.
+- **Rotate.** Run `set-vm-token` again. The file is replaced atomically and applies from the next job; a job already running keeps the token it was given.
+- **Expire.** A minted token lasts about a year and the runner cannot read its expiry, so only the file's age is checked. An expired or revoked token passes the shape check, the job starts, and the agent fails to sign in inside the VM; that is an agent sign-in error in the result, not `vm_token_delivery_failed`. Run `set-vm-token` again with a new token. A closed code of its own for this is a noted follow-up.
+- **Remove.** `fx-runner credentials clear-vm-token` removes the file (running it twice is fine). `fx-runner revoke` and `service uninstall` leave the file in place, as they do the API key file, so clear it first. Exclude `credentials/` from backups of the state directory: the file is not encrypted at rest, the same as the API key file.
+- **Revoke.** Removing the file does not revoke the token. Revoke it in your Claude account settings, and do so whenever the file or a terminal's scrollback may have been seen by someone else. The exact menu is not recorded here; check the account settings page of the day.
+- **Unsafe file.** A file with the wrong mode or owner, a link, or an extra hard link reads as `unsafe`, never as a silent fall back to the `CLAUDE_CODE_OAUTH_TOKEN` variable. `set-vm-token` refuses to replace one; clear it first. The variable is a dev fallback used only when the file is missing.
+- **Switching engines.** With `sandbox_engine` back at `os_sandbox` the file stays and is ignored; OS-sandbox jobs never read it.
 
 ### The clone size watch and the deepening fetch (#1104)
 

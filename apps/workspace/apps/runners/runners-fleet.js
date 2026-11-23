@@ -535,6 +535,12 @@ export function addSteps(origin) {
     { text: "Link it to your account. It prints a code; open " + origin + "/link and type the code there:", command: "fx-runner setup --cloud-url " + origin },
   ];
 }
+// B-6-VMTOKEN: what a machine in virtual machine mode (engine microvm) with no Claude token shows. The Onboarding app says the same words (onboarding-engine.js); a test pins that they match.
+export const VM_TOKEN_COMMAND = "fx-runner credentials set-vm-token";
+export const VM_TOKEN_LINE = "Virtual machine mode needs a Claude token on this machine. On that machine run " + VM_TOKEN_COMMAND + ".";
+export const VM_TOKEN_STAYS = "The token stays on that machine and is never sent to us.";
+/** The notice is for a machine that reports the microvm engine and no usable model credential; any other engine, or one not reported, keeps the old copy. */
+export const needsVmToken = (tier, claudePresent) => tier === "microvm" && claudePresent !== true;
 export const KVM_NOTE = "On a server with KVM, add sudo fx-runner vm install for microVM isolation.";
 
 /** The machine list: one read at a time, and the last good list stays on screen when a later read fails. */
