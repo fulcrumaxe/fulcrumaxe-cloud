@@ -44,6 +44,9 @@ const ENGINE_FILES = ["src/engines/claude/capture.ts", "src/engines/claude/engin
  */
 export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/cloud.ts": ["crypto"],
+  // D#845 ON-8c: the engine archive: an https GET per redirect hop (no agent, no redirect followed), a sha256 of the body as it streams, and gunzip with an output cap. It reads no file and no environment.
+  "src/setup/engineArchive.ts": ["crypto", "https", "zlib"],
+  "src/setup/planCheck.ts": ["crypto"], // the sha256 of the plan route's reply bytes, compared with the job's plan_ref before the reply is parsed
   "src/config.ts": ["crypto", "fs", "path"],
   "src/keys.ts": ["crypto"],
   // The engine bridge (EB-3): the runner's user id is given by the caller, never read from `process` here.
