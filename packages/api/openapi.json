@@ -50341,6 +50341,23 @@
                     },
                     "missing_events": {
                       "type": "number"
+                    },
+                    "held_events": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    },
+                    "oldest_seq": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     }
                   },
                   "required": [
@@ -50350,7 +50367,9 @@
                     "heard_age_s",
                     "source_ages_s",
                     "gaps",
-                    "missing_events"
+                    "missing_events",
+                    "held_events",
+                    "oldest_seq"
                   ],
                   "additionalProperties": false
                 }
@@ -50619,6 +50638,23 @@
                     },
                     "missing_events": {
                       "type": "number"
+                    },
+                    "held_events": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    },
+                    "oldest_seq": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     }
                   },
                   "required": [
@@ -50628,7 +50664,9 @@
                     "heard_age_s",
                     "source_ages_s",
                     "gaps",
-                    "missing_events"
+                    "missing_events",
+                    "held_events",
+                    "oldest_seq"
                   ],
                   "additionalProperties": false
                 }
@@ -50838,6 +50876,23 @@
                     },
                     "missing_events": {
                       "type": "number"
+                    },
+                    "held_events": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    },
+                    "oldest_seq": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     }
                   },
                   "required": [
@@ -50847,7 +50902,9 @@
                     "heard_age_s",
                     "source_ages_s",
                     "gaps",
-                    "missing_events"
+                    "missing_events",
+                    "held_events",
+                    "oldest_seq"
                   ],
                   "additionalProperties": false
                 }
@@ -51067,6 +51124,23 @@
                     },
                     "missing_events": {
                       "type": "number"
+                    },
+                    "held_events": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    },
+                    "oldest_seq": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     }
                   },
                   "required": [
@@ -51076,7 +51150,9 @@
                     "heard_age_s",
                     "source_ages_s",
                     "gaps",
-                    "missing_events"
+                    "missing_events",
+                    "held_events",
+                    "oldest_seq"
                   ],
                   "additionalProperties": false
                 }
@@ -51353,6 +51429,23 @@
                     },
                     "missing_events": {
                       "type": "number"
+                    },
+                    "held_events": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    },
+                    "oldest_seq": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     }
                   },
                   "required": [
@@ -51362,7 +51455,9 @@
                     "heard_age_s",
                     "source_ages_s",
                     "gaps",
-                    "missing_events"
+                    "missing_events",
+                    "held_events",
+                    "oldest_seq"
                   ],
                   "additionalProperties": false
                 }
@@ -51583,6 +51678,23 @@
                     },
                     "missing_events": {
                       "type": "number"
+                    },
+                    "held_events": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    },
+                    "oldest_seq": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     }
                   },
                   "required": [
@@ -51592,7 +51704,9 @@
                     "heard_age_s",
                     "source_ages_s",
                     "gaps",
-                    "missing_events"
+                    "missing_events",
+                    "held_events",
+                    "oldest_seq"
                   ],
                   "additionalProperties": false
                 }
@@ -51893,6 +52007,23 @@
                     "missing_events": {
                       "type": "number"
                     },
+                    "held_events": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    },
+                    "oldest_seq": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
                     "window": {
                       "type": "object",
                       "properties": {
@@ -51955,6 +52086,8 @@
                     "source_ages_s",
                     "gaps",
                     "missing_events",
+                    "held_events",
+                    "oldest_seq",
                     "window",
                     "totals"
                   ],
@@ -52136,6 +52269,23 @@
                     },
                     "missing_events": {
                       "type": "number"
+                    },
+                    "held_events": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    },
+                    "oldest_seq": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     },
                     "window": {
                       "type": "object",
@@ -52400,6 +52550,8 @@
                     "source_ages_s",
                     "gaps",
                     "missing_events",
+                    "held_events",
+                    "oldest_seq",
                     "window",
                     "agents_by_role",
                     "duration_s",

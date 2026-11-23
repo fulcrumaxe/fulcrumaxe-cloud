@@ -116,6 +116,10 @@ export interface EngineRepoFreshness {
   gaps: Array<{ from_seq: number; to_seq: number; before_ts: string | null }>;
   /** Events missing across every session of the repo (the sum over every hole, not only the 20 listed). */
   missing_events: number;
+  /** Events the runner holds back on its machine until someone watches: the sum of the lengths of the repo's held holes (they are never counted in `missing_events`). */
+  held_events: number;
+  /** The lowest seq the repo's detail sessions hold (the cursor for "load older"), or null while none has uploaded. */
+  oldest_seq: number | null;
 }
 
 /**
@@ -125,27 +129,39 @@ export interface EngineRepoFreshness {
  * `heard_age_s` the smallest, never what only the newest session says. Sessions are ordered by the server's clock (`created_at`, `last_heard_at`), never by an
  * event time the runner chose.
  */
-export async function readEngineRepoFreshness(client: Pick<PoolClient, 'query'>, repoId: string): Promise<EngineRepoFreshness | null> {
+export async function readEngineRepoFreshness(client: Pick<PoolClient, 'query'>, repoId: string, accountId: string): Promise<EngineRepoFreshness | null> {
+  // Every statement names the account as well as the repo: row security confines a tenant client, and the predicate keeps an RLS-bypassing client (a test, a job) to the one account it names.
   const agg = await client.query(
     `SELECT count(*)::int AS n, max(GREATEST(last_event_at, last_heartbeat_at)) AS as_of, EXTRACT(EPOCH FROM (now() - max(last_heard_at)))::float8 AS heard
-       FROM engine_sessions WHERE repo_id = $1`,
-    [repoId],
+       FROM engine_sessions WHERE account_id = $1 AND repo_id = $2`,
+    [accountId, repoId],
   );
   const a = agg.rows[0];
   if (a.n === 0) return null;
   const head = await client.query(
-    `SELECT id, engine_instance_id, session_kind FROM engine_sessions WHERE repo_id = $1 ORDER BY (session_kind = 'engine') DESC, created_at DESC, id LIMIT 1`,
-    [repoId],
+    `SELECT id, engine_instance_id, session_kind FROM engine_sessions WHERE account_id = $1 AND repo_id = $2 ORDER BY (session_kind = 'engine') DESC, created_at DESC, id LIMIT 1`,
+    [accountId, repoId],
   );
   const ages = await client.query(
-    `SELECT source_ages_s FROM engine_sessions WHERE repo_id = $1 AND session_kind IN ('engine', 'detail') AND source_ages_s IS NOT NULL ORDER BY last_heard_at DESC NULLS LAST, created_at DESC, id LIMIT 1`,
-    [repoId],
+    `SELECT source_ages_s FROM engine_sessions WHERE account_id = $1 AND repo_id = $2 AND session_kind IN ('engine', 'detail') AND source_ages_s IS NOT NULL ORDER BY last_heard_at DESC NULLS LAST, created_at DESC, id LIMIT 1`,
+    [accountId, repoId],
   );
   const g = await client.query(
-    `SELECT from_seq, to_seq, before_ts FROM engine_session_gaps WHERE NOT held AND session_id IN (SELECT id FROM engine_sessions WHERE repo_id = $1) ORDER BY detected_at DESC, session_id, from_seq DESC LIMIT 20`,
-    [repoId],
+    `SELECT from_seq, to_seq, before_ts FROM engine_session_gaps WHERE account_id = $1 AND NOT held AND session_id IN (SELECT id FROM engine_sessions WHERE account_id = $1 AND repo_id = $2) ORDER BY detected_at DESC, session_id, from_seq DESC LIMIT 20`,
+    [accountId, repoId],
   );
-  const m = await client.query(`SELECT COALESCE(sum(to_seq - from_seq + 1), 0)::text AS n FROM engine_session_gaps WHERE NOT held AND session_id IN (SELECT id FROM engine_sessions WHERE repo_id = $1)`, [repoId]);
+  const m = await client.query(
+    `SELECT COALESCE(sum(to_seq - from_seq + 1) FILTER (WHERE NOT held), 0)::text AS missing, COALESCE(sum(to_seq - from_seq + 1) FILTER (WHERE held), 0)::text AS held
+       FROM engine_session_gaps WHERE account_id = $1 AND session_id IN (SELECT id FROM engine_sessions WHERE account_id = $1 AND repo_id = $2)`,
+    [accountId, repoId],
+  );
+  // The lowest seq of any detail session of the repo: one primary-key probe per session.
+  const o = await client.query(
+    `SELECT min(low)::text AS oldest FROM (
+       SELECT (SELECT min(e.seq) FROM engine_events e WHERE e.account_id = $1 AND e.session_id = s.id) AS low
+         FROM engine_sessions s WHERE s.account_id = $1 AND s.repo_id = $2 AND s.session_kind = 'detail') d`,
+    [accountId, repoId],
+  );
   const row = head.rows[0];
   return {
     session_id: row.id,
@@ -155,6 +171,48 @@ export async function readEngineRepoFreshness(client: Pick<PoolClient, 'query'>,
     heard_age_s: a.heard === null ? null : Math.max(0, Math.round(a.heard)),
     source_ages_s: ages.rows[0]?.source_ages_s ?? {},
     gaps: g.rows.map((r) => ({ from_seq: Number(r.from_seq), to_seq: Number(r.to_seq), before_ts: r.before_ts === null ? null : new Date(r.before_ts).toISOString() })),
-    missing_events: Number(m.rows[0].n),
+    missing_events: Number(m.rows[0].missing),
+    held_events: Number(m.rows[0].held),
+    oldest_seq: o.rows[0].oldest === null ? null : Number(o.rows[0].oldest),
   };
+}
+
+/** The panels of the Team app that have a read route of their own, and so an "as of" of their own. */
+export type EnginePanel = 'agents' | 'lanes' | 'gates' | 'asks' | 'log' | 'usage' | 'stats';
+
+/**
+ * The event kinds each panel's reader reads, the same sets as the database's `engine_kind_panels` (a pg test compares the two). `usage` also reads ticks that carried a figure, which
+ * is why it is asked with a body test (`usageOnly`).
+ */
+export const ENGINE_PANEL_KINDS: Readonly<Record<EnginePanel, { kinds: readonly string[]; usageOnly?: readonly string[] }>> = {
+  agents: { kinds: ['agent_started', 'agent_linked', 'agent_stopped'] },
+  lanes: { kinds: ['merge_lane'] },
+  gates: { kinds: ['merge_lane', 'gate_receipt'] },
+  asks: { kinds: ['ask_raised', 'ask_cleared'] },
+  log: { kinds: ['team_log_line'] },
+  usage: { kinds: ['agent_linked'], usageOnly: ['agent_stopped', 'tick_ended'] },
+  stats: { kinds: ['agent_started', 'agent_linked', 'agent_stopped', 'merged', 'gate_receipt'] },
+};
+
+/**
+ * When the repo's newest event for one panel reached the cloud (the server's own `received_at`, never a time the runner chose), across every session of the repo, or null when the panel
+ * has had none. One index probe per session and kind (`engine_events_panel_recent`, 1061).
+ */
+export async function readEnginePanelAsOf(client: Pick<PoolClient, 'query'>, accountId: string, repoId: string, panel: EnginePanel): Promise<string | null> {
+  const spec = ENGINE_PANEL_KINDS[panel];
+  const { rows } = await client.query<{ at: Date | null }>(
+    `SELECT max(t.at) AS at
+       FROM engine_sessions s
+       CROSS JOIN LATERAL (
+         SELECT (SELECT max(e.received_at) FROM engine_events e WHERE e.account_id = $1 AND e.session_id = s.id AND e.kind = k.kind) AS at
+           FROM unnest($3::text[]) AS k(kind)
+         UNION ALL
+         SELECT (SELECT max(e.received_at) FROM engine_events e WHERE e.account_id = $1 AND e.session_id = s.id AND e.kind = u.kind AND e.body ? 'usage') AS at
+           FROM unnest($4::text[]) AS u(kind)
+       ) t
+      WHERE s.account_id = $1 AND s.repo_id = $2`,
+    [accountId, repoId, [...spec.kinds], [...(spec.usageOnly ?? [])]],
+  );
+  const at = rows[0]?.at ?? null;
+  return at === null ? null : new Date(at).toISOString();
 }

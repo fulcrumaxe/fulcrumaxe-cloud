@@ -5682,6 +5682,8 @@ export interface Operations {
         before_ts: string | null;
       }>;
       missing_events: number;
+      held_events: number;
+      oldest_seq: (number) | (null);
     };
   };
   listEngineAgents: {
@@ -5719,6 +5721,8 @@ export interface Operations {
         before_ts: string | null;
       }>;
       missing_events: number;
+      held_events: number;
+      oldest_seq: (number) | (null);
     };
   };
   listEngineLanes: {
@@ -5749,6 +5753,8 @@ export interface Operations {
         before_ts: string | null;
       }>;
       missing_events: number;
+      held_events: number;
+      oldest_seq: (number) | (null);
     };
   };
   listEngineGates: {
@@ -5781,6 +5787,8 @@ export interface Operations {
         before_ts: string | null;
       }>;
       missing_events: number;
+      held_events: number;
+      oldest_seq: (number) | (null);
     };
   };
   listEngineAsks: {
@@ -5818,6 +5826,8 @@ export interface Operations {
         before_ts: string | null;
       }>;
       missing_events: number;
+      held_events: number;
+      oldest_seq: (number) | (null);
     };
   };
   listEngineLog: {
@@ -5850,6 +5860,8 @@ export interface Operations {
         before_ts: string | null;
       }>;
       missing_events: number;
+      held_events: number;
+      oldest_seq: (number) | (null);
     };
   };
   getEngineUsage: {
@@ -5893,6 +5905,8 @@ export interface Operations {
         before_ts: string | null;
       }>;
       missing_events: number;
+      held_events: number;
+      oldest_seq: (number) | (null);
       window: {
         from: string;
         to: string;
@@ -5930,6 +5944,8 @@ export interface Operations {
         before_ts: string | null;
       }>;
       missing_events: number;
+      held_events: number;
+      oldest_seq: (number) | (null);
       window: {
         from: string;
         to: string;
