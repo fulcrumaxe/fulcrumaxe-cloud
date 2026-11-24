@@ -57,6 +57,8 @@ export interface ServerView {
   public_ipv4: string | null;
   failure_code: string | null;
   price: PriceTriple | null;
+  /** Derived on each read from the linked runner's own hello (`runners.model_auth_present`), never stamped on the row: true or false once the machine has said, null when no live runner is linked or it has not said. */
+  claude_signed_in: boolean | null;
   created_at: string;
 }
 
@@ -159,13 +161,14 @@ export async function quoteServer(ctx: ServerCtx, input: { serverType: string; l
 
 interface Row {
   id: string; name: string; status: string; server_type: string | null; location: string | null; public_ipv4: string | null; failure_code: string | null;
-  price_hourly_gross: string | null; price_monthly_gross: string | null; ipv4_monthly_gross: string | null; currency: string; created_at: Date;
+  price_hourly_gross: string | null; price_monthly_gross: string | null; ipv4_monthly_gross: string | null; currency: string; claude_signed_in: boolean | null; created_at: Date;
 }
-const COLUMNS = `id, name, status, server_type, location, host(public_ipv4) AS public_ipv4, failure_code, price_hourly_gross::text, price_monthly_gross::text, ipv4_monthly_gross::text, currency, created_at`;
+const COLUMNS = `id, name, status, server_type, location, host(public_ipv4) AS public_ipv4, failure_code, price_hourly_gross::text, price_monthly_gross::text, ipv4_monthly_gross::text, currency,
+  (SELECT r.model_auth_present FROM runners r WHERE r.account_id = managed_servers.account_id AND r.id = managed_servers.runner_id AND r.revoked_at IS NULL) AS claude_signed_in, created_at`;
 const viewOf = (r: Row): ServerView => ({
   id: r.id, name: r.name, kind: "hetzner_cloud", status: r.status, server_type: r.server_type, location: r.location, public_ipv4: r.public_ipv4, failure_code: r.failure_code,
   // A server found by the orphan sweep was not made through a create, so no price was stamped: it has none, and says so.
-  price: r.price_hourly_gross === null || r.price_monthly_gross === null || r.ipv4_monthly_gross === null ? null : { currency: r.currency, hourly_gross: r.price_hourly_gross, monthly_gross: r.price_monthly_gross, ipv4_monthly_gross: r.ipv4_monthly_gross }, created_at: r.created_at.toISOString(),
+  price: r.price_hourly_gross === null || r.price_monthly_gross === null || r.ipv4_monthly_gross === null ? null : { currency: r.currency, hourly_gross: r.price_hourly_gross, monthly_gross: r.price_monthly_gross, ipv4_monthly_gross: r.ipv4_monthly_gross }, claude_signed_in: r.claude_signed_in, created_at: r.created_at.toISOString(),
 });
 
 /** One of the account's servers, or null. The id must be a UUID (the caller checks; a malformed one never reaches the database). */

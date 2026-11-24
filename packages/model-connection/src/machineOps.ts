@@ -68,6 +68,56 @@ export function machineKekSource(env: Readonly<Record<string, string | undefined
   };
 }
 
+/**
+ * D#845 MC-8a: the Claude sign-in link and the one-time code, each sealed into one blob (`version || nonce || wrapped key || ciphertext`) under the machine KEK. The AAD binds the account, the
+ * request, the runner and the purpose (`account:request:runner:purpose`), so a blob copied to another request, runner or purpose, or another account's, fails to open. The caller holds the
+ * returned object and gives plaintext to nothing but its own response to the person (the link) or the runner's one fetch (the code). Errors are fixed codes of {@link MachineOpsError}.
+ */
+export interface MachineLoginIds {
+  accountId: string;
+  requestId: string;
+  runnerId: string;
+}
+export type MachineLoginPurpose = 'auth_url' | 'code';
+export interface MachineLoginSealer {
+  seal(ids: MachineLoginIds, purpose: MachineLoginPurpose, plaintext: string): Buffer;
+  open(ids: MachineLoginIds, purpose: MachineLoginPurpose, blob: Buffer): string;
+}
+/** The blob's layout: one format byte, the four-byte KEK version that wrapped it (so a rotation opens old blobs under the key that sealed them), the nonce, the wrapped key and the ciphertext. */
+const LOGIN_BLOB_FORMAT = 1;
+const KEK_VERSION_BYTES = 4;
+const NONCE_BYTES = 12;
+const WRAPPED_DEK_BYTES = 60;
+const HEADER_BYTES = 1 + KEK_VERSION_BYTES;
+const loginAad = (ids: MachineLoginIds, purpose: MachineLoginPurpose): Buffer => Buffer.from(`${ids.accountId}:${ids.requestId}:${ids.runnerId}:claude_login_${purpose}`, 'utf8');
+
+export function createMachineLoginSealer(kek: KekSource = machineKekSource()): MachineLoginSealer {
+  return {
+    seal(ids, purpose, plaintext) {
+      const version = kek.currentVersion();
+      const sealed = seal({ kek: keyOrThrow(kek, version), aad: loginAad(ids, purpose) }, plaintext);
+      const header = Buffer.alloc(HEADER_BYTES);
+      header[0] = LOGIN_BLOB_FORMAT;
+      header.writeUInt32BE(version, 1);
+      return Buffer.concat([header, sealed.nonce, sealed.wrappedDek, sealed.ciphertext]);
+    },
+    open(ids, purpose, blob) {
+      if (blob.length < HEADER_BYTES + NONCE_BYTES + WRAPPED_DEK_BYTES + 16 || blob[0] !== LOGIN_BLOB_FORMAT) throw new MachineOpsError('unseal_failed');
+      const version = blob.readUInt32BE(1);
+      // A version of 0 is never written; any other the source does not hold answers as an unset key, and one it holds under another key fails the cipher below. Both are fixed codes.
+      if (version === 0) throw new MachineOpsError('unseal_failed');
+      const key = keyOrThrow(kek, version);
+      const body = blob.subarray(HEADER_BYTES);
+      try {
+        return open({ kek: key, aad: loginAad(ids, purpose) }, { nonce: body.subarray(0, NONCE_BYTES), wrappedDek: body.subarray(NONCE_BYTES, NONCE_BYTES + WRAPPED_DEK_BYTES), ciphertext: body.subarray(NONCE_BYTES + WRAPPED_DEK_BYTES) });
+      } catch {
+        // fx-swallow-ok: a blob that does not open (tampered, moved to another request, runner, purpose or account, wrong key) fails closed; the cipher error names key material, so only a fixed code is kept
+        throw new MachineOpsError('unseal_failed');
+      }
+    },
+  };
+}
+
 export type HetznerProbeResult = { verdict: 'ok'; unlabelledServers: number } | { verdict: 'invalid' | 'read_only' | 'unreachable' };
 /** Asks Hetzner what a token can do (read, write, how many servers are not ours). Production: `createHetznerCredentialProbe` from `@fx/hetzner`. */
 export interface HetznerTokenProbe {

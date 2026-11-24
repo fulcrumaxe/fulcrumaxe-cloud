@@ -15,6 +15,7 @@
         "monthly_gross": "4.5101",
         "ipv4_monthly_gross": "0.5950"
       },
+      "claude_signed_in": null,
       "created_at": "2026-11-23T10:20:00.000Z"
     },
     {
@@ -27,6 +28,7 @@
       "public_ipv4": "203.0.113.8",
       "failure_code": null,
       "price": null,
+      "claude_signed_in": true,
       "created_at": "2026-11-20T08:00:00.000Z"
     }
   ]

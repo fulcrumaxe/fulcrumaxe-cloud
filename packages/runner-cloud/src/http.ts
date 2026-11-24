@@ -1,6 +1,7 @@
 import type { Pool } from "pg";
 import { CURRENT_PROTOCOL_VERSION, MAX_CREATED_SKEW_SECONDS, MIN_SUPPORTED_PROTOCOL_VERSION, type ClaimCapacity, type ContextLedgerBody, type DoneCheck, type Job, type LocalOnlyEvent, type PlaneMergeOrderedConfig, type PlaneMergeOrderedFact, type SignedJob, type StopReason, type SurveyFailureReason } from "@fulcrumaxe/runner-protocol";
 import { reportError } from "@fx/telemetry";
+import type { MachineLoginSealer } from "@fx/model-connection";
 import type { CloudClose, ScopeRefusal } from "@fx/core/src/work-items/scopeRefusal.js";
 import type { EngineUsagePort } from "./ingestEngineEvents.js";
 import type { EngineCommandSigner } from "./engineCommands.js";
@@ -83,6 +84,11 @@ export interface RunnerCloudDeps {
    * audit row through `writeEngineAudit`; a set of ports with no audit writer is 503 `not_configured` before anything is read or written.
    */
   engineDecide?: EngineDecidePorts | null;
+  /**
+   * D#845 MC-8a: seals and opens the Claude sign-in link and code under the machine key (apps/web supplies it from model-connection, the machine_ops code path). Absent, or answering
+   * with a key error: the sign-in routes answer 503 `not_configured` and nothing is stored or opened.
+   */
+  machineLoginSealer?: MachineLoginSealer | null;
   /** The configured public origin (FX_APP_ORIGIN). The only source of the URL a signature is checked against. */
   origin: string | undefined;
   /** EB-8a: the signer for engine bridge commands (the job-signing key, held by the worker). Absent, or answering null, the pull route is 503 `not_configured` and delivers nothing. */

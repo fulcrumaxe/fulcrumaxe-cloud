@@ -488,10 +488,10 @@ describe('audit_write / audit_write_system: append-only, unforgeable audit_log (
       // cannot run before it, so it is held back and applied with them.
       // 0872 (D#598 P1f-5r) widens 0731's and 0760's objects, so it is held back with them.
       // 0905 (D#6) adds a probe over 0731's sandbox_reap_ex_state, so it goes with them.
-      // 1050 (D#845 MC-5) reads 1035's managed_servers (an audit_write migration), so it goes with them. 1054 (D#845 MC-4) adds a column to that table; 1055 (D#845 MC-7) alters it and the runner definer.
+      // 1050 (D#845 MC-5) reads 1035's managed_servers (an audit_write migration), so it goes with them. 1054 (D#845 MC-4) adds a column to that table; 1055 (D#845 MC-7) alters it and the runner definer. 1070 (D#845 MC-8a) alters 1035's machine_login_requests.
       // 1063 (D#845 MC-11a) writes 1035's machine_usage_daily (1035 re-carries audit_write), so it goes with them.
       // 0952 (D#483 S5-g2) lists repositories by their discovery_settings (0849, itself an audit_write migration), so it goes with them; 0955 replaces that list.
-      const BUILDS_ON_HELD_BACK = ['0760_sandbox_reaper_net.sql', '0761_sandbox_reap_lock.sql', '0872_publish_sandbox_reaper.sql', '0905_sandbox_reap_pending_probe.sql', '0952_discovery_sweep.sql', '0955_discovery_sweep_paging.sql', '1050_provisioning_token_bound_ip.sql', '1054_managed_server_idempotency.sql', '1055_managed_server_lifecycle.sql', '1063_machine_usage_rollup.sql'];
+      const BUILDS_ON_HELD_BACK = ['0760_sandbox_reaper_net.sql', '0761_sandbox_reap_lock.sql', '0872_publish_sandbox_reaper.sql', '0905_sandbox_reap_pending_probe.sql', '0952_discovery_sweep.sql', '0955_discovery_sweep_paging.sql', '1050_provisioning_token_bound_ip.sql', '1054_managed_server_idempotency.sql', '1055_managed_server_lifecycle.sql', '1063_machine_usage_rollup.sql', '1070_machine_login.sql'];
       const AUDIT_WRITE_MIGRATIONS = allFiles.filter(
         (f) => BUILDS_ON_HELD_BACK.includes(f) || isAuditWriteMigration(readFileSync(path.join(DEFAULT_MIGRATIONS_DIR, f), 'utf8')),
       );

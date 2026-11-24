@@ -14931,6 +14931,12 @@
                               }
                             ]
                           },
+                          "claude_signed_in": {
+                            "type": [
+                              "boolean",
+                              "null"
+                            ]
+                          },
                           "created_at": {
                             "type": "string"
                           }
@@ -14945,6 +14951,7 @@
                           "public_ipv4",
                           "failure_code",
                           "price",
+                          "claude_signed_in",
                           "created_at"
                         ],
                         "additionalProperties": false
@@ -15168,6 +15175,12 @@
                         }
                       ]
                     },
+                    "claude_signed_in": {
+                      "type": [
+                        "boolean",
+                        "null"
+                      ]
+                    },
                     "created_at": {
                       "type": "string"
                     }
@@ -15182,6 +15195,7 @@
                     "public_ipv4",
                     "failure_code",
                     "price",
+                    "claude_signed_in",
                     "created_at"
                   ],
                   "additionalProperties": false
@@ -15836,6 +15850,12 @@
                         }
                       ]
                     },
+                    "claude_signed_in": {
+                      "type": [
+                        "boolean",
+                        "null"
+                      ]
+                    },
                     "created_at": {
                       "type": "string"
                     }
@@ -15850,6 +15870,7 @@
                     "public_ipv4",
                     "failure_code",
                     "price",
+                    "claude_signed_in",
                     "created_at"
                   ],
                   "additionalProperties": false

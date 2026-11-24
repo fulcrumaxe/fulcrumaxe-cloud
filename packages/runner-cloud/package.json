@@ -22,6 +22,7 @@
     "@fx/db": "workspace:*",
     "@fx/decisions": "workspace:*",
     "@fx/gh-policy": "workspace:*",
+    "@fx/model-connection": "workspace:*",
     "@fx/runner": "workspace:*",
     "@fx/telemetry": "workspace:*",
     "pg": "^8.13.1"
