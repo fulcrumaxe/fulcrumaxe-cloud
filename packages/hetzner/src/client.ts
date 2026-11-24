@@ -259,10 +259,19 @@ export function createHetznerClient(options: HetznerOptions) {
 
   /** One write that may land without an answer: after an ambiguous ending, or a uniqueness refusal, `find` decides. Found is success; not found allows exactly one more send. */
   const writeOrFind = async <T, F>(post: () => Promise<T>, find: () => Promise<F | undefined>): Promise<{ made: T } | { found: F }> => {
+    // Once any send has ended ambiguously, the first POST may still land: every later HetznerError (the re-send's refusal, a uniqueness refusal, a failed look-up) is rethrown as ambiguous, with its code, status, retryAfter and remote kept.
+    let sentAmbiguous = false;
+    const ambiguousToo = (x: unknown): unknown => (sentAmbiguous && x instanceof HetznerError && !x.ambiguous ? new HetznerError(x.code, x.message, { ...x.extra, ambiguous: true }) : x);
     for (let attempt = 0; ; attempt++) {
-      try { return { made: await post() }; } catch (e) {
+      try { return { made: await post() }; } catch (first) {
+        const e = ambiguousToo(first);
         if (!(e instanceof HetznerError) || !(e.ambiguous || e.code === "uniqueness_error")) throw e;
-        const found = await find();
+        if (e.ambiguous) sentAmbiguous = true;
+        let found: F | undefined;
+        try { found = await find(); } catch (lookup) {
+          // The write may have landed and the look-up for it failed too (a lock, a rate limit, a revoked token): whatever the look-up's own code says, nobody knows whether the write took effect.
+          throw ambiguousToo(lookup);
+        }
         if (found !== undefined) return { found };
         if (e.code === "uniqueness_error" || attempt >= Math.min(maxRetries, 1)) throw e;
         await sleep(250 * 2 ** attempt);

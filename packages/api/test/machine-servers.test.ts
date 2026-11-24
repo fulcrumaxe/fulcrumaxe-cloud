@@ -460,6 +460,7 @@ describe('machine servers: quote and create', () => {
       world.failNext.push({ method: 'POST', path: '/servers', status: 500, code: 'server_error' });
       const res = await create(who, 'k-late');
       expect(res.status).toBe(503);
+      expect(await res.json()).toMatchObject({ error: { code: 'server_outcome_unknown' } });
       expect(world.servers).toEqual([]);
       const row = (await serversOf(who.accountId))[0];
       expect(row).toMatchObject({ status: 'failed', failure_code: 'cleanup_failed', provider_server_id: null });
@@ -471,10 +472,73 @@ describe('machine servers: quote and create', () => {
       expect(world.servers.filter((x) => (x.labels as Record<string, string>)['fx-server'] === row.id)).toHaveLength(1);
     });
 
+    // FU-243: the create was sent and answered ambiguously, then the client's own look-up failed. Whatever that look-up said, nobody knows if a server was made.
+    const UNKNOWN_COPY = "We couldn't tell whether the server was made. Check the servers list before trying again.";
+    const lookups: Array<[string, { status: number; code: string }]> = [
+      ['a rate limit (429)', { status: 429, code: 'rate_limit_exceeded' }],
+      ['a lock (423)', { status: 423, code: 'locked' }],
+      ['a token revoked in between (401)', { status: 401, code: 'unauthorized' }],
+    ];
+    for (const [label, failure] of lookups) {
+      it(`server: an ambiguous create then a look-up that fails with ${label} answers server_outcome_unknown, never the look-up's code`, async () => {
+        const who = await owner();
+        world.failNext.push({ method: 'POST', path: '/servers', status: 500, code: 'server_error' }, { method: 'GET', path: '/servers', skip: 1, ...failure });
+        const res = await create(who, `k-unknown-${failure.status}`);
+        expect(res.status).toBe(503);
+        const body = (await res.json()) as Reply;
+        expect(body.error).toEqual(expect.objectContaining({ code: 'server_outcome_unknown', message: UNKNOWN_COPY }));
+        expect(JSON.stringify(body)).not.toMatch(/hetzner_|locked|rate/i);
+        expect(postsTo('/servers')).toHaveLength(1);
+        expect((await serversOf(who.accountId))[0]).toMatchObject({ status: 'failed', failure_code: 'cleanup_failed' });
+      });
+    }
+
+    // The first POST was answered ambiguously and may still land, so a refusal of the re-send proves nothing: with one retry allowed, none of these may answer a clean-refusal code.
+    const resends: Array<[number, string]> = [[403, 'resource_limit_exceeded'], [412, 'resource_unavailable'], [422, 'placement_error'], [409, 'uniqueness_error']];
+    for (const [status, code] of resends) {
+      it(`server: an ambiguous create then a re-send refused with ${code} answers 503 server_outcome_unknown, marks the row cleanup_failed and sends exactly two POSTs`, async () => {
+        machineServerDeps.hetznerOptions = () => ({ maxRetries: 1, timeoutMs: 2000, sleep: async () => undefined, testTarget: { lookup: fake.lookup, port: fake.port, ca: fake.ca } });
+        const who = await owner();
+        world.failNext.push({ method: 'POST', path: '/servers', status: 500, code: 'server_error' }, { method: 'POST', path: '/servers', status, code });
+        const res = await create(who, `k-resend-${code}`);
+        expect(res.status).toBe(503);
+        const body = (await res.json()) as Reply;
+        expect(body.error).toEqual(expect.objectContaining({ code: 'server_outcome_unknown', message: UNKNOWN_COPY }));
+        expect(JSON.stringify(body)).not.toMatch(/hetzner_/i);
+        expect(postsTo('/servers')).toHaveLength(2);
+        expect((await serversOf(who.accountId))[0]).toMatchObject({ status: 'failed', failure_code: 'cleanup_failed' });
+      });
+    }
+
+    it('server: an ambiguous create, a uniqueness refusal on the re-send, then a look-up 401 answers server_outcome_unknown and still marks the token invalid', async () => {
+      machineServerDeps.hetznerOptions = () => ({ maxRetries: 1, timeoutMs: 2000, sleep: async () => undefined, testTarget: { lookup: fake.lookup, port: fake.port, ca: fake.ca } });
+      const who = await owner();
+      world.failNext.push({ method: 'POST', path: '/servers', status: 500, code: 'server_error' }, { method: 'POST', path: '/servers', status: 409, code: 'uniqueness_error' }, { method: 'GET', path: '/servers', skip: 2, status: 401, code: 'unauthorized' });
+      const res = await create(who, 'k-resend-401');
+      expect(res.status).toBe(503);
+      expect(await res.json()).toMatchObject({ error: { code: 'server_outcome_unknown' } });
+      expect(postsTo('/servers')).toHaveLength(2);
+      expect((await serversOf(who.accountId))[0]).toMatchObject({ status: 'failed', failure_code: 'cleanup_failed' });
+    });
+
+    it('server: a same-key retry of a cleanup_failed row answers server_outcome_unknown, not a 201 and not a second create', async () => {
+      const who = await owner();
+      world.failNext.push({ method: 'POST', path: '/servers', status: 500, code: 'server_error' });
+      expect((await create(who, 'k-replay-unknown')).status).toBe(503);
+      const posts = postsTo('/servers').length;
+      const again = await create(who, 'k-replay-unknown');
+      expect(again.status).toBe(503);
+      expect(await again.json()).toMatchObject({ error: { code: 'server_outcome_unknown' } });
+      expect(postsTo('/servers')).toHaveLength(posts);
+      expect(await serversOf(who.accountId)).toHaveLength(1);
+    });
+
     it('server: a plain refusal (Hetzner says the size is unavailable) is a clean failure, because nothing was made', async () => {
       const who = await owner();
       world.failNext.push({ method: 'POST', path: '/servers', status: 412, code: 'resource_unavailable' });
-      expect((await create(who, 'k-refused')).status).toBe(409);
+      const refused = await create(who, 'k-refused');
+      expect(refused.status).toBe(409);
+      expect(await refused.json()).toMatchObject({ error: { code: 'hetzner_resource_unavailable' } });
       await expectNothingLeft(who.accountId);
       expect((await serversOf(who.accountId))[0]).toMatchObject({ status: 'failed', failure_code: 'hetzner_resource_unavailable' });
     });

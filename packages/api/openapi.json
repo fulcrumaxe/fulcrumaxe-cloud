@@ -15269,7 +15269,7 @@
             }
           },
           "503": {
-            "description": "Error `price_unavailable` or a `hetzner_*` code: Hetzner did not answer, and no price is shown. `not_configured` and `machine_kek_unset` mean Hetzner Cloud servers are off here.",
+            "description": "Error `price_unavailable` or a `hetzner_*` code: Hetzner did not answer, and no price is shown. `not_configured` and `machine_kek_unset` mean Hetzner Cloud servers are off here. On create only: `server_outcome_unknown` means the create was sent and nobody can say whether the server was made; check the servers list before trying again. The same key answers `server_outcome_unknown` again for as long as the row is `cleanup_failed`.",
             "content": {
               "application/json": {
                 "schema": {

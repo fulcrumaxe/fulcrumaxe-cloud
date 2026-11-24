@@ -342,6 +342,35 @@ describe("an idempotent create", () => {
   });
 });
 
+describe("a create whose first send ended ambiguously", () => {
+  // The first POST may still land, so whatever the re-send or the look-up answers afterwards, nobody can say the server was not made.
+  const refusals: Array<[number, string]> = [[403, "resource_limit_exceeded"], [412, "resource_unavailable"], [422, "placement_error"], [409, "uniqueness_error"]];
+  for (const [status, code] of refusals) {
+    it(`rethrows a re-send refused with ${code} as ambiguous, keeping its code and status`, async () => {
+      const c = make({ maxRetries: 1 });
+      world.failNext.push({ method: "POST", path: "/servers", status: 500 }, { method: "POST", path: "/servers", status, code });
+      const e = await thrown(c.createServer(create("amb1")));
+      expect(e).toMatchObject({ code, extra: { ambiguous: true, status } });
+      expect(world.requests.filter((r) => r.method === "POST")).toHaveLength(2);
+      expect(world.servers).toHaveLength(0);
+    });
+  }
+  it("rethrows a look-up 401 after a uniqueness refusal as ambiguous, keeping the 401", async () => {
+    const c = make({ maxRetries: 1 });
+    world.failNext.push({ method: "POST", path: "/servers", status: 500 }, { method: "POST", path: "/servers", status: 409, code: "uniqueness_error" }, { method: "GET", path: "/servers", status: 401, code: "unauthorized", skip: 2 });
+    const e = await thrown(c.createServer(create("amb2")));
+    expect(e).toMatchObject({ code: "unauthorized", extra: { ambiguous: true, status: 401 } });
+  });
+  it("leaves a refusal on the only send as a plain, non-ambiguous refusal", async () => {
+    const c = make({ maxRetries: 1 });
+    world.failNext.push({ method: "POST", path: "/servers", status: 403, code: "resource_limit_exceeded" });
+    const e = await thrown(c.createServer(create("amb3")));
+    expect(e.code).toBe("resource_limit_exceeded");
+    expect(e.ambiguous).toBe(false);
+    expect(world.requests.filter((r) => r.method === "POST")).toHaveLength(1);
+  });
+});
+
 describe("the token never leaves", () => {
   it("is absent from every error, stack, inspection, stdout and log, on every path", async () => {
     const out: string[] = [];
