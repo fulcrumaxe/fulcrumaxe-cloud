@@ -1,6 +1,9 @@
 import { loadPlanData } from '@fx/plan-data';
 import type { ModelId, UsageTokens } from './types.js';
 
+/** The one place a manifest tier (what the runner and the engine report) becomes a price-table model id. The worker's seat resolver and the machine spend read both use it. */
+export const TIER_TO_MODEL_ID: Readonly<Record<string, string>> = { haiku: 'haiku-4.5', sonnet: 'sonnet-5', opus: 'opus-5' };
+
 /**
  * Per-MTok USD rates, by model. The figures are private: they are read from
  * the plan data (`loadPlanData()`, the FX_PLAN_DATA setting) on every call,

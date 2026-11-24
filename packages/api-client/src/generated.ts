@@ -3150,6 +3150,65 @@ export interface Operations {
       authorize_url: string;
     };
   };
+  getMachineSpend: {
+    path: undefined;
+    query: undefined;
+    body: undefined;
+    response: {
+      period_start: string;
+      period_end: string;
+      as_of: string;
+      servers: {
+        note: string;
+        estimate_note: string | null;
+        totals: Array<{
+          currency: string;
+          amount: string;
+        }>;
+        unpriced_count: number;
+        servers: (Array<{
+          id: string;
+          name: string;
+          server_type: string | null;
+          location: string | null;
+          running: boolean;
+          hours: string;
+          currency: string;
+          cost: string | null;
+          estimate: boolean;
+        }>) | (null);
+      };
+      usage: {
+        note: string;
+        input_tokens: string;
+        output_tokens: string;
+        cache_read_tokens: string;
+        cache_write_tokens: string;
+        api_equivalent_usd: number | null;
+        priced: boolean;
+        machines: Array<{
+          runner_id: string;
+          name: string | null;
+          input_tokens: string;
+          output_tokens: string;
+          cache_read_tokens: string;
+          cache_write_tokens: string;
+          api_equivalent_usd: number | null;
+          priced: boolean;
+          projects: Array<{
+            repo_id: (string) | (null);
+            name: string | null;
+            input_tokens: string;
+            output_tokens: string;
+            cache_read_tokens: string;
+            cache_write_tokens: string;
+            api_equivalent_usd: number | null;
+            priced: boolean;
+          }>;
+        }>;
+      };
+    };
+  };
   getEngineBilling: {
     path: undefined;
     query: undefined;
@@ -7617,6 +7676,17 @@ export const operations = {
     pathParams: [],
     queryParams: [],
     hasBody: true,
+  },
+  getMachineSpend: {
+    method: "GET",
+    path: "/api/v1/billing/machines",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: [],
+    hasBody: false,
   },
   getEngineBilling: {
     method: "GET",

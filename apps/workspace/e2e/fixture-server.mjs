@@ -458,6 +458,7 @@ export function startFixtureServer({ distDir = DEFAULT_DIST_DIR, port = DEFAULT_
       "/api/v1/budgets": join(V1_FIXTURES_DIR, "getBudgets", "200-ok.json"),
       "/api/v1/account": join(V1_FIXTURES_DIR, "getAccount", "200-ok.json"),
       "/api/v1/billing/engine": join(V1_FIXTURES_DIR, "getEngineBilling", "200-ok.json"),
+      "/api/v1/billing/machines": join(V1_FIXTURES_DIR, "getMachineSpend", "200-ok.json"),
       "/api/plans": join(SCRIPT_DIR, "plans-fixture.json"),
     };
     if (req.method === "GET" && Object.hasOwn(BILLING_READS, urlPath)) {

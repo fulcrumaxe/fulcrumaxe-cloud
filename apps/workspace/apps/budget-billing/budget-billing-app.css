@@ -102,6 +102,9 @@
   background: var(--bg-surface, #0a0a0a);
 }
 
+.bb-list { margin: 4px 0; padding-left: 1.2rem; overflow-wrap: anywhere; }
+.bb-list .bb-list { margin: 2px 0 6px; }
+
 .bb-switch { display: inline-flex; align-items: center; gap: 8px; min-height: 32px; }
 .bb-switch input { width: 1.1rem; height: 1.1rem; margin: 0; accent-color: var(--accent, #1aff80); }
 

@@ -9,6 +9,7 @@ import type { RouteContext, RouteEntry } from "../registry.js";
 import { SESSION_LIMITS } from "../ratelimit/session.js";
 import { ApiError } from "../errors.js";
 import { platformOpsPool } from "../sse/pools.js";
+import { readMachineSpend } from "../machines/spend.js";
 
 /** D#31 API-7e: `{ url }` and nothing else -- never a Stripe session id, customer id or key. */
 export const billingLinkResponseSchema = z.object({ url: z.string().url() });
@@ -163,7 +164,61 @@ export const engineBillingResponseSchema = z.object({
   as_of: z.string().nullable().describe("When the subscription was last synced from the provider; null before the first sync."),
 });
 
+const usageTokens = {
+  input_tokens: z.string().describe("Whole tokens, as a decimal string."),
+  output_tokens: z.string(),
+  cache_read_tokens: z.string(),
+  cache_write_tokens: z.string(),
+};
+const usd = z.number().nullable().describe("What these tokens would cost at API prices, from the cloud's own price table; null when none of them has a price. Never billed.");
+/** D#845 MC-11b: the machine figures of Budget & billing, answered whole: the page prints them and does no arithmetic. */
+export const machineSpendResponseSchema = z.object({
+  period_start: z.string(),
+  period_end: z.string(),
+  as_of: z.string().describe("The moment these figures were read."),
+  servers: z.object({
+    note: z.string().describe("Says these are estimates and who bills them."),
+    estimate_note: z.string().nullable().describe("Set when any listed server is an estimate (made before its hourly IPv4 price was recorded); says why."),
+    totals: z.array(z.object({ currency: z.string(), amount: z.string() })).describe("Per currency, from the servers that have a stamped price."),
+    unpriced_count: z.number().int().describe("Servers with no stamped price: listed, and left out of the totals."),
+    servers: z.array(z.object({
+      id: z.string().uuid(), name: z.string(), server_type: z.string().nullable(), location: z.string().nullable(), running: z.boolean(),
+      hours: z.string().describe("Hours billed this month: running time rounded up to whole started hours."), currency: z.string(), cost: z.string().nullable().describe("min(hours x hourly, monthly) + min(hours x IPv4 hourly, IPv4 monthly), gross, four decimals; null with no stamped price."),
+      estimate: z.boolean().describe("True when its IPv4 is counted at the full monthly price because no hourly IPv4 price was recorded for it."),
+    })).nullable().describe("The per-server rows. Owners and admins only: a member gets null here and still gets the totals."),
+  }),
+  usage: z.object({
+    note: z.string(),
+    ...usageTokens,
+    api_equivalent_usd: usd,
+    priced: z.boolean().describe("False when some tokens are on a model with no price, so the dollars cover the priced part only."),
+    machines: z.array(z.object({
+      runner_id: z.string().uuid(), name: z.string().nullable(), ...usageTokens, api_equivalent_usd: usd, priced: z.boolean(),
+      projects: z.array(z.object({ repo_id: z.string().uuid().nullable(), name: z.string().nullable().describe("owner/name; null for a project that was removed."), ...usageTokens, api_equivalent_usd: usd, priced: z.boolean() })),
+    })),
+  }),
+});
+
 export const billingRoutes: RouteEntry[] = [
+  {
+    method: "GET",
+    // principals omitted -> session-only, like the Engine row beside it.
+    minRole: "member",
+    idempotency: "never",
+    rateClass: "read",
+    path: "/api/v1/billing/machines",
+    operationId: "getMachineSpend",
+    summary: "This month's machine figures: servers we rented and Claude usage on the account's machines",
+    description:
+      "Session only, any member. `servers` is min(billed hours x hourly, monthly) + min(billed hours x IPv4 hourly, IPv4 monthly) for each Hetzner Cloud server we created, with running time rounded up to whole started hours as Hetzner bills it, from the gross prices stamped when it was made, estimated from the list price (Hetzner bills the person directly); a server made before the hourly IPv4 price was recorded counts its IPv4 at the monthly price and is marked an estimate; totals are per currency and a server with no stamped price is listed and left out. The per-server rows (name, size, location) are for owners and admins only: a member gets `servers.servers` null and the totals. `usage` is the tokens the machines reported this UTC month, by machine and project, with what they would cost at API prices from the cloud's own price table (information, never billed). No provider call is made. The page prints these figures as they are.",
+    responseSchema: machineSpendResponseSchema,
+    async handler(ctx) {
+      const { accountId, userId } = ctx.principal;
+      // Server names, sizes and locations are owner/admin-only everywhere else (GET /machine-servers/{id}); a member sees the totals only.
+      const includeServerRows = ctx.principal.kind === "session" && (ctx.principal.role === "owner" || ctx.principal.role === "admin");
+      return withTenant(ctx.pool, accountId, userId, (client) => readMachineSpend(client, accountId, { includeServerRows }));
+    },
+  },
   {
     method: "GET",
     // principals omitted -> session-only: the owner flag belongs to a signed-in person.
