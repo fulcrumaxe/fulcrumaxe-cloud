@@ -1,7 +1,7 @@
 import type { AppCredentialsSource } from "./appCredentials.js";
 import { ADD_DISCUSSION_COMMENT_DOCUMENT, type RetractionSurface } from "./retraction.js";
 import { GH_OWNER_LOGIN_RE, GH_REPO_NAME_RE } from "./eventMapper.js";
-import { getInstallationToken, PLANE_PARITY_PERMISSIONS, RECEIPT_BLOCK_PERMISSIONS, RETRACTION_PERMISSIONS, REVERT_PR_PERMISSIONS, type AccessTokenRequester, type InstallationTokenCache } from "./installationToken.js";
+import { getInstallationToken, PLANE_PARITY_PERMISSIONS, RECEIPT_BLOCK_PERMISSIONS, RETRACTION_PERMISSIONS, REVERT_PR_PERMISSIONS, SETUP_LABELS_PERMISSIONS, type AccessTokenRequester, type InstallationTokenCache } from "./installationToken.js";
 import { REVERT_PR_DOCUMENT, revertPrVariables } from "./revertPr.js";
 import { pinnedMergeGateBody, pinnedMergeQueueReadBody } from "./mergeGateGraphql.js";
 
@@ -44,6 +44,9 @@ import { pinnedMergeGateBody, pinnedMergeQueueReadBody } from "./mergeGateGraphq
  *                  Pinned to the pull request number it was opened for; allows exactly `GET` that pull request (its node id is read from the answer) and `POST /graphql` ONCE,
  *                  whose body is the pinned document (revertPr.ts) with that node id, `draft` true and the fixed title and body. Anything else is `path_refused` before a request is sent.
  *
+ *   - `setup_labels` D#845 ON-8f2b: the install step's creation of the engine's labels in ONE customer repository, which `runner_pr` cannot do (its path list holds no `/labels` and its token holds no `issues` write).
+ *                  Token: the `setup_labels` purpose (`issues: write` and `metadata: read`, one repository, minted fresh and revoked by `close()`). The client allows exactly `POST /repos/<owner>/<name>/labels`
+ *                  with a JSON body of exactly `name`, `color` and `description` (strings) and no query; there is no read (a label that exists answers 422, which the caller counts as made). Everything else is `path_refused`.
  *   - `retraction` D#7 DP7b-w: a correction on the ONE surface a deprecation notice was recorded on. Token: the `retraction` purpose (one key, by surface: `contents: write` for a
  *                  release, `issues: write` for a comment, `discussions: write` for a Discussion; one repository, minted fresh and revoked by `close()`). The client is pinned to
  *                  the surface it was opened for and allows exactly: a release, `GET` it and `PATCH` it once with a body whose only key is `body`; a comment, `POST /issues/<n>/comments`
@@ -59,7 +62,7 @@ import { pinnedMergeGateBody, pinnedMergeQueueReadBody } from "./mergeGateGraphq
  *     GitHub's own `message` cut short. It never hears a token, a header or a request body.
  */
 
-export type InstallationHttpKind = "read" | "merge_gate" | "runner_pr" | "repo_map" | "branch_delete" | "branch_sync" | "receipt_block" | "retraction" | "revert_pr" | "plane_parity";
+export type InstallationHttpKind = "read" | "merge_gate" | "runner_pr" | "repo_map" | "branch_delete" | "branch_sync" | "receipt_block" | "retraction" | "revert_pr" | "plane_parity" | "setup_labels";
 
 export interface InstallationHttpRequest {
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
@@ -246,6 +249,8 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
       // D#598 P1d-2: the `plane_parity` purpose and its fixed read set, revoked on close.
       ...(kind === "plane_parity" ? { purpose: "plane_parity" as const, role: "plane_parity", scope: { repositories: [target.name] as [string], permissions: PLANE_PARITY_PERMISSIONS }, revoke: revokeInstallationToken } : {}),
       ...(kind === "revert_pr" ? { purpose: "revert_pr" as const, role: "revert_pr", scope: { repositories: [target.name] as [string], permissions: REVERT_PR_PERMISSIONS }, revoke: revokeInstallationToken } : {}),
+      // D#845 ON-8f2b: the `setup_labels` purpose, its fixed permission set and its revoke.
+      ...(kind === "setup_labels" ? { purpose: "setup_labels" as const, role: "setup_labels", scope: { repositories: [target.name] as [string], permissions: SETUP_LABELS_PERMISSIONS }, revoke: revokeInstallationToken } : {}),
     });
     const prefix = `/repos/${target.owner}/${target.name}/`;
     // The repository itself (`GET /repos/<owner>/<name>`, no trailing slash) is also allowed, for GET only: D#6 R3b reads its `private` flag.
@@ -257,7 +262,7 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
 
     return {
       async close() {
-        if (kind === "branch_delete" || kind === "branch_sync" || kind === "retraction" || kind === "revert_pr" || kind === "plane_parity") await revokeInstallationToken(token);
+        if (kind === "branch_delete" || kind === "branch_sync" || kind === "retraction" || kind === "revert_pr" || kind === "plane_parity" || kind === "setup_labels") await revokeInstallationToken(token);
       },
       async request(raw) {
         // Snapshot every field of the request exactly once; from here on only the snapshot is used (checks, URL, body, log), so a caller's accessor
@@ -292,6 +297,14 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
         // `runner_pr` holds contents:read, so it gets its own EXACT list rather than the prefix rule above (CWE-284): a caller that
         // names this kind must not be able to read file contents, patches or commits. Everything else is refused here, PUT included.
         if (kind === "runner_pr" && !(graphql || runnerPrAllowed(req.method, req.path, prefix))) throw new InstallationHttpError("path_refused");
+        // `setup_labels` holds issues:write, so it gets the narrowest list there is: create a label, with exactly the three fields of one label row.
+        if (kind === "setup_labels") {
+          const b = req.body;
+          const create =
+            req.method === "POST" && req.path === `${prefix}labels` && req.query === undefined && isRecord(b) && Object.keys(b).sort().join() === "color,description,name" &&
+            typeof b["name"] === "string" && typeof b["color"] === "string" && typeof b["description"] === "string";
+          if (!create) throw new InstallationHttpError("path_refused");
+        }
         // `repo_map` holds contents:read, so it too gets an exact list (no `contents`, commits, archives or `..`).
         if (kind === "repo_map" && !repoMapAllowed(req.method, req.path, prefix)) throw new InstallationHttpError("path_refused");
         // `branch_delete` holds contents:write, so it gets the narrowest list there is: read the one branch, delete the one branch, once.
@@ -373,7 +386,7 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
             headers: {
               accept: "application/vnd.github+json",
               authorization: `Bearer ${token}`,
-              ...(kind === "branch_delete" || kind === "receipt_block" || kind === "retraction" || kind === "revert_pr" || kind === "plane_parity" ? { "user-agent": "fulcrumaxe-cloud" } : {}),
+              ...(kind === "branch_delete" || kind === "receipt_block" || kind === "retraction" || kind === "revert_pr" || kind === "plane_parity" || kind === "setup_labels" ? { "user-agent": "fulcrumaxe-cloud" } : {}),
               "x-github-api-version": "2022-11-28",
               ...(sendBody !== undefined ? { "content-type": "application/json" } : {}),
             },

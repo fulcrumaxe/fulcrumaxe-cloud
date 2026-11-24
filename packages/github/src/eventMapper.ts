@@ -143,6 +143,9 @@ export interface CreateWorkItemEvent {
   canCreateWork: boolean;
 }
 
+/** D#845 ON-8f2b: the head branch of a project setup's install pull request (the engine version in its name). */
+const SETUP_INSTALL_BRANCH = /^fx\/engine-install-[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}$/;
+
 /** pull_request.opened / .closed: transitions an existing, linked work item. */
 export interface TransitionPrEvent {
   kind: 'transition_pr';
@@ -654,6 +657,7 @@ export type ApplyResult =
   | { applied: 'proposal_rate_limited' }
   | { applied: 'proposal_changed'; count: number }
   | { applied: 'pr_push_recorded'; workItemId: string; recorded: boolean }
+  | { applied: 'setup_install_pr_closed'; outcome: 'finished' | 'failed' | 'recorded' }
   | { applied: 'queue_event_recorded'; workItemId: string; recorded: boolean }
   | { applied: 'mcp_config_routed' }
   | { applied: 'repo_names_written'; count: number }
@@ -957,6 +961,14 @@ export async function applyMappedEvent(client: PoolClient, ctx: ApplyEventCtx, m
       // CWE-863: a fork PR from an untrusted author must never drive a stage transition.
       if (mapped.isFork && mapped.trust !== 'trusted') {
         return { applied: 'skipped', reason: 'pull_request: fork or untrusted head repo, no stage transition' };
+      }
+      // D#845 ON-8f2b (Ruling 83): the watch on a project setup's install pull request. A close or merge of a pull request from the engine's install branch, in this repository, from this repository's own
+      // branch (never a fork), into the default branch, is the setup's own business when the setup has such a pull request (or is just about to record one); the definer checks the branch against the setup's
+      // own job. A pull request it does not know goes on as any other, so a branch of that name that is not ours still takes the ordinary path.
+      if ((mapped.toStage === 'merged' || mapped.toStage === 'closed_unmerged') && !mapped.isFork && mapped.baseIsDefault === true && typeof mapped.headRef === 'string' && SETUP_INSTALL_BRANCH.test(mapped.headRef)) {
+        const { rows } = await client.query<{ r: string }>('SELECT setup_install_pr_closed($1::uuid, $2::int, $3::boolean, $4) AS r', [ctx.repoId, mapped.prNumber, mapped.toStage === 'merged', mapped.headRef]);
+        const outcome = rows[0]?.r;
+        if (outcome === 'finished' || outcome === 'failed' || outcome === 'recorded') return { applied: 'setup_install_pr_closed', outcome };
       }
       // D#483 P1: a close or merge also finds the item a runner run opened this pull request for (its body carries no "Closes #N"). An open or a push never does: those keep the body link.
       const closing = mapped.toStage === 'merged' || mapped.toStage === 'closed_unmerged';

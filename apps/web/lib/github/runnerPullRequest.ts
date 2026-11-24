@@ -33,8 +33,10 @@ export function createAppRunPullRequestPort(deps: { open?: typeof openInstallati
   const appLogin = deps.appLogin ?? ((repo: PullRequestRepo) => readRepoAppLogin(repo.id));
   return createRunPullRequestPort({
     appLogin,
-    async open(repo) {
-      const http = await openRunnerPrHttp(open, { repoId: repo.id, owner: repo.owner, name: repo.name });
+    async open(repo, purpose) {
+      // D#845 ON-8f2b: the install step's labels need `issues: write` and `POST /labels`, which the pull request kind holds neither of; they go through the `setup_labels` kind (the one write, exact list).
+      const target = { repoId: repo.id, owner: repo.owner, name: repo.name };
+      const http = purpose === "setup_labels" ? await open("setup_labels", target) : await openRunnerPrHttp(open, target);
       return {
         request(req: GithubRequest) {
           if (!METHODS.has(req.method)) return Promise.reject(new Error("method_refused"));
@@ -42,6 +44,8 @@ export function createAppRunPullRequestPort(deps: { open?: typeof openInstallati
           const out: InstallationHttpRequest = { method: req.method as InstallationHttpRequest["method"], path: req.path, query: req.query, body: req.body };
           return http.request(out);
         },
+        // A client that holds a credential to release (`setup_labels` revokes its token) is closed by the port that opened it.
+        ...(http.close === undefined ? {} : { close: () => http.close!() }),
       };
     },
   });

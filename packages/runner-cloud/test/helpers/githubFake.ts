@@ -61,6 +61,8 @@ export interface FakeRepo {
   pulls: FakePullRequest[];
   /** D#845 ON-8f2a: commits by id with their parents (only those a test names; every other id is "no such object", as GitHub answers). */
   commits: Map<string, string[]>;
+  /** D#845 ON-8f2b: the repository's labels by lower-cased name, as GitHub keeps them (names are unique case-insensitively). */
+  labels: Map<string, { name: string; color: string; description: string }>;
 }
 
 const ok = (body: unknown, status = 200): GithubResponse => ({ status, body });
@@ -96,7 +98,7 @@ export class FakeGithub implements GithubClient {
   markReadyForbidden = false;
 
   addRepo(owner: string, name: string, over: Partial<Pick<FakeRepo, "defaultBranch" | "supportsDrafts" | "id">> = {}): FakeRepo {
-    const repo: FakeRepo = { id: over.id ?? 1234567, owner, name, defaultBranch: over.defaultBranch ?? "main", supportsDrafts: over.supportsDrafts ?? true, branches: new Map(), pulls: [], commits: new Map() };
+    const repo: FakeRepo = { id: over.id ?? 1234567, owner, name, defaultBranch: over.defaultBranch ?? "main", supportsDrafts: over.supportsDrafts ?? true, branches: new Map(), pulls: [], commits: new Map(), labels: new Map() };
     repo.branches.set(repo.defaultBranch, { oid: "a".repeat(40), aheadBy: 0, files: [] });
     this.repos.set(`${owner}/${name}`.toLowerCase(), repo);
     return repo;
@@ -181,7 +183,25 @@ export class FakeGithub implements GithubClient {
       if (!keysAre(req.body, ["state"]) || (req.body as { state: unknown }).state !== "closed") this.deny("A5 body");
       return { label: "A5", handler: () => this.closePull(m![1]!, m![2]!, Number(m![3])) };
     }
+    if (method === "POST" && (m = /^\/repos\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/labels$/.exec(path))) {
+      noQuery([]);
+      if (!keysAre(req.body, ["name", "color", "description"])) this.deny("A26 body");
+      return { label: "A26", handler: () => this.createLabel(m![1]!, m![2]!, req.body as { name: string; color: string; description: string }) };
+    }
     return this.deny(`${method} ${path}`);
+  }
+
+  /** GitHub's own rules for a label: a name of 1 to 50 characters, a colour of six hex digits WITHOUT a leading `#`, a description of at most 100 characters; a name that exists (in any case) is a 422 `already_exists`. */
+  private createLabel(owner: string, name: string, body: { name: string; color: string; description: string }): GithubResponse {
+    const repo = this.repoOf(owner, name);
+    if (!repo) return notFound();
+    if (typeof body.name !== "string" || body.name.length < 1 || body.name.length > 50) throw new StrictFakeError("A26: a label name is 1 to 50 characters");
+    if (typeof body.color !== "string" || !/^[0-9A-Fa-f]{6}$/.test(body.color)) throw new StrictFakeError("A26: a label colour is six hex digits without a #");
+    if (typeof body.description !== "string" || [...body.description].length > 100) throw new StrictFakeError("A26: a label description is at most 100 characters");
+    const key = body.name.toLowerCase();
+    if (repo.labels.has(key)) return { status: 422, body: { message: "Validation Failed", errors: [{ resource: "Label", code: "already_exists", field: "name" }], documentation_url: "https://docs.github.com/rest/issues/labels#create-a-label", status: "422" } };
+    repo.labels.set(key, { name: body.name, color: body.color, description: body.description });
+    return ok({ id: repo.labels.size, node_id: `LA_kwDOFake${repo.labels.size}`, name: body.name, color: body.color, description: body.description, default: false }, 201);
   }
 
   private getRepo(owner: string, name: string): GithubResponse {
@@ -302,3 +322,35 @@ export class FakeGithub implements GithubClient {
     return ok({ data: { markPullRequestReadyForReview: null }, errors: [{ type: "NOT_FOUND", message: "Could not resolve to a node with the global id." }] });
   }
 }
+
+/**
+ * The live installation client's exact path lists (packages/github `installationHttp.ts`), written out here WITHOUT importing them, as the kinds the install step opens:
+ *   - `runner_pr`:    `POST /graphql`, `GET` the repository, `GET` and `POST` its `/pulls`, `PATCH /pulls/<digits>`. Nothing else, so no `/labels`.
+ *   - `setup_labels`: `POST /repos/<o>/<r>/labels` with a body of exactly name, color and description, no query. Nothing else.
+ * A request outside the kind's list is rejected `path_refused` (as the live client does, before anything is sent) and counts in `denied`; one inside it is answered by the strict fake. The live lists are proven
+ * against the real client in packages/github (setupLabels.test.ts) and apps/web (runnerPullRequest.test.ts); this keeps the port tests from passing on a path the live kind would refuse.
+ */
+export type FakeInstallationKind = "runner_pr" | "setup_labels";
+export function installationKindClient(fake: FakeGithub, kind: FakeInstallationKind): GithubClient {
+  const repoRoot = /^\/repos\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+/;
+  const allowed = (req: GithubRequest): boolean => {
+    const rest = repoRoot.test(req.path) ? req.path.replace(repoRoot, "") : null;
+    if (kind === "setup_labels") return req.method === "POST" && rest === "/labels" && req.query === undefined && keysAre(req.body, ["name", "color", "description"]);
+    if (req.method === "POST" && req.path === "/graphql") return true;
+    if (rest === null) return false;
+    if (req.method === "GET") return rest === "" || rest === "/pulls";
+    if (req.method === "POST") return rest === "/pulls";
+    return req.method === "PATCH" && /^\/pulls\/\d+$/.test(rest);
+  };
+  return {
+    request(req) {
+      if (!allowed(req)) {
+        fake.denied++;
+        return Promise.reject(new Error(`installationHttp: path_refused (${kind}: ${req.method} ${req.path})`));
+      }
+      return fake.request(req);
+    },
+  };
+}
+/** What `createRunPullRequestPort` is given as `open`: the pull request kind, or `setup_labels` when the port asks for it. */
+export const openInstallationKinds = (fake: FakeGithub) => async (_repo: unknown, purpose?: "setup_labels"): Promise<GithubClient> => installationKindClient(fake, purpose === "setup_labels" ? "setup_labels" : "runner_pr");

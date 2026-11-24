@@ -2,7 +2,7 @@ import { COPY } from "@fulcrumaxe/runner-protocol";
 import { safeChildTitle } from "@fx/core/src/work-items/childTitle.js";
 import { cleanWorkItemTitle } from "@fx/core/src/work-items/title.js";
 import type { TenantQueryable } from "./acceptanceScope.js";
-import { LocalOnlyGithubError, localOnlyGithub, type GithubClient, type GithubGraphqlOperation, type GithubResponse, type LocalOnlyGithub } from "./localOnlyGithub.js";
+import { LocalOnlyGithubError, SETUP_INSTALL_LABELS, localOnlyGithub, type GithubClient, type GithubGraphqlOperation, type GithubResponse, type LocalOnlyGithub } from "./localOnlyGithub.js";
 
 /**
  * D#6 R2b-3e (C21 section 5, C22 section 6): the GitHub port the `done` route will use for a `runner_local` repo. There is no
@@ -89,6 +89,8 @@ export interface PullRequestRef {
   draft: boolean;
   /** True when an open pull request for the branch already existed and was reused. */
   reused: boolean;
+  /** The pull request's head commit as GitHub showed it when the ref was read (D#845 ON-8f2b: the install step holds it to the commit the runner pushed); absent when GitHub gave none. */
+  headSha?: string;
 }
 /** The change types GitHub documents. The port does not classify: `changeType` is passed through exactly as GitHub gave it, an unknown value included (the rename rule is the `done` route's). */
 export const CHANGE_TYPES = ["ADDED", "DELETED", "RENAMED", "COPIED", "MODIFIED", "CHANGED"] as const;
@@ -121,6 +123,8 @@ export interface PullRequestText {
 export interface SetupInstallPort extends RunPullRequestPort {
   /** The parent commit ids of the commit `sha` in the repository, or null when GitHub has no commit of that id. */
   commitParents(input: { repo: PullRequestRepo; sha: string }): Promise<string[] | null>;
+  /** D#845 ON-8f2b (A26): makes the engine's labels in the repository, one call each; a label that already exists counts as made. It throws the first failure. */
+  ensureLabels(input: { repo: PullRequestRepo }): Promise<void>;
 }
 
 export interface RunPullRequestPort {
@@ -226,6 +230,11 @@ export function isDraftUnsupported(body: unknown): boolean {
   return texts.some((t) => typeof t === "string" && /draft/i.test(t) && /not supported/i.test(t));
 }
 
+/** GitHub's answer to a label that is already there: a 422 whose every error says a Label already exists. Any other 422 is a refusal. */
+function isLabelExists(body: unknown): boolean {
+  return isObject(body) && Array.isArray(body.errors) && body.errors.length > 0 && body.errors.every((e) => isObject(e) && e.resource === "Label" && e.code === "already_exists");
+}
+
 async function guarded(call: () => Promise<GithubResponse>): Promise<GithubResponse> {
   try {
     return await call();
@@ -266,12 +275,17 @@ function pullRequestRef(raw: unknown, branch: string, repo: PullRequestRepo, reu
   if (!isObject(raw) || !isCount(raw.number) || raw.number < 1 || typeof raw.node_id !== "string" || typeof raw.draft !== "boolean" || raw.state !== "open") return malformed();
   const head = raw.head;
   if (!isObject(head) || head.ref !== branch || !isObject(head.repo) || !sameRepo(head.repo.full_name, repo)) return malformed();
-  return { number: raw.number, nodeId: raw.node_id, draft: raw.draft, reused };
+  const sha = head.sha;
+  return { number: raw.number, nodeId: raw.node_id, draft: raw.draft, reused, ...(typeof sha === "string" && OID.test(sha) ? { headSha: sha } : {}) };
 }
 
 /** Builds the port over `open`, which answers a client for one repository (the App's installation token for it; for the app, see apps/web). */
 export function createRunPullRequestPort(deps: {
-  open(repo: PullRequestRepo): Promise<GithubClient>;
+  /**
+   * A client for one repository. With no `purpose` it is the pull request client (find, open, read, close, GraphQL). `"setup_labels"` asks for the one that may create labels: the pull request
+   * client's token and path list hold no `issues` write and no `/labels`, so `ensureLabels` must NOT go through it (a fake that did not model the live path list hid exactly that).
+   */
+  open(repo: PullRequestRepo, purpose?: "setup_labels"): Promise<GithubClient>;
   /** Waits between looks at a pull request GitHub cannot show yet. Tests inject an instant one. */
   sleep?: (ms: number) => Promise<void>;
   /**
@@ -281,10 +295,10 @@ export function createRunPullRequestPort(deps: {
    */
   appLogin(repo: PullRequestRepo): Promise<string>;
 }): SetupInstallPort {
-  const client = async (repo: PullRequestRepo, options: { setupInstall?: boolean } = {}): Promise<LocalOnlyGithub> => {
+  const client = async (repo: PullRequestRepo, options: { setupInstall?: boolean; purpose?: "setup_labels" } = {}): Promise<LocalOnlyGithub> => {
     let inner: GithubClient;
     try {
-      inner = await deps.open(repo);
+      inner = await (options.purpose === undefined ? deps.open(repo) : deps.open(repo, options.purpose));
     } catch (error) {
       // fx-swallow-ok: the cause can carry a name or a token, so only a fixed reason survives. No installation and a read-only App
       // are permanent (a retry cannot fix them); a token mint that failed or timed out, or a transport error, is worth retrying.
@@ -405,6 +419,20 @@ export function createRunPullRequestPort(deps: {
       const parents = need(isObject(object.parents) && object.parents);
       if (!isCount(parents.totalCount) || !Array.isArray(parents.nodes) || parents.nodes.length !== parents.totalCount || parents.totalCount > 5) return malformed();
       return (parents.nodes as unknown[]).map((n) => (isObject(n) && typeof n.oid === "string" && OID.test(n.oid) ? n.oid : malformed()));
+    },
+
+    async ensureLabels({ repo }) {
+      const gh = await client(repo, { setupInstall: true, purpose: "setup_labels" });
+      try {
+        for (const row of SETUP_INSTALL_LABELS) {
+          const res = await guarded(() => gh.request({ method: "POST", path: `${repoPath(repo)}/labels`, body: { name: row.name, color: row.color, description: row.description } }));
+          if (res.status === 422 && isLabelExists(res.body)) continue;
+          checkStatus(res, [201]);
+        }
+      } finally {
+        // The `setup_labels` token holds an issues write: it is revoked as soon as the labels are made or the call fails, never left to lapse.
+        await gh.close?.();
+      }
     },
 
     changedFiles: ({ repo, number }) => settle(() => readChangedFiles(repo, number)),
