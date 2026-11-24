@@ -60,6 +60,7 @@ function world(options: { code?: number | null; chunks?: Array<["stdout" | "stde
     stateDir,
     binaryDir: path.join(base, "claude-bin"),
     jobsRoot,
+    cacheDir: base,
     searchPath: binDir,
     selfCommand: options.selfCommand ?? ["/opt/fictional runner/fx runner", "it's.mjs"],
     uid: process.getuid?.(),

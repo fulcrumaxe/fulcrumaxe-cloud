@@ -38,6 +38,8 @@ let base: string;
 let home: string;
 let stateDir: string;
 let jobsRoot: string;
+/** The runner's cache directory the guest is told of (`HostGuestDeps.cacheDir`); a test that nests its jobs root below it sets it, the rest use the jobs root's parent. */
+let declaredCache: string | undefined;
 let bundle: string;
 let upstream: net.Server;
 let upstreamPort: number;
@@ -55,6 +57,7 @@ function depsFor(): HostGuestDeps {
     stateDir,
     binaryDir: path.join(base, "claude-bin"),
     jobsRoot,
+    cacheDir: declaredCache ?? path.dirname(jobsRoot),
     searchPath: process.env["PATH"] ?? "/usr/bin:/bin",
     selfCommand: [process.execPath, bundle],
     uid: process.getuid?.(),
@@ -561,6 +564,7 @@ describe.skipIf(!usable)("the runner's cache directory is hidden from the guest"
   });
   afterAll(() => {
     jobsRoot = saved;
+    declaredCache = undefined;
   });
 
   /** Plants a sentinel in each sibling directory of the cache, and returns their paths. */
@@ -595,6 +599,29 @@ describe.skipIf(!usable)("the runner's cache directory is hidden from the guest"
     expect(JSON.parse((await g.run(process.execPath, ["-e", CONNECT_CLIENT, "registry.npmjs.org", "443"], guestEnvOf({}))).stdout.trim())).toContain("from-registry");
     await other.guest.close();
     await g.guest.close();
+  }, 120_000);
+
+  it("an engine session's layout (`engine-sessions/roots`, nested one level below the cache directory) hides the cache outside the home directory too: the mirrors are not readable, the session's own root and egress work", async () => {
+    const cache = path.join(base, "xdg-cache-sessions", "fx-runner");
+    declaredCache = cache;
+    jobsRoot = path.join(cache, "engine-sessions", "roots");
+    const files = plant(cache);
+    const g = newGuest();
+    try {
+      for (const file of files) {
+        expect(readFileSync(file, "utf8"), file).toBe(HIDDEN); // control: really there
+        const out = await g.run("sh", ["-c", 'cat "$1" 2>&1; echo "exit=$?"', "fx", file]);
+        expect(out.stdout, file).not.toContain(HIDDEN);
+        expect(out.stdout, file).toMatch(/exit=[1-9]/);
+      }
+      const listing = await g.run("sh", ["-c", 'ls "$1" 2>&1; echo "exit=$?"', "fx", path.join(cache, "mirrors")]);
+      expect(listing.stdout).not.toContain("github.com");
+      const own = await g.run("sh", ["-c", 'echo ok >w.txt; cat w.txt; ls "$1"', "fx", g.egressDir]);
+      expect(own.stdout.split("\n")[0]).toBe("ok");
+    } finally {
+      await g.guest.close();
+      declaredCache = undefined;
+    }
   }, 120_000);
 
   it("the default layout (cache under the home directory) still works: own root, writes, tools and egress", async () => {

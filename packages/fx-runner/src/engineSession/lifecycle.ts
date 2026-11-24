@@ -42,6 +42,8 @@ export interface EngineSessionDeps {
   port: (options: { timeoutMs: number; runId: string; persistent: true }) => ResumableVmPort;
   /** The compute state of a sandbox by name: `gone` for a name the daemon does not hold. */
   state: (name: string) => Promise<SandboxComputeState>;
+  /** The standard tier only: empties the session's token file when a stop finds nothing running (the running path wipes it through `vm.quiesce`). */
+  wipeToken?: (name: string) => Promise<void>;
   /** The host copy of the repository at a commit, as a setup makes it (ON-8d). */
   repos: SetupRepos;
   /** Who a repository id is on this machine (from the mirror this machine made for it); undefined when it is not known. */
@@ -205,7 +207,9 @@ export function createEngineSessionHandlers(deps: EngineSessionDeps): { engine_s
       const known = await deps.state(name);
       if (known === "unknown") await p.fail("session_stop", "vm_teardown_incomplete", "state");
       if (known !== "running") {
-        // nothing is up: already stopped, or never kept (the next start takes the fresh path)
+        // nothing is up: already stopped, or never kept (the next start takes the fresh path). A tier that keeps a secret beside the session wipes it here too: a scope that ended on its own
+        // (a crash, a reboot of the user manager) must not leave the token behind just because there was nothing to stop.
+        await deps.wipeToken?.(name).catch(() => p.fail("session_stop", "vm_teardown_incomplete", "token"));
         await p.say("session_stop", "skipped");
         await p.say("snapshot", "skipped");
       } else {

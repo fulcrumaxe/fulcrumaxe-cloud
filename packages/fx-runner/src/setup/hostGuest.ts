@@ -57,6 +57,12 @@ export interface HostGuestDeps {
   binaryDir: string;
   /** The dedicated directory every job root is made under (absolute, outside the state directory). */
   jobsRoot: string;
+  /**
+   * The runner's cache directory (absolute, normalised): the directory the mirrors, workspaces, tmp, spill and launch directories live in, as `cacheRootsFor` gives it wherever `XDG_CACHE_HOME`
+   * put it. It is denied for reads whole. It is named by the caller and never worked out from the jobs root's own path: a session's jobs root is nested below it (`engine-sessions/roots`), so a parent of that
+   * path would be a different directory and would leave the mirrors readable.
+   */
+  cacheDir: string;
   /** Where bubblewrap and socat are looked for, and the guest commands' own PATH. */
   searchPath: string;
   /** This program's own command (`host.selfCommand`): `<words> __egress-serve <socket>` is the forwarder. */
@@ -71,12 +77,14 @@ export interface HostGuestDeps {
   egress?: Pick<EgressProxyOptions, "lookup" | "connect" | "ownAddresses" | "onDecision">;
 }
 
-/** A held command: one process that outlives the job that started it, in the scope `unit`. */
+/** A held command: one process that outlives the job that started it, in the scope `unit`. `env` is added after the table's check (the table is the closed list a job may name); `readPaths` are shown back read-only inside the hidden user runtime directory. */
 export interface HoldParams {
   cmd: string;
   args: readonly string[];
   unit: string;
   limitMs: number;
+  env?: Record<string, string>;
+  readPaths?: readonly string[];
 }
 export type HostGuest = SdkSandbox & { close(): Promise<void>; hold(params: HoldParams): Promise<SdkCommand> };
 
@@ -142,7 +150,7 @@ export function putFile(root: string, file: string, content: string, mode: numbe
 }
 
 /** Where a job root's workspace and stage directories are: the guest paths of every command and file of the job. */
-export const pathsOfRoot =(root: string): GuestPaths => ({ workspace: path.join(root, "work"), stage: path.join(root, "stage") });
+export const pathsOfRoot = (root: string): GuestPaths => ({ workspace: path.join(root, "work"), stage: path.join(root, "stage") });
 
 /** A guest over a fresh job root. `root` exists (0700) and is a direct child of `deps.jobsRoot`. */
 export function createHostGuest(deps: HostGuestDeps, name: string, root: string): { guest: HostGuest; paths: GuestPaths; egressDir: string } {
@@ -153,7 +161,7 @@ export function createHostGuest(deps: HostGuestDeps, name: string, root: string)
   // The runner's whole cache directory (mirrors, workspaces, tmp, spill, launch, setup-guests, setup-egress) wherever `XDG_CACHE_HOME` put it: denied for reads, so
   // naming only the home directory would leave other repos' mirrors and other jobs' files readable when the cache sits outside it. Its own root and egress directory are
   // the narrower grants (a narrower allow wins).
-  const cacheDir = path.dirname(path.normalize(deps.jobsRoot));
+  const cacheDir = path.normalize(deps.cacheDir);
   const egressDir = path.join(egressRoot, path.basename(root));
   removeRoot(egressDir); // a directory a crashed run left under this name
   const socket = egressSocketPath(egressDir);
@@ -213,7 +221,7 @@ export function createHostGuest(deps: HostGuestDeps, name: string, root: string)
       const cwd = params.cwd ?? root;
       if (cwd !== root && !inside(root, cwd)) throw new HostGuestRefused("path_refused");
       if (hold !== undefined && (deps.scope === undefined || deps.platform !== "linux")) throw new HostGuestRefused("sandbox_unavailable");
-      const env = envOf(params.env);
+      const env = { ...envOf(params.env), ...(hold?.env ?? {}) };
       const files = deps.selfCommand.filter((word) => path.isAbsolute(word) && deps.host.isFile(word));
       const settings = settingsNow();
       // which tool this machine uses is asked first (the command is only a placeholder): a bubblewrap one gets the filtered wrapper with the tool's own path as an argument
@@ -233,7 +241,8 @@ export function createHostGuest(deps: HostGuestDeps, name: string, root: string)
       } else {
         // the user's runtime directory holds the session bus and other sockets that start programs as the person; it is hidden whole, exactly as the check's sandbox does (`hostSandbox.ts`)
         const split = launch.args.indexOf("--");
-        argv = [...launch.args.slice(0, split), ...(deps.host.isDir(USER_RUNTIME_ROOT) ? ["--tmpfs", USER_RUNTIME_ROOT] : []), ...launch.args.slice(split)];
+        // a held command's own paths (the token directory) are put back after that, read-only
+        argv = [...launch.args.slice(0, split), ...(deps.host.isDir(USER_RUNTIME_ROOT) ? ["--tmpfs", USER_RUNTIME_ROOT] : []), ...(hold?.readPaths ?? []).flatMap((p) => ["--ro-bind", p, p]), ...launch.args.slice(split)];
       }
       let program = launch.tool;
       let programArgs = argv;

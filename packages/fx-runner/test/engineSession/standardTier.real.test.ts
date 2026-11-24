@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -13,7 +13,7 @@ import { engineHostUnit } from "../../src/engineHost/supervisor.js";
 import { runInstall } from "../../src/engines/claude/capture.js";
 import { createEngineSessionHandlers } from "../../src/engineSession/lifecycle.js";
 import { createOperateMark } from "../../src/engineSession/operateMark.js";
-import { createStandardSessionParts } from "../../src/engineSession/standardTier.js";
+import { createStandardSessionParts, onTmpfs, sessionHandlersFor } from "../../src/engineSession/standardTier.js";
 import { detectScopeSupport } from "../../src/sandbox/jobLimits.js";
 import { createSandboxHost } from "../../src/sandbox/probeHost.js";
 import type { HostGuestDeps } from "../../src/setup/hostGuest.js";
@@ -23,7 +23,7 @@ import { fixtureRepo, hostDeps } from "../vm/workspace/helpers.js";
 import { NAME, compactSession, del as delOf, start as startOf, stop as stopOf } from "./sessionRig.js";
 
 /**
- * D#845 ON-13a3a with REAL bubblewrap and a REAL systemd user scope: the engine session on the standard tier, driven through the real dispatcher and the real lifecycle handlers. The stand-ins are the least that can be:
+ * D#845 ON-13a3 with REAL bubblewrap and a REAL systemd user scope: the engine session on the standard tier, driven through the real dispatcher and the real lifecycle handlers. The stand-ins are the least that can be:
  * the repository archive (a fixture repository) and the cloud's reports. Every child runs on a PRIVATE PATH (links to the few programs it needs): the real `claude`, `gh` and git credential helpers are not on it, and the
  * test asserts that before it spawns anything.
  */
@@ -33,7 +33,7 @@ const run: GitCapture = (command, args, env) =>
   new Promise((resolve) => execFile(command, [...args], { env, timeout: 10_000 }, (error, stdout) => resolve({ code: error === null ? 0 : typeof error.code === "number" ? error.code : null, stdout, timedOut: false })));
 const SCOPES = XDG === undefined ? undefined : await detectScopeSupport({ platform: "linux", uid: process.getuid?.(), runtimeDir: XDG, searchPath: "/run/current-system/sw/bin:/usr/bin:/bin", capture: run, isDir: (d) => existsSync(d), readText: (f) => (existsSync(f) ? readFileSync(f, "utf8") : undefined) });
 const tools = SCOPES?.ok === true ? SCOPES.tools : undefined;
-const usable = BWRAP !== undefined && checkCanLaunch(BWRAP) && tools !== undefined && XDG !== undefined;
+const usable = BWRAP !== undefined && checkCanLaunch(BWRAP) && tools !== undefined && XDG !== undefined && onTmpfs(XDG);
 
 const SENTINEL = "FX-ON13A3-SENTINEL";
 const PROGRAMS = ["sh", "env", "base64", "tar", "gzip", "git", "readlink", "cat", "sleep", "true", "mkdir", "rm", "chmod", "ls", "head", "grep", "bwrap", "socat"];
@@ -69,19 +69,21 @@ afterAll(() => {
   if (usable) rmSync(base, { recursive: true, force: true });
 });
 
-function world() {
-  const jobsRoot = path.join(base, "sessions", `r${String(Math.random()).slice(2, 8)}`, "roots");
+function world(options: { xdg?: string | undefined; isTmpfs?: (dir: string) => boolean } = {}) {
+  // the runner's layout: `<cache>/engine-sessions/roots`, the cache directory two levels up
+  const cacheDir = path.join(base, "sessions", `r${String(Math.random()).slice(2, 8)}`);
+  const jobsRoot = path.join(cacheDir, "engine-sessions", "roots");
   mkdirSync(path.dirname(jobsRoot), { recursive: true, mode: 0o700 });
   const guest: HostGuestDeps = {
-    start: spawnIn, host: createSandboxHost(async () => ({ code: null, stdout: "", stderr: "", timedOut: false })), platform: "linux", home, stateDir, binaryDir: path.join(base, "claude-bin"), jobsRoot, searchPath: privateBin,
+    start: spawnIn, host: createSandboxHost(async () => ({ code: null, stdout: "", stderr: "", timedOut: false })), platform: "linux", home, stateDir, binaryDir: path.join(base, "claude-bin"), jobsRoot, cacheDir, searchPath: privateBin,
     selfCommand: [process.execPath, bundle], uid: process.getuid?.(), scope: { tools: tools as NonNullable<typeof tools>, runtimeDir: XDG as string, budget: { memoryBytes: 2 * 1024 ** 3, tasks: 256 } },
   };
-  const parts = createStandardSessionParts({ guest, capture: run });
+  const parts = createStandardSessionParts({ guest, xdgRuntimeDir: "xdg" in options ? options.xdg : XDG, capture: run, ...(options.isTmpfs === undefined ? {} : { isTmpfs: options.isTmpfs }) });
   const repo = fixtureRepo();
   const host = hostDeps();
   const reports: Array<Record<string, unknown> & { job_id: string }> = [];
   const handlers = createEngineSessionHandlers({
-    vm: parts.vm, port: () => parts.port, state: parts.state, minGuestMb: 1,
+    vm: parts.vm, port: () => parts.port, state: parts.state, wipeToken: parts.wipeToken, minGuestMb: 1,
     get paths() {
       return parts.paths();
     },
@@ -99,7 +101,7 @@ function world() {
       },
       machineJobProgress: async (id: string, body: unknown) => (reports.push({ ...(body as object), job_id: id }), { kind: "recorded" as const }),
     };
-    const dispatcher = createMachineJobDispatcher({ client, keyring: JOB_KEYRING, runnerId: RUNNER_ID, now: () => new Date(), handlers, sandboxEngine: () => "os_sandbox", log: () => undefined });
+    const dispatcher = createMachineJobDispatcher({ client, keyring: JOB_KEYRING, runnerId: RUNNER_ID, now: () => new Date(), handlers: sessionHandlersFor({ microvm: undefined, standard: handlers }, () => "os_sandbox") ?? {}, sandboxEngine: () => "os_sandbox", log: () => undefined });
     for (let i = 0; i < list.length; i++) expect(await dispatcher.run()).toBe("handled");
   }
   return { parts, repo, go, last: (): string[] => compactSession(reports.splice(0)), jobsRoot };
@@ -133,18 +135,31 @@ describe.skipIf(!usable)("an engine session on the standard tier (real bubblewra
     expect(before.length).toBeGreaterThanOrEqual(3);
     expect(before.map(commandOf)).toContain("sleep");
 
+    // the token file: 0700 directory, 0600 empty file on the tmpfs, its path in the program's environment, and neither the runtime directory nor the bus in it
+    const tokenFile = path.join(XDG as string, "fx-engine-session", NAME, "repo-token");
+    expect(lstatSync(path.dirname(tokenFile)).mode & 0o777).toBe(0o700);
+    expect(lstatSync(tokenFile).mode & 0o777).toBe(0o600);
+    expect(readFileSync(tokenFile, "utf8")).toBe("");
+    const holder = before.find((pid) => commandOf(pid) === "sleep") as number;
+    const env = readFileSync(`/proc/${String(holder)}/environ`, "utf8").split("\0");
+    expect(env).toContain(`FX_ENGINE_REPO_TOKEN_FILE=${tokenFile}`);
+    expect(env.some((v) => v.startsWith("XDG_RUNTIME_DIR=") || v.startsWith("DBUS_SESSION_BUS_ADDRESS="))).toBe(false);
+    writeFileSync(tokenFile, "FX-TOKEN-CONTENT"); // ON-18 writes it; a stop empties it
+
     // S-6: from inside the same sandbox the session cannot read the runner's key or see it in the state directory; its own root it can write (control); the key is really there
     const root = path.join(w.jobsRoot, readdirSync(w.jobsRoot)[0] as string);
     const probe = await ((await w.parts.vm.guestOf({ runId: "", sandboxName: NAME, sessionId: "" })) as unknown as { hold(p: unknown): Promise<Held> }).hold({
       cmd: "sh",
-      args: ["-c", `cat '${path.join(stateDir, "key.pem")}' >/dev/null 2>&1 && echo KEY_READ || echo KEY_DENIED; ls '${stateDir}' 2>/dev/null | grep -q key.pem && echo KEY_LISTED || echo KEY_HIDDEN; echo x > '${root}/work/marker' && echo ROOT_WRITABLE`],
+      args: ["-c", `cat '${path.join(stateDir, "key.pem")}' >/dev/null 2>&1 && echo KEY_READ || echo KEY_DENIED; ls '${stateDir}' 2>/dev/null | grep -q key.pem && echo KEY_LISTED || echo KEY_HIDDEN; grep -q TOKEN-CONTENT "$FX_ENGINE_REPO_TOKEN_FILE" && echo TOKEN_READABLE; { echo x >> "$FX_ENGINE_REPO_TOKEN_FILE"; } 2>/dev/null && echo TOKEN_WRITABLE || echo TOKEN_READ_ONLY; echo x > '${root}/work/marker' && echo ROOT_WRITABLE`],
       unit: engineHostUnit(4242),
+      env: { FX_ENGINE_REPO_TOKEN_FILE: tokenFile },
+      readPaths: [path.dirname(tokenFile)],
       limitMs: 30_000,
     });
     let said = "";
     for await (const line of probe.logs()) said += line.data;
     expect((await probe.wait()).exitCode).toBe(0);
-    expect(said.split("\n").filter((l) => l !== "")).toEqual(["KEY_DENIED", "KEY_HIDDEN", "ROOT_WRITABLE"]);
+    expect(said.split("\n").filter((l) => l !== "")).toEqual(["KEY_DENIED", "KEY_HIDDEN", "TOKEN_READABLE", "TOKEN_READ_ONLY", "ROOT_WRITABLE"]);
     expect(readFileSync(path.join(stateDir, "key.pem"), "utf8")).toBe(SENTINEL);
 
     // stop: the proxy's directory is removed, the scope is gone, cgroup.procs is empty, and no process of it is alive
@@ -152,6 +167,7 @@ describe.skipIf(!usable)("an engine session on the standard tier (real bubblewra
     expect(existsSync(egress)).toBe(true);
     await w.go(stop());
     expect(existsSync(egress)).toBe(false);
+    expect(readFileSync(tokenFile, "utf8")).toBe(""); // the content is wiped before the stop
     expect(w.last()).toEqual(["admission:started", "admission:ok", "session_stop:started", "session_stop:ok", "snapshot:started", "snapshot:ok", "done:ok"]);
     expect(await w.parts.state(NAME)).toBe("stopped");
     expect(await procsOf(unit)).toEqual([]);
@@ -171,7 +187,60 @@ describe.skipIf(!usable)("an engine session on the standard tier (real bubblewra
     await w.go(del());
     expect(await w.parts.state(NAME)).toBe("gone");
     expect(existsSync(root)).toBe(false);
+    expect(existsSync(path.dirname(tokenFile))).toBe(false);
     expect(await procsOf(unit)).toEqual([]);
+  }, 120_000);
+
+  it("refuses to start without a tmpfs runtime directory, and leaves nothing running", async () => {
+    for (const xdg of [undefined, path.join(base, "not-a-tmpfs")]) {
+      if (xdg !== undefined) mkdirSync(xdg, { recursive: true, mode: 0o700 });
+      if (xdg !== undefined && onTmpfs(xdg)) continue; // a home directory on tmpfs cannot show the refusal
+      const w = world({ xdg });
+      await w.go(start(w.repo.commit, false));
+      expect(w.last().at(-1)).toBe("session_create:failed:vm_boot_failed");
+      expect(await procsOf(engineHostUnit(77))).toEqual([]);
+      expect(await w.parts.state(NAME)).toBe("gone");
+    }
+  }, 60_000);
+
+  it("refuses a runtime directory that is a tmpfs but not this user's own: a shared tmpfs, a sibling of it, a directory that only starts with its name; and one below it that is not a tmpfs", async () => {
+    const own = XDG as string;
+    const cases: Array<{ xdg: string; isTmpfs?: (dir: string) => boolean }> = [{ xdg: `${own}-other`, isTmpfs: () => true }, { xdg: path.join(path.dirname(own), "0"), isTmpfs: () => true }, { xdg: path.join(own, "sub"), isTmpfs: () => false }];
+    if (onTmpfs("/dev/shm")) cases.push({ xdg: "/dev/shm" }); // a real, shared tmpfs: the check is on whose it is, not only on its type
+    for (const one of cases) {
+      const w = world(one);
+      await w.go(start(w.repo.commit, false));
+      expect(w.last().at(-1), one.xdg).toBe("session_create:failed:vm_boot_failed");
+      expect(await procsOf(engineHostUnit(77))).toEqual([]);
+      expect(await w.parts.state(NAME)).toBe("gone");
+    }
+    // control: this user's own runtime directory, or a directory below it on the tmpfs, is accepted
+    const w = world({ xdg: own });
+    await w.go(start(w.repo.commit, false));
+    expect(w.last().at(-1)).toBe("done:ok@created");
+    await w.go(del());
+  }, 120_000);
+
+  it("a stop that finds the scope already gone (it ended on its own) still wipes the token file, and says the stop was skipped", async () => {
+    const w = world();
+    const unit = engineHostUnit(77);
+    await w.go(start(w.repo.commit, false));
+    w.last();
+    const tokenFile = path.join(XDG as string, "fx-engine-session", NAME, "repo-token");
+    writeFileSync(tokenFile, "FX-TOKEN-LEFT-BEHIND");
+    // the scope dies without a stop job (a crash of the program, or of the user manager's scope)
+    await run((tools as NonNullable<typeof tools>).systemctl, ["--user", "kill", "--signal=SIGKILL", `${unit}.scope`], { XDG_RUNTIME_DIR: XDG as string }, 5_000);
+    for (let i = 0; i < 100 && (await w.parts.state(NAME)) === "running"; i++) await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(await w.parts.state(NAME)).toBe("stopped");
+    expect(readFileSync(tokenFile, "utf8")).toBe("FX-TOKEN-LEFT-BEHIND"); // control: still there before the stop job
+    await w.go(stop());
+    expect(w.last()).toEqual(["admission:started", "admission:ok", "session_stop:skipped", "snapshot:skipped", "done:ok"]);
+    expect(readFileSync(tokenFile, "utf8")).toBe("");
+    expect(lstatSync(tokenFile).mode & 0o777).toBe(0o600);
+    // a stop of a session that was never kept makes nothing
+    await w.go(del());
+    await w.go(stop());
+    expect(existsSync(path.dirname(tokenFile))).toBe(false);
   }, 120_000);
 
   it("a resume of a session nothing was kept for takes the fresh start", async () => {
