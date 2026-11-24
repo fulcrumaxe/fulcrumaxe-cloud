@@ -25,6 +25,7 @@ const PLANS = "/api/plans";
 const CHECKOUT = "/api/v1/billing/checkout-session";
 const PORTAL = "/api/v1/billing/portal-session";
 const ENGINE = "/api/v1/billing/engine";
+const MACHINES = "/api/v1/billing/machines";
 const ENGINE_QTY = "/api/v1/billing/engine-quantity";
 // Fixed relative paths: the server accepts only plain absolute paths on this app.
 const BACK_PATH = "/";
@@ -189,6 +190,84 @@ export function engineNode(m, body, act, notice, busy) {
     notice);
 }
 
+// ── D#845 MC-11b: the machine figures (GET /api/v1/billing/machines). The server computes every number: hours, costs, totals, tokens and the API-price dollars.
+// This code only prints them: no sum, no product, no percentage. Money arrives as a decimal string and is shown by string edits alone (a symbol, and the
+// four-decimal tail trimmed to two when it is zero), never converted to a float.
+export const MACHINE_COPY = {
+  heading: "Machines",
+  loading: "Loading machine costs...",
+  failed: "Machine costs couldn't be loaded.",
+  serversTitle: "Servers this month",
+  noServers: "No servers rented this month.",
+  usageTitle: "Claude usage this month",
+  noUsage: "No Claude usage from your machines this month.",
+  noPrice: "No API price for these models.",
+  noServerPrice: "No price on record for these servers.",
+  partPrice: "Some models have no API price, so the figure covers the priced part only.",
+  removedProject: "Removed project",
+  unnamedMachine: "Unnamed machine",
+  noProject: "No project",
+  unpriced: (n) => (n === 1 ? "1 server has no price on record and isn't counted." : n + " servers have no price on record and aren't counted."),
+};
+const SYMBOLS = { EUR: "\u20ac", USD: "$", GBP: "\u00a3" };
+/** "12.3400" EUR -> "\u20ac12.34"; "12.3456" stays four places. String edits only. */
+export function moneyText(amount, currency) {
+  const trimmed = String(amount).replace(/(\.\d\d)00$/, "$1");
+  return Object.hasOwn(SYMBOLS, currency) ? SYMBOLS[currency] + trimmed : trimmed + " " + currency;
+}
+/** Whole tokens with thousands separators, by string edits (the count is a decimal string, possibly past 2^53). */
+export function tokenText(count) {
+  return String(count).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+const tokenLine = (u) =>
+  tokenText(u.input_tokens) + " in, " + tokenText(u.output_tokens) + " out, " + tokenText(u.cache_read_tokens) + " cache read, " + tokenText(u.cache_write_tokens) + " cache write";
+const dollarsText = (u) => (u.api_equivalent_usd === null ? MACHINE_COPY.noPrice : "\u2248 " + money(u.api_equivalent_usd) + " " + "at API prices" + (u.priced ? "" : " (partial)"));
+const asOfText = (iso) => {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "" : "As of " + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+};
+
+/** The Machines card as DOM. `ui` is { failed }; `act` is { retry }. */
+export function machineSpendNode(body, ui, act) {
+  const t = (id, text, cls) => h("p", { class: cls || "bb-muted", "data-testid": id }, text);
+  const head = h("h3", { class: "bb-title" }, MACHINE_COPY.heading);
+  const sound = (b) => b && b.servers && (b.servers.servers === null || Array.isArray(b.servers.servers)) && Array.isArray(b.servers.totals) && b.usage && Array.isArray(b.usage.machines);
+  if ((ui && ui.failed) || (body && !sound(body))) {
+    return h("section", { class: "bb-card", "data-testid": "bb-machines", "data-state": "failed" }, head,
+      h("p", { class: "bb-muted", role: "alert", "data-testid": "bb-machines-failed" }, MACHINE_COPY.failed + " ",
+        h("button", { type: "button", class: "bb-btn", "data-testid": "bb-machines-retry", onClick: act.retry }, "Try again")));
+  }
+  if (!body) return h("section", { class: "bb-card", "data-testid": "bb-machines", "data-state": "loading" }, head, t("bb-machines-loading", MACHINE_COPY.loading));
+  const sv = body.servers;
+  const us = body.usage;
+  // A member gets the totals without the per-server rows (`servers.servers` is null); an owner or admin gets both.
+  const anyServers = sv.servers === null ? sv.totals.length > 0 || sv.unpriced_count > 0 : sv.servers.length > 0;
+  return h("section", { class: "bb-card", "data-testid": "bb-machines", "data-state": "ready" }, head,
+    asOfText(body.as_of) ? t("bb-machines-asof", asOfText(body.as_of)) : null,
+    h("h4", { class: "bb-title" }, MACHINE_COPY.serversTitle),
+    !anyServers ? t("bb-servers-empty", MACHINE_COPY.noServers) : [
+      sv.totals.length === 0
+        ? t("bb-servers-total", MACHINE_COPY.noServerPrice)
+        : h("p", { "data-testid": "bb-servers-total" }, sv.totals.map((x) => moneyText(x.amount, x.currency)).join(" + ")),
+      t("bb-servers-note", sv.note + "."),
+      sv.estimate_note ? t("bb-servers-estimate", sv.estimate_note + ".") : null,
+      sv.unpriced_count > 0 ? t("bb-servers-unpriced", MACHINE_COPY.unpriced(sv.unpriced_count)) : null,
+      sv.servers === null ? null : h("ul", { class: "bb-list", "data-testid": "bb-servers-list" }, sv.servers.map((s) =>
+        h("li", { "data-testid": "bb-server" }, s.name + ": " + s.hours + " h" + (s.running ? "" : " (deleted)") + ", " + (s.cost === null ? "no price on record" : moneyText(s.cost, s.currency) + (s.estimate ? " (estimate)" : ""))))),
+    ],
+    h("h4", { class: "bb-title" }, MACHINE_COPY.usageTitle),
+    us.machines.length === 0 ? t("bb-usage-empty", MACHINE_COPY.noUsage) : [
+      h("p", { "data-testid": "bb-usage-total" }, dollarsText(us)),
+      t("bb-usage-tokens", tokenLine(us)),
+      us.priced || us.api_equivalent_usd === null ? null : t("bb-usage-partial", MACHINE_COPY.partPrice),
+      h("ul", { class: "bb-list", "data-testid": "bb-usage-machines" }, us.machines.map((m) =>
+        h("li", { "data-testid": "bb-usage-machine" },
+          h("strong", {}, m.name || MACHINE_COPY.unnamedMachine), ": " + dollarsText(m), h("br"), tokenLine(m),
+          h("ul", { class: "bb-list" }, m.projects.map((p) =>
+            h("li", { "data-testid": "bb-usage-project" }, (p.repo_id === null ? MACHINE_COPY.noProject : p.name || MACHINE_COPY.removedProject) + ": " + dollarsText(p), h("br"), tokenLine(p))))))),
+    ]);
+}
+
 export function mountBudgetBilling(host) {
   const abort = new AbortController();
   const state = {
@@ -196,6 +275,7 @@ export function mountBudgetBilling(host) {
     budgets: undefined,
     account: undefined,
     engine: undefined,
+    machines: undefined,
     engineHint: "",
     plans: undefined,
     plansUnavailable: false,
@@ -230,10 +310,11 @@ export function mountBudgetBilling(host) {
   const modelHost = h("div");
   const plansHost = h("div");
   const engineHost = h("div");
+  const machinesHost = h("div");
   // Kept for good: a redraw replaces the row but never this node, so an answer is announced once.
   const engineNotice = h("p", { class: "bb-muted", role: "status", "aria-live": "polite", "data-testid": "bb-engine-notice" });
   const shareHost = h("div");
-  root.append(noticeEl, bannerHost, planHost, usageHost, modelHost, partnerEl, plansHost, engineHost, shareHost);
+  root.append(noticeEl, bannerHost, planHost, usageHost, modelHost, partnerEl, plansHost, engineHost, machinesHost, shareHost);
   host.replaceChildren(root);
 
   function paintNotice(text, isError) {
@@ -312,7 +393,7 @@ export function mountBudgetBilling(host) {
 
   const loadAll = () => {
     state.engineHint = ""; // what a refusal taught lasts until the next full read
-    return Promise.all([read("usage", USAGE), read("budgets", BUDGETS), read("account", ACCOUNT), read("plans", PLANS), read("engine", ENGINE)]).then(render);
+    return Promise.all([read("usage", USAGE), read("budgets", BUDGETS), read("account", ACCOUNT), read("plans", PLANS), read("engine", ENGINE), read("machines", MACHINES)]).then(render);
   };
   const loadUsage = () => read("usage", USAGE).then(render);
   const loadEngine = () => read("engine", ENGINE).then(render);
@@ -589,7 +670,7 @@ export function mountBudgetBilling(host) {
       nodes.push(exhaustedEl);
     }
     // The Engines row says its own read failed, beside a page that still works.
-    if (Object.entries(state.failed).some(([k, v]) => v && k !== "engine")) {
+    if (Object.entries(state.failed).some(([k, v]) => v && k !== "engine" && k !== "machines")) {
       if (loadErrText.data !== LOAD_FAILED + " ") loadErrText.data = LOAD_FAILED + " ";
       nodes.push(loadErrEl);
     }
@@ -826,6 +907,7 @@ export function mountBudgetBilling(host) {
     put(modelHost, modelView());
     put(plansHost, plansView());
     put(engineHost, engineView());
+    put(machinesHost, machineSpendNode(state.machines, { failed: state.failed.machines === true }, { retry: () => read("machines", MACHINES).then(render) }));
     put(shareHost, shareView());
     if (focusId && document.activeElement !== active) {
       const target = root.querySelector(`[data-testid="${focusId}"]`);

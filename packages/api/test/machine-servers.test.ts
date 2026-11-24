@@ -245,6 +245,8 @@ describe('machine servers: quote and create', () => {
       const [row] = await serversOf(who.accountId);
       expect(row).toMatchObject({ id: body.id, kind: 'hetzner_cloud', status: 'creating', name: `fx-${body.id.slice(0, 8)}`, provider_server_id: String(made.id), provider_firewall_id: String((world.firewalls[0] as unknown as Wall).id), public_ipv4: '203.0.113.7', currency: 'EUR', idempotency_key: 'k-happy', created_by: who.userId });
       expect([row.price_hourly_gross, row.price_monthly_gross, row.ipv4_monthly_gross]).toEqual(['0.007000', '4.5101', '0.5950']);
+      // D#845 MC-11b: the address's hourly price is stamped beside the monthly one (the fake lists 0.0008 net, 0.0010 gross), as Hetzner lists it and never as a share of the monthly price.
+      expect(row.ipv4_hourly_gross).toBe('0.001000');
       const bound = await withTenant(appUserPool, who.accountId, who.userId, async (c) => (await c.query(`SELECT bound, ip FROM runner_provisioning_token_bound_ip($1)`, [hashProvisioningToken(secret!)])).rows[0]);
       expect(bound).toEqual({ bound: true, ip: '203.0.113.7' });
       const tokens = await tokenRows(who.accountId);

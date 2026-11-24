@@ -27491,6 +27491,378 @@
         }
       }
     },
+    "/api/v1/billing/machines": {
+      "get": {
+        "operationId": "getMachineSpend",
+        "summary": "This month's machine figures: servers we rented and Claude usage on the account's machines",
+        "description": "Session only, any member. `servers` is min(billed hours x hourly, monthly) + min(billed hours x IPv4 hourly, IPv4 monthly) for each Hetzner Cloud server we created, with running time rounded up to whole started hours as Hetzner bills it, from the gross prices stamped when it was made, estimated from the list price (Hetzner bills the person directly); a server made before the hourly IPv4 price was recorded counts its IPv4 at the monthly price and is marked an estimate; totals are per currency and a server with no stamped price is listed and left out. The per-server rows (name, size, location) are for owners and admins only: a member gets `servers.servers` null and the totals. `usage` is the tokens the machines reported this UTC month, by machine and project, with what they would cost at API prices from the cloud's own price table (information, never billed). No provider call is made. The page prints these figures as they are.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "This month's machine figures: servers we rented and Claude usage on the account's machines",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "period_start": {
+                      "type": "string"
+                    },
+                    "period_end": {
+                      "type": "string"
+                    },
+                    "as_of": {
+                      "type": "string",
+                      "description": "The moment these figures were read."
+                    },
+                    "servers": {
+                      "type": "object",
+                      "properties": {
+                        "note": {
+                          "type": "string",
+                          "description": "Says these are estimates and who bills them."
+                        },
+                        "estimate_note": {
+                          "description": "Set when any listed server is an estimate (made before its hourly IPv4 price was recorded); says why.",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "totals": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "currency": {
+                                "type": "string"
+                              },
+                              "amount": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "currency",
+                              "amount"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "description": "Per currency, from the servers that have a stamped price."
+                        },
+                        "unpriced_count": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991,
+                          "description": "Servers with no stamped price: listed, and left out of the totals."
+                        },
+                        "servers": {
+                          "anyOf": [
+                            {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "id": {
+                                    "type": "string",
+                                    "format": "uuid",
+                                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                                  },
+                                  "name": {
+                                    "type": "string"
+                                  },
+                                  "server_type": {
+                                    "type": [
+                                      "string",
+                                      "null"
+                                    ]
+                                  },
+                                  "location": {
+                                    "type": [
+                                      "string",
+                                      "null"
+                                    ]
+                                  },
+                                  "running": {
+                                    "type": "boolean"
+                                  },
+                                  "hours": {
+                                    "type": "string",
+                                    "description": "Hours billed this month: running time rounded up to whole started hours."
+                                  },
+                                  "currency": {
+                                    "type": "string"
+                                  },
+                                  "cost": {
+                                    "description": "min(hours x hourly, monthly) + min(hours x IPv4 hourly, IPv4 monthly), gross, four decimals; null with no stamped price.",
+                                    "type": [
+                                      "string",
+                                      "null"
+                                    ]
+                                  },
+                                  "estimate": {
+                                    "type": "boolean",
+                                    "description": "True when its IPv4 is counted at the full monthly price because no hourly IPv4 price was recorded for it."
+                                  }
+                                },
+                                "required": [
+                                  "id",
+                                  "name",
+                                  "server_type",
+                                  "location",
+                                  "running",
+                                  "hours",
+                                  "currency",
+                                  "cost",
+                                  "estimate"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "description": "The per-server rows. Owners and admins only: a member gets null here and still gets the totals."
+                        }
+                      },
+                      "required": [
+                        "note",
+                        "estimate_note",
+                        "totals",
+                        "unpriced_count",
+                        "servers"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "usage": {
+                      "type": "object",
+                      "properties": {
+                        "note": {
+                          "type": "string"
+                        },
+                        "input_tokens": {
+                          "type": "string",
+                          "description": "Whole tokens, as a decimal string."
+                        },
+                        "output_tokens": {
+                          "type": "string"
+                        },
+                        "cache_read_tokens": {
+                          "type": "string"
+                        },
+                        "cache_write_tokens": {
+                          "type": "string"
+                        },
+                        "api_equivalent_usd": {
+                          "description": "What these tokens would cost at API prices, from the cloud's own price table; null when none of them has a price. Never billed.",
+                          "type": [
+                            "number",
+                            "null"
+                          ]
+                        },
+                        "priced": {
+                          "type": "boolean",
+                          "description": "False when some tokens are on a model with no price, so the dollars cover the priced part only."
+                        },
+                        "machines": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "runner_id": {
+                                "type": "string",
+                                "format": "uuid",
+                                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                              },
+                              "name": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "input_tokens": {
+                                "type": "string",
+                                "description": "Whole tokens, as a decimal string."
+                              },
+                              "output_tokens": {
+                                "type": "string"
+                              },
+                              "cache_read_tokens": {
+                                "type": "string"
+                              },
+                              "cache_write_tokens": {
+                                "type": "string"
+                              },
+                              "api_equivalent_usd": {
+                                "description": "What these tokens would cost at API prices, from the cloud's own price table; null when none of them has a price. Never billed.",
+                                "type": [
+                                  "number",
+                                  "null"
+                                ]
+                              },
+                              "priced": {
+                                "type": "boolean"
+                              },
+                              "projects": {
+                                "type": "array",
+                                "items": {
+                                  "type": "object",
+                                  "properties": {
+                                    "repo_id": {
+                                      "anyOf": [
+                                        {
+                                          "type": "string",
+                                          "format": "uuid",
+                                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                                        },
+                                        {
+                                          "type": "null"
+                                        }
+                                      ]
+                                    },
+                                    "name": {
+                                      "description": "owner/name; null for a project that was removed.",
+                                      "type": [
+                                        "string",
+                                        "null"
+                                      ]
+                                    },
+                                    "input_tokens": {
+                                      "type": "string",
+                                      "description": "Whole tokens, as a decimal string."
+                                    },
+                                    "output_tokens": {
+                                      "type": "string"
+                                    },
+                                    "cache_read_tokens": {
+                                      "type": "string"
+                                    },
+                                    "cache_write_tokens": {
+                                      "type": "string"
+                                    },
+                                    "api_equivalent_usd": {
+                                      "description": "What these tokens would cost at API prices, from the cloud's own price table; null when none of them has a price. Never billed.",
+                                      "type": [
+                                        "number",
+                                        "null"
+                                      ]
+                                    },
+                                    "priced": {
+                                      "type": "boolean"
+                                    }
+                                  },
+                                  "required": [
+                                    "repo_id",
+                                    "name",
+                                    "input_tokens",
+                                    "output_tokens",
+                                    "cache_read_tokens",
+                                    "cache_write_tokens",
+                                    "api_equivalent_usd",
+                                    "priced"
+                                  ],
+                                  "additionalProperties": false
+                                }
+                              }
+                            },
+                            "required": [
+                              "runner_id",
+                              "name",
+                              "input_tokens",
+                              "output_tokens",
+                              "cache_read_tokens",
+                              "cache_write_tokens",
+                              "api_equivalent_usd",
+                              "priced",
+                              "projects"
+                            ],
+                            "additionalProperties": false
+                          }
+                        }
+                      },
+                      "required": [
+                        "note",
+                        "input_tokens",
+                        "output_tokens",
+                        "cache_read_tokens",
+                        "cache_write_tokens",
+                        "api_equivalent_usd",
+                        "priced",
+                        "machines"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "period_start",
+                    "period_end",
+                    "as_of",
+                    "servers",
+                    "usage"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/billing/engine": {
       "get": {
         "operationId": "getEngineBilling",

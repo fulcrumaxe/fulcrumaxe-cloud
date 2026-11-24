@@ -10,7 +10,7 @@ import { PREVIEW_COMPUTE_CAP_USD, PREVIEW_MAX_RUN_MS, PREVIEW_MODEL_CAP_USD } fr
 import type { RetrySeatSource } from "./retry.js";
 import { DEPLOY_VERIFIER_ROLE } from "@fulcrumaxe/runner-protocol";
 import { DISCOVERY_ANALYST_ROLE, PROPOSAL_VERIFIER_ROLE, effectiveModeSql, runsInOurSandbox, RUN_TIME_CEILING_MS, SANDBOX_MAX_TIMEOUT_MS, boundedLimit, runnerLimitsFrom, sandboxComputeUsdFor, sandboxTimeFor, type Product, type RunLimitsInput, type StartAgentRunInput } from "@fx/runner";
-import { isClaudeModelId, type PlanId } from "@fx/spend";
+import { isClaudeModelId, TIER_TO_MODEL_ID, type PlanId } from "@fx/spend";
 import { estimateRunModelUsd } from "@fx/core/src/role-settings/runPrice.js";
 
 /**
@@ -67,8 +67,8 @@ export type SeatResult = { ok: true; seat: SeatRunConfig & { limits: RunLimitsIn
 
 // D#483 S5-p: the run-time chain (limits -> longest run -> compute price) lives in @fx/runner so the pipeline estimate prices from the same code.
 export { RUN_TIME_CEILING_MS, boundedLimit, runnerLimitsFrom, sandboxTimeFor };
-/** The one place a manifest tier becomes a model id (C55 s4). */
-export const TIER_TO_MODEL_ID: Readonly<Record<string, string>> = { haiku: "haiku-4.5", sonnet: "sonnet-5", opus: "opus-5" };
+/** The one place a manifest tier becomes a model id (C55 s4) is `TIER_TO_MODEL_ID` in @fx/spend; re-exported here for this package's callers. */
+export { TIER_TO_MODEL_ID };
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SIZE_OF_KIND: Readonly<Record<string, Size>> = { small: "Small", feature: "Feature", critical: "Critical" };

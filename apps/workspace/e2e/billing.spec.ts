@@ -24,6 +24,7 @@ const PLANS = JSON.parse(readFileSync(join(DIR, "plans-fixture.json"), "utf8"));
 const CHECKOUT = fixture("createCheckoutSession", "200-ok.json");
 const PORTAL = fixture("createPortalSession", "200-ok.json");
 const ENGINE_BODY = fixture("getEngineBilling", "200-ok.json");
+const MACHINES_BODY = fixture("getMachineSpend", "200-ok.json");
 
 const CSP = "script-src 'self'; object-src 'none'; base-uri 'self'; require-trusted-types-for 'script'; trusted-types 'none'";
 const WIN = `#windows-container .fulc-window[data-app-id="budget-billing"]`;
@@ -47,6 +48,8 @@ interface Opts {
   link?: (route: Route) => Promise<void>;
   /** GET /api/v1/billing/engine (the Engines row); the default is the contract fixture. */
   engine?: (route: Route) => Promise<void>;
+  /** GET /api/v1/billing/machines (the Machines card); the default is the contract fixture. */
+  machines?: (route: Route) => Promise<void>;
   /** Keep the page clock stopped from boot on, so only the test's runFor moves it (the app's 15 s read deadline cannot run out in real time either). */
   paused?: boolean;
 }
@@ -104,6 +107,7 @@ async function boot(page: Page, opts: Opts = {}): Promise<Seen> {
   });
   // Registered after the generic billing route above, so it wins for the one read.
   await page.route("**/api/v1/billing/engine", (route) => (opts.engine ? opts.engine(route) : json(route, 200, ENGINE_BODY)));
+  await page.route("**/api/v1/billing/machines", (route) => (opts.machines ? opts.machines(route) : json(route, 200, MACHINES_BODY)));
   await page.route("**/api/plans", (route) => {
     seen.plans++;
     if (opts.plansUnavailable) return json(route, 503, err("plan_data_unavailable"));
@@ -1089,5 +1093,105 @@ test.describe("D#845 ON-22c-2: Budget & Billing Engines row", () => {
   test("not offered: no Engines row at all", async ({ page }) => {
     await boot(page, { owner: true, engine: (route) => json(route, 200, { ...ENGINE_BODY, offered: false, price_usd_month: null }) });
     await expect(tid(page, "bb-engines")).toHaveCount(0);
+  });
+});
+
+// ── D#845 MC-11b: the Machines card. The page prints what the API answers: servers rented this month, and Claude usage by machine and project with the API-price dollars.
+// The server did the hours, the prices and the sums, so every figure below is one the fixture holds, checked as text on screen (no figure is derived here).
+test.describe("D#845 MC-11b: Budget & Billing machine figures", () => {
+  const body = (over: Record<string, unknown> = {}) => ({ ...MACHINES_BODY, ...over });
+  const usage = (over: Record<string, unknown>) => ({ ...MACHINES_BODY.usage, ...over });
+  const noMachineText = async (page: Page) => {
+    const text = await page.locator(`${WIN} [data-testid="bb-machines"]`).innerText();
+    expect(text).not.toMatch(JUNK);
+    expect(text).not.toContain("%");
+    return text;
+  };
+
+  test("prints the served figures: servers with the Hetzner note, usage with tokens and the API-price dollars, by machine and project, and never a percentage", async ({ page }) => {
+    const seen = await boot(page, {});
+    await expect(tid(page, "bb-servers-total")).toHaveText("\u20ac12.34");
+    await expect(tid(page, "bb-servers-note")).toHaveText("Estimated from Hetzner's list price. Hetzner bills you directly.");
+    await expect(tid(page, "bb-server")).toHaveText("build-box: 481 h, \u20ac12.34");
+    await expect(tid(page, "bb-usage-total")).toHaveText("\u2248 $4.20 at API prices");
+    await expect(tid(page, "bb-usage-tokens")).toHaveText("1,200,000 in, 340,000 out, 5,000,000 cache read, 250,000 cache write");
+    await expect(tid(page, "bb-usage-machine")).toContainText("Studio laptop");
+    await expect(tid(page, "bb-usage-project")).toContainText("acme/site: \u2248 $4.20 at API prices");
+    await expect(tid(page, "bb-machines-asof")).toContainText("As of");
+    await noMachineText(page);
+    expect(seen.errors).toEqual([]);
+  });
+
+  test("empty states: no servers and no usage each say so, with no zero money and no placeholder", async ({ page }) => {
+    await boot(page, { machines: (route) => json(route, 200, body({ servers: { ...MACHINES_BODY.servers, totals: [], servers: [], unpriced_count: 0 }, usage: usage({ machines: [], input_tokens: "0", output_tokens: "0", cache_read_tokens: "0", cache_write_tokens: "0" }) })) });
+    await expect(tid(page, "bb-servers-empty")).toHaveText("No servers rented this month.");
+    await expect(tid(page, "bb-usage-empty")).toHaveText("No Claude usage from your machines this month.");
+    await expect(tid(page, "bb-servers-total")).toHaveCount(0);
+    await expect(tid(page, "bb-usage-total")).toHaveCount(0);
+    await noMachineText(page);
+  });
+
+  test("a server with no price on record and a model with no API price are said, never shown as zero", async ({ page }) => {
+    const m = MACHINES_BODY.usage.machines[0];
+    await boot(page, {
+      machines: (route) => json(route, 200, body({
+        servers: { ...MACHINES_BODY.servers, totals: [], unpriced_count: 1, servers: [{ ...MACHINES_BODY.servers.servers[0], cost: null }] },
+        usage: usage({ api_equivalent_usd: null, priced: false, machines: [{ ...m, api_equivalent_usd: null, priced: false, projects: [{ ...m.projects[0], repo_id: null, name: null, api_equivalent_usd: null, priced: false }] }] }),
+      })),
+    });
+    await expect(tid(page, "bb-servers-total")).toHaveText("No price on record for these servers.");
+    await expect(tid(page, "bb-servers-unpriced")).toHaveText("1 server has no price on record and isn't counted.");
+    await expect(tid(page, "bb-server")).toContainText("no price on record");
+    await expect(tid(page, "bb-usage-total")).toHaveText("No API price for these models.");
+    await expect(tid(page, "bb-usage-project")).toContainText("No project");
+    await noMachineText(page);
+  });
+
+  test("a part-priced total says it is partial", async ({ page }) => {
+    await boot(page, { machines: (route) => json(route, 200, body({ usage: usage({ priced: false }) })) });
+    await expect(tid(page, "bb-usage-total")).toHaveText("\u2248 $4.20 at API prices (partial)");
+    await expect(tid(page, "bb-usage-partial")).toContainText("Some models have no API price");
+  });
+
+  test("a failed read says so beside a standing page, and Try again reads it; a malformed answer is the same failure", async ({ page }) => {
+    let answer: "fail" | "junk" | "ok" = "fail";
+    await boot(page, { machines: (route) => (answer === "fail" ? json(route, 500, err("boom")) : answer === "junk" ? json(route, 200, { hello: 1 }) : json(route, 200, MACHINES_BODY)) });
+    await expect(tid(page, "bb-machines-failed")).toContainText("Machine costs couldn't be loaded.");
+    await expect(tid(page, "bb-load-error")).toHaveCount(0);
+    await expect(tid(page, "bb-plans")).toBeVisible();
+    answer = "junk";
+    await tid(page, "bb-machines-retry").click();
+    await expect(tid(page, "bb-machines-failed")).toBeVisible();
+    answer = "ok";
+    await tid(page, "bb-machines-retry").click();
+    await expect(tid(page, "bb-servers-total")).toHaveText("\u20ac12.34");
+  });
+
+  test("phone and tablet: the card fits the window, and its retry is touch-sized", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "desktop", "phone and tablet projects only");
+    const long = "m".repeat(60);
+    const m = MACHINES_BODY.usage.machines[0];
+    let fail = true;
+    await boot(page, { machines: (route) => (fail ? json(route, 500, err("boom")) : json(route, 200, body({ usage: usage({ machines: [{ ...m, name: long, projects: [{ ...m.projects[0], name: "acme/" + long }] }] }) }))) });
+    // The failed state shows the retry: it is touch-sized (44 px on a phone, at least 24 px on a tablet).
+    await expect(tid(page, "bb-machines-retry")).toBeVisible();
+    await page.locator(WIN).evaluate((el) => Promise.all(el.getAnimations({ subtree: true }).map((a) => a.finished)));
+    const retry = await tid(page, "bb-machines-retry").boundingBox();
+    expect(retry!.height).toBeGreaterThanOrEqual(testInfo.project.name === "phone" ? 44 : 24);
+    fail = false;
+    await tid(page, "bb-machines-retry").click();
+    await expect(tid(page, "bb-usage-machine")).toContainText(long);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+    // Measure only once the window's width transition has finished, and read both boxes in one call.
+    await page.locator(WIN).evaluate((el) => Promise.all(el.getAnimations({ subtree: true }).map((a) => a.finished)));
+    const { card, win } = await page.evaluate(
+      ([c, w]) => {
+        const r = (s: string) => document.querySelector(s)!.getBoundingClientRect();
+        return { card: r(c), win: r(w) };
+      },
+      [`${WIN} [data-testid="bb-machines"]`, `${WIN} [data-testid="bb-app"]`],
+    );
+    expect(card.x + card.width).toBeLessThanOrEqual(win.x + win.width + 1);
+    expect(await axeSeriousOrCritical(page)).toEqual([]);
   });
 });

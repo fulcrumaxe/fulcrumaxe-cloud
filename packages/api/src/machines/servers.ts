@@ -141,13 +141,13 @@ export const withHetznerServerClient = <T>(ctx: ServerCtx, providerServerId: str
   withManagedServer(opsCtx(ctx), providerServerId, (token) => f(clientFor(token)));
 
 /** The live prices of one size in one location, or null when Hetzner does not list a price there. Reads nothing but Hetzner. */
-async function livePrice(client: HetznerClient, serverType: string, location: string): Promise<(PriceTriple & { available: boolean }) | null> {
+async function livePrice(client: HetznerClient, serverType: string, location: string): Promise<(PriceTriple & { available: boolean; ipv4_hourly_gross: string }) | null> {
   const [pricing, types] = await Promise.all([client.getPricing(), client.listServerTypes()]);
   const price = pricing.serverTypes.find((t) => t.name === serverType)?.prices.find((p) => p.location === location);
   const ipv4 = pricing.primaryIps.find((p) => p.type === "ipv4")?.prices.find((p) => p.location === location);
   const type = types.find((t) => t.name === serverType);
   if (!price || !ipv4 || !type) return null;
-  return { currency: pricing.currency, hourly_gross: price.hourlyGross, monthly_gross: price.monthlyGross, ipv4_monthly_gross: ipv4.monthlyGross, available: type.locations.some((l) => l.name === location && l.available) };
+  return { currency: pricing.currency, hourly_gross: price.hourlyGross, monthly_gross: price.monthlyGross, ipv4_monthly_gross: ipv4.monthlyGross, ipv4_hourly_gross: ipv4.hourlyGross, available: type.locations.some((l) => l.name === location && l.available) };
 }
 const noPrice = (): ApiError => new ApiError(503, "price_unavailable", "Prices couldn't be loaded");
 
@@ -390,9 +390,9 @@ async function createLocked(ctx: ServerCtx, input: CreateInput, lock: PoolClient
       await checkpoint("insert");
       await withTenant(ctx.pool, accountId, userId, (cl) =>
         cl.query(
-          `INSERT INTO managed_servers (id, account_id, kind, credential_id, name, server_type, location, status, price_hourly_gross, price_monthly_gross, ipv4_monthly_gross, currency, provisioning_token_id, created_by, idempotency_key)
-           VALUES ($1, $2, 'hetzner_cloud', (SELECT id FROM machine_provider_credentials WHERE account_id = $2 AND provider = 'hetzner_cloud' AND removed_at IS NULL), $3, $4, $5, 'creating', $6, $7, $8, $9, $10, $11, $12)`,
-          [serverId, accountId, name, input.serverType, input.location, live.hourly_gross, live.monthly_gross, live.ipv4_monthly_gross, live.currency, issued.id, userId, input.idempotencyKey],
+          `INSERT INTO managed_servers (id, account_id, kind, credential_id, name, server_type, location, status, price_hourly_gross, price_monthly_gross, ipv4_monthly_gross, ipv4_hourly_gross, currency, provisioning_token_id, created_by, idempotency_key)
+           VALUES ($1, $2, 'hetzner_cloud', (SELECT id FROM machine_provider_credentials WHERE account_id = $2 AND provider = 'hetzner_cloud' AND removed_at IS NULL), $3, $4, $5, 'creating', $6, $7, $8, $13, $9, $10, $11, $12)`,
+          [serverId, accountId, name, input.serverType, input.location, live.hourly_gross, live.monthly_gross, live.ipv4_monthly_gross, live.currency, issued.id, userId, input.idempotencyKey, live.ipv4_hourly_gross],
         ),
       );
       made.serverRowId = serverId;

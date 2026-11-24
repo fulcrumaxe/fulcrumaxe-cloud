@@ -378,7 +378,7 @@ describe('machine tables [pg]', () => {
     });
 
     it.each([
-      ['price_hourly_gross', '1'], ['price_monthly_gross', '1'], ['ipv4_monthly_gross', '1'], ['currency', `'USD'`], ['kind', `'hetzner_cloud'`],
+      ['price_hourly_gross', '1'], ['price_monthly_gross', '1'], ['ipv4_monthly_gross', '1'], ['ipv4_hourly_gross', '1'], ['currency', `'USD'`], ['kind', `'hetzner_cloud'`],
       ['credential_id', 'credential_id'], ['provisioning_token_id', 'provisioning_token_id'], ['created_by', 'created_by'], ['created_at', 'created_at'], ['account_id', 'account_id'], ['id', 'id'],
     ])('managed_servers.%s cannot be updated by app_user, even to its own value', async (col, val) => {
       await expect(asA((c) => c.query(`UPDATE managed_servers SET ${col} = ${val} WHERE id = $1 AND account_id = $2`, [serverA, a.accountId]))).rejects.toMatchObject({ code: PG_ERROR.INSUFFICIENT_PRIVILEGE });

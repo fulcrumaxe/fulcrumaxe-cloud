@@ -1,0 +1,47 @@
+{
+  "period_start": "2026-11-01T00:00:00.000Z",
+  "period_end": "2026-12-01T00:00:00.000Z",
+  "as_of": "2026-11-20T10:00:00.000Z",
+  "servers": {
+    "note": "Estimated from Hetzner's list price. Hetzner bills you directly",
+    "estimate_note": null,
+    "totals": [{ "currency": "EUR", "amount": "12.3400" }],
+    "unpriced_count": 0,
+    "servers": [
+      { "id": "7b1c1f5e-2d1e-4a0e-9a53-0f0c6c0a1111", "name": "build-box", "server_type": "cpx31", "location": "fsn1", "running": true, "hours": "481", "currency": "EUR", "cost": "12.3400", "estimate": false }
+    ]
+  },
+  "usage": {
+    "note": "at API prices",
+    "input_tokens": "1200000",
+    "output_tokens": "340000",
+    "cache_read_tokens": "5000000",
+    "cache_write_tokens": "250000",
+    "api_equivalent_usd": 4.2,
+    "priced": true,
+    "machines": [
+      {
+        "runner_id": "0d2e7c3a-8f55-4d6e-b1a3-2c9d5e7f2222",
+        "name": "Studio laptop",
+        "input_tokens": "1200000",
+        "output_tokens": "340000",
+        "cache_read_tokens": "5000000",
+        "cache_write_tokens": "250000",
+        "api_equivalent_usd": 4.2,
+        "priced": true,
+        "projects": [
+          {
+            "repo_id": "5a9b3d1c-6e44-4f2a-8c77-1b0a9d3e3333",
+            "name": "acme/site",
+            "input_tokens": "1200000",
+            "output_tokens": "340000",
+            "cache_read_tokens": "5000000",
+            "cache_write_tokens": "250000",
+            "api_equivalent_usd": 4.2,
+            "priced": true
+          }
+        ]
+      }
+    ]
+  }
+}
