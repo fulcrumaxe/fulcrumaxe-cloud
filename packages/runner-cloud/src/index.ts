@@ -52,6 +52,7 @@ export { CHECK_BOUNDS, normaliseCheck } from "./checkResult.js";
 export { gitTicketRun } from "./gitTicket.js";
 export { planeMergeClaimRun, planeMergeReportRun, planeMergeVerifyRun, settleAuthorizedOrder, type SettleHint, type SettleOutcome } from "./planeMerge.js";
 export { DEPLOY_ORDER_ELIGIBLE_SQL, deployOrderClaimRun, deployOrderReportRun, deployOrderWaiting } from "./deployOrder.js";
+export { setupPushTokenRun } from "./setupPush.js";
 export { machineJobClaimRun, machineJobProgressRun, offeredMachineJobs, setupProgressRun } from "./machineJob.js";
 export { ENGINE_SOURCE_REPO, buildPlanFile, engineTarballUrl, issueProjectSetup, retryInstall, setupPlanRun, type IssuedSetupJob } from "./setupJobs.js";
 export { ENGINE_SESSION_NAME_PREFIX, issueEngineSessionDelete, issueEngineSessionStart, issueEngineSessionStop, startEngine, type EngineStopReason, type IssuedSessionJob, type PersonStopReason } from "./engineSession.js";

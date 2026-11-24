@@ -147,6 +147,7 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/commands/watchPane.ts": ["path"], // the transcript's path under the state directory
   "src/commands/run.ts": ["path"], // the composition root: the runner's own directory layout; the process start and the pid check arrive through its host argument
   "src/engines/claude/kit.ts": ["path"], // the engine's file layout under the state directory
+  "src/setup/setupPush.ts": ["path"], // D#845 ON-8f1: the snapshot of the setup workspace is made under the runner's own snapshots directory, resolved from absolute paths
   "src/daemon/push.ts": ["path"], // the workspace's git directory is `<workspace>/.git`, resolved from an absolute path
   "src/daemon/workspaceExclude.ts": ["fs", "path"], // D#6 C44-3: no-follow append to the workspace's own `.git/info/exclude`
   "src/daemon/workspaceGit.ts": ["fs", "path"], // lstat of the agent-written `.git`: nothing in it is followed

@@ -93,6 +93,7 @@ function scanSource(text: string): Hit[] {
 
 /** Every allowed hit: file, rule, and why. A new hit anywhere else fails the test; a listed one that no longer exists fails it too. */
 const ALLOWED: ReadonlyArray<{ file: string; rule: string; why: string }> = [
+  { file: "packages/fx-runner/src/setup/setupPush.ts", rule: "lease", why: "D#845 ON-8f1: the install branch of a setup is moved only with --force-with-lease=refs/heads/<fx/engine-install-v>:<tip read just before>, 40-hex, never the default branch (a test pushes a person's commit in between and sees it kept)" },
   { file: "packages/runner-protocol/src/planePush/planePushTransport.ts", rule: "lease", why: "the harness's only force-style push: --force-with-lease=<ref>:<head> with a head validated as 40-hex, for the item's own paired branch" },
 ];
 

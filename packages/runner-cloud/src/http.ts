@@ -110,6 +110,8 @@ export interface RunnerCloudDeps {
   engineUsage?: EngineUsagePort | null;
   /** D#6 PUBLIC-MERGE PR2b: the merge-order routes' gate, store and GitHub reads. Null while it is not configured; those routes then answer 503 `not_configured`. */
   planeMerge?: PlaneMergePort | null;
+  /** D#845 ON-8f: mints and revokes the one push credential of a project setup (a `setup_push` installation token for one customer repository). Null while it is not configured; the push-token route then answers 503 `not_configured`. */
+  setupPush?: { mint(repo: { id: string; owner: string; name: string }): Promise<{ token: string; expiresAt: Date }>; revoke(token: string): Promise<void> } | null;
   /** D#598 P1f-2: the GitHub access of the public-push routes. Null while it is not configured; those routes then answer 503 `not_configured`. */
   planePush?: PlanePushHostedPort | null;
   /**

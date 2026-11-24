@@ -61,6 +61,7 @@ runner/runs/[id]/done/route.ts
 runner/runs/[id]/events/route.ts
 runner/setup/[setup_id]/plan/route.ts
 runner/setup/[setup_id]/progress/route.ts
+runner/setup/[setup_id]/push-token/route.ts
 runner/wake/route.ts
 runners/[id]/check/route.ts
 runners/[id]/claude-login/cancel/route.ts
