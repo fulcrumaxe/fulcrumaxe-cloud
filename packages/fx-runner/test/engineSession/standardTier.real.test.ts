@@ -55,7 +55,7 @@ beforeAll(() => {
   home = path.join(base, "home");
   stateDir = path.join(base, "state"); // beside the home directory, not in it: the state directory's own rule is what is tested
   privateBin = path.join(base, "private-bin");
-  for (const dir of [stateDir, privateBin, path.join(base, "claude-bin"), path.join(base, "bin")]) mkdirSync(dir, { recursive: true });
+  for (const dir of [stateDir, privateBin, path.join(base, "engine-bin"), path.join(base, "bin")]) mkdirSync(dir, { recursive: true });
   writeFileSync(path.join(stateDir, "key.pem"), SENTINEL);
   const hostPath = `${process.env["PATH"] ?? ""}:/run/current-system/sw/bin:/usr/bin:/bin`.split(path.delimiter);
   for (const name of PROGRAMS) {
@@ -75,7 +75,7 @@ function world(options: { xdg?: string | undefined; isTmpfs?: (dir: string) => b
   const jobsRoot = path.join(cacheDir, "engine-sessions", "roots");
   mkdirSync(path.dirname(jobsRoot), { recursive: true, mode: 0o700 });
   const guest: HostGuestDeps = {
-    start: spawnIn, host: createSandboxHost(async () => ({ code: null, stdout: "", stderr: "", timedOut: false })), platform: "linux", home, stateDir, binaryDir: path.join(base, "claude-bin"), jobsRoot, cacheDir, searchPath: privateBin,
+    start: spawnIn, host: createSandboxHost(async () => ({ code: null, stdout: "", stderr: "", timedOut: false })), platform: "linux", home, stateDir, binaryDir: path.join(base, "engine-bin"), jobsRoot, cacheDir, searchPath: privateBin,
     selfCommand: [process.execPath, bundle], uid: process.getuid?.(), scope: { tools: tools as NonNullable<typeof tools>, runtimeDir: XDG as string, budget: { memoryBytes: 2 * 1024 ** 3, tasks: 256 } },
   };
   const parts = createStandardSessionParts({ guest, xdgRuntimeDir: "xdg" in options ? options.xdg : XDG, capture: run, ...(options.isTmpfs === undefined ? {} : { isTmpfs: options.isTmpfs }) });

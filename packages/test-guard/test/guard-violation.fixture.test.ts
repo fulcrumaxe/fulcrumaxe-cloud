@@ -79,4 +79,18 @@ describe("model-call guard violation fixture", () => {
       /blocked child_process/,
     );
   });
+
+  it("does not block a spawn whose path arguments sit under a directory with a neutral name", () => {
+    expect(() =>
+      childProcess.spawn("true", ["--bind", "/tmp/fx-case/engine-bin", "/work"]),
+    ).not.toThrow(/blocked child_process/);
+  });
+
+  it("still blocks a spawn whose argument path ends in a claude-named entry", () => {
+    // Why test setups name their binary directory "engine-bin": a final path
+    // segment of "claude-bin" reads as the claude binary, and stays blocked.
+    expect(() =>
+      childProcess.spawn("true", ["--bind", "/tmp/fx-case/claude-bin", "/work"]),
+    ).toThrow(/blocked child_process spawn/);
+  });
 });

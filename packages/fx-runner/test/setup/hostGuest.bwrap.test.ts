@@ -56,7 +56,7 @@ function depsFor(): HostGuestDeps {
     platform: "linux",
     home,
     stateDir,
-    binaryDir: path.join(base, "claude-bin"),
+    binaryDir: path.join(base, "engine-bin"),
     jobsRoot,
     cacheDir: declaredCache ?? path.dirname(jobsRoot),
     searchPath: process.env["PATH"] ?? "/usr/bin:/bin",
@@ -104,7 +104,7 @@ beforeAll(() => {
   home = path.join(base, "home");
   stateDir = path.join(home, ".fx-runner");
   jobsRoot = path.join(base, "jobs");
-  for (const dir of [stateDir, path.join(base, "claude-bin"), path.join(base, "bin")]) mkdirSync(dir, { recursive: true });
+  for (const dir of [stateDir, path.join(base, "engine-bin"), path.join(base, "bin")]) mkdirSync(dir, { recursive: true });
   writeFileSync(path.join(home, "sentinel.txt"), SENTINEL);
   writeFileSync(path.join(stateDir, "key.pem"), SENTINEL);
   bundle = path.join(base, "bin", "fx-runner.cjs");

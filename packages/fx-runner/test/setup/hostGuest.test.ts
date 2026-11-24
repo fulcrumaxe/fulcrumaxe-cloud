@@ -58,7 +58,7 @@ function world(options: { code?: number | null; chunks?: Array<["stdout" | "stde
     platform: options.platform ?? "linux",
     home,
     stateDir,
-    binaryDir: path.join(base, "claude-bin"),
+    binaryDir: path.join(base, "engine-bin"),
     jobsRoot,
     cacheDir: base,
     searchPath: binDir,
@@ -93,7 +93,7 @@ describe("what a command is started with", () => {
     const binds = (flag: string): string[] => args.flatMap((arg, i) => (arg === flag ? [args[i + 1] as string] : []));
     // the only writable places are the root and its own temp directory
     expect(binds("--bind-try").sort()).toEqual([g.root, path.join(g.root, "tmp")].sort());
-    for (const hidden of [w.home, w.stateDir, w.jobsRoot, path.join(w.base, "claude-bin"), "/tmp", "/var/tmp", "/dev/shm"]) {
+    for (const hidden of [w.home, w.stateDir, w.jobsRoot, path.join(w.base, "engine-bin"), "/tmp", "/var/tmp", "/dev/shm"]) {
       if (existsSync(hidden)) expect(binds("--tmpfs").some((dir) => hidden === dir || hidden.startsWith(`${dir}/`)), hidden).toBe(true);
     }
     // the command is the wrapper, then the host's words as separate arguments
