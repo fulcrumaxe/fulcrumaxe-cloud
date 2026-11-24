@@ -115,6 +115,8 @@ export const SESSION_LIMITS = {
   pairingGithub: { name: "pairing-github", account: [{ limit: 60, seconds: 60 }] },
   /** The picker asks GitHub about up to 30 repos per call: 6 a minute per account. */
   pairingPicker: { name: "pairing-picker", account: [{ limit: 6, seconds: 60 }] },
+  /** The runner project picker asks GitHub about every repo of the account (up to 8 at once) under the App JWT on each read: 6 a minute and 60 an hour per account. */
+  runnerRepoPicker: { name: "runner-repo-picker", account: [{ limit: 6, seconds: 60 }, { limit: 60, seconds: 3600 }] },
   /** Saving or removing a context rule, and writing the context budget, may read the repository's tree from the code host to measure pins: 60 a minute per account. */
   contextRuleWrite: { name: "context-rule-write", account: [{ limit: 60, seconds: 60 }] },
   /** A signed-in browser's error report to `POST /api/rum`: 30 a minute per account (the report is a log line and one coalesced upsert). */

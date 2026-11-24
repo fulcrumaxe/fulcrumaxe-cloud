@@ -268,6 +268,18 @@ describe('session rate limits', () => {
       expect((err as RateLimitedError).retryAfterSeconds).toBeLessThanOrEqual(10);
     });
 
+    it('the runner project picker is held to 6 a minute and 60 an hour per account, counted on the real store', async () => {
+      expect(SESSION_LIMITS.runnerRepoPicker.account).toEqual([{ limit: 6, seconds: 60 }, { limit: 60, seconds: 3600 }]);
+      const a = await owner();
+      const other = await owner();
+      const limit = pgSessionLimiter(appUserPool, SESSION_LIMITS.runnerRepoPicker);
+      for (let i = 0; i < 6; i++) await limit(a);
+      const err = await limit(a).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(RateLimitedError);
+      expect((err as RateLimitedError).retryAfterSeconds).toBeLessThanOrEqual(60);
+      await expect(limit(other)).resolves.toBeUndefined();
+    });
+
     it('a store that fails is a failure, never an unlimited pass', async () => {
       const a = await owner();
       const broken = { checkAndIncrement: async () => { throw new Error('store down'); } };

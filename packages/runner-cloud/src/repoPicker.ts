@@ -10,15 +10,18 @@ import { readVisibilities, type RepoVisibilityAnswer } from "./repoPrivacy.js";
  * its dials currently match. Owner or admin only (it is the picker for placing a project, which only they can do).
  *
  * Visibility is asked of GitHub per request through the same bounded reader the runner gates use (8 at once, one 10 s deadline) and is kept in this process's memory for at most
- * 60 s so a person reopening the picker does not ask again. Nothing is stored. A definite answer only is kept: "unknown" (any failure, a missing reader, a read past the deadline)
- * is never remembered, so the next request tries again. The place route reads GitHub live and stays the guard; this answer is for display.
+ * 60 s so a person reopening the picker does not ask again. Nothing is stored. "Unknown" (any failure, no installation, a missing reader, a read past the deadline) is kept for
+ * only 15 s, so a loop of reads cannot hammer GitHub for a repo it cannot answer, and a repo that was just fixed shows within a quarter of a minute. The place route reads GitHub live
+ * and stays the guard; this answer is for display.
  */
 export const PICKER_VISIBILITY_TTL_MS = 60_000;
+/** How long an "unknown" answer is remembered. */
+export const PICKER_UNKNOWN_TTL_MS = 15_000;
 /** The most repositories one picker read lists. */
 export const PICKER_MAX_REPOS = 1000;
 const CACHE_MAX_ENTRIES = 5000;
 
-const cache = new Map<string, { at: number; answer: "public" | "private" }>();
+const cache = new Map<string, { at: number; answer: RepoVisibilityAnswer }>();
 
 /** D#845 ON-7b (Ruling 87.1): the owners a repo can be created under. Asked of GitHub live, kept per account in this process for at most 60 s, never stored. */
 export const PICKER_OWNERS_TTL_MS = 60_000;
@@ -107,17 +110,15 @@ export async function listPickerRepos(deps: RunnerCloudDeps, principal: SessionP
   const toRead: string[] = [];
   for (const r of found) {
     const hit = cache.get(`${accountId}:${r.id}`);
-    if (hit && nowMs - hit.at >= 0 && nowMs - hit.at < PICKER_VISIBILITY_TTL_MS) seen.set(r.id, hit.answer);
+    const ttl = hit?.answer === "unknown" ? PICKER_UNKNOWN_TTL_MS : PICKER_VISIBILITY_TTL_MS;
+    if (hit && nowMs - hit.at >= 0 && nowMs - hit.at < ttl) seen.set(r.id, hit.answer);
     else toRead.push(r.id);
   }
   const fresh = await readVisibilities(deps, accountId, toRead);
   for (const [id, answer] of fresh) {
     seen.set(id, answer);
-    if (answer === "unknown") cache.delete(`${accountId}:${id}`);
-    else {
-      if (cache.size >= CACHE_MAX_ENTRIES) cache.delete(cache.keys().next().value as string);
-      cache.set(`${accountId}:${id}`, { at: nowMs, answer });
-    }
+    if (cache.size >= CACHE_MAX_ENTRIES && !cache.has(`${accountId}:${id}`)) cache.delete(cache.keys().next().value as string);
+    cache.set(`${accountId}:${id}`, { at: nowMs, answer });
   }
 
   let owners: PickerOwner[] | null;
