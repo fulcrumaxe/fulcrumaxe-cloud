@@ -4,7 +4,7 @@
 // start, the real signal source and this program's own path are handed to `run`, `doctor` and `service`, so that nothing under
 // src/ has to name them. The two Anthropic variables reach `doctor` as names only, never as values.
 import { execFile, spawn, spawnSync } from "node:child_process";
-import { lstatSync, readFileSync, realpathSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { userInfo } from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -28,6 +28,8 @@ import { createEngineBridgePorts } from "../src/engineBridge/ports.js";
 import { createSandboxHost } from "../src/sandbox/probeHost.js";
 import { interopEntryPresent } from "../src/sandbox/platform.js";
 import { cacheRootsFor } from "../src/daemon/mirror.js";
+import { killLoginTree, readProcessTable } from "../src/daemon/claudeLogin.js";
+import { isManagedServer } from "../src/daemon/managedServer.js";
 import { openLaunchDir } from "../src/launchDir.js";
 import { vmBuildHost } from "../scripts/vm-host.mjs";
 import { readMemAvailableBytes, vmHostFacts, vmHostFactsWithHelper } from "../scripts/vm-facts.mjs";
@@ -240,6 +242,76 @@ const engineHostEnv = Object.fromEntries(
     LANG: process.env.LANG,
   }).filter(([, v]) => v !== undefined),
 );
+// D#845 MC-8b: what the Claude sign-in link needs to start the installed CLI: the path the job runner resolves (its clean search path), a fixed allowlist of variables with no credential, no BROWSER
+// and no DISPLAY, and a process start that makes the child the leader of its own process group. `script` starts the CLI in a NEW session, so the group alone does not reach it: the kill reads the process
+// table below the child and ends that tree too (killLoginTree). Output is handed over as text and is never kept here.
+const loginProcs = readProcessTable({
+  pids: () => {
+    try {
+      return readdirSync("/proc").filter((n) => /^[0-9]+$/.test(n)).map(Number);
+    } catch {
+      return [];
+    }
+  },
+  stat: (pid) => {
+    try {
+      return readFileSync(`/proc/${Number(pid)}/stat`, "utf8");
+    } catch {
+      return undefined;
+    }
+  },
+});
+const loginKillPorts = {
+  ...loginProcs,
+  signal: (target, sig) => {
+    try {
+      process.kill(target, sig);
+    } catch {
+      // the process or group is already gone
+    }
+  },
+  after: (ms, fn) => void setTimeout(fn, ms),
+};
+const claudeLoginEnv = () =>
+  Object.fromEntries(
+    Object.entries({ HOME: process.env.HOME, USER: process.env.USER, LOGNAME: process.env.LOGNAME, LANG: process.env.LANG, LC_ALL: process.env.LC_ALL, TMPDIR: process.env.TMPDIR, TERM: "xterm", COLUMNS: "200" }).filter(([, v]) => v !== undefined),
+  );
+const claudeLogin = {
+  locateClaude: () => {
+    try {
+      return resolveClaudePath(cleanEnv({ mode: "subscription" }).PATH ?? "");
+    } catch {
+      return undefined;
+    }
+  },
+  env: () => ({ ...claudeLoginEnv(), PATH: cleanEnv({ mode: "subscription" }).PATH ?? "" }),
+  launch: (spec) => {
+    const child = spawn(spec.file, spec.args, { cwd: spec.cwd, env: spec.env, detached: true, stdio: ["pipe", "pipe", "pipe"] });
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdin.on("error", () => undefined); // the CLI may exit before it has read everything
+    let exited = false;
+    const exitCallbacks = [];
+    const onceExit = (code) => {
+      if (exited) return;
+      exited = true;
+      for (const cb of exitCallbacks) cb(code);
+    };
+    child.on("error", () => onceExit(null)); // a start that failed has no pid
+    child.on("close", (code) => onceExit(code)); // after the pipes have drained, so the last output is read before the end
+    return {
+      write: (text) => void child.stdin.write(text),
+      onOutput: (cb) => {
+        child.stdout.on("data", cb);
+        child.stderr.on("data", cb);
+      },
+      onExit: (cb) => (exited ? cb(null) : void exitCallbacks.push(cb)),
+      kill: () => {
+        if (child.pid !== undefined) killLoginTree(loginKillPorts, child.pid);
+      },
+    };
+  },
+};
 // D#845 ON-21: the readers behind the preflight list, given to `doctor` and (D#845 ON-21b) to `run`, which reports the codes only.
 const preflightReaders = { kernel: (input) => kernelFacts({ ...input, readMemAvailableBytes: () => readMemAvailableBytes() }), lookup: resolver };
 
@@ -392,6 +464,10 @@ runCli({
     xdgRuntimeDir: process.env.XDG_RUNTIME_DIR,
     // D#842 EB-3c: the engine bridge's halt path and dial ceiling keeper, bound to the machine through the same kill-path dependencies `engine-host stop` uses. Without them `run` never starts the bridge.
     engineBridge: createEngineBridgePorts(engineHaltDeps),
+    // D#845 MC-8b: the Claude sign-in link's process start (Linux only; `run` refuses it elsewhere).
+    claudeLogin,
+    // D#845 MC-8b: whether the cloud's own install path set this machine up (the root-written marker its bootstrap leaves); only such a machine advertises and runs the sign-in link.
+    managedServer: () => isManagedServer(),
     // D#845 ON-21b: the same kernel readings and resolver `doctor` uses; `run` reports the codes of its preflight on the hello only to a cloud that listed the `preflight` capability.
     preflight: preflightReaders,
     // D#587 B-5a part 3: what a runner set to `microvm` checks before every claim until it passes: KVM, the helper's socket and the helper's own answer.

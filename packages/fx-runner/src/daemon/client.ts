@@ -4,7 +4,7 @@
  * list is never sent and a reply it does not describe is never believed: it is an error with a closed code.
  */
 import {
-  CURRENT_PROTOCOL_VERSION, MACHINE_ONBOARDING_MIN_PROTOCOL, SANDBOX_COMMAND_CAPABILITY, SANDBOX_INVENTORY_MIN_PROTOCOL, VERIFY_SIGN_IN_MIN_PROTOCOL, type VerifySignInState,
+  CURRENT_PROTOCOL_VERSION, MACHINE_LOGIN_CAPABILITY, MACHINE_ONBOARDING_MIN_PROTOCOL, MachineLoginCode, MachineLoginReport, machineLoginCodePath, machineLoginReportPath, SANDBOX_COMMAND_CAPABILITY, SANDBOX_INVENTORY_MIN_PROTOCOL, VERIFY_SIGN_IN_MIN_PROTOCOL, type VerifySignInState,
   CLAIM_PATH, ClaimMessage, ClaimRateLimitedReply, type ConflictAttestation, HelloMessage, HelloReply, ClaimReply, WAKE_CAPABILITY, type WakeGrant, DoneMessage, DoneReply, DoneRetryReply, EventsMessage, EventsReply, HeartbeatMessage,
   GitTicketMessage, GitTicketReply, GIT_TICKET_PATH, HeartbeatReply, SeqNotIncreasingReply, StopReply,
   CONFLICT_FACTS_CAPABILITY, DISCOVERY_ANALYST_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, HEARTBEAT_INVENTORY_HELLO_CAPABILITY, WATCH_MODE_HELLO_CAPABILITY, ORDERED_FACTS_CAPABILITY, OVERLAP_FACTS_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, MEMORY_PROPOSALS_PATH, MemoryProposalsMessage, MemoryProposalsReply, MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, PLANE_MERGE_CLAIM_PATH, PLANE_MERGE_REPORT_PATH, PLANE_MERGE_VERIFY_PATH, PlaneMergeClaimMessage, PlaneMergeClaimReply, PlaneMergeReportMessage, PlaneMergeReportReply, PlaneMergeRetryReply, PlaneMergeVerifyMessage, PlaneMergeVerifyReply,
@@ -14,6 +14,7 @@ import {
 } from "@fulcrumaxe/runner-protocol";
 import { errorCodeOf, signedGet, signedPost, type CloudReply } from "../cloud.js";
 import { WAKE_PATH, parseWakeReply } from "./wake.js";
+import type { MachineCommandReceiver } from "./machineCommands.js";
 import type { SandboxCommandReceiver } from "./sandboxCommands.js";
 import type { InventoryReporter } from "./sandboxInventory.js";
 import type { HostLoadReporter } from "./hostLoad.js";
@@ -100,6 +101,10 @@ export type MachineJobProgressResult = SetupProgressResult;
 /** D#845 ON-8f: the one push credential of a setup job. `refused` carries the cloud's closed code (`already_issued`, `push_not_started`, `app_not_installed`, ...). Held in memory only; nothing here is logged. */
 export type SetupPushTokenResult = { kind: "token"; token: string; expiresAt: string } | { kind: "refused"; status: 404 | 409 | 502; code?: string } | CallError;
 export type SetupPlanResult = { kind: "plan"; text: string } | { kind: "missing" } | { kind: "too_large" } | CallError;
+/** D#845 MC-8b: the cloud's answer to a sign-in report. 404 and 409 are its closed refusals (no such request, or the request is no longer in a state that takes this: a late `done` is 409). */
+export type MachineLoginReportResult = { kind: "recorded" } | { kind: "refused"; status: 404 | 409; code?: string } | CallError;
+/** The code, once. `gone` is 410: it is not there any more (late, already taken, or the request is over). The code is only ever in the `code` field of this result. */
+export type MachineLoginCodeResult = { kind: "code"; code: string } | { kind: "gone" } | CallError;
 export type PlaneMergeReportResult = { kind: "recorded" } | { kind: "retry"; retryAfter: number } | { kind: "fenced"; code?: string } | CallError;
 
 /** The closed codes a token request can be refused with; any other 4xx or 5xx word is a plain `CallError`. */
@@ -152,6 +157,9 @@ export interface RunnerClient {
   /** D#845 ON-13a1: a session job's report, keyed by its own job id (the cloud's machine-job route); the replies are `setupProgress`'s. */
   machineJobProgress(jobId: string, body: SessionJobProgressBody): Promise<MachineJobProgressResult>;
   setupPlan(setupId: string, version: number): Promise<SetupPlanResult>;
+  /** D#845 MC-8b. The two signed calls of one Claude sign-in request: report the link or the end, and take the person's code (once). */
+  machineLoginReport(requestId: string, report: MachineLoginReport): Promise<MachineLoginReportResult>;
+  machineLoginCode(requestId: string): Promise<MachineLoginCodeResult>;
   setupPushToken(setupId: string, jobId: string): Promise<SetupPushTokenResult>;
 }
 
@@ -182,6 +190,10 @@ export interface RunnerClientConfig {
    * like the inventory it is used only at protocol 21 or later, and never on a status poll. The acks count as sent once the cloud answered 200.
    */
   sandboxCommands?: SandboxCommandReceiver;
+  /**
+   * D#845 MC-8b: receives the signed machine commands (the Claude sign-in link) a claim reply carries and holds their acks for the next claim. Used only at protocol 22 or later, and never on a status poll.
+   */
+  machineCommands?: MachineCommandReceiver;
   /**
    * D#587 FU-179: true once a hello reply listed `heartbeat_inventory`. Only then does a heartbeat carry the sandbox inventory (from the same reporter a claim uses, so the two share one
    * "last sent" state). A runner holding a run sends no claim, so this is how a VM that exists while the job runs reaches the cloud. It counts as sent once the cloud answered `sandboxes_recorded`.
@@ -225,7 +237,8 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
       // D#845 watch mode: `watch_mode_v1` is the newest build capability, so it goes first after those three (and after `kvm_fact_v1`, which is dropped before all of them): a cloud without it keeps every other capability and watch mode stays off.
       // D#842 EB-3c: `engine_bridge_v1` was the newest build capability, so it goes first after those three (which are only advertised while their settings and probe pass): a cloud without it keeps every other capability and the bridge stays off.
       // D#483 S5-j2e-RUNNER: `overlap_facts_v1` is the newest build capability, so it goes first after the three browser/deploy ones: a cloud without it keeps every other capability.
-      for (const drop of [HEARTBEAT_INVENTORY_HELLO_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, SANDBOX_COMMAND_CAPABILITY, BROWSER_PLAYWRIGHT_CAPABILITY, BROWSER_CHROME_CAPABILITY, DEPLOY_ORDER_CAPABILITY, WATCH_MODE_HELLO_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, OVERLAP_FACTS_CAPABILITY, MEM_PROPOSAL_CAPABILITY, TIP_PUBLISH_CAPABILITY, ORDERED_FACTS_CAPABILITY, CONFLICT_FACTS_CAPABILITY, DISCOVERY_ANALYST_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, WAKE_CAPABILITY] as const) {
+      // D#845 MC-8b: `machine_login_v1` is the newest build capability of all, so it goes first after the three browser and deploy ones (which are only advertised while their settings and probe pass): a cloud without it keeps every other capability, and the runner then answers every sign-in command as unsupported.
+      for (const drop of [HEARTBEAT_INVENTORY_HELLO_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, SANDBOX_COMMAND_CAPABILITY, BROWSER_PLAYWRIGHT_CAPABILITY, BROWSER_CHROME_CAPABILITY, DEPLOY_ORDER_CAPABILITY, MACHINE_LOGIN_CAPABILITY, WATCH_MODE_HELLO_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, OVERLAP_FACTS_CAPABILITY, MEM_PROPOSAL_CAPABILITY, TIP_PUBLISH_CAPABILITY, ORDERED_FACTS_CAPABILITY, CONFLICT_FACTS_CAPABILITY, DISCOVERY_ANALYST_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, WAKE_CAPABILITY] as const) {
         if (!refused(reply) || !(parsed.capabilities ?? []).includes(drop)) continue;
         dropped = [...dropped, drop];
         reply = await send(HELLO_PATH, { ...parsed, capabilities: (parsed.capabilities ?? []).filter((c) => !dropped.includes(c)) });
@@ -265,14 +278,18 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
       const hostLoad = sandboxUnavailable === undefined && (config.protocolVersion ?? CURRENT_PROTOCOL_VERSION) >= MACHINE_ONBOARDING_MIN_PROTOCOL ? config.hostLoad?.next() : undefined;
       const commands = sandboxUnavailable === undefined && (config.protocolVersion ?? CURRENT_PROTOCOL_VERSION) >= SANDBOX_INVENTORY_MIN_PROTOCOL ? config.sandboxCommands : undefined;
       const sentAcks = commands?.pendingAcks() ?? [];
-      const reply = await send(CLAIM_PATH, ClaimMessage.parse(sandboxUnavailable !== undefined ? { sandbox_unavailable: sandboxUnavailable } : { ...(capacity === undefined ? {} : { capacity }), ...(signIn === undefined ? {} : { verify_sign_in: signIn }), ...(inventory === undefined ? {} : { sandboxes: inventory.rows }), ...(sentAcks.length === 0 ? {} : { sandbox_acks: sentAcks }), ...(hostLoad === undefined ? {} : { host_load: hostLoad.load }) }));
+      const machine = sandboxUnavailable === undefined && (config.protocolVersion ?? CURRENT_PROTOCOL_VERSION) >= MACHINE_ONBOARDING_MIN_PROTOCOL ? config.machineCommands : undefined;
+      const sentMachineAcks = machine?.pendingAcks() ?? [];
+      const reply = await send(CLAIM_PATH, ClaimMessage.parse(sandboxUnavailable !== undefined ? { sandbox_unavailable: sandboxUnavailable } : { ...(capacity === undefined ? {} : { capacity }), ...(sentMachineAcks.length === 0 ? {} : { machine_acks: sentMachineAcks }), ...(signIn === undefined ? {} : { verify_sign_in: signIn }), ...(inventory === undefined ? {} : { sandboxes: inventory.rows }), ...(sentAcks.length === 0 ? {} : { sandbox_acks: sentAcks }), ...(hostLoad === undefined ? {} : { host_load: hostLoad.load }) }));
       if (reply?.status === 200) {
         inventory?.commit();
         hostLoad?.commit();
         commands?.committed(sentAcks);
+        machine?.committed(sentMachineAcks);
         const parsed = ClaimReply.safeParse(reply.body);
         if (!parsed.success) return fail(reply, "invalid_reply");
         if (commands !== undefined && parsed.data.sandbox_commands !== undefined) commands.receive(parsed.data.sandbox_commands);
+        if (machine !== undefined && parsed.data.machine_commands !== undefined) machine.receive(parsed.data.machine_commands);
         // A status poll takes no job: a reply with one is refused here, so no code path past this point can run it.
         if (sandboxUnavailable !== undefined && "signed_job" in parsed.data) return fail(reply, "invalid_reply");
         // The reply schema also refuses a claim whose `run_id` differs from the signed job's own.
@@ -499,6 +516,36 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
       }
       if (reply?.status === 200) return Buffer.byteLength(reply.raw ?? "") > MAX_PLAN_BYTES ? { kind: "too_large" } : { kind: "plan", text: reply.raw ?? "" };
       if (reply?.status === 404) return { kind: "missing" };
+      return fail(reply);
+    },
+
+    async machineLoginReport(requestId, report) {
+      const parsed = MachineLoginReport.safeParse(report);
+      if (!parsed.success || !UUID_TEXT.test(requestId)) return fail(undefined, "invalid_message");
+      const reply = await send(machineLoginReportPath(requestId), parsed.data);
+      if (reply?.status === 200) return { kind: "recorded" };
+      if (reply?.status === 404 || reply?.status === 409) {
+        const code = errorCodeOf(reply.body);
+        return { kind: "refused", status: reply.status, ...(code === undefined ? {} : { code }) };
+      }
+      return fail(reply);
+    },
+
+    async machineLoginCode(requestId) {
+      if (!UUID_TEXT.test(requestId)) return fail(undefined, "invalid_message");
+      let reply: CloudReply | undefined;
+      try {
+        reply = await signedGet({ origin: config.origin, path: machineLoginCodePath(requestId), key: config.key, now: config.now(), fetchFn: config.fetchFn, bypass: config.bypass, headers: { accept: "application/json" } });
+      } catch {
+        // fx-swallow-ok: signedGet reports a network failure in fixed words; the caller counts it as a failed fetch
+        reply = undefined;
+      }
+      if (reply?.status === 410) return { kind: "gone" };
+      if (reply?.status === 200) {
+        const body = typeof reply.body === "object" && reply.body !== null && !Array.isArray(reply.body) ? (reply.body as Record<string, unknown>) : {};
+        const code = MachineLoginCode.safeParse(body["code"]);
+        return code.success ? { kind: "code", code: code.data } : fail(undefined, "invalid_reply");
+      }
       return fail(reply);
     },
 

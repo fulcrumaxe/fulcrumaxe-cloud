@@ -72,7 +72,7 @@ type Signals = EventEmitter & RunHost["signals"];
 const newSignals = (): Signals => new EventEmitter() as unknown as Signals;
 
 /** What the program's entry point hands `run`: the real pid, the real kill and the real process start. */
-const hostWith = (signals: RunHost["signals"]): RunHost => ({ home, platform: "linux", signals, pid: process.pid, kill: (pid, signal) => process.kill(pid, signal), chdir: () => undefined, engine: createClaudeKit(spawn, { launch: testLaunch(), bashSandboxUnusable: shellSandboxUsable }), sandbox: fakeSandboxHost() });
+const hostWith = (signals: RunHost["signals"]): RunHost => ({ home, platform: "linux", signals, pid: process.pid, kill: (pid, signal) => process.kill(pid, signal), chdir: () => undefined, engine: createClaudeKit(spawn, { launch: testLaunch(), bashSandboxUnusable: shellSandboxUsable }), sandbox: fakeSandboxHost(), managedServer: () => true });
 
 /** A machine with room for everything: the composed-daemon tests are about other things than this machine's free memory. */
 const GB = 1024 ** 3;
@@ -147,17 +147,18 @@ describe("the engine bridge in the composed daemon", () => {
 
   it("never starts the bridge on a hello that dropped engine_bridge_v1 (an older cloud), and the claim loop is not held up", async () => {
     enable();
-    // sandbox_commands_v1 (D#587 B-7b) is refused first, then watch_mode_v1 (D#845), then engine_bridge_v1.
+    // sandbox_commands_v1 (D#587 B-7b) is refused first, then machine_login_v1 (D#845 MC-8b), then watch_mode_v1 (D#845), then engine_bridge_v1.
+    cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     const run = start({ host: { engineBridge: ports() } });
     await until(() => claims() >= 1 && statusFile() !== undefined);
-    // sandbox_commands_v1 goes first, then watch_mode_v1, then engine_bridge_v1: the fourth hello is the same without both.
-    expect(hellos()).toHaveLength(4);
-    expect(HelloMessage.parse(hellos()[2]!.body).capabilities).toContain("engine_bridge_v1");
-    expect(HelloMessage.parse(hellos()[3]!.body).capabilities).not.toContain("engine_bridge_v1");
-    expect(HelloMessage.parse(hellos()[3]!.body).capabilities).toContain("overlap_facts_v1");
+    // sandbox_commands_v1 goes first, then machine_login_v1, then watch_mode_v1, then engine_bridge_v1: the fifth hello is the same without both.
+    expect(hellos()).toHaveLength(5);
+    expect(HelloMessage.parse(hellos()[3]!.body).capabilities).toContain("engine_bridge_v1");
+    expect(HelloMessage.parse(hellos()[4]!.body).capabilities).not.toContain("engine_bridge_v1");
+    expect(HelloMessage.parse(hellos()[4]!.body).capabilities).toContain("overlap_facts_v1");
     expect(statusFile()).toMatchObject({ hello: false, repos: [{ run: "waiting", reason: "hello" }] });
     expect(await stop(run)).toMatchObject({ code: 0 });
   });
