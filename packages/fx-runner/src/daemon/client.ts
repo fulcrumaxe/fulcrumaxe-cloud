@@ -10,7 +10,7 @@ import {
   CONFLICT_FACTS_CAPABILITY, DISCOVERY_ANALYST_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, HEARTBEAT_INVENTORY_HELLO_CAPABILITY, WATCH_MODE_HELLO_CAPABILITY, ORDERED_FACTS_CAPABILITY, OVERLAP_FACTS_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, MEMORY_PROPOSALS_PATH, MemoryProposalsMessage, MemoryProposalsReply, MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, PLANE_MERGE_CLAIM_PATH, PLANE_MERGE_REPORT_PATH, PLANE_MERGE_VERIFY_PATH, PlaneMergeClaimMessage, PlaneMergeClaimReply, PlaneMergeReportMessage, PlaneMergeReportReply, PlaneMergeRetryReply, PlaneMergeVerifyMessage, PlaneMergeVerifyReply,
   BROWSER_CHROME_CAPABILITY, BROWSER_PLAYWRIGHT_CAPABILITY, DEPLOY_ORDER_CAPABILITY, DEPLOY_ORDER_CLAIM_PATH, DEPLOY_ORDER_REPORT_PATH, DeployOrderClaimMessage, DeployOrderClaimReply, DeployOrderReportMessage, DeployOrderReportReply,
   PLANE_PUSH_PAIRING_PATH, PLANE_PUSH_REPORT_PATH, PLANE_PUSH_TOKEN_PATH, PlanePushPairingMessage, PlanePushPairingReply, PlanePushReportMessage, PlanePushReportReply, PlanePushTokenMessage, PlanePushTokenReply, type ClaimCapacity, type ContextLedgerWire, type DoneCheck, type LocalOnlyEvent, type SandboxUnavailableReason, type SignedJob, type StopReason,
-  MACHINE_JOB_CLAIM_PATH, MachineJobClaimMessage, MachineJobClaimReply, MAX_PLAN_BYTES, SetupProgressBody, SetupProgressReply, setupPlanPath, setupProgressPath, type SignedMachineJob,
+  MACHINE_JOB_CLAIM_PATH, MachineJobClaimMessage, MachineJobClaimReply, MAX_PLAN_BYTES, SessionJobProgressBody, SetupProgressBody, SetupProgressReply, machineJobProgressPath, setupPlanPath, setupProgressPath, type SignedMachineJob,
 } from "@fulcrumaxe/runner-protocol";
 import { errorCodeOf, signedGet, signedPost, type CloudReply } from "../cloud.js";
 import { WAKE_PATH, parseWakeReply } from "./wake.js";
@@ -94,6 +94,8 @@ export type DeployOrderReportResult = { kind: "recorded" } | { kind: "fenced"; c
 export type MachineJobClaimResult = { kind: "job"; signedJob: SignedMachineJob } | { kind: "none"; retryAfter: number } | CallError;
 /** 404 and 409 are the cloud's closed refusals of a report: this job is not the setup's current one, is not running, or the number is not above the last. */
 export type SetupProgressResult = { kind: "recorded" } | { kind: "refused"; status: 404 | 409; code?: string } | CallError;
+/** The session job report route answers with the setup route's replies, so one reply type serves both. */
+export type MachineJobProgressResult = SetupProgressResult;
 /** The plan route's reply as the exact text read: the caller hashes it before it parses it. `too_large` is a body over `MAX_PLAN_BYTES`. */
 export type SetupPlanResult = { kind: "plan"; text: string } | { kind: "missing" } | { kind: "too_large" } | CallError;
 export type PlaneMergeReportResult = { kind: "recorded" } | { kind: "retry"; retryAfter: number } | { kind: "fenced"; code?: string } | CallError;
@@ -145,6 +147,8 @@ export interface RunnerClient {
   /** D#845 ON-8c. The calls of a machine job: take it (only after a claim reply said `machine_job`), report one step of a setup, and read a setup's plan file. */
   machineJobClaim(): Promise<MachineJobClaimResult>;
   setupProgress(setupId: string, body: SetupProgressBody): Promise<SetupProgressResult>;
+  /** D#845 ON-13a1: a session job's report, keyed by its own job id (the cloud's machine-job route); the replies are `setupProgress`'s. */
+  machineJobProgress(jobId: string, body: SessionJobProgressBody): Promise<MachineJobProgressResult>;
   setupPlan(setupId: string, version: number): Promise<SetupPlanResult>;
 }
 
@@ -447,6 +451,18 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
       const parsed = SetupProgressBody.safeParse(body);
       if (!parsed.success || !UUID_TEXT.test(setupId)) return fail(undefined, "invalid_message");
       const reply = await send(setupProgressPath(setupId), parsed.data);
+      if (reply?.status === 200) return SetupProgressReply.safeParse(reply.body).success ? { kind: "recorded" } : fail(reply, "invalid_reply");
+      if (reply?.status === 404 || reply?.status === 409) {
+        const code = errorCodeOf(reply.body);
+        return { kind: "refused", status: reply.status, ...(code === undefined ? {} : { code }) };
+      }
+      return fail(reply);
+    },
+
+    async machineJobProgress(jobId, body) {
+      const parsed = SessionJobProgressBody.safeParse(body);
+      if (!parsed.success || !UUID_TEXT.test(jobId)) return fail(undefined, "invalid_message");
+      const reply = await send(machineJobProgressPath(jobId), parsed.data);
       if (reply?.status === 200) return SetupProgressReply.safeParse(reply.body).success ? { kind: "recorded" } : fail(reply, "invalid_reply");
       if (reply?.status === 404 || reply?.status === 409) {
         const code = errorCodeOf(reply.body);

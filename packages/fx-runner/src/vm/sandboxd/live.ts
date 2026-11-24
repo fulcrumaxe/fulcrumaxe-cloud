@@ -10,7 +10,7 @@ import { createMicrovmSandbox, type MicrovmSandbox, type MicrovmSandboxConfig } 
 import { createEgressPolicyPort, type EgressStarters } from "./policyPort.js";
 import { createDaemonSdk, idOfRunner, runnerIdPrefix, type DaemonSdk } from "./sdkAdapter.js";
 import { assertNotRoot, Sandboxd, type SandboxdDeps } from "./sandboxd.js";
-import { createMicrovmVmPort } from "./vmPort.js";
+import { createMicrovmVmPort, type ResumableVmPort } from "./vmPort.js";
 import type { GuestBindings, GuestRunHooks } from "./guestBindings.js";
 import { HelperError } from "./helperClient.js";
 import { createWorkspaceCrossing, type WorkspaceCrossing } from "../workspace/crossing.js";
@@ -55,7 +55,7 @@ export interface LiveMicrovm {
   /** The same SDK the port uses, for the inventory source and the signed stop, delete and reap commands. */
   sdk: DaemonSdk;
   /** The production VM factory for `runVmJob` over this same port, daemon and egress policy port (B-5b-3c-ii). `persistent` makes the agent's VM keep a snapshot when stopped. */
-  vmPort(options: { timeoutMs: number; runId: string; persistent?: boolean; bindings?: GuestBindings }): VmPort;
+  vmPort(options: { timeoutMs: number; runId: string; persistent?: boolean; bindings?: GuestBindings }): ResumableVmPort;
   /** Where the run's usage and relay sinks are attached (`run`), and where each VM's binding reads them from. */
   runHooks: GuestRunHooks;
   /**

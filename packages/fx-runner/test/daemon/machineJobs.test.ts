@@ -1,13 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { SETUP_RUNNER_STEPS, SetupProgressBody, type MachineJob } from "@fulcrumaxe/runner-protocol";
+import { SESSION_JOB_STEP_ORDER, SETUP_RUNNER_STEPS, SessionJobProgressBody, SetupProgressBody, type MachineJob } from "@fulcrumaxe/runner-protocol";
 import type { MachineJobClaimResult, SetupProgressResult } from "../../src/daemon/client.js";
-import { createMachineJobDispatcher, createStepReporter, effectiveEngine, type MachineJobEvent, type MachineJobHandlers } from "../../src/daemon/machineJobs.js";
+import { createMachineJobDispatcher, createSessionReporter, createStepReporter, effectiveEngine, type MachineJobEvent, type MachineJobHandlers } from "../../src/daemon/machineJobs.js";
 import { JOB_KEYRING, OTHER_JOB_KEYRING, RUNNER_ID, SETUP_ID, jobOf, signedJob } from "../helpers/machineJobFixture.js";
 
 /** D#845 ON-8c criteria: a one-at-a-time dispatcher on signed jobs; a kind with no handler is kind_unsupported; steps are reported in order and the last runner step `ok` ends the job. */
 let engine: "os_sandbox" | "microvm" = "microvm";
 function rig(claims: MachineJobClaimResult[], answers: Array<SetupProgressResult | "throw"> = []) {
   const progress: SetupProgressBody[] = [];
+  const session: Array<SessionJobProgressBody & { job_id: string }> = [];
   const events: MachineJobEvent[] = [];
   let claimCalls = 0;
   const client = {
@@ -21,9 +22,15 @@ function rig(claims: MachineJobClaimResult[], answers: Array<SetupProgressResult
       if (answer === "throw") throw new Error("boom");
       return answer ?? { kind: "recorded" };
     },
+    async machineJobProgress(jobId: string, body: SessionJobProgressBody): Promise<SetupProgressResult> {
+      session.push({ ...body, job_id: jobId });
+      const answer = answers.shift();
+      if (answer === "throw") throw new Error("boom");
+      return answer ?? { kind: "recorded" };
+    },
   };
   const make = (handlers: MachineJobHandlers = {}, now: () => Date = () => new Date()) => createMachineJobDispatcher({ client, keyring: JOB_KEYRING, runnerId: RUNNER_ID, now, handlers, sandboxEngine: () => engine, log: (e) => events.push(e) });
-  return { make, progress, events, claimCalls: () => claimCalls, client };
+  return { make, progress, session, events, claimCalls: () => claimCalls, client };
 }
 
 describe("the dispatcher", () => {
@@ -36,7 +43,7 @@ describe("the dispatcher", () => {
     expect(r.events).toEqual([{ event: "unsupported", kind: "project_setup" }, { event: "ended", kind: "project_setup" }]);
   });
 
-  it("every other kind with no handler is unsupported too; one with no setup id has nothing to report to and sends nothing", async () => {
+  it("every other kind with no handler is unsupported too; a session kind is reported on the machine-job route by its job id, on `admission`, and never on a setup", async () => {
     const withSetup = jobOf({ kind: "engine_update" }, {});
     const update = { ...withSetup, args: { engine: (withSetup.args as { engine: unknown }).engine, branch: "fx/engine-update-1.2.4" } } as MachineJob;
     const stop = { ...jobOf({ kind: "engine_session_stop", setup_id: undefined }), args: { reason: "person", operate_epoch: 0 } } as MachineJob;
@@ -45,7 +52,22 @@ describe("the dispatcher", () => {
     await d.run();
     await d.run();
     expect(r.progress.map((p) => p.failure_code)).toEqual(["kind_unsupported"]);
+    expect(r.session).toEqual([{ job_id: stop.job_id, seq: 0, step: "admission", state: "failed", failure_code: "kind_unsupported" }]);
+    const wire = Object.fromEntries(Object.entries(r.session[0] as object).filter(([key]) => key !== "job_id"));
+    expect(SessionJobProgressBody.safeParse(wire).success).toBe(true);
     expect(r.events.filter((e) => e.event === "unsupported").map((e) => (e as { kind: string }).kind)).toEqual(["engine_update", "engine_session_stop"]);
+  });
+
+  it("a session job refused for its engine reports `admission` failed / engine_unsupported on the machine-job route", async () => {
+    engine = "os_sandbox";
+    const start = { ...jobOf({ kind: "engine_session_start", requires_engine: "microvm" }), args: { at_sha: "a".repeat(40), resume: false, operate_epoch: 1 } } as MachineJob;
+    const r = rig([{ kind: "job", signedJob: signedJob(start) }]);
+    let ran = false;
+    await r.make({ engine_session_start: async () => void (ran = true) }).run();
+    engine = "microvm";
+    expect(ran).toBe(false);
+    expect(r.progress).toEqual([]);
+    expect(r.session).toMatchObject([{ step: "admission", state: "failed", failure_code: "engine_unsupported", failure_reason: "engine_mismatch" }]);
   });
 
   it("hands a verified job to the handler of its kind, with a reporter and a signal, and nothing else", async () => {
@@ -244,5 +266,79 @@ describe("the step reporter", () => {
     const r = reporterRig();
     await expect(r.reporter.report({ sub_step: "bootstrap", state: "failed", failure_code: "bootstrap_failed", failure_reason: "/home/x: no such file" })).rejects.toThrow("failure_reason");
     expect(r.progress).toEqual([]);
+  });
+});
+
+describe("the session reporter", () => {
+  type Kind = "engine_session_start" | "engine_session_stop" | "engine_session_delete";
+  const sessionJob = (kind: Kind) =>
+    ({ ...jobOf({ kind, setup_id: undefined }), args: kind === "engine_session_start" ? { at_sha: "a".repeat(40), resume: true, operate_epoch: 3 } : kind === "engine_session_stop" ? { reason: "person", operate_epoch: 3 } : { operate_epoch: 3 } }) as never;
+  function sessionRig(kind: Kind, answers: Array<SetupProgressResult | "throw"> = []) {
+    const r = rig([], answers);
+    const ended = new AbortController();
+    return { ...r, ended, reporter: createSessionReporter({ client: r.client }, sessionJob(kind), ended) };
+  }
+  const wire = (body: SessionJobProgressBody & { job_id: string }) => {
+    return Object.fromEntries(Object.entries(body).filter(([key]) => key !== "job_id"));
+  };
+
+  it("numbers every report from 0 under the job's own id, builds only protocol-valid bodies, and never calls the setup route", async () => {
+    const r = sessionRig("engine_session_stop");
+    await r.reporter.report({ step: "admission", state: "started" });
+    await r.reporter.report({ step: "admission", state: "ok" });
+    await r.reporter.report({ step: "session_stop", state: "skipped" });
+    expect(r.session.map((p) => [p.seq, p.step, p.state])).toEqual([[0, "admission", "started"], [1, "admission", "ok"], [2, "session_stop", "skipped"]]);
+    expect(new Set(r.session.map((p) => p.job_id)).size).toBe(1);
+    for (const body of r.session) expect(SessionJobProgressBody.safeParse(wire(body)).success).toBe(true);
+    expect(r.progress).toEqual([]);
+  });
+
+  it("a step may be skipped but never gone back to, and a step outside the kind's own list throws step_order", async () => {
+    const r = sessionRig("engine_session_start");
+    await r.reporter.report({ step: "session_create", state: "ok" });
+    await r.reporter.report({ step: "session_boot", state: "ok" }); // seed skipped
+    await expect(r.reporter.report({ step: "seed", state: "started" })).rejects.toThrow("step_order");
+    await expect(r.reporter.report({ step: "snapshot", state: "started" })).rejects.toThrow("step_order");
+    expect(r.session.map((p) => p.step)).toEqual(["session_create", "session_boot"]);
+    for (const kind of ["engine_session_start", "engine_session_stop", "engine_session_delete"] as const) {
+      const k = sessionRig(kind);
+      for (const step of SESSION_JOB_STEP_ORDER[kind]) if (step !== "done") await k.reporter.report({ step, state: "ok" });
+      expect(k.reporter.closed, kind).toBe(false);
+    }
+  });
+
+  it("a start ends on `done` ok, which carries its start mode and nothing else does; the job's signal aborts and nothing more is sent", async () => {
+    const r = sessionRig("engine_session_start");
+    await expect(r.reporter.report({ step: "done", state: "ok" })).rejects.toThrow("start_mode");
+    await expect(r.reporter.report({ step: "session_boot", state: "ok", start_mode: "fresh" })).rejects.toThrow("start_mode");
+    expect(await r.reporter.report({ step: "done", state: "ok", start_mode: "fresh" })).toBe("recorded");
+    expect(r.session.at(-1)).toMatchObject({ step: "done", state: "ok", start_mode: "fresh" });
+    expect(r.reporter.closed).toBe(true);
+    expect(r.ended.signal.aborted).toBe(true);
+    expect(await r.reporter.report({ step: "done", state: "ok", start_mode: "fresh" })).toBe("closed");
+    const stop = sessionRig("engine_session_stop");
+    await expect(stop.reporter.report({ step: "done", state: "ok", start_mode: "created" })).rejects.toThrow("start_mode");
+  });
+
+  it("a failed report ends the job; a refusal from the cloud closes it; the retry rule is the setup reporter's", async () => {
+    const failed = sessionRig("engine_session_delete");
+    await failed.reporter.report({ step: "session_delete", state: "failed", failure_code: "vm_teardown_incomplete" });
+    expect(failed.reporter.closed).toBe(true);
+    expect(await failed.reporter.report({ step: "done", state: "ok" })).toBe("closed");
+    const refused = sessionRig("engine_session_stop", [{ kind: "refused", status: 409, code: "job_not_active" }]);
+    expect(await refused.reporter.report({ step: "admission", state: "started" })).toBe("closed");
+    expect(refused.ended.signal.aborted).toBe(true);
+    const retried = sessionRig("engine_session_stop", [{ kind: "error", status: 0 }, { kind: "refused", status: 409, code: "seq_not_increasing" }]);
+    expect(await retried.reporter.report({ step: "admission", state: "started" })).toBe("recorded");
+    expect(retried.session.map((p) => p.seq)).toEqual([0, 0]);
+    const lost = sessionRig("engine_session_stop", [{ kind: "error", status: 503 }, { kind: "error", status: 503 }, { kind: "error", status: 503 }]);
+    expect(await lost.reporter.report({ step: "admission", state: "started" })).toBe("lost");
+    expect(lost.reporter.closed).toBe(false);
+  });
+
+  it("a reason that is not a closed word is never sent", async () => {
+    const r = sessionRig("engine_session_start");
+    await expect(r.reporter.report({ step: "seed", state: "failed", failure_code: "vm_workspace_failed", failure_reason: "/srv/fixture-a: no" })).rejects.toThrow("failure_reason");
+    expect(r.session).toEqual([]);
   });
 });

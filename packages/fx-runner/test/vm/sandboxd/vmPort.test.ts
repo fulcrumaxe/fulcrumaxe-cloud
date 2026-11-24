@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
+import { SandboxNotFoundError } from "../../../src/sandbox/port.js";
 import { createMicrovmVmPort, VmPortRefused, type MicrovmVmPortParts } from "../../../src/vm/sandboxd/vmPort.js";
 
 const SENTINEL = "/home/sentinel-user/secret-repo";
 
-function rig(over: { state?: string; guestFails?: boolean; createFails?: boolean; teardown?: boolean; persistent?: boolean } = {}) {
+function rig(over: { state?: string; guestFails?: boolean; createFails?: boolean; teardown?: boolean; persistent?: boolean; wake?: "ok" | "gone" } = {}) {
   const log: string[] = [];
   const parts: MicrovmVmPortParts = {
     sandbox: {
@@ -27,6 +28,14 @@ function rig(over: { state?: string; guestFails?: boolean; createFails?: boolean
         log.push(`state ${handle.sandboxName}`);
         return (over.state ?? "running") as never;
       },
+      ...(over.wake === undefined
+        ? {}
+        : {
+            async wake(handle, timeoutMs) {
+              log.push(`wake ${handle.sandboxName} timeout=${String(timeoutMs)}`);
+              if (over.wake === "gone") throw new SandboxNotFoundError(handle.sandboxName);
+            },
+          }),
     },
     daemon: { teardown: async (id) => (log.push(`teardown ${id}`), over.teardown !== false), get: async (id) => (log.push(`get ${id}`), {} as never) },
     bindings: { bind: (name, _sandbox, timeoutMs) => (log.push(`bind ${name} timeout=${String(timeoutMs)}`), {} as never), unbind: (name) => void log.push(`unbind ${name}`) },
@@ -114,7 +123,8 @@ describe("the production VmPort", () => {
     const r = rig({ persistent: true });
     await r.port.create("rn-1", "agent");
     await r.port.destroy("rn-1");
-    expect(r.log.slice(3)).toEqual(["teardown id-rn-1", "release id-rn-1", "unbind rn-1"]);
+    // create, get, unbind (a session's earlier stop may have left a stale binding) and bind come first
+    expect(r.log.slice(4)).toEqual(["teardown id-rn-1", "release id-rn-1", "unbind rn-1"]);
   });
 
   it("a destroy the helper did not finish is refused with one fixed word, so the registry keeps the VM as a leftover", async () => {
@@ -130,5 +140,36 @@ describe("the production VmPort", () => {
     await r.port.delete("rn-1");
     await r.port.delete("rn-never-made");
     expect(r.log.slice(3).filter((l) => l.startsWith("delete"))).toEqual(["delete rn-1", "delete rn-1", "delete rn-never-made"]);
+  });
+});
+
+describe("the production VmPort: resume (D#845 ON-13a1)", () => {
+  it("a persistent VM's create and a resume both replace the binding an earlier stop left (a stop never unbinds), so a session can be stopped and started again", async () => {
+    const r = rig({ persistent: true, wake: "ok" });
+    await r.port.create("fx-engine-7", "agent");
+    await r.port.stop("fx-engine-7");
+    await r.port.resume("fx-engine-7");
+    expect(r.log.filter((l) => l.startsWith("bind") || l.startsWith("unbind"))).toEqual(["unbind fx-engine-7", "bind fx-engine-7 timeout=123000", "unbind fx-engine-7", "bind fx-engine-7 timeout=123000"]);
+  });
+
+  it("wakes the kept disk through the port with the port's limit, then binds the daemon's handle by name like a created VM; a later destroy keeps the snapshots (it is persistent)", async () => {
+    const r = rig({ persistent: true, wake: "ok" });
+    await r.port.resume("fx-engine-7");
+    expect(r.log).toEqual(["wake fx-engine-7 timeout=123000", "unbind fx-engine-7", "get id-fx-engine-7", "bind fx-engine-7 timeout=123000"]);
+    await r.port.destroy("fx-engine-7");
+    expect(r.log.slice(4)).toEqual(["teardown id-fx-engine-7", "release id-fx-engine-7", "unbind fx-engine-7"]);
+  });
+
+  it("a name the daemon no longer holds rejects with the port's own SandboxNotFoundError and binds nothing", async () => {
+    const r = rig({ persistent: true, wake: "gone" });
+    await expect(r.port.resume("fx-engine-7")).rejects.toBeInstanceOf(SandboxNotFoundError);
+    expect(r.log.some((l) => l.startsWith("bind"))).toBe(false);
+  });
+
+  it("a port that is not persistent, or whose sandbox cannot wake, refuses with one fixed word and touches nothing", async () => {
+    for (const r of [rig({ wake: "ok" }), rig({ persistent: true })]) {
+      await expect(r.port.resume("fx-engine-7")).rejects.toMatchObject({ code: "resume_unavailable" });
+      expect(r.log).toEqual([]);
+    }
   });
 });
