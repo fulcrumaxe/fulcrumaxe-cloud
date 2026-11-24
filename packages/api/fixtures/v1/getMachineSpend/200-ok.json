@@ -29,6 +29,8 @@
         "cache_write_tokens": "250000",
         "api_equivalent_usd": 4.2,
         "priced": true,
+        "sign_in_kind": "subscription",
+        "paid_note": "Covered by your Claude plan; shown at API prices for comparison",
         "projects": [
           {
             "repo_id": "5a9b3d1c-6e44-4f2a-8c77-1b0a9d3e3333",

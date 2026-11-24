@@ -27708,6 +27708,22 @@
                               "priced": {
                                 "type": "boolean"
                               },
+                              "sign_in_kind": {
+                                "type": "string",
+                                "enum": [
+                                  "subscription",
+                                  "api_key",
+                                  "unknown"
+                                ],
+                                "description": "How Claude is signed in on this machine now, derived from its registration and its latest hello; never stored."
+                              },
+                              "paid_note": {
+                                "description": "Who pays for this machine's usage: a plan (shown at API prices for comparison) or the person's API key; null when the sign-in kind is unknown.",
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
                               "projects": {
                                 "type": "array",
                                 "items": {
@@ -27779,6 +27795,8 @@
                               "cache_write_tokens",
                               "api_equivalent_usd",
                               "priced",
+                              "sign_in_kind",
+                              "paid_note",
                               "projects"
                             ],
                             "additionalProperties": false

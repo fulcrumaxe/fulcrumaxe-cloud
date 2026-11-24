@@ -263,6 +263,7 @@ export function machineSpendNode(body, ui, act) {
       h("ul", { class: "bb-list", "data-testid": "bb-usage-machines" }, us.machines.map((m) =>
         h("li", { "data-testid": "bb-usage-machine" },
           h("strong", {}, m.name || MACHINE_COPY.unnamedMachine), ": " + dollarsText(m), h("br"), tokenLine(m),
+          typeof m.paid_note === "string" && m.paid_note !== "" ? h("div", { class: "bb-muted", "data-testid": "bb-usage-paid" }, m.paid_note + ".") : null,
           h("ul", { class: "bb-list" }, m.projects.map((p) =>
             h("li", { "data-testid": "bb-usage-project" }, (p.repo_id === null ? MACHINE_COPY.noProject : p.name || MACHINE_COPY.removedProject) + ": " + dollarsText(p), h("br"), tokenLine(p))))))),
     ]);

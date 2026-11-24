@@ -82,6 +82,14 @@ describe("the card", () => {
     expect(byId(e, "bb-servers-estimate")[0].textContent).toBe("Estimate: older server.");
     expect(byId(e, "bb-server")[0].textContent).toBe("build-box: 481 h, €12.34 (estimate)");
   });
+  it("each machine says who pays for its usage, from the sign-in kind, and says nothing when it is unknown", () => {
+    const withKind = (kind, note) => ({ ...FIXTURE, usage: { ...FIXTURE.usage, machines: [{ ...FIXTURE.usage.machines[0], sign_in_kind: kind, paid_note: note }] } });
+    expect(byId(machineSpendNode(FIXTURE, {}, {}), "bb-usage-paid")[0].textContent).toBe("Covered by your Claude plan; shown at API prices for comparison.");
+    expect(byId(machineSpendNode(withKind("api_key", "Billed to your API key"), {}, {}), "bb-usage-paid")[0].textContent).toBe("Billed to your API key.");
+    const unknown = machineSpendNode(withKind("unknown", null), {}, {});
+    expect(byId(unknown, "bb-usage-paid")).toHaveLength(0);
+    expect(unknown.textContent).not.toMatch(/Covered by|Billed to|undefined|null/);
+  });
   it("an unpriced model is not zero dollars", () => {
     const part = { ...FIXTURE, usage: { ...FIXTURE.usage, api_equivalent_usd: null, priced: false } };
     expect(byId(machineSpendNode(part, {}, {}), "bb-usage-total")[0].textContent).toBe(MACHINE_COPY.noPrice);

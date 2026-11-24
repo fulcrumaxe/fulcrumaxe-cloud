@@ -1,6 +1,7 @@
 import type { PoolClient } from "pg";
 import { computeUsd, priceFor, TIER_TO_MODEL_ID } from "@fx/spend";
 import { utcMonthStart } from "@fx/core/src/time.js";
+import { RUNNER_SIGN_IN_KIND_SQL, type RunnerSignInKind } from "@fx/db/src/runnerSignIn.js";
 
 /**
  * D#845 MC-11b: the two machine figures of Budget & billing, answered whole so the page does no arithmetic.
@@ -26,6 +27,12 @@ import { utcMonthStart } from "@fx/core/src/time.js";
 export const SERVER_PRICE_NOTE = "Estimated from Hetzner's list price. Hetzner bills you directly";
 export const SERVER_ESTIMATE_NOTE = "Estimate: this server was made before its hourly IPv4 price was recorded, so its IPv4 is counted at the full monthly price";
 export const USAGE_PRICE_NOTE = "at API prices";
+/** How a machine's Claude usage is paid (owner ruling 88.0a), from `runnerSignInKind`. `unknown` has no line. */
+export const USAGE_PAID_NOTE: Record<RunnerSignInKind, string | null> = {
+  subscription: "Covered by your Claude plan; shown at API prices for comparison",
+  api_key: "Billed to your API key",
+  unknown: null,
+};
 
 export interface ServerSpendRow {
   id: string;
@@ -65,6 +72,10 @@ export interface UsageMachine extends UsageTokens {
   name: string | null;
   api_equivalent_usd: number | null;
   priced: boolean;
+  /** How Claude is signed in on this machine now: a derived fact (`runnerSignInKind`), never stored. */
+  sign_in_kind: RunnerSignInKind;
+  /** The one line saying who pays for this machine's usage; null when the sign-in kind is unknown. */
+  paid_note: string | null;
   projects: UsageProject[];
 }
 export interface ClaudeUsage extends UsageTokens {
@@ -144,7 +155,7 @@ function priceTier(tier: string, t: { input: bigint; output: bigint; cacheRead: 
 }
 
 interface UsageRow {
-  runner_id: string; runner_name: string | null; repo_id: string | null; gh_owner: string | null; gh_name: string | null; model_tier: string;
+  runner_id: string; runner_name: string | null; sign_in_kind: RunnerSignInKind; repo_id: string | null; gh_owner: string | null; gh_name: string | null; model_tier: string;
   input_tokens: string; output_tokens: string; cache_read_tokens: string; cache_write_tokens: string;
 }
 
@@ -160,25 +171,26 @@ const dollars = (a: Acc): number | null => (a.tenThousandths === 0 && a.unpriced
 
 async function readUsage(client: PoolClient, accountId: string, from: Date, to: Date): Promise<ClaudeUsage> {
   const { rows } = await client.query<UsageRow>(
-    `SELECT u.runner_id, rs.name AS runner_name, u.repo_id, r.gh_owner, r.gh_name, u.model_tier,
+    `SELECT u.runner_id, rs.name AS runner_name, ${RUNNER_SIGN_IN_KIND_SQL("rn")} AS sign_in_kind, u.repo_id, r.gh_owner, r.gh_name, u.model_tier,
             SUM(u.input_tokens)::text AS input_tokens, SUM(u.output_tokens)::text AS output_tokens,
             SUM(u.cache_read_tokens)::text AS cache_read_tokens, SUM(u.cache_write_tokens)::text AS cache_write_tokens
        FROM machine_usage_daily u
        LEFT JOIN runner_settings rs ON rs.account_id = u.account_id AND rs.runner_id = u.runner_id
+       LEFT JOIN runners rn ON rn.account_id = u.account_id AND rn.id = u.runner_id
        LEFT JOIN repos r ON r.account_id = u.account_id AND r.id = u.repo_id
       WHERE u.account_id = $1 AND u.day >= $2::date AND u.day < $3::date
-      GROUP BY u.runner_id, rs.name, u.repo_id, r.gh_owner, r.gh_name, u.model_tier
+      GROUP BY u.runner_id, rs.name, ${RUNNER_SIGN_IN_KIND_SQL("rn")}, u.repo_id, r.gh_owner, r.gh_name, u.model_tier
       ORDER BY u.runner_id, u.repo_id NULLS LAST, u.model_tier`,
     [accountId, from.toISOString().slice(0, 10), to.toISOString().slice(0, 10)],
   );
   const total = acc();
-  const machines = new Map<string, { name: string | null; acc: Acc; projects: Map<string, { name: string | null; repo: string | null; acc: Acc }> }>();
+  const machines = new Map<string, { name: string | null; kind: RunnerSignInKind; acc: Acc; projects: Map<string, { name: string | null; repo: string | null; acc: Acc }> }>();
   for (const r of rows) {
     const t = { input: BigInt(r.input_tokens), output: BigInt(r.output_tokens), cacheRead: BigInt(r.cache_read_tokens), cacheWrite: BigInt(r.cache_write_tokens) };
     if (t.input + t.output + t.cacheRead + t.cacheWrite === 0n) continue;
     const cents = priceTier(r.model_tier, t);
     let m = machines.get(r.runner_id);
-    if (!m) machines.set(r.runner_id, (m = { name: r.runner_name, acc: acc(), projects: new Map() }));
+    if (!m) machines.set(r.runner_id, (m = { name: r.runner_name, kind: r.sign_in_kind, acc: acc(), projects: new Map() }));
     const key = r.repo_id ?? "none";
     let p = m.projects.get(key);
     if (!p) m.projects.set(key, (p = { repo: r.repo_id, name: r.gh_owner !== null && r.gh_name !== null ? `${r.gh_owner}/${r.gh_name}` : null, acc: acc() }));
@@ -190,7 +202,7 @@ async function readUsage(client: PoolClient, accountId: string, from: Date, to: 
     api_equivalent_usd: dollars(total),
     priced: !total.unpriced,
     machines: [...machines].map(([runner_id, m]) => ({
-      runner_id, name: m.name, ...tokens(m.acc), api_equivalent_usd: dollars(m.acc), priced: !m.acc.unpriced,
+      runner_id, name: m.name, ...tokens(m.acc), api_equivalent_usd: dollars(m.acc), priced: !m.acc.unpriced, sign_in_kind: m.kind, paid_note: USAGE_PAID_NOTE[m.kind],
       projects: [...m.projects.values()].map((p) => ({ repo_id: p.repo, name: p.name, ...tokens(p.acc), api_equivalent_usd: dollars(p.acc), priced: !p.acc.unpriced })),
     })),
   };
