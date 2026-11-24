@@ -1715,12 +1715,37 @@ test("overlay: a pull request that edits the list itself is judged by the list a
   assert.equal(overlayChange({ [LIST_PATH]: `${LIST_TEXT}docs/more/\tops-material\n` }, WITH_LIST).mode, "overlay");
 });
 
-test("overlay: files that own product-suite tests are not skippable (a private package, a vitest file that imports an overlay script)", () => {
+test("overlay: a private package is not skippable", () => {
   const pkg = overlayChange({ [`${PRIV_PKG}/src/a.ts`]: "x", "docs/ops/ci.md": "x" }, WITH_LIST);
   assert.notEqual(pkg.mode, "overlay");
   assert.ok(pkg.packages.includes(PRIV_PKG));
-  const t = overlayChange({ "packages/db/test/pgTls.test.ts": "x" }, WITH_LIST);
-  assert.notEqual(t.mode, "overlay");
+});
+
+test("overlay: an overlay script change, alone or with its overlay test, is overlay-only (never the product suite)", () => {
+  const script = overlayChange({ "scripts/ops/staging-role-creds.mjs": "x", "docs/ops/ci.md": "x" }, WITH_LIST);
+  assert.equal(script.mode, "overlay");
+  assert.deepEqual(script.packages, []);
+  assert.equal(script.e2e, false);
+  // a vitest file marked tests-an-overlay-script changes alone, and together with the overlay script it tests
+  for (const files of [
+    { "packages/db/test/pgTls.test.ts": "x" },
+    { "packages/db/test/pgTls.test.ts": "x", "scripts/ops/staging-role-creds.mjs": "x" },
+  ]) {
+    const r = overlayChange(files, WITH_LIST);
+    assert.equal(r.mode, "overlay", JSON.stringify(files));
+    assert.deepEqual(r.overlay, Object.keys(files).sort());
+  }
+});
+
+test("overlay: a tests-an-overlay-script file mixed with a product path, and a product-only change, keep the ordinary answer", () => {
+  for (const product of [{ "packages/env-spec/src/a.ts": "x" }, { "scripts/check.sh": "x" }]) {
+    const mixed = overlayChange({ "packages/db/test/pgTls.test.ts": "x", ...product }, WITH_LIST);
+    assert.notEqual(mixed.mode, "overlay", JSON.stringify(product));
+    assert.deepEqual(mixed, overlayChange({ "packages/db/test/pgTls.test.ts": "x", ...product }), JSON.stringify(product));
+    const only = overlayChange(product, WITH_LIST);
+    assert.deepEqual(only, overlayChange(product), JSON.stringify(product));
+  }
+  assert.equal(overlayChange({ "scripts/check.sh": "x", "scripts/ops/a.mjs": "x" }, WITH_LIST).mode, "full");
 });
 
 test("overlay: ci:full, CI_FORCE_FULL and an unreadable label read still force a full run", () => {

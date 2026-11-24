@@ -375,10 +375,15 @@ export function ciWorkflowEffect(repoRoot, base, head, cw) {
 
 /**
  * Authorities in the overlay list whose files own product-suite tests of their own (a private workspace
- * package, and vitest files that import an overlay script). A change to one of them is NOT skippable: the
- * ordinary classification selects its package and the suites that cover it.
+ * package). A change to one of them is NOT skippable: the ordinary classification selects its package and
+ * the suites that cover it.
+ *
+ * `tests-an-overlay-script` is deliberately NOT here. Those vitest files exist only to test an overlay
+ * script, so the product suites cannot see them; scripts/ci/overlay-checks.sh runs a changed one by name,
+ * and runs the ones that refer to a changed overlay script. Treating them as non-skippable sent every such
+ * private pull request to a full run of the product suite, which the private runner cannot pass.
  */
-export const OVERLAY_NOT_SKIPPABLE = new Set(["private-package", "tests-an-overlay-script"]);
+export const OVERLAY_NOT_SKIPPABLE = new Set(["private-package"]);
 
 /**
  * Parses the overlay list (scripts/ci/publish-denylist.local): `<path><TAB><authority>` per line, `#` comments
