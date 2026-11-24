@@ -64,8 +64,8 @@ describe("survey done [pg]", () => {
     await admin.query("INSERT INTO runner_capabilities (runner_id, account_id, capabilities) VALUES ($1, $2, $3)", [id, acct.accountId, capabilities]);
     return id;
   }
-  const survey = (acct = A, over: { role?: string; taskKind?: "survey" | "implement"; setupId?: string } = {}) =>
-    issueSurveyRun(admin, appPool, { accountId: acct.accountId, userId: acct.userId, repoId: acct.repoId, signing, createdMs: T0 - 5000, expiresMs: T0 + 72 * 3_600_000, ...over });
+  const survey = (acct = A, over: { role?: string; taskKind?: "survey" | "implement"; setupId?: string; placeOn?: string } = {}) =>
+    issueSurveyRun(admin, appPool, { accountId: acct.accountId, userId: acct.userId, repoId: acct.repoId, signing, createdMs: T0 - 5000, expiresMs: T0 + 72 * 3_600_000, placeOn: runner, ...over });
   const send = (path: string, body: unknown, k = key) => signed(k, path, body);
   const run = (fn: () => Promise<{ status: number; body: unknown }>) => toResponse(fn);
   async function claim(id: string, k = key): Promise<number> {
@@ -107,10 +107,10 @@ describe("survey done [pg]", () => {
     expect(again).toEqual(first);
     expect(await draftsOf(setupId)).toHaveLength(1);
     await admin.query("UPDATE project_setups SET phase = 'done' WHERE id = $1", [setupId]);
-    const second = await survey();
-    // The first runner was just throttled by the claim route, so the second survey is run by another runner of the account.
+    // The first runner was just throttled by the claim route, so the second survey is run by another runner of the account (the repo is placed on it for this survey).
     const k2 = newKey();
-    await newRunner(A, k2);
+    const runner2 = await newRunner(A, k2);
+    const second = await survey(A, { placeOn: runner2 });
     await done(second.runId, await claim(second.runId, k2), { agentOutput: DRAFT }, k2);
     expect((await draftsOf(second.setupId)).map((d) => d.version)).toEqual([2]);
   });

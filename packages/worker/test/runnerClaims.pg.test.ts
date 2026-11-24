@@ -347,6 +347,13 @@ describe("runner claim, heartbeat and events [pg]", () => {
         await capable(fresh, ["proposal_verifier", "discovery_analyst", "browser_chrome_v1", "survey_v1"]);
         for (const role of RUNNER_ELIGIBLE_ROLES) {
           const id = await pending({ role });
+          // D#845 ON-10b1: a survey is offered only to the machine its repo is placed on, with its setup waiting for exactly this run.
+          if (role === "project-surveyor") {
+            await admin.query("DELETE FROM project_placements WHERE account_id = $1 AND (repo_id = $2 OR runner_id = $3)", [A.accountId, A.repoId, fresh]);
+            await admin.query("INSERT INTO project_placements (repo_id, account_id, runner_id, placed_by) VALUES ($1, $2, $3, 'person')", [A.repoId, A.accountId, fresh]);
+            await admin.query("INSERT INTO project_setups (id, account_id, repo_id, kind, phase, created_by, survey_run_id) VALUES ($1, $2, $3, 'existing', 'survey', $4, $5)", [randomUUID(), A.accountId, A.repoId, A.userId, id]);
+            await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, 'run.input', $3::jsonb)", [A.accountId, id, JSON.stringify({ meta: { survey_runner_id: fresh } })]);
+          }
           const result = await claim(fresh);
           expect(result, role).toMatchObject({ kind: "claimed", runId: id });
           // The account's one slot is free again for the next role.

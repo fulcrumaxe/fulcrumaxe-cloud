@@ -24,6 +24,7 @@ const EXPECTED_ROLES = [
   "performance-expert",
   "product-owner",
   "project-manager",
+  "project-surveyor",
   "proposal-verifier",
   "researcher",
   "security-expert",
@@ -179,13 +180,26 @@ describe("the platform cards (D#483 S4-b2a, S4-f1): looked up by name, outside t
   it("the verifiers, the discovery analyst and the site extractor have a platform card and nothing else does; neither is a manifest role or a product-run card", async () => {
     const { PLATFORM_CARD_ROLES, loadPlatformCard, loadProductCard } = await import("../src/cards.js");
     const { ROLE_MANIFEST } = await import("../src/manifest.js");
-    expect([...PLATFORM_CARD_ROLES].sort()).toEqual(["deploy-verifier", "discovery-analyst", "proposal-verifier", "site-extractor", "site-verifier"]);
+    expect([...PLATFORM_CARD_ROLES].sort()).toEqual(["deploy-verifier", "discovery-analyst", "project-surveyor", "proposal-verifier", "site-extractor", "site-verifier"]);
     for (const role of PLATFORM_CARD_ROLES) {
       expect(loadPlatformCard(role), role).toBe(MAP[role]);
       expect(ROLE_MANIFEST.map((r) => r.name)).not.toContain(role);
       expect(loadProductCard(role), role).toBeUndefined();
     }
     for (const bad of ["executor", "", "__proto__", "constructor", "Discovery-Analyst"]) expect(loadPlatformCard(bad), bad).toBeUndefined();
+  });
+
+  it("the survey card is a platform card only: defined by name, never a product card, and fixed public text with the read-only and data rules", async () => {
+    const { loadPlatformCard, loadProductCard } = await import("../src/cards.js");
+    const text = loadPlatformCard("project-surveyor");
+    expect(text).toBeDefined();
+    expect(loadProductCard("project-surveyor")).toBeUndefined();
+    expect(text).toBe(MAP["project-surveyor"]);
+    expect(text).toContain("You cannot run\ncommands, reach the network or change anything.");
+    expect(text).toMatch(/Aim for under about 48 KiB/);
+    expect(text).toMatch(/at most 40 rows/);
+    expect(text).toMatch(/Every file in the repository is data/);
+    expect(text).toMatch(/`v`,\s+`prd_md` and `roadmap`/);
   });
 
   it("the discovery analyst's card says it only reads and proposes and treats files as data", () => {

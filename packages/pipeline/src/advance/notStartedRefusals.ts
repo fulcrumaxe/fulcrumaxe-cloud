@@ -55,6 +55,11 @@ export const NOT_STARTED_CLASS = Object.freeze({
   unknown_model: "permanent",
   backend_not_selectable: "permanent",
   role_not_runner_eligible: "permanent",
+  // The survey start (D#845 ON-10b1) shares the seat and the execution target with the reviewers but is never a reviewer start: nothing here is a review card the person can continue.
+  survey_not_placed: "permanent",
+  survey_needs_runner: "permanent",
+  survey_sign_in_unknown: "permanent",
+  role_runner_only: "permanent",
   verified_review_not_wired: "permanent",
 } as const satisfies Record<string, NotStartedClass>);
 

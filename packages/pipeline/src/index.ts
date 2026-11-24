@@ -66,3 +66,5 @@ export * from "./discovery/analystPrompt.js";
 // D#749 V3c: the post-merge verify stage's prompt and answer rules, which apps/web hands to the worker's verify stage.
 export { buildVerifyPrompt, type VerifyPromptInput } from "./verify/prompt.js";
 export { outcomeFromAnswer, type RowOutcome, type OutcomeContext } from "./verify/rules.js";
+// D#845 ON-10b1: the survey run's fixed task prompt.
+export { buildSurveyPrompt, SurveyPromptInputError, SURVEY_PRD_TARGET_BYTES, SURVEY_ROADMAP_MAX_ROWS, type SurveyPromptInput } from "./onboarding/surveyPrompt.js";

@@ -10,6 +10,7 @@ import {
   isBrowserJobRole,
   RUNNER_ELIGIBLE_ROLES,
   RUNNER_LEASE_SECONDS,
+  SURVEY_ROLE,
   SignedJobSchema,
   canonicalJson,
   capacityFreeSlots,
@@ -375,7 +376,16 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
     return { light: Number(rows[0]!.light), heavy: Number(rows[0]!.heavy) };
   }
 
-  /** The claim of one candidate, in one transaction. */
+  /**
+ * D#845 ON-10b1 (Ruling 88 item 6): a survey run is offered only to the machine its repo is placed on, and only while its setup is waiting for exactly this run. It authorizes (not only narrows),
+ * so it is one condition here and not a routing rule. CWE-367: the machine must be the CURRENT placement AND the machine the start's seat was decided for (kept in the run's `run.input` meta as `survey_runner_id`); a placement that moved since the start (a $0 subscription seat, then an api_key machine) means the run is never claimed, and the setup's deadline or a retry handles it. `runExpr` and `runnerExpr` are SQL operands the caller owns (never user text). The claim re-checks it under the run's lock.
+ */
+const surveyPinSql = (runExpr: string, runnerExpr: string, roleExpr: string, accountExpr: string): string =>
+  `(${roleExpr} <> '${SURVEY_ROLE}' OR EXISTS (SELECT 1 FROM project_setups s JOIN project_placements pp ON pp.account_id = s.account_id AND pp.repo_id = s.repo_id
+      WHERE s.account_id = ${accountExpr} AND s.survey_run_id = ${runExpr} AND s.phase = 'survey' AND s.state = 'started' AND pp.runner_id = ${runnerExpr}
+      AND EXISTS (SELECT 1 FROM run_events e WHERE e.account_id = ${accountExpr} AND e.run_id = ${runExpr} AND e.kind = 'run.input' AND e.payload #>> '{meta,survey_runner_id}' = ${runnerExpr}::uuid::text)))`;
+
+/** The claim of one candidate, in one transaction. */
   async function claimOne(
     accountId: string,
     runnerId: string,
@@ -414,6 +424,8 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
         [accountId, runId],
       );
       if (locked.rows.length === 0) return "taken" as const;
+      // The survey's pin again, with the run locked: a placement that moved since the candidate was read gives `taken`, never a claim by the wrong machine.
+      if (candidate.role === SURVEY_ROLE && (await client.query(`SELECT 1 WHERE ${surveyPinSql("$2::uuid", "$3::uuid", "$4::text", "$1::uuid")}`, [accountId, runId, runnerId, candidate.role])).rows.length === 0) return "taken" as const;
       // A subscription runner takes, as it stands, only a run its registrant started or approved. Any other run is taken only if the claim
       // approves it for the registrant here (C31 section 2.2): the database re-checks the runner, its registrant's membership and consent,
       // the repo's dial and the run itself with the run locked, and writes approved_by, the audit row and the receipt in this transaction.
@@ -501,6 +513,8 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
                   AND ($4 <> 'subscription' OR a.initiated_by = $5 OR a.approved_by = $5 OR (a.approved_by IS NULL AND a.dispatch_repo_id = ANY($9::uuid[]) AND NOT runner_plan_declined(a.id)))
                   AND a.id <> ALL($6::uuid[]) AND a.dispatch_repo_id <> ALL($13::uuid[])
                   AND (a.excluded_runner_id IS NULL OR a.excluded_runner_id <> $7)
+                  -- D#845 ON-10b1: a survey goes only to the machine its repo is placed on.
+                  AND ${surveyPinSql("a.id", "$7", "a.role", "a.account_id")}
                   AND (a.claimable_after IS NULL OR a.claimable_after <= $8::timestamptz)
                   -- D#599 PL-2b: a job in the cross-side shape is read by no runner that predates it (its strict parse would fail the whole reply). NULL means any runner;
                   -- a runner that has not said hello (no stored version) counts as below every version.

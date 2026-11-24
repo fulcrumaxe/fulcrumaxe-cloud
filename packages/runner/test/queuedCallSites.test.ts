@@ -64,7 +64,7 @@ describe("callers of a queued runner run (D#6 C29)", () => {
     expect([...source.matchAll(/queued: "(accept|refuse)"/g)]).toHaveLength(2);
   });
 
-  it("acceptQueuedRunnerRun: the advance starter's accept branch, the retry, the check-failed fix round, nobody else", () => {
+  it("acceptQueuedRunnerRun: the advance starter's accept branch, the retry, the check-failed fix round, the survey start, nobody else", () => {
     expect(callSites("acceptQueuedRunnerRun")).toEqual({
       // D#600 CX-7: the review fix round is a fresh session started through the advance starter (the accept branch below), no longer a resume in advance.ts.
       // checkFix.ts is the fix round after a failed approved check (D#6 C47 R-CHK-3a): still a `resumeAgentRun` result (that round needs the failed run's own kept workspace), wrapped the same way
@@ -72,6 +72,8 @@ describe("callers of a queued runner run (D#6 C29)", () => {
       "packages/worker/src/checkFix.ts": 1,
       "packages/worker/src/retry.ts": 1,
       "packages/worker/src/starter.ts": 1,
+      // D#845 ON-10b1: the survey's start accepts the queued runner run (the person's own machine claims it; nothing waits on a hook), and any result that is not a queued run is a closed refusal there.
+      "packages/worker/src/surveyStart.ts": 1,
     });
   });
 });

@@ -20,6 +20,11 @@ export interface SurveyRunOptions {
   expiresMs: number;
   role?: string;
   taskKind?: Job["task"]["kind"];
+  /**
+   * D#845 ON-10b1: the machine the repo is placed on. A survey run is offered only to that machine (the claim pin), so a test that claims one names the claimer here and the repo's placement is
+   * moved to it (a machine holds one placement and a repo has one, so both old rows go first). Absent: the placement is left as it is.
+   */
+  placeOn?: string;
 }
 
 export async function issueSurveyRun(admin: PoolClient, appPool: Pool, o: SurveyRunOptions): Promise<{ runId: string; setupId: string }> {
@@ -52,6 +57,12 @@ export async function issueSurveyRun(admin: PoolClient, appPool: Pool, o: Survey
      VALUES ($1, $2, $3, 'runner', 'pending', 'runner_local', $4, $5::jsonb, $6, to_timestamp($7 / 1000.0))`,
     [runId, o.accountId, job.role, o.repoId, JSON.stringify(signJob(job, o.signing)), o.userId, o.createdMs],
   );
+  if (o.placeOn !== undefined) {
+    await admin.query("DELETE FROM project_placements WHERE account_id = $1 AND (repo_id = $2 OR runner_id = $3)", [o.accountId, o.repoId, o.placeOn]);
+    await admin.query("INSERT INTO project_placements (repo_id, account_id, runner_id, placed_by) VALUES ($1, $2, $3, 'person')", [o.repoId, o.accountId, o.placeOn]);
+  }
+  // CWE-367: the machine the seat was decided for, kept with the run the way the real start keeps it.
+  if (o.placeOn !== undefined) await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, 'run.input', $3::jsonb)", [o.accountId, runId, JSON.stringify({ prompt_sha256: sha256Text(prompt), meta: { survey_runner_id: o.placeOn } })]);
   await withTenant(appPool, o.accountId, o.userId, (c) => c.query("SELECT survey_start_record($1, $2)", [setupId, runId]));
   return { runId, setupId };
 }

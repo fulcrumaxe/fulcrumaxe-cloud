@@ -30,6 +30,8 @@ import {
   type FollowSliceResult,
   type HookResult,
   type LostRunOutcome,
+  type PrecheckDenyReason,
+  type PrecheckRun,
   type RunLimit,
   type TerminalReport,
 } from "../executionTarget.js";
@@ -73,7 +75,7 @@ import {
   type StartDetachedResult,
 } from "../sandboxPort.js";
 import { reportError } from "@fx/telemetry";
-import { mergeContextLedgerMeasures, type ContextLedgerMeasure, type ContextSection, type ContextSpill } from "@fulcrumaxe/runner-protocol";
+import { SURVEY_ROLE, mergeContextLedgerMeasures, type ContextLedgerMeasure, type ContextSection, type ContextSpill } from "@fulcrumaxe/runner-protocol";
 import { recordContextFigure, recordContextLedger } from "../contextLedgerWriter.js";
 import { modelIdForCliName } from "../vercelSandboxPort.js";
 import type { BrokenConnectionCode, ConnectionStatusPort } from "../connectionStatusPort.js";
@@ -419,9 +421,16 @@ export class SandboxTarget implements ExecutionTarget {
     return this.deps.operatorToken?.(run.accountId, payerAccountId) !== undefined;
   }
 
+  /** D#845 ON-10b1: the survey is a run on the person's own machine, never in our sandbox: refused here before a row exists, and again in `admit`. */
+  async precheck(run: PrecheckRun): Promise<{ ok: true } | { ok: false; reason: PrecheckDenyReason }> {
+    return run.role === SURVEY_ROLE ? { ok: false, reason: "role_runner_only" } : { ok: true };
+  }
+
   /** See file header for why `client` is accepted but unused. */
   async admit(run: ExecutionRun, client: PoolClient): Promise<AdmitResult> {
     void client;
+    // Before anything is reserved: no money is held for a run our sandbox will not take.
+    if (run.role === SURVEY_ROLE) return { admitted: false, reason: "role_runner_only" };
     // C46 MP-MODEL: a model outside `@fx/spend`'s price table has no live
     // meter, so the run is refused before it reserves anything or gets a
     // sandbox (metering no longer skips an unpriced model).
