@@ -149,6 +149,8 @@ export interface StartAgentRunInput {
   /** D#2 H09b2, correction C16: see `ExecutionRun.funding`/`funding.ts`.
    * Omitted (or `{kind:'self'}`) is every pre-C16 caller, unchanged. */
   funding?: RunFunding;
+  /** D#845 ON-10b1: see `ExecutionRun.requiresEngine`. Only the survey's start sets it. */
+  requiresEngine?: ExecutionRun["requiresEngine"];
   /** D#2 H14c-4: when set, the run row and a claim on `key` commit together;
    * a key that is already taken makes this throw `IdempotencyKeyTakenError`
    * before `admit` (no reservation, no sandbox). */
@@ -234,6 +236,7 @@ export function buildExecutionRun(id: string, input: StartAgentRunInput): Execut
     maxExtensions: input.maxExtensions,
     spend: input.spend,
     funding: input.funding,
+    ...(input.requiresEngine !== undefined ? { requiresEngine: input.requiresEngine } : {}),
   };
 }
 

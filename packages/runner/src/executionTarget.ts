@@ -181,13 +181,15 @@ export type AdmitDenyReason =
   | "public_repo"
   | "repo_visibility_unknown"
   | "role_not_runner_eligible"
-  | "verified_review_not_wired";
+  | "verified_review_not_wired"
+  /** D#845 ON-10b1: the project survey runs on the person's own machine only; our sandbox never takes it (Ruling 88 item 1, door 4 of 4). */
+  | "role_runner_only";
 
 /**
  * D#599 PL-2: why a run was refused before its row was written. The target's own `AdmitDenyReason`s that need no money or row to decide, plus
  * the repository's stored cloud-verified consent no longer being the current wording. A closed set: it reaches a person as a code.
  */
-export type TargetPrecheckReason = Extract<AdmitDenyReason, "backend_not_selectable" | "public_repo" | "repo_visibility_unknown" | "role_not_runner_eligible" | "verified_review_not_wired">;
+export type TargetPrecheckReason = Extract<AdmitDenyReason, "backend_not_selectable" | "public_repo" | "repo_visibility_unknown" | "role_not_runner_eligible" | "verified_review_not_wired" | "role_runner_only">;
 export type PrecheckDenyReason = TargetPrecheckReason | "verified_consent_stale";
 
 /** What a target's `precheck` is given: the facts of a run that exist before its row does. */
@@ -215,6 +217,7 @@ const ADMIT_DENY_REASON_SET: Readonly<Record<AdmitDenyReason, true>> = {
   repo_visibility_unknown: true,
   role_not_runner_eligible: true,
   verified_review_not_wired: true,
+  role_runner_only: true,
 };
 export const isAdmitDenyReason = (reason: unknown): reason is AdmitDenyReason =>
   typeof reason === "string" && Object.hasOwn(ADMIT_DENY_REASON_SET, reason);
@@ -358,6 +361,11 @@ export interface ExecutionRun {
    * draws on. Omitted (or `{kind:'self'}`) means "the run's own account" --
    * every H09b1 caller is unchanged. See `funding.ts`. */
   funding?: RunFunding;
+  /**
+   * D#845 ON-10b1: the sandbox engine this run cannot go without. The job issuer signs it as `requires_engine`, and the claim hands the job only to a runner whose reported engine is that one.
+   * Only the survey's start sets it, from the placed machine's reported engine; never taken from a runner.
+   */
+  requiresEngine?: "microvm";
 }
 
 /**

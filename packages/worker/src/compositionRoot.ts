@@ -118,6 +118,7 @@ import { createFixGate } from "./fixGateStep.js";
 import { createDecisionIntake } from "./decisionIntake.js";
 import { createReceiptBlockRefresher, type OpenReceiptBlockHttp } from "./receiptBlock.js";
 import type { ReversalGitOpeners } from "./reversalCompensate.js";
+import { createSurveyStart, type SurveyStartFacade } from "./surveyStart.js";
 import { createSeatResolver, retrySeatSourceOf, type SeatRequest, type SeatResult } from "./seat.js";
 import { createRunStarter, type RunFollower } from "./starter.js";
 import { reportError } from "@fx/telemetry";
@@ -234,7 +235,7 @@ export interface CreateWorkerOptions {
  * worker's own sweep/kick only, never directly callable from a user request.
  * H14c-3b's CARRY-28 enforces caller authorisation.
  */
-export interface Worker extends PlanePublish, RunActionFacade, RunnerLeaseFacade, RunnerClaimFacade, RunnerDoneFacade, RunnerGitTicketFacade, RunnerPlanePushFacade, RunnerMemoryProposalsFacade, RunnerQueueSweeper, RunnerLeaseSweeper, Pick<RunHandoffs, "sweepRunHandoffs" | "completeRunHandoff" | "completeHandoffOnDone">, RunnerNoticeSweeper, InvariantSweeper, Pick<StageResume, "sweepParkedStages">, Pick<GateReask, "wakeMergeGate" | "wakeConflictingSiblings">, PreviewFacade, RetryFacade, AdvanceFacade, ResumeFacade, ContinueFacade {
+export interface Worker extends PlanePublish, Pick<SurveyStartFacade, "startSurveyRun">, RunActionFacade, RunnerLeaseFacade, RunnerClaimFacade, RunnerDoneFacade, RunnerGitTicketFacade, RunnerPlanePushFacade, RunnerMemoryProposalsFacade, RunnerQueueSweeper, RunnerLeaseSweeper, Pick<RunHandoffs, "sweepRunHandoffs" | "completeRunHandoff" | "completeHandoffOnDone">, RunnerNoticeSweeper, InvariantSweeper, Pick<StageResume, "sweepParkedStages">, Pick<GateReask, "wakeMergeGate" | "wakeConflictingSiblings">, PreviewFacade, RetryFacade, AdvanceFacade, ResumeFacade, ContinueFacade {
   registry: ExecutionTargetRegistry;
   /** EB-8a: signs an engine bridge command with the job-signing key; null while that key is not configured (the pull route then answers 503). */
   engineCommandSigner: Pick<JobSigner, "keyId" | "signEngineCommand" | "signSandboxCommand" | "signMachineJob" | "signMachineCommand"> | null;
@@ -634,6 +635,7 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
       ...resume,
       ...continuation,
       resolveRunSeat,
+      ...createSurveyStart({ pool: pools.runnerPool, registry, resolveRunSeat }),
       sweepComputeSettle: runSweepComputeSettle,
       sweepSandboxReap: runSweepSandboxReap,
       sandboxInventory: runSandboxInventory,
@@ -669,6 +671,7 @@ export function createWorker(options: CreateWorkerOptions): Promise<Worker> {
       registry,
       engineCommandSigner,
       resolveRunSeat,
+      startSurveyRun,
       sweepComputeSettle,
       sweepAutoStart,
       sweepDiscoveryQueue,
@@ -772,6 +775,7 @@ export function createWorker(options: CreateWorkerOptions): Promise<Worker> {
         registry,
         engineCommandSigner,
         resolveRunSeat,
+        startSurveyRun,
         sweepComputeSettle,
         sweepSandboxReap,
         sandboxInventory: inventory,

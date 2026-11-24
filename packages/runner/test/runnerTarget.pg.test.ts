@@ -63,8 +63,8 @@ describe("RunnerTarget [pg]", () => {
   }
 
   describe("admit: the role", () => {
-    it.each(["executor", "docs-writer", "project-manager", "technical-architect", "code-reviewer", "security-reviewer", "acceptance-tester", "debater", "deploy-verifier"])(
-      "%s is a role a runner may run in a Local-only repository (the four reviewers by the owner ruling, C12 section 1; the deploy verifier, D#749: the owner's machine is the runner)",
+    it.each(["executor", "docs-writer", "project-manager", "technical-architect", "code-reviewer", "security-reviewer", "acceptance-tester", "debater", "deploy-verifier", "project-surveyor"])(
+      "%s is a role a runner may run in a Local-only repository (the four reviewers by the owner ruling, C12 section 1; the deploy verifier, D#749: the owner's machine is the runner; the project surveyor, D#845 ON-10b1: if a later row makes it a confined read role, its exemption here is required, and this is the guard)",
       async (role) => {
         const w = await world();
         const run = await insertRun(w, { role });

@@ -59,7 +59,7 @@ describe("every not-started refusal is classified once", () => {
   it("reads a real set from each source (a moved marker or an emptied union fails here, not silently)", () => {
     expect(bySource.startReviewerBody).toBeGreaterThanOrEqual(3);
     expect(bySource.startRun).toBeGreaterThanOrEqual(8);
-    expect(bySource.seat).toBe(9);
+    expect(bySource.seat).toBe(12);
     expect(bySource.admit).toBeGreaterThanOrEqual(7);
     expect(bySource.spend).toBe(8);
     expect(codes.has("sandbox_reaping")).toBe(true);

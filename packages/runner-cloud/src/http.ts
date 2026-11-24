@@ -93,6 +93,13 @@ export interface RunnerCloudDeps {
   origin: string | undefined;
   /** EB-8a: the signer for engine bridge commands (the job-signing key, held by the worker). Absent, or answering null, the pull route is 503 `not_configured` and delivers nothing. */
   engineCommandSigner?: (() => Promise<EngineCommandSigner | null>) | null;
+  /**
+   * D#845 ON-10b1: the worker's start of a survey run (`startSurveyRun`), or null while no worker is configured (the start is then 503 `not_configured` and writes nothing). Wired in apps/web the way
+   * `engineCommandSigner` is.
+   */
+  surveyRuns?: (() => Promise<SurveyRunPort | null>) | null;
+  /** D#845 ON-10b1: the deadline Workflow's start. Typed here and not called yet: the start that sets it lands with the deadline (ON-10b2), which then makes it required. */
+  surveyDeadline?: { start(args: { accountId: string; setupId: string; runId: string }): Promise<void> } | null;
   /** The worker's lease-fail method, or null while no worker is configured. Called after a revoke has committed. */
   failRunnerLeases: FailRunnerLeases | null;
   /**
@@ -186,6 +193,28 @@ export interface RunnerCloudDeps {
    * Absent, or throwing, the suggestion is "unavailable".
    */
   readAllowanceFile?: (target: { repoId: string; owner: string; name: string }) => Promise<string | null>;
+}
+
+/** What the survey start needs of the worker. Plain ids and strings in, plain data out; structurally the worker's `startSurveyRun`. */
+export interface SurveyRunPort {
+  startSurveyRun(input: {
+    accountId: string;
+    userId: string;
+    setupId: string;
+    repoId: string;
+    runnerId: string;
+    owner: string;
+    name: string;
+    headSha: string;
+    priorRunId: string | null;
+    requiresEngine?: "microvm";
+  }): Promise<
+    | { ok: true; runId: string }
+    | { ok: false; status: 403; code: "forbidden" }
+    | { ok: false; status: 409; code: "survey_running"; runId: string | null }
+    | { ok: false; status: 409; code: "survey_not_started"; reason: string }
+    | { ok: false; status: 500; code: "internal" }
+  >;
 }
 
 /**

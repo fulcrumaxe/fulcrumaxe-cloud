@@ -20,6 +20,7 @@ import {
   CONTEXT_WINDOW_JOB_MIN_PROTOCOL,
   ITEM_PR_BRANCH,
   REVIEW_JOB_ROLES,
+  SURVEY_ROLE,
   jobCarriesPinnedCommit,
   CONFINED_READ_ROLES,
   RUNNER_ELIGIBLE_ROLES,
@@ -384,6 +385,7 @@ export async function bindItemPullRequest(
 function taskKind(role: string, continues: boolean): Job["task"]["kind"] {
   if (role === "executor") return continues ? "fix" : "implement";
   if ((REVIEW_JOB_ROLES as readonly string[]).includes(role)) return "review";
+  if (role === SURVEY_ROLE) return "survey";
   return "advise";
 }
 
@@ -586,6 +588,8 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
         ...(conflictRound !== undefined ? { conflict_round: conflictRound } : {}),
         // D#749 V2c-1: omitted (never null) on every job but the deploy verifier's, so their signed bytes are unchanged.
         ...(run.browserMethod !== undefined ? { browser_method: run.browserMethod } : {}),
+        // D#845 ON-10b1: omitted (never null) unless the start asked for a microVM, so every other job's signed bytes are unchanged.
+        ...(run.requiresEngine === "microvm" ? { requires_engine: "microvm" as const } : {}),
         ...(fixRoundKind !== undefined ? { fix_round_kind: fixRoundKind } : {}),
         branch_prefix: RUNNER_BRANCH_PREFIX,
         model_hint: MODEL_HINT.test(run.model) ? run.model : null,

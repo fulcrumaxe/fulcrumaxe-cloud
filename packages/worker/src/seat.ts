@@ -8,7 +8,8 @@ import { getRoleEntry } from "@fx/roles";
 import { loadPlatformCard, loadProductCard, type CardRuntime } from "@fx/roles/cards";
 import { PREVIEW_COMPUTE_CAP_USD, PREVIEW_MAX_RUN_MS, PREVIEW_MODEL_CAP_USD } from "./preview.js";
 import type { RetrySeatSource } from "./retry.js";
-import { DEPLOY_VERIFIER_ROLE } from "@fulcrumaxe/runner-protocol";
+import { DEPLOY_VERIFIER_ROLE, SURVEY_MAX_RUN_MS, SURVEY_ROLE } from "@fulcrumaxe/runner-protocol";
+import { RUNNER_SIGN_IN_KIND_SQL, type RunnerSignInKind } from "@fx/db/src/runnerSignIn.js";
 import { DISCOVERY_ANALYST_ROLE, PROPOSAL_VERIFIER_ROLE, effectiveModeSql, runsInOurSandbox, RUN_TIME_CEILING_MS, SANDBOX_MAX_TIMEOUT_MS, boundedLimit, runnerLimitsFrom, sandboxComputeUsdFor, sandboxTimeFor, type Product, type RunLimitsInput, type StartAgentRunInput } from "@fx/runner";
 import { isClaudeModelId, TIER_TO_MODEL_ID, type PlanId } from "@fx/spend";
 import { estimateRunModelUsd } from "@fx/core/src/role-settings/runPrice.js";
@@ -46,7 +47,13 @@ export type SeatRequest =
    * D#749 V3c: the post-merge deploy verifier (`role` is deploy-verifier). The same shape as a verify seat: VERIFY_LIMITS_ROLE's limits and model, its own platform card, and `capUsd`
    * (one tester job's figure) as its cap and its reservation. Read-only on either team App; the run is a runner job.
    */
-  | { accountId: string; role: string; repoId: string; purpose: "deploy_verify"; capUsd: number };
+  | { accountId: string; role: string; repoId: string; purpose: "deploy_verify"; capUsd: number }
+  /**
+   * D#845 ON-10b1 (Ruling 88): the project survey (`role` is project-surveyor), on the machine the repo is placed on (`runnerId`). It borrows VERIFY_LIMITS_ROLE's limits and model and runs on its
+   * own platform card. Only a `runner_local` repo gets one. What the account's model budget must be depends on how Claude is signed in on that machine (`runnerSignInKind`, owner ruling 88.0):
+   * a subscription costs nothing metered (`capUsd: 0`, any budget), an API key meets the normal budget gate, and a sign-in the cloud cannot tell is treated as an API key.
+   */
+  | { accountId: string; role: string; repoId: string; runnerId: string; purpose: "survey" };
 
 /** The manifest role a verifier run takes its limits and model from (TL ruling 1, 10-22). Customer role settings are unchanged. */
 export const VERIFY_LIMITS_ROLE = "project-manager";
@@ -59,6 +66,10 @@ export type SeatRefusal =
   | "installation_not_writable"
   | "no_model"
   | "model_budget_unset"
+  /** D#845 ON-10b1: the survey seat's own refusals. */
+  | "survey_not_placed"
+  | "survey_needs_runner"
+  | "survey_sign_in_unknown"
   | "limits_exceed_sandbox"
   | "account_not_found";
 
@@ -125,18 +136,22 @@ export function createSeatResolver(deps: SeatDeps): (request: SeatRequest) => Pr
     // A verify seat and an analyse seat are one shape: a confined read-only platform run on a borrowed role. Each is bound to its own role name.
     const verify = repoScoped && (request.purpose === "verify" || request.purpose === "analyse" || request.purpose === "deploy_verify");
     if (verify && request.role !== (request.purpose === "verify" ? PROPOSAL_VERIFIER_ROLE : request.purpose === "analyse" ? DISCOVERY_ANALYST_ROLE : DEPLOY_VERIFIER_ROLE)) return refuse("unknown_role");
-    // A verifier run is billed, limited and routed as the role it borrows; only its card and its run row are its own.
-    const role = verify ? VERIFY_LIMITS_ROLE : request.role;
+    const survey = repoScoped && request.purpose === "survey";
+    if (survey && request.role !== SURVEY_ROLE) return refuse("unknown_role");
+    // A verifier or survey run is billed, limited and routed as the role it borrows; only its card and its run row are its own.
+    const borrowed = verify || survey;
+    const role = borrowed ? VERIFY_LIMITS_ROLE : request.role;
     const entry = getRoleEntry(role);
     if (entry === undefined) return refuse("unknown_role");
     // D#483 S4-b2c: the verifier's one card on either runtime (it names no path and no tool beyond "the file tools you are given"); whether a run may
     // go to a runner at all is the sweep's decision (cloud-verified repositories only) and the runner target's (a Local-only one refuses the role).
-    const loadCard = verify ? (_r: string, _o?: { runtime: CardRuntime }) => loadPlatformCard(request.role) : (deps.loadCard ?? loadProductCard);
+    const loadCard = borrowed ? (_r: string, _o?: { runtime: CardRuntime }) => loadPlatformCard(request.role) : (deps.loadCard ?? loadProductCard);
     // A role with no card is refused before anything is read. The card for the run's runtime is picked once the repository is read.
     if (loadCard(role) === undefined) return refuse("no_card");
     if (typeof accountId !== "string" || !UUID_RE.test(accountId)) return refuse("account_not_found");
     const ownerId = repoScoped ? request.repoId : request.workItemId;
     if (typeof ownerId !== "string" || !UUID_RE.test(ownerId)) return refuse("no_repo");
+    if (survey && !(typeof request.runnerId === "string" && UUID_RE.test(request.runnerId))) return refuse("survey_not_placed");
 
     return withTenant(deps.pool, accountId, async (client): Promise<SeatResult> => {
       const account = (await client.query<{ plan: PlanId; budget: string; hosted_plan_paid: boolean }>("SELECT plan, hosted_plan_paid, model_budget_usd_month AS budget FROM accounts WHERE id = $1", [accountId])).rows[0];
@@ -167,12 +182,14 @@ export function createSeatResolver(deps: SeatDeps): (request: SeatRequest) => Pr
       const cardMode = "expectedExecutionMode" in request && request.expectedExecutionMode !== undefined ? request.expectedExecutionMode : repo.execution_mode;
       const roleCard = runsInOurSandbox(cardMode, role) ? loadCard(role) : loadCard(role, { runtime: "runner" });
       if (roleCard === undefined) return refuse("no_card");
+      // D#845 ON-10b1 (Ruling 88 item 1, door 1 of 4): a survey runs on the person's own machine and nowhere else, so any other mode is no seat.
+      if (survey && repo.execution_mode !== "runner_local") return refuse("survey_needs_runner");
       if (repo.app_kind === null) return refuse("no_installation");
       if (preview) {
         // A preview reads a repo through the read-only App and never writes: any other kind is not a preview seat.
         if (repo.app_kind !== "team_readonly") return refuse("no_installation");
-      } else if (verify) {
-        // A verifier only reads (its GitHub role holds contents: read); either team App will do, and nothing else.
+      } else if (verify || survey) {
+        // A verifier only reads (its GitHub role holds contents: read); either team App will do, and nothing else. The survey's mirror reads through the same App.
         if (repo.app_kind !== "team_readonly" && repo.app_kind !== "team") return refuse("no_installation");
       } else {
         try {
@@ -184,18 +201,35 @@ export function createSeatResolver(deps: SeatDeps): (request: SeatRequest) => Pr
       }
 
       const monthlyModelBudgetUsd = Number(account.budget);
+      // D#845 ON-10b1 (Ruling 88): the machine the survey is for must be this repo's placement and live; its sign-in kind is read in this same transaction, from the stored row only.
+      let signIn: RunnerSignInKind = "unknown";
+      if (survey) {
+        const placed = (
+          await client.query<{ kind: RunnerSignInKind }>(
+            `SELECT ${RUNNER_SIGN_IN_KIND_SQL("rn")} AS kind FROM project_placements pp
+               JOIN runners rn ON rn.account_id = pp.account_id AND rn.id = pp.runner_id AND rn.revoked_at IS NULL
+              WHERE pp.account_id = $1 AND pp.repo_id = $2 AND pp.runner_id = $3 AND rn.account_id = $1`,
+            [accountId, repoId, request.runnerId],
+          )
+        ).rows[0];
+        if (placed === undefined) return refuse("survey_not_placed");
+        signIn = placed.kind;
+      }
+      // A subscription survey costs the account nothing metered, so no budget is needed for it (88.0).
+      const freeSurvey = survey && signIn === "subscription";
       // An operator account runs on our own subscription, which no account budget pays for: it needs none set.
-      if (!(monthlyModelBudgetUsd > 0) && !(deps.isOperatorAccount?.(accountId) ?? false)) return refuse("model_budget_unset");
+      if (!freeSurvey && !(monthlyModelBudgetUsd > 0) && !(deps.isOperatorAccount?.(accountId) ?? false)) return refuse(survey && signIn === "unknown" ? "survey_sign_in_unknown" : "model_budget_unset");
 
       const resolved = runnerLimitsFrom(await resolveRunLimits(client, { accountId, role }));
       // A preview (and a verifier, read the same way) must end by its own limit inside the invocation that reads its stream, and takes no extension.
-      const limits = repoScoped ? { ...resolved.limits, maxRunMs: Math.min(resolved.limits.maxRunMs, PREVIEW_MAX_RUN_MS) } : resolved.limits;
+      const limits = survey ? { ...resolved.limits, maxRunMs: SURVEY_MAX_RUN_MS } : repoScoped ? { ...resolved.limits, maxRunMs: Math.min(resolved.limits.maxRunMs, PREVIEW_MAX_RUN_MS) } : resolved.limits;
       const maxExtensions = repoScoped ? 0 : resolved.maxExtensions;
-      const capUsd = preview ? PREVIEW_MODEL_CAP_USD : verify ? request.capUsd : resolved.perRunUsd;
+      const capUsd = preview ? PREVIEW_MODEL_CAP_USD : verify ? request.capUsd : freeSurvey ? 0 : resolved.perRunUsd;
       if (verify && !(capUsd > 0)) return refuse("model_budget_unset");
       const { maxPossibleRunMs, timeoutMs } = sandboxTimeFor(limits, maxExtensions);
-      const estimateComputeUsd = sandboxComputeUsdFor(maxPossibleRunMs);
-      if (timeoutMs > (deps.maxTimeoutMs ?? SANDBOX_MAX_TIMEOUT_MS) || (repoScoped && estimateComputeUsd > PREVIEW_COMPUTE_CAP_USD)) return refuse("limits_exceed_sandbox");
+      // A survey uses no sandbox of ours, so it has no compute to estimate or to cap.
+      const estimateComputeUsd = survey ? 0 : sandboxComputeUsdFor(maxPossibleRunMs);
+      if (!survey && (timeoutMs > (deps.maxTimeoutMs ?? SANDBOX_MAX_TIMEOUT_MS) || (repoScoped && estimateComputeUsd > PREVIEW_COMPUTE_CAP_USD))) return refuse("limits_exceed_sandbox");
 
       const size = repoScoped ? "Small" : kind === null ? undefined : SIZE_OF_KIND[kind];
       const model = await modelFor(client, deps, { accountId, repoId, role, tier: entry.defaultModel, size });
