@@ -23,8 +23,8 @@ export const LAP_ALERT_FACTOR = 2;
  * at 30 minutes). While it has none, nothing is waiting and the reconciler may sleep, so its lap is judged against this idle cadence.
  */
 export const IDLE_RECONCILE_CADENCE_SECONDS = 4 * 60 * 60;
-/** The two 15-minute jobs that sit behind the reconcile gate. */
-export const FAST_RECONCILE_JOBS = ['sandbox_reap_terminal', 'model_credits_revalidate'] as const;
+/** The 15-minute jobs that sit behind the reconcile gate (D#845 ON-8f2a added the install pull request step: the push report marks the reconciler, and a pass that left work behind reports its due time). */
+export const FAST_RECONCILE_JOBS = ['sandbox_reap_terminal', 'model_credits_revalidate', 'setup_install_pr'] as const;
 const GATED_FAST_JOBS: ReadonlySet<string> = new Set(FAST_RECONCILE_JOBS);
 
 /** How long after a connection breaks for out-of-credit the credits job keeps its 15-minute cadence. */
@@ -101,12 +101,24 @@ async function terminalReapPending(pool: Pick<Pool, 'query'>, opts: WorkOptions,
   }
 }
 
+/** True while any setup has its push recorded and no install pull request yet. A failed read counts as no work (never a false alarm). */
+export async function setupInstallPending(pool: Pick<Pool, 'query'>): Promise<boolean> {
+  try {
+    const { rows } = await pool.query<{ pending: boolean }>('SELECT setup_install_pr_pending() AS pending');
+    return rows[0]?.pending === true;
+  } catch {
+    // fx-swallow-ok: an unreadable probe means "no extra work known"; a stall alert is never raised from a failed read
+    return false;
+  }
+}
+
 async function workState(pool: Pick<Pool, 'query'>, opts: WorkOptions = {}): Promise<{ working: ReadonlySet<string>; creditsBackedOff: boolean }> {
   const out = new Set<string>();
   const credits = await readCreditsBreak(pool);
   if (credits.broken) out.add('model_credits_revalidate');
   const { rows } = await pool.query<{ last_result_code: string | null; last_full_pass_at: Date | null }>("SELECT last_result_code, last_full_pass_at FROM reconcile_jobs WHERE name = 'sandbox_reap_terminal'");
   const job = rows[0];
+  if (await setupInstallPending(pool)) out.add('setup_install_pr');
   if (job !== undefined && (job.last_result_code === 'budget' || (await terminalReapPending(pool, opts, job.last_result_code === 'ok' ? job.last_full_pass_at : null)))) out.add('sandbox_reap_terminal');
   return { working: out, creditsBackedOff: credits.backedOff };
 }

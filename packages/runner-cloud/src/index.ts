@@ -53,6 +53,7 @@ export { gitTicketRun } from "./gitTicket.js";
 export { planeMergeClaimRun, planeMergeReportRun, planeMergeVerifyRun, settleAuthorizedOrder, type SettleHint, type SettleOutcome } from "./planeMerge.js";
 export { DEPLOY_ORDER_ELIGIBLE_SQL, deployOrderClaimRun, deployOrderReportRun, deployOrderWaiting } from "./deployOrder.js";
 export { setupPushTokenRun } from "./setupPush.js";
+export { claimSetupInstall, completeSetupInstall, installPathRefused, installPullRequestText, type SetupInstallClaim, type SetupInstallDeps, type SetupInstallFailure, type SetupInstallOutcome } from "./setupInstallPr.js";
 export { machineJobClaimRun, machineJobProgressRun, offeredMachineJobs, setupProgressRun } from "./machineJob.js";
 export { ENGINE_SOURCE_REPO, buildPlanFile, engineTarballUrl, issueProjectSetup, retryInstall, setupPlanRun, type IssuedSetupJob } from "./setupJobs.js";
 export { ENGINE_SESSION_NAME_PREFIX, issueEngineSessionDelete, issueEngineSessionStart, issueEngineSessionStop, startEngine, type EngineStopReason, type IssuedSessionJob, type PersonStopReason } from "./engineSession.js";
@@ -67,6 +68,7 @@ export {
   GATE1_QUEUE_DOCUMENTS,
   GATE1_STATUS_DOCUMENTS,
   GITHUB_GRAPHQL_DOCUMENTS,
+  SETUP_INSTALL_DOCUMENTS,
   LOCAL_ONLY_ALLOWLIST,
   LOCAL_ONLY_REVIEW_STATUS_CONTEXT,
   LocalOnlyGithubError,
@@ -144,8 +146,10 @@ export {
   type PullRequestRef,
   type PullRequestRepo,
   type RunPullRequestFailure,
+  type PullRequestText,
   type RunPullRequestPort,
   type RunPullRequestText,
+  type SetupInstallPort,
 } from "./runPullRequest.js";
 export { MAX_ENTRY_PATTERNS, MAX_SCOPE_ENTRIES, MAX_SCOPE_PATTERNS, loadAcceptanceScope, parseAcceptanceScope, pathInScope, pathsOutsideScope, type AcceptanceScope, type TenantQueryable } from "./acceptanceScope.js";
 export { getRepoMode } from "./repoMode.js";

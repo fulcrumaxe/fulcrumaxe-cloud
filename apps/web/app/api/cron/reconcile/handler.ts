@@ -24,6 +24,9 @@ import {
   runTick,
   sandboxInventoryJob,
   createMachineServerSweep,
+  createSetupInstallPrJob,
+  type SetupInstallStep,
+  setupInstallPending,
   type MachineSweepStart,
   sandboxReapJobs,
   type OpsAlertSink,
@@ -34,11 +37,13 @@ import {
   type TickDeps,
   type TickSummary,
 } from "@fx/reconcile";
+import { claimSetupInstall, completeSetupInstall, type SetupInstallPort } from "@fx/runner-cloud";
+import { createAppRunPullRequestPort } from "../../../../lib/github/runnerPullRequest";
 import { getWorker } from "../../../../lib/worker";
 import { startMachineSweep } from "../../../../lib/machineServers";
 import { cronAuthorized } from "../../../../lib/cronAuth";
 
-const [TERMINAL_JOB, CREDITS_JOB] = FAST_RECONCILE_JOBS;
+const [TERMINAL_JOB, CREDITS_JOB, INSTALL_JOB] = FAST_RECONCILE_JOBS;
 
 /** How far ahead the gate looks again when the 15-minute jobs' state could not be read: their own cadence, so a read failure never lets work wait. */
 const FAST_JOB_RETRY_MS = 15 * 60_000;
@@ -58,6 +63,8 @@ export async function reconcileNextDueAt(pool: Pick<TickDeps["pool"], "query">, 
   if (terminal === "budget" || terminal === "not_due") pending.push(TERMINAL_JOB);
   const credits = await readCreditsBreak(pool);
   if (credits.broken) pending.push(CREDITS_JOB);
+  // D#845 ON-8f2a: a pushed install whose pull request is not yet opened (the pass failed to reach GitHub, or has not run since the push report marked us).
+  if (await setupInstallPending(pool)) pending.push(INSTALL_JOB);
   if (pending.length === 0) return null;
   const { rows } = await pool.query<{ name: string; due: number }>(
     "SELECT name, (EXTRACT(EPOCH FROM next_due_at) * 1000)::float8 AS due FROM reconcile_jobs WHERE name = ANY($1::text[])",
@@ -98,6 +105,8 @@ export interface ReconcileHandlerDeps {
   reportError: ReportError;
   /** D#845 MC-7: starts the queued orphan sweep of one credential. Absent (a test double): the sweep job reports not_configured. */
   startMachineSweep?: ((a: MachineSweepStart) => Promise<unknown>) | undefined;
+  /** D#845 ON-8f2a: the GitHub port of the install pull request step, built when a setup is due. Absent: the app port. */
+  setupInstallPort?: (() => SetupInstallPort) | undefined;
   /** The raw FX_SANDBOX_REAP_MODE: unset is dry_run, off | dry_run | on are themselves, anything else is off (and reported). */
   sandboxReapMode?: string | undefined;
   /**
@@ -256,6 +265,25 @@ export function defaultReconcileDeps(): ReconcileHandlerDeps {
   };
 }
 
+/**
+ * D#845 ON-8f2a (Ruling 83): one pass of the install pull request step for the reconcile job: claims the oldest due setup (platform_ops, under its lease) and does it. A claim of an impossible shape is reported and left to its
+ * lease; a GitHub that could not be asked ends the pass (`retry`). The port is built the first time a setup is due, so an idle tick opens no GitHub client.
+ */
+export function setupInstallStep(deps: Pick<ReconcileHandlerDeps, "reportError" | "setupInstallPort">): SetupInstallStep {
+  let port: SetupInstallPort | undefined;
+  return async (pool) => {
+    const claim = await claimSetupInstall(pool);
+    if (claim === null) return "none";
+    if (claim === "malformed") {
+      deps.reportError(new Error("setup install claim malformed"), { stage: "reconcile.setup_install_pr", route: RECONCILE_ROUTE, code: "internal_error" });
+      return "done";
+    }
+    port ??= (deps.setupInstallPort ?? createAppRunPullRequestPort)();
+    const outcome = await completeSetupInstall({ pool, port }, claim);
+    return outcome === "retry" ? "retry" : "done";
+  };
+}
+
 export async function reconcileHandler(
   req: NextRequest,
   injected?: ReconcileHandlerDeps,
@@ -292,6 +320,7 @@ export async function reconcileHandler(
         modelKeyHealth: modelKeyHealthJobFromEnv(deps.platformOpsPool, deps.reportError),
         modelCreditsRevalidate: modelCreditsRevalidateJobFromEnv(deps.platformOpsPool, deps.reportError),
         machine: [createMachineServerSweep(deps.startMachineSweep ?? null)],
+        setupInstall: createSetupInstallPrJob(setupInstallStep(deps)),
         sandbox: [...sandboxReapJobs(worker, sandboxDeps), sandboxInventoryJob(worker, sandboxDeps)],
       }),
       enabled: deps.enabled,

@@ -127,7 +127,7 @@ export const SETUP_VM_JOB_CODES = ["vm_admission_refused", "vm_boot_failed", "vm
 /** What a setup may fail with besides the engine's own coldstart codes: a closed list of the runner's and the cloud's steps. */
 export const SETUP_FAILURE_CODES = [
   "engine_fetch_failed", "engine_checksum", "engine_archive_refused", "plan_fetch_failed", "plan_checksum", "plan_invalid", "setup_status_refused", "bootstrap_failed", "finalize_failed",
-  "bundle_refused", "push_failed", "direct_raced", "pr_open_failed", "labels_failed", "kind_unsupported", "job_expired", "job_silent", "job_overran", "engine_unsupported", ...SETUP_VM_JOB_CODES,
+  "bundle_refused", "push_failed", "direct_raced", "pr_open_failed", "install_head_changed", "pr_scope_refused", "labels_failed", "kind_unsupported", "job_expired", "job_silent", "job_overran", "engine_unsupported", ...SETUP_VM_JOB_CODES,
 ] as const;
 /** The runner's own steps. None reuses a coldstart name (`bundle_out` is not `bundle`, `gh_labels` is not `labels`). */
 export const SETUP_RUNNER_STEPS = ["engine_fetch", "plan_fetch", "sandbox_boot", "workspace_in", "bootstrap", "finalize", "bundle_out", "push", "pr_open", "gh_labels"] as const;
