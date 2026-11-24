@@ -236,8 +236,24 @@ export const GATE1_QUEUE_DOCUMENTS = Object.freeze({
   }
 }`,
 });
-const ALL_DOCUMENTS: Readonly<Record<string, string>> = Object.freeze({ ...GITHUB_GRAPHQL_DOCUMENTS, ...MERGE_QUEUE_READ_DOCUMENTS, ...GATE1_ATTEST_DOCUMENTS, ...GATE1_STATUS_DOCUMENTS, ...GATE1_QUEUE_DOCUMENTS });
-export type GithubGraphqlOperation = keyof typeof GITHUB_GRAPHQL_DOCUMENTS | keyof typeof MERGE_QUEUE_READ_DOCUMENTS | keyof typeof GATE1_ATTEST_DOCUMENTS | keyof typeof GATE1_STATUS_DOCUMENTS | keyof typeof GATE1_QUEUE_DOCUMENTS;
+/**
+ * D#845 ON-8f2a (A25): the parents of ONE commit named by its sha, as commit ids and their count: nothing else of the commit (no message, author, tree or file). The install step reads it to hold the
+ * pushed commit to the job's base before it opens a pull request (the head is directly on the base in a pull request job, and a root commit in direct mode). Opt-in (`setupInstall`): no other client holds it.
+ */
+export const SETUP_INSTALL_DOCUMENTS = Object.freeze({
+  CommitParents: `query CommitParents($owner: String!, $name: String!, $sha: GitObjectID!) {
+  repository(owner: $owner, name: $name) {
+    object(oid: $sha) {
+      ... on Commit {
+        oid
+        parents(first: 5) { totalCount nodes { oid } }
+      }
+    }
+  }
+}`,
+});
+const ALL_DOCUMENTS: Readonly<Record<string, string>> = Object.freeze({ ...GITHUB_GRAPHQL_DOCUMENTS, ...MERGE_QUEUE_READ_DOCUMENTS, ...GATE1_ATTEST_DOCUMENTS, ...GATE1_STATUS_DOCUMENTS, ...GATE1_QUEUE_DOCUMENTS, ...SETUP_INSTALL_DOCUMENTS });
+export type GithubGraphqlOperation = keyof typeof GITHUB_GRAPHQL_DOCUMENTS | keyof typeof MERGE_QUEUE_READ_DOCUMENTS | keyof typeof GATE1_ATTEST_DOCUMENTS | keyof typeof GATE1_STATUS_DOCUMENTS | keyof typeof GATE1_QUEUE_DOCUMENTS | keyof typeof SETUP_INSTALL_DOCUMENTS;
 
 /** D#6 CLOUD-POSTS-FX-GATE1 PR 0: the one label A14 may add, the one extra status context A7 takes on the attester's client, and its only descriptions. */
 export const FX_GATE1_LABEL = "ci:full";
@@ -259,7 +275,7 @@ export interface LocalOnlyAllowlistEntry {
   query: readonly string[];
   body: string;
   /** Present on an opt-in entry: it holds only on a client built with that option, and every other client refuses it. */
-  only?: "gate1Attest" | "engineRemove";
+  only?: "gate1Attest" | "engineRemove" | "setupInstall";
   /** An opt-in entry that ALSO holds on a client built with this read-only option (A17 alone). */
   alsoOn?: "gate1Status";
 }
@@ -291,6 +307,8 @@ export const LOCAL_ONLY_ALLOWLIST: readonly LocalOnlyAllowlistEntry[] = Object.f
     { id: "A22", method: "POST", paths: ["/repos/{owner}/{repo}/git/trees"], query: [], body: "{ base_tree, tree: 1 to 500 deletions { path, mode, type: blob, sha: null } }", only: "engineRemove" },
     { id: "A23", method: "POST", paths: ["/repos/{owner}/{repo}/git/commits"], query: [], body: "{ message, tree, parents: [one commit] }", only: "engineRemove" },
     { id: "A24", method: "POST", paths: ["/repos/{owner}/{repo}/git/refs"], query: [], body: "{ ref: refs/heads/fx/engine-remove-<major.minor.patch>, sha }", only: "engineRemove" },
+    // D#845 ON-8f2a: the install step's one extra read, on a client built with `setupInstall` only.
+    { id: "A25", method: "POST", paths: ["/graphql"], query: [], body: "{ query: CommitParents, variables: exactly owner, name, sha }", only: "setupInstall" },
   ].map((entry) => Object.freeze(entry) as LocalOnlyAllowlistEntry),
 );
 
@@ -405,6 +423,9 @@ const GATE1_VARIABLES: Readonly<Record<keyof typeof GATE1_ATTEST_DOCUMENTS, (v: 
 const GATE1_STATUS_VARIABLES: Readonly<Record<keyof typeof GATE1_STATUS_DOCUMENTS, (v: Record<string, unknown>) => boolean>> = {
   Gate1Status: (v) => hasExactKeys(v, ["owner", "name", "sha"]) && ownerOrName(v.owner) && ownerOrName(v.name) && typeof v.sha === "string" && SHA.test(v.sha),
 };
+const SETUP_INSTALL_VARIABLES: Readonly<Record<keyof typeof SETUP_INSTALL_DOCUMENTS, (v: Record<string, unknown>) => boolean>> = {
+  CommitParents: (v) => hasExactKeys(v, ["owner", "name", "sha"]) && ownerOrName(v.owner) && ownerOrName(v.name) && typeof v.sha === "string" && SHA.test(v.sha),
+};
 const GATE1_QUEUE_VARIABLES: Readonly<Record<keyof typeof GATE1_QUEUE_DOCUMENTS, (v: Record<string, unknown>) => boolean>> = {
   Gate1QueueEntries: (v) => hasExactKeys(v, ["owner", "name", "branch"]) && ownerOrName(v.owner) && ownerOrName(v.name) && str(v.branch, REF_NAME),
 };
@@ -453,6 +474,8 @@ function bodyFits(entry: LocalOnlyAllowlistEntry, body: unknown, gate1Attest: bo
       return documentBodyFits(body, GATE1_STATUS_DOCUMENTS, GATE1_STATUS_VARIABLES, "Gate1Status");
     case "A18":
       return documentBodyFits(body, GATE1_QUEUE_DOCUMENTS, GATE1_QUEUE_VARIABLES, "Gate1QueueEntries");
+    case "A25":
+      return documentBodyFits(body, SETUP_INSTALL_DOCUMENTS, SETUP_INSTALL_VARIABLES, "CommitParents");
     case "A22":
     case "A23":
     case "A24":
@@ -502,14 +525,15 @@ const QUERY_VALUES: Readonly<Record<string, (value: string) => boolean>> = {
 };
 
 /** The rule a call breaks, or null when it is on the allowlist. `not_allowlisted` for anything the list does not hold; `accept` for a media type other than JSON. */
-export function localOnlyViolation(req: Pick<GithubRequest, "method" | "path" | "query" | "headers" | "body">, exclude: readonly string[] = [], options: { gate1Attest?: boolean; gate1Status?: boolean; engineRemove?: boolean } = {}): string | null {
+export function localOnlyViolation(req: Pick<GithubRequest, "method" | "path" | "query" | "headers" | "body">, exclude: readonly string[] = [], options: { gate1Attest?: boolean; gate1Status?: boolean; engineRemove?: boolean; setupInstall?: boolean } = {}): string | null {
   const engineRemove = options.engineRemove === true;
   const gate1Attest = options.gate1Attest === true;
   const gate1Status = options.gate1Status === true;
+  const setupInstall = options.setupInstall === true;
   if (typeof req.method !== "string" || typeof req.path !== "string") return NOT_ALLOWLISTED;
   const where = canonical(foldContinuationBranchPath(req.path));
   if (where === null) return NOT_ALLOWLISTED;
-  const entry = LOCAL_ONLY_ALLOWLIST.find((e) => !exclude.includes(e.id) && (engineRemove ? e.only === "engineRemove" || ENGINE_REMOVE_BASE_IDS.includes(e.id) : e.only !== "engineRemove" && (e.only === undefined || gate1Attest || (gate1Status && e.alsoOn === "gate1Status"))) && e.method === req.method && e.paths.some((template) => templateMatches(template, where.segments)) && bodyFits(e, req.body, gate1Attest, engineRemove));
+  const entry = LOCAL_ONLY_ALLOWLIST.find((e) => !exclude.includes(e.id) && (engineRemove ? e.only === "engineRemove" || ENGINE_REMOVE_BASE_IDS.includes(e.id) : e.only !== "engineRemove" && (e.only === undefined || (e.only === "setupInstall" ? setupInstall : gate1Attest || (gate1Status && e.alsoOn === "gate1Status")))) && e.method === req.method && e.paths.some((template) => templateMatches(template, where.segments)) && bodyFits(e, req.body, gate1Attest, engineRemove));
   if (!entry) return NOT_ALLOWLISTED;
 
   const given = Object.entries(req.query ?? {});
@@ -546,13 +570,14 @@ export interface LocalOnlyGithub extends GithubClient {
  * cloud cannot call merge on it at all and a runner or a person merges there. `gate1Attest` turns on the opt-in entries (A14 to A16, and A7's
  * `fx-gate1` shape) for this client only. `gate1Status` turns on A17 alone (a read), and nothing that writes.
  */
-export function localOnlyGithub(inner: GithubClient, options: { exclude?: readonly string[]; gate1Attest?: boolean; gate1Status?: boolean; engineRemove?: boolean } = {}): LocalOnlyGithub {
+export function localOnlyGithub(inner: GithubClient, options: { exclude?: readonly string[]; gate1Attest?: boolean; gate1Status?: boolean; engineRemove?: boolean; setupInstall?: boolean } = {}): LocalOnlyGithub {
   const exclude = options.exclude ?? [];
   const gate1Attest = options.gate1Attest === true;
   const gate1Status = options.gate1Status === true;
   const engineRemove = options.engineRemove === true;
+  const setupInstall = options.setupInstall === true;
   const send = (req: GithubRequest): Promise<GithubResponse> => {
-    const rule = localOnlyViolation(req, exclude, { gate1Attest, gate1Status, engineRemove });
+    const rule = localOnlyViolation(req, exclude, { gate1Attest, gate1Status, engineRemove, setupInstall });
     if (rule !== null) return Promise.reject(new LocalOnlyGithubError(rule));
     const hasAccept = Object.keys(req.headers ?? {}).some((name) => name.toLowerCase() === "accept");
     return inner.request(hasAccept ? req : { ...req, headers: { ...req.headers, accept: JSON_ACCEPT } });

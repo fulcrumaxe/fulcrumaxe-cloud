@@ -26,6 +26,8 @@ export function buildReconcileJobs(extra: {
   sandbox?: readonly ReconcileJob[];
   /** D#845 MC-7: the Hetzner server sweep (it needs a way to start a queued job, so the route builds it). */
   machine?: readonly ReconcileJob[];
+  /** D#845 ON-8f2a: the install pull request step (it needs the GitHub port and the app database, so the route builds it). */
+  setupInstall?: ReconcileJob;
 }): readonly ReconcileJob[] {
-  return [...RECONCILE_JOBS, ...(extra.sandbox ?? []), ...(extra.machine ?? []), extra.githubInstallations, extra.githubRepos, extra.stripeSubscriptions, extra.modelKeyHealth, extra.modelCreditsRevalidate];
+  return [...RECONCILE_JOBS, ...(extra.sandbox ?? []), ...(extra.machine ?? []), ...(extra.setupInstall ? [extra.setupInstall] : []), extra.githubInstallations, extra.githubRepos, extra.stripeSubscriptions, extra.modelKeyHealth, extra.modelCreditsRevalidate];
 }

@@ -1,6 +1,6 @@
 import type { PrCloseHttp } from "@fx/worker";
 import { fenceForPrClose } from "./localOnlyHttp";
-import { createRunPullRequestPort, type GithubRequest, type PullRequestRepo, type RunPullRequestPort } from "@fx/runner-cloud";
+import { createRunPullRequestPort, type GithubRequest, type PullRequestRepo, type RunPullRequestPort, type SetupInstallPort } from "@fx/runner-cloud";
 import type { ContinuationBasePort } from "@fx/runner";
 import { createBranchSyncPort, type BranchSyncPort, type InstallationHttpRequest } from "@fx/github";
 import { openInstallationHttp, readRepoAppLogin } from "./installationHttp";
@@ -28,7 +28,7 @@ export async function openFencedPrCloseClient(open: typeof openInstallationHttp,
   return fenceForPrClose(await openRunnerPrHttp(open, repo));
 }
 
-export function createAppRunPullRequestPort(deps: { open?: typeof openInstallationHttp; appLogin?: (repo: PullRequestRepo) => Promise<string> } = {}): RunPullRequestPort {
+export function createAppRunPullRequestPort(deps: { open?: typeof openInstallationHttp; appLogin?: (repo: PullRequestRepo) => Promise<string> } = {}): SetupInstallPort {
   const open = deps.open ?? openInstallationHttp;
   const appLogin = deps.appLogin ?? ((repo: PullRequestRepo) => readRepoAppLogin(repo.id));
   return createRunPullRequestPort({

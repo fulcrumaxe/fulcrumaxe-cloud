@@ -174,7 +174,7 @@ export async function issueProjectSetup(deps: RunnerCloudDeps, principal: Sessio
     const { rows } = await client.query<{ attempt: number }>("SELECT machine_job_issue($1, $2, $3, $4, 'project_setup', $5::jsonb, $6, $7) AS attempt", [jobId, first.runnerId, first.setup.repoId, first.setup.id, JSON.stringify(signed), issued, expires]);
     const attempt = rows[0]!.attempt;
     await client.query(
-      `UPDATE project_setups SET phase = 'install', state = 'started', sub_step = NULL, failure_code = NULL, failure_reason = NULL, failure_at = NULL, install_head_sha = NULL, engine_version = $3, attempt = $4, plan_setup = $5::jsonb, updated_at = now()
+      `UPDATE project_setups SET phase = 'install', state = 'started', sub_step = NULL, failure_code = NULL, failure_reason = NULL, failure_at = NULL, install_head_sha = NULL, install_pr_claim_at = NULL, install_pr_claim_sha = NULL, engine_version = $3, attempt = $4, plan_setup = $5::jsonb, updated_at = now()
         WHERE account_id = $1 AND id = $2`,
       [principal.accountId, first.setup.id, first.release.version, attempt, JSON.stringify(built.plan.setup)],
     );

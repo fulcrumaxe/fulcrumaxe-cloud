@@ -111,10 +111,23 @@ export interface RunPullRequestText {
   parentIssueNumber?: number | null;
 }
 
+/** A pull request's title and body as the caller wrote them (the install pull request's; never an agent's words). */
+export interface PullRequestText {
+  title: string;
+  body: string;
+}
+
+/** The port the install step uses: the run port plus the one read of a commit's parents (A25, a client of its own that no other call shares). */
+export interface SetupInstallPort extends RunPullRequestPort {
+  /** The parent commit ids of the commit `sha` in the repository, or null when GitHub has no commit of that id. */
+  commitParents(input: { repo: PullRequestRepo; sha: string }): Promise<string[] | null>;
+}
+
 export interface RunPullRequestPort {
   defaultBranch(repo: PullRequestRepo): Promise<string>;
   branchState(input: { repo: PullRequestRepo; branch: string; base: string }): Promise<BranchState>;
-  openDraft(input: { repo: PullRequestRepo; branch: string; base: string; run: RunPullRequestText }): Promise<PullRequestRef>;
+  /** `run` fills the run pull request's fixed title and body; `text` (D#845 ON-8f2a, the install pull request) gives them directly. One of the two is required. */
+  openDraft(input: { repo: PullRequestRepo; branch: string; base: string; run?: RunPullRequestText; text?: PullRequestText }): Promise<PullRequestRef>;
   changedFiles(input: { repo: PullRequestRepo; number: number }): Promise<ChangedFiles>;
   markReady(input: { repo: PullRequestRepo; pullRequest: PullRequestRef }): Promise<void>;
   close(input: { repo: PullRequestRepo; number: number }): Promise<void>;
@@ -267,8 +280,8 @@ export function createRunPullRequestPort(deps: {
    * kept and no second pull request is attempted). A throw is a failure to find out, so it is `unavailable`; an empty answer is `rejected`.
    */
   appLogin(repo: PullRequestRepo): Promise<string>;
-}): RunPullRequestPort {
-  const client = async (repo: PullRequestRepo): Promise<LocalOnlyGithub> => {
+}): SetupInstallPort {
+  const client = async (repo: PullRequestRepo, options: { setupInstall?: boolean } = {}): Promise<LocalOnlyGithub> => {
     let inner: GithubClient;
     try {
       inner = await deps.open(repo);
@@ -277,7 +290,7 @@ export function createRunPullRequestPort(deps: {
       // are permanent (a retry cannot fix them); a token mint that failed or timed out, or a transport error, is worth retrying.
       throw new RunPullRequestError(isPermanentOpenFailure(error) ? "rejected" : "unavailable");
     }
-    return localOnlyGithub(inner);
+    return localOnlyGithub(inner, options);
   };
 
   async function findOpen(gh: LocalOnlyGithub, repo: PullRequestRepo, branch: string, base: string): Promise<PullRequestRef | null> {
@@ -328,7 +341,7 @@ export function createRunPullRequestPort(deps: {
     }
   }
 
-  const port: RunPullRequestPort = {
+  const port: SetupInstallPort = {
     async defaultBranch(repo) {
       const gh = await client(repo);
       const res = await guarded(() => gh.request({ method: "GET", path: repoPath(repo) }));
@@ -353,10 +366,12 @@ export function createRunPullRequestPort(deps: {
       return { exists: true, headOid: ref.target.oid, aheadBy, defaultBranch };
     },
 
-    async openDraft({ repo, branch, base, run }) {
-      const ids = { runId: run.runId, workItemId: run.workItemId, issueNumber: run.issueNumber ?? null, parentIssueNumber: run.parentIssueNumber ?? null };
-      const title = pullRequestTitle(run.workItemTitle);
-      const body = pullRequestBody(ids);
+    async openDraft({ repo, branch, base, run, text }) {
+      if (run === undefined && text === undefined) return malformed();
+      const ids = run === undefined ? null : { runId: run.runId, workItemId: run.workItemId, issueNumber: run.issueNumber ?? null, parentIssueNumber: run.parentIssueNumber ?? null };
+      const title = text !== undefined ? pullRequestTitle(text.title) : pullRequestTitle(run!.workItemTitle);
+      const bodyFor = (readyFallback: boolean): string => (text !== undefined ? (readyFallback ? `${text.body}\n\n${READY_FALLBACK_LINE}` : text.body) : pullRequestBody(ids!, { readyFallback }));
+      const body = bodyFor(false);
       const gh = await client(repo);
       const existing = await findOpen(gh, repo, branch, base);
       if (existing) return existing;
@@ -368,13 +383,28 @@ export function createRunPullRequestPort(deps: {
         if (raced) return raced;
         if (isDraftUnsupported(res.body)) {
           // The repository cannot have drafts: retry ONCE as a ready pull request. A 422 on the retry, like any other status, goes to checkStatus.
-          const retry = await create(pullRequestBody(ids, { readyFallback: true }), false);
+          const retry = await create(bodyFor(true), false);
           checkStatus(retry, [201]);
           return pullRequestRef(retry.body, branch, repo, false);
         }
       }
       checkStatus(res, [201]);
       return pullRequestRef(res.body, branch, repo, false);
+    },
+
+    async commitParents({ repo, sha }) {
+      if (!OID.test(sha)) return malformed();
+      const gh = await client(repo, { setupInstall: true });
+      const data = await query(gh, "CommitParents", { owner: repo.owner, name: repo.name, sha });
+      const repository = need(isObject(data.repository) && data.repository);
+      const object = repository.object;
+      if (object === null || object === undefined) return null;
+      // An object that is not a commit (a tag, a tree) selects nothing under the commit fragment: it is no commit of that id.
+      if (!isObject(object) || object.oid === undefined) return null;
+      if (object.oid !== sha) return malformed();
+      const parents = need(isObject(object.parents) && object.parents);
+      if (!isCount(parents.totalCount) || !Array.isArray(parents.nodes) || parents.nodes.length !== parents.totalCount || parents.totalCount > 5) return malformed();
+      return (parents.nodes as unknown[]).map((n) => (isObject(n) && typeof n.oid === "string" && OID.test(n.oid) ? n.oid : malformed()));
     },
 
     changedFiles: ({ repo, number }) => settle(() => readChangedFiles(repo, number)),
@@ -435,5 +465,5 @@ export function createRunPullRequestPort(deps: {
         }
       },
     ]),
-  ) as unknown as RunPullRequestPort;
+  ) as unknown as SetupInstallPort;
 }

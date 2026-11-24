@@ -97,7 +97,7 @@ describe("a planned PR child's paired publish [pg]", { timeout: 90_000 }, () => 
 
   let fake: ReturnType<typeof createFakeSandbox>;
   let output: () => { exitCode: number; stdout: string };
-  const drafts: Array<{ branch: string; base: string; run: RunPullRequestText }> = [];
+  const drafts: Array<{ branch: string; base: string; run?: RunPullRequestText }> = [];
   const draftPort: RunPullRequestPort = {
     defaultBranch: async () => "main",
     branchState: async () => ({ exists: true, headOid: PRIVATE_HEAD, aheadBy: 1, defaultBranch: "main" }),
@@ -219,7 +219,7 @@ describe("a planned PR child's paired publish [pg]", { timeout: 90_000 }, () => 
     expect(input.body).not.toMatch(/closes|fixes|resolves/i);
     expect(input.title).toBe("this planned PR"); // the stored title reads as a closing keyword
     // the private draft: text from our rows, the parent's number, never the child's own
-    const text = drafts[0]!.run;
+    const text = drafts[0]!.run!;
     expect(text).toMatchObject({ issueNumber: null, parentIssueNumber: PARENT_NUMBER });
     const body = pullRequestBody(text);
     expect(body).toContain("Refs #41");

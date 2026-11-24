@@ -45,7 +45,7 @@ describe("settling a paired sandbox build, and opening the public pull request a
   /** The private side. `existing` is an open pull request our App already opened on the branch (it is reused). */
   const priv = {
     calls: [] as string[],
-    opened: [] as Array<{ branch: string; base: string; run: RunPullRequestText }>,
+    opened: [] as Array<{ branch: string; base: string; run?: RunPullRequestText }>,
     ready: [] as number[],
     existing: false,
     openError: false,

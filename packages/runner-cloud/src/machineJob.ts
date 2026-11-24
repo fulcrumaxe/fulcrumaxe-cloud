@@ -14,6 +14,7 @@ import {
 } from "@fulcrumaxe/runner-protocol";
 import type { PoolClient } from "pg";
 import { emitSetupChanged } from "@fx/core/src/onboarding/engineTrack.js";
+import { markWorkPending } from "@fx/core/src/pendingWork.js";
 import { RunnerHttpError, asRunner, parseJsonBody, parseMessage, pgCode, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse } from "./http.js";
 import { reissueRacedSetup } from "./setupReissue.js";
 import { verifyRunnerRequest, withRunnerSession } from "./verifyRunnerRequest.js";
@@ -108,6 +109,8 @@ export async function setupProgressRun(deps: RunnerCloudDeps, req: RunnerHttpReq
   });
   // A direct-mode job that lost the race for the default branch is replaced by the same setup in PR mode; when that cannot be done it stays failed for a person's Retry.
   if (result === "ok" && body.state === "failed" && body.failure_code === "direct_raced") await reissueRacedSetup(deps, runner, setupId.toLowerCase(), body.job_id);
+  // D#845 ON-8f2a: the pushed commit is recorded, so the install pull request is due; the reconcile job takes it on the next tick (never in this request, and a lost marker only costs the backstop).
+  if (result === "ok" && body.sub_step === "push" && body.state === "ok") void markWorkPending("reconcile");
   if (result === "ok") return { status: 200, body: SetupProgressReply.parse({ recorded: true }), headers: NO_STORE };
   if (result === "superseded") throw new RunnerHttpError(409, "job_superseded", "a later attempt replaced this job");
   if (result === "not_active") throw new RunnerHttpError(409, "job_not_active", "this job is not running");

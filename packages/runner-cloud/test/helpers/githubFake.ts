@@ -1,4 +1,4 @@
-import { GITHUB_GRAPHQL_DOCUMENTS, type GithubClient, type GithubRequest, type GithubResponse } from "../../src/localOnlyGithub.js";
+import { GITHUB_GRAPHQL_DOCUMENTS, SETUP_INSTALL_DOCUMENTS, type GithubClient, type GithubRequest, type GithubResponse } from "../../src/localOnlyGithub.js";
 
 /**
  * A fake of the part of GitHub the `done` port touches, as strict as the real service about what our code depends on, and written
@@ -59,6 +59,8 @@ export interface FakeRepo {
   supportsDrafts: boolean;
   branches: Map<string, FakeBranch>;
   pulls: FakePullRequest[];
+  /** D#845 ON-8f2a: commits by id with their parents (only those a test names; every other id is "no such object", as GitHub answers). */
+  commits: Map<string, string[]>;
 }
 
 const ok = (body: unknown, status = 200): GithubResponse => ({ status, body });
@@ -94,7 +96,7 @@ export class FakeGithub implements GithubClient {
   markReadyForbidden = false;
 
   addRepo(owner: string, name: string, over: Partial<Pick<FakeRepo, "defaultBranch" | "supportsDrafts" | "id">> = {}): FakeRepo {
-    const repo: FakeRepo = { id: over.id ?? 1234567, owner, name, defaultBranch: over.defaultBranch ?? "main", supportsDrafts: over.supportsDrafts ?? true, branches: new Map(), pulls: [] };
+    const repo: FakeRepo = { id: over.id ?? 1234567, owner, name, defaultBranch: over.defaultBranch ?? "main", supportsDrafts: over.supportsDrafts ?? true, branches: new Map(), pulls: [], commits: new Map() };
     repo.branches.set(repo.defaultBranch, { oid: "a".repeat(40), aheadBy: 0, files: [] });
     this.repos.set(`${owner}/${name}`.toLowerCase(), repo);
     return repo;
@@ -229,7 +231,8 @@ export class FakeGithub implements GithubClient {
   private graphql(body: unknown): { label: string; handler: () => GithubResponse } {
     if (!keysAre(body, ["query", "variables"])) this.deny("graphql body keys");
     const { query, variables } = body as { query: string; variables: unknown };
-    const op = (Object.keys(GITHUB_GRAPHQL_DOCUMENTS) as Array<keyof typeof GITHUB_GRAPHQL_DOCUMENTS>).find((k) => GITHUB_GRAPHQL_DOCUMENTS[k] === query);
+    const docs = { ...GITHUB_GRAPHQL_DOCUMENTS, ...SETUP_INSTALL_DOCUMENTS } as Record<string, string>;
+    const op = Object.keys(docs).find((k) => docs[k] === query) as keyof typeof GITHUB_GRAPHQL_DOCUMENTS | keyof typeof SETUP_INSTALL_DOCUMENTS | undefined;
     if (!op) return this.deny("graphql query text is not one of the fixed documents");
     // The review path's document (A9) is not part of the `done` path this fake models.
     if (op === "CommitChecks") return this.deny("CommitChecks is the review path's, not the done path's");
@@ -247,6 +250,16 @@ export class FakeGithub implements GithubClient {
       if (!fits) throw new StrictFakeError(`${op}: $${k} is not a ${d.type}`);
     }
     return { label: `A1 ${op}`, handler: () => this[`gql${op}`](given) };
+  }
+
+  /** `object(oid:)` answers null for an id it has no commit of; for a commit, its id and parents (first 5, with the total). */
+  private gqlCommitParents(v: Record<string, unknown>): GithubResponse {
+    const repo = this.repoOf(String(v.owner), String(v.name));
+    if (!repo) return ok({ data: { repository: null }, errors: [{ type: "NOT_FOUND", path: ["repository"], message: "Could not resolve to a Repository." }] });
+    if (!/^[0-9a-f]{40}$/.test(String(v.sha))) throw new StrictFakeError("CommitParents: $sha is not a GitObjectID");
+    const parents = repo.commits.get(String(v.sha));
+    if (parents === undefined) return ok({ data: { repository: { object: null } } });
+    return ok({ data: { repository: { object: { oid: v.sha, parents: { totalCount: parents.length, nodes: parents.slice(0, 5).map((oid) => ({ oid })) } } } } });
   }
 
   private gqlRunBranchState(v: Record<string, unknown>): GithubResponse {
