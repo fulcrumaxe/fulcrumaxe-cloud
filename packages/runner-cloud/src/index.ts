@@ -1,8 +1,22 @@
 /** @fx/runner-cloud: the cloud side of the local runner (private). R2a is runner identity; see README.md. */
 export * from "./http.js";
-export { isUsableEd25519Key } from "./strictEd25519.js";
-export { signedUrl, verifyKeyBoundRequest, verifyRunnerRequest, verifySelfSignedRequest, withRunnerSession, type VerifiedRunner } from "./verifyRunnerRequest.js";
-export { CODE_TTL_MINUTES, hashRegistrationCode, mintRegistrationCode, newRegistrationCode } from "./registrationCodes.js";
+export {
+  isUsableEd25519Key,
+} from "./strictEd25519.js";
+export {
+  signedUrl,
+  verifyKeyBoundRequest,
+  verifyRunnerRequest,
+  verifySelfSignedRequest,
+  withRunnerSession,
+  type VerifiedRunner,
+} from "./verifyRunnerRequest.js";
+export {
+  CODE_TTL_MINUTES,
+  hashRegistrationCode,
+  mintRegistrationCode,
+  newRegistrationCode,
+} from "./registrationCodes.js";
 export {
   MAX_OUTSTANDING_PROVISIONING_TOKENS,
   PROVISIONING_TOKEN_DEFAULT_TTL_SECONDS,
@@ -15,10 +29,28 @@ export {
   revokeProvisioningToken,
   type ProvisioningTokenEntry,
 } from "./provisioningTokens.js";
-export { REGISTER_PATH, registerRunner } from "./register.js";
-export { BOUND_SOURCE_IP_HEADER, boundSourceIp } from "./boundSourceIp.js";
-export { NODESOURCE_KEY_FINGERPRINT, SERVER_TOKEN_REPO_COUNT, SERVER_TOKEN_TTL_SECONDS, STAGE_DIR, USER_DATA_MAX_BYTES, renderUserData, type IssuedServerToken, type UserDataInput } from "./userData.js";
-export { mintServerProvisioningToken, type ServerProvisioningToken } from "./serverToken.js";
+export {
+  REGISTER_PATH,
+  registerRunner,
+} from "./register.js";
+export {
+  BOUND_SOURCE_IP_HEADER,
+  boundSourceIp,
+} from "./boundSourceIp.js";
+export {
+  NODESOURCE_KEY_FINGERPRINT,
+  SERVER_TOKEN_REPO_COUNT,
+  SERVER_TOKEN_TTL_SECONDS,
+  STAGE_DIR,
+  USER_DATA_MAX_BYTES,
+  renderUserData,
+  type IssuedServerToken,
+  type UserDataInput,
+} from "./userData.js";
+export {
+  mintServerProvisioningToken,
+  type ServerProvisioningToken,
+} from "./serverToken.js";
 export {
   DEVICE_CODE_KEY_MIN_BYTES,
   DEVICE_START_GLOBAL_PER_HOUR_DEFAULT,
@@ -36,31 +68,161 @@ export {
   readDeviceGlobalLimit,
   startDevice,
 } from "./deviceFlow.js";
-export { ROTATE_PATH, rotateRunnerKey } from "./rotate.js";
-export { REVOKE_PATH, revokeAllRunners, revokeRunner, selfRevokeRunner } from "./revoke.js";
-export { FLEET_SETTING_ACTIONS, applyRunnerSetting, checkRunner, removeRunner, setRunnerRepos, type FleetSettingAction } from "./fleetControls.js";
-export { RUNNER_CHECK_REPLY_MS, checkStatusOf, runnerReplyOf, type RunnerCheckStatus, type RunnerReply } from "./runnerReply.js";
-export { CLAIM_PATH, claimRun } from "./claim.js";
-export { HEARTBEAT_PATH, heartbeatRun } from "./heartbeat.js";
-export { SANDBOX_COMMAND_LIFE_SECONDS, SANDBOX_COMMAND_MAX_OPEN, enqueueSandboxCommand, exchangeSandboxCommands } from "./sandboxCommands.js";
-export { ENGINE_COMMANDS_PULL_PATH, ackEngineCommand, engineCommandAckPath, pullEngineCommands, type EngineCommandSigner } from "./engineCommands.js";
-export { ENGINE_DECIDE_PATH, engineDecide, parseEngineDecide, pgEngineDecidePorts, type EngineDecideAuditEntry, type EngineDecidePorts, type EngineGate } from "./engineDecide.js";
-export { eventsPath, ingestEvents } from "./ingestEvents.js";
-export { ENGINE_EVENTS_PATH, engineSeqInOrder, ingestEngineEvents, parseEngineBatch, type EngineUsagePort, type EngineUsageSubject } from "./ingestEngineEvents.js";
-export { DISPATCH_BASE_KIND, branchOf, donePath, doneRun } from "./done.js";
-export { CHECK_BOUNDS, normaliseCheck } from "./checkResult.js";
-export { gitTicketRun } from "./gitTicket.js";
-export { planeMergeClaimRun, planeMergeReportRun, planeMergeVerifyRun, settleAuthorizedOrder, type SettleHint, type SettleOutcome } from "./planeMerge.js";
-export { DEPLOY_ORDER_ELIGIBLE_SQL, deployOrderClaimRun, deployOrderReportRun, deployOrderWaiting } from "./deployOrder.js";
-export { setupPushTokenRun } from "./setupPush.js";
-export { claimSetupInstall, completeSetupInstall, installPathRefused, installPullRequestText, type SetupInstallClaim, type SetupInstallDeps, type SetupInstallFailure, type SetupInstallOutcome } from "./setupInstallPr.js";
-export { machineJobClaimRun, machineJobProgressRun, offeredMachineJobs, setupProgressRun } from "./machineJob.js";
-export { ENGINE_SOURCE_REPO, buildPlanFile, engineTarballUrl, issueProjectSetup, retryInstall, setupPlanRun, type IssuedSetupJob } from "./setupJobs.js";
-export { ENGINE_SESSION_NAME_PREFIX, issueEngineSessionDelete, issueEngineSessionStart, issueEngineSessionStop, startEngine, type EngineStopReason, type IssuedSessionJob, type PersonStopReason } from "./engineSession.js";
-export { cancelClaudeLogin, exchangeMachineCommands, machineLoginCodeRun, machineLoginReportRun, readClaudeLogin, signOutOfClaude, startClaudeLogin, submitClaudeLoginCode } from "./machineLogin.js";
-export { startSurvey, type StartedSurvey } from "./surveyJobs.js";
-export { memoryProposalsRun } from "./memoryProposals.js";
-export { PLANE_PUSH_REPORT_CODES, planePushPairingRun, planePushReportRun, planePushTokenRun } from "./planePush.js";
+export {
+  ROTATE_PATH,
+  rotateRunnerKey,
+} from "./rotate.js";
+export {
+  REVOKE_PATH,
+  revokeAllRunners,
+  revokeRunner,
+  selfRevokeRunner,
+} from "./revoke.js";
+export {
+  FLEET_SETTING_ACTIONS,
+  applyRunnerSetting,
+  checkRunner,
+  removeRunner,
+  setRunnerRepos,
+  type FleetSettingAction,
+} from "./fleetControls.js";
+export {
+  RUNNER_CHECK_REPLY_MS,
+  checkStatusOf,
+  runnerReplyOf,
+  type RunnerCheckStatus,
+  type RunnerReply,
+} from "./runnerReply.js";
+export {
+  CLAIM_PATH,
+  claimRun,
+} from "./claim.js";
+export {
+  HEARTBEAT_PATH,
+  heartbeatRun,
+} from "./heartbeat.js";
+export {
+  SANDBOX_COMMAND_LIFE_SECONDS,
+  SANDBOX_COMMAND_MAX_OPEN,
+  enqueueSandboxCommand,
+  exchangeSandboxCommands,
+} from "./sandboxCommands.js";
+export {
+  ENGINE_COMMANDS_PULL_PATH,
+  ackEngineCommand,
+  engineCommandAckPath,
+  pullEngineCommands,
+  type EngineCommandSigner,
+} from "./engineCommands.js";
+export {
+  ENGINE_DECIDE_PATH,
+  engineDecide,
+  parseEngineDecide,
+  pgEngineDecidePorts,
+  type EngineDecideAuditEntry,
+  type EngineDecidePorts,
+  type EngineGate,
+} from "./engineDecide.js";
+export {
+  eventsPath,
+  ingestEvents,
+} from "./ingestEvents.js";
+export {
+  ENGINE_EVENTS_PATH,
+  engineSeqInOrder,
+  ingestEngineEvents,
+  parseEngineBatch,
+  type EngineUsagePort,
+  type EngineUsageSubject,
+} from "./ingestEngineEvents.js";
+export {
+  DISPATCH_BASE_KIND,
+  branchOf,
+  donePath,
+  doneRun,
+} from "./done.js";
+export {
+  CHECK_BOUNDS,
+  normaliseCheck,
+} from "./checkResult.js";
+export {
+  gitTicketRun,
+} from "./gitTicket.js";
+export {
+  planeMergeClaimRun,
+  planeMergeReportRun,
+  planeMergeVerifyRun,
+  settleAuthorizedOrder,
+  type SettleHint,
+  type SettleOutcome,
+} from "./planeMerge.js";
+export {
+  DEPLOY_ORDER_ELIGIBLE_SQL,
+  deployOrderClaimRun,
+  deployOrderReportRun,
+  deployOrderWaiting,
+} from "./deployOrder.js";
+export {
+  setupPushTokenRun,
+} from "./setupPush.js";
+export {
+  claimSetupInstall,
+  completeSetupInstall,
+  installPathRefused,
+  installPullRequestText,
+  type SetupInstallClaim,
+  type SetupInstallDeps,
+  type SetupInstallFailure,
+  type SetupInstallOutcome,
+} from "./setupInstallPr.js";
+export {
+  machineJobClaimRun,
+  machineJobProgressRun,
+  offeredMachineJobs,
+  setupProgressRun,
+} from "./machineJob.js";
+export {
+  ENGINE_SOURCE_REPO,
+  buildPlanFile,
+  engineTarballUrl,
+  issueProjectSetup,
+  retryInstall,
+  setupPlanRun,
+  type IssuedSetupJob,
+} from "./setupJobs.js";
+export {
+  ENGINE_SESSION_NAME_PREFIX,
+  issueEngineSessionDelete,
+  issueEngineSessionStart,
+  issueEngineSessionStop,
+  startEngine,
+  type EngineStopReason,
+  type IssuedSessionJob,
+  type PersonStopReason,
+} from "./engineSession.js";
+export {
+  cancelClaudeLogin,
+  exchangeMachineCommands,
+  machineLoginCodeRun,
+  machineLoginReportRun,
+  readClaudeLogin,
+  signOutOfClaude,
+  startClaudeLogin,
+  submitClaudeLoginCode,
+} from "./machineLogin.js";
+export {
+  startSurvey,
+  type StartedSurvey,
+} from "./surveyJobs.js";
+export {
+  memoryProposalsRun,
+} from "./memoryProposals.js";
+export {
+  PLANE_PUSH_REPORT_CODES,
+  planePushPairingRun,
+  planePushReportRun,
+  planePushTokenRun,
+} from "./planePush.js";
 export {
   FX_GATE1_DESCRIPTIONS,
   FX_GATE1_LABEL,
@@ -82,9 +244,24 @@ export {
   type GithubResponse,
   type LocalOnlyAllowlistEntry,
 } from "./localOnlyGithub.js";
-export { EngineRemovalError, buildEngineRemovalPr, type EngineRemovalCode, type EngineRemovalInput, type EngineRemovalResult } from "./engineRemovalPr.js";
-export { HELLO_PATH, protocolVersionSupported, runnerHello } from "./hello.js";
-export { WAKE_PATH, acceptsWakeJson, runnerWake, type WakeDeps } from "./wake.js";
+export {
+  EngineRemovalError,
+  buildEngineRemovalPr,
+  type EngineRemovalCode,
+  type EngineRemovalInput,
+  type EngineRemovalResult,
+} from "./engineRemovalPr.js";
+export {
+  HELLO_PATH,
+  protocolVersionSupported,
+  runnerHello,
+} from "./hello.js";
+export {
+  WAKE_PATH,
+  acceptsWakeJson,
+  runnerWake,
+  type WakeDeps,
+} from "./wake.js";
 export {
   RUNNER_SEEN_REFRESH_MS,
   RUNNER_SEEN_TTL_SECONDS,
@@ -101,15 +278,76 @@ export {
   type RunnerSeenWriteStore,
   type RunnerSeenWriter,
 } from "./wakeSeen.js";
-export { WAKE_SAFETY_JITTER_SECONDS, wakeSafetyRetryAfterSeconds } from "./wakeToken.js";
-export { WAKE_KEY_MIN_BYTES, configuredWakeKey, mintWakeToken, readWakeKey, verifyWakeToken, wakeGrantFor, type WakeRunner } from "./wakeToken.js";
-export { ALREADY_FINISHING_REASON, ALREADY_PAUSED_REASON, NOT_HELD_REASON, NOT_YOUR_RUNNER_REASON, SET_BY_SOMEONE_ELSE_REASON, accountLineOf, fleetControlsOf, type AccountLine, type FleetControl, type FleetControls } from "./fleetView.js";
-export { REVOKED_REGISTRANT_LEFT_NOTE, RUNNER_STATES, RUN_WAIT_REASONS, capacityOf, classifyRunner, getRunWait, getRunWaitReason, getRunnerStates, loadLabel, waitReasonOf, type AccountRunnerCaps, type RawRun, type RunWaitReason, type RunnerCapacity, type RunnerFacts, type RunnerRow, type RunnerRunning, type RunnerState } from "./readModel.js";
-export { listRunners } from "./fleetList.js";
-export { listMachines, moveProjectRoute } from "./machines.js";
-export { PICKER_MAX_INSTALLATIONS, PICKER_MAX_REPOS, PICKER_OWNERS_TIMEOUT_MS, PICKER_OWNERS_TTL_MS, PICKER_UNKNOWN_TTL_MS, PICKER_VISIBILITY_TTL_MS, clearPickerVisibilityCache, listPickerRepos, type PickerOwner, type PickerRepo } from "./repoPicker.js";
-export { placeProjectRoute } from "./projectConfirm.js";
-export { readMachineFacts, readMachineFactsIn, type MachineFacts } from "./machineFacts.js";
+export {
+  WAKE_SAFETY_JITTER_SECONDS,
+  wakeSafetyRetryAfterSeconds,
+  WAKE_KEY_MIN_BYTES,
+  configuredWakeKey,
+  mintWakeToken,
+  readWakeKey,
+  verifyWakeToken,
+  wakeGrantFor,
+  type WakeRunner,
+} from "./wakeToken.js";
+export {
+  ALREADY_FINISHING_REASON,
+  ALREADY_PAUSED_REASON,
+  NOT_HELD_REASON,
+  NOT_YOUR_RUNNER_REASON,
+  SET_BY_SOMEONE_ELSE_REASON,
+  accountLineOf,
+  fleetControlsOf,
+  type AccountLine,
+  type FleetControl,
+  type FleetControls,
+} from "./fleetView.js";
+export {
+  REVOKED_REGISTRANT_LEFT_NOTE,
+  RUNNER_STATES,
+  RUN_WAIT_REASONS,
+  capacityOf,
+  classifyRunner,
+  getRunWait,
+  getRunWaitReason,
+  getRunnerStates,
+  loadLabel,
+  waitReasonOf,
+  type AccountRunnerCaps,
+  type RawRun,
+  type RunWaitReason,
+  type RunnerCapacity,
+  type RunnerFacts,
+  type RunnerRow,
+  type RunnerRunning,
+  type RunnerState,
+} from "./readModel.js";
+export {
+  listRunners,
+} from "./fleetList.js";
+export {
+  listMachines,
+  moveProjectRoute,
+} from "./machines.js";
+export {
+  PICKER_MAX_INSTALLATIONS,
+  PICKER_MAX_REPOS,
+  PICKER_OWNERS_TIMEOUT_MS,
+  PICKER_OWNERS_TTL_MS,
+  PICKER_UNKNOWN_TTL_MS,
+  PICKER_VISIBILITY_TTL_MS,
+  clearPickerVisibilityCache,
+  listPickerRepos,
+  type PickerOwner,
+  type PickerRepo,
+} from "./repoPicker.js";
+export {
+  placeProjectRoute,
+} from "./projectConfirm.js";
+export {
+  readMachineFacts,
+  readMachineFactsIn,
+  type MachineFacts,
+} from "./machineFacts.js";
 export {
   LOAD_STALE_AFTER_INTERVALS,
   PLACEMENT_MIN_DISK_FREE_MB,
@@ -125,13 +363,40 @@ export {
   type IneligibleReason,
   type MachineCapacity,
 } from "./placement.js";
-export { anyRunnerCanTakeConflictRound } from "./conflictReach.js";
-export { approveRun } from "./approvals.js";
-export { APPROVALS_LIMIT, listApprovals, type ApprovalEntry } from "./approvalsList.js";
-export { setPlanConsent } from "./planConsent.js";
-export { PLACEMENTS, auditPlacementChange, cancelPendingRunsOnLeftSide, type Placement } from "./itemPlacement.js";
-export { HANDOFF_DEADLINE_MS, HANDOFF_PROTOCOL_VERSION, cancelHandoff, handoffDeadlineFor, requestHandoff, type HandoffCloudTarget, type HandoffDeps, type HandoffReservations } from "./handoff.js";
-export { getPlanApprovalDial, setPlanApprovalDial } from "./planApprovalDial.js";
+export {
+  anyRunnerCanTakeConflictRound,
+} from "./conflictReach.js";
+export {
+  approveRun,
+} from "./approvals.js";
+export {
+  APPROVALS_LIMIT,
+  listApprovals,
+  type ApprovalEntry,
+} from "./approvalsList.js";
+export {
+  setPlanConsent,
+} from "./planConsent.js";
+export {
+  PLACEMENTS,
+  auditPlacementChange,
+  cancelPendingRunsOnLeftSide,
+  type Placement,
+} from "./itemPlacement.js";
+export {
+  HANDOFF_DEADLINE_MS,
+  HANDOFF_PROTOCOL_VERSION,
+  cancelHandoff,
+  handoffDeadlineFor,
+  requestHandoff,
+  type HandoffCloudTarget,
+  type HandoffDeps,
+  type HandoffReservations,
+} from "./handoff.js";
+export {
+  getPlanApprovalDial,
+  setPlanApprovalDial,
+} from "./planApprovalDial.js";
 export {
   CHANGE_TYPES,
   MAX_FILE_PAGES,
@@ -152,10 +417,47 @@ export {
   type RunPullRequestText,
   type SetupInstallPort,
 } from "./runPullRequest.js";
-export { MAX_ENTRY_PATTERNS, MAX_SCOPE_ENTRIES, MAX_SCOPE_PATTERNS, loadAcceptanceScope, parseAcceptanceScope, pathInScope, pathsOutsideScope, type AcceptanceScope, type TenantQueryable } from "./acceptanceScope.js";
-export { getRepoMode } from "./repoMode.js";
-export { CLOUD_VERIFIED_COPY_SHA256, LOCAL_AUTO_MERGE_COPY_SHA256, SETTABLE_MODES, setExecutionMode, type RepoVisibilityAnswer } from "./executionMode.js";
-export { CHECK_UNREADABLE_MESSAGE, getSandboxAllowances, setAsideSandboxAllowances, setSandboxAllowances, suggestCheckFromFile, type SuggestedCheck } from "./sandboxAllowances.js";
-export { CONFLICT_ATTESTATION_EVENT } from "./conflictAttest.js";
-export { ENGINE_DIALS_PATH, engineDials, parseDialsQuery, pgEngineDialsPorts, type DialResolver, type EngineDialsPorts } from "./engineDials.js";
-export { catalogueResolver, defaultEngineDialsPorts } from "./engineDialsDefaults.js";
+export {
+  MAX_ENTRY_PATTERNS,
+  MAX_SCOPE_ENTRIES,
+  MAX_SCOPE_PATTERNS,
+  loadAcceptanceScope,
+  parseAcceptanceScope,
+  pathInScope,
+  pathsOutsideScope,
+  type AcceptanceScope,
+  type TenantQueryable,
+} from "./acceptanceScope.js";
+export {
+  getRepoMode,
+} from "./repoMode.js";
+export {
+  CLOUD_VERIFIED_COPY_SHA256,
+  LOCAL_AUTO_MERGE_COPY_SHA256,
+  SETTABLE_MODES,
+  setExecutionMode,
+  type RepoVisibilityAnswer,
+} from "./executionMode.js";
+export {
+  CHECK_UNREADABLE_MESSAGE,
+  getSandboxAllowances,
+  setAsideSandboxAllowances,
+  setSandboxAllowances,
+  suggestCheckFromFile,
+  type SuggestedCheck,
+} from "./sandboxAllowances.js";
+export {
+  CONFLICT_ATTESTATION_EVENT,
+} from "./conflictAttest.js";
+export {
+  ENGINE_DIALS_PATH,
+  engineDials,
+  parseDialsQuery,
+  pgEngineDialsPorts,
+  type DialResolver,
+  type EngineDialsPorts,
+} from "./engineDials.js";
+export {
+  catalogueResolver,
+  defaultEngineDialsPorts,
+} from "./engineDialsDefaults.js";

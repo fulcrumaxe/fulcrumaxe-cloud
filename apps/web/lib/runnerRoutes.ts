@@ -122,7 +122,30 @@ let machineLoginSealer: ReturnType<typeof createMachineLoginSealer> | undefined;
 
 export function runnerDeps(): RunnerCloudDeps {
   const auth = defaultAuthDeps();
-  return { appUserPool: auth.appUserPool, origin: process.env.FX_APP_ORIGIN, failRunnerLeases, leases, engineUsage: { record: recordEngineUsage }, maxRunners: (plan) => runnerLimitsFor(plan).maxRunners, accountRunnerCaps: accountRunnerCaps, accountJobLimit, repoVisibility: (accountId, repoId) => liveVisibility().visibility({ accountId, repoId }), installationAccount: (installationAccount ??= createInstallationAccountReader()), pullRequests: (pullRequests ??= createAppRunPullRequestPort()), planePush: (planePush ??= createLivePlanePushPort()), setupPush: (setupPush ??= createLiveSetupPushPort()), planeMerge: (planeMerge ??= livePlaneMerge()), readAllowanceFile, planePushIdentity, wakeKey, runnerSeen: runnerSeenFromCache(), deviceCodeKey: () => readDeviceCodeKey(process.env), deviceFlowGlobalPerHour: () => readDeviceGlobalLimit(process.env), engineCommandSigner: async () => (await getWorker())?.engineCommandSigner ?? null, machineLoginSealer: (machineLoginSealer ??= createMachineLoginSealer()) };
+  return {
+    appUserPool: auth.appUserPool,
+    origin: process.env.FX_APP_ORIGIN,
+    failRunnerLeases,
+    leases,
+    engineUsage: { record: recordEngineUsage },
+    maxRunners: (plan) => runnerLimitsFor(plan).maxRunners,
+    accountRunnerCaps: accountRunnerCaps,
+    accountJobLimit,
+    repoVisibility: (accountId, repoId) => liveVisibility().visibility({ accountId, repoId }),
+    installationAccount: (installationAccount ??= createInstallationAccountReader()),
+    pullRequests: (pullRequests ??= createAppRunPullRequestPort()),
+    planePush: (planePush ??= createLivePlanePushPort()),
+    setupPush: (setupPush ??= createLiveSetupPushPort()),
+    planeMerge: (planeMerge ??= livePlaneMerge()),
+    readAllowanceFile,
+    planePushIdentity,
+    wakeKey,
+    runnerSeen: runnerSeenFromCache(),
+    deviceCodeKey: () => readDeviceCodeKey(process.env),
+    deviceFlowGlobalPerHour: () => readDeviceGlobalLimit(process.env),
+    engineCommandSigner: async () => (await getWorker())?.engineCommandSigner ?? null,
+    machineLoginSealer: (machineLoginSealer ??= createMachineLoginSealer()),
+  };
 }
 
 /** D#6 RUNNER-WAKE R3a: the wake token's HMAC key, read on every call. Missing or shorter than 32 bytes: null, and no runner is sent a wake grant. */
