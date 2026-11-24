@@ -14,6 +14,7 @@ import { getWorker } from "./worker";
 import { createAppRunPullRequestPort } from "./github/runnerPullRequest";
 import { readPlanePushIdentity } from "@fx/core/src/repos/planePushIdentity.js";
 import { createLivePlanePushPort } from "./github/planePushHosted";
+import { createLiveSetupPushPort } from "./github/setupPush";
 import { createPlaneMergeOps } from "./planeMerge";
 import { openPlanSource } from "./github/planSource";
 import { runnerSeenFromCache } from "./runnerSeenCache";
@@ -56,6 +57,7 @@ let installationAccount: ReturnType<typeof createInstallationAccountReader> | un
 let pullRequests: RunPullRequestPort | undefined;
 /** D#598 P1f-2: the GitHub side of the public-push routes. Built on first use; a missing App answers the routes' fixed `not_configured`. */
 let planePush: PlanePushHostedPort | undefined;
+let setupPush: ReturnType<typeof createLiveSetupPushPort> | undefined;
 
 /**
  * D#6 PUBLIC-MERGE PR2b: the merge-order routes' store, gate and GitHub reads. Built on first use over the worker (resolved per call, so a missing worker is a 503
@@ -120,7 +122,7 @@ let machineLoginSealer: ReturnType<typeof createMachineLoginSealer> | undefined;
 
 export function runnerDeps(): RunnerCloudDeps {
   const auth = defaultAuthDeps();
-  return { appUserPool: auth.appUserPool, origin: process.env.FX_APP_ORIGIN, failRunnerLeases, leases, engineUsage: { record: recordEngineUsage }, maxRunners: (plan) => runnerLimitsFor(plan).maxRunners, accountRunnerCaps: accountRunnerCaps, accountJobLimit, repoVisibility: (accountId, repoId) => liveVisibility().visibility({ accountId, repoId }), installationAccount: (installationAccount ??= createInstallationAccountReader()), pullRequests: (pullRequests ??= createAppRunPullRequestPort()), planePush: (planePush ??= createLivePlanePushPort()), planeMerge: (planeMerge ??= livePlaneMerge()), readAllowanceFile, planePushIdentity, wakeKey, runnerSeen: runnerSeenFromCache(), deviceCodeKey: () => readDeviceCodeKey(process.env), deviceFlowGlobalPerHour: () => readDeviceGlobalLimit(process.env), engineCommandSigner: async () => (await getWorker())?.engineCommandSigner ?? null, machineLoginSealer: (machineLoginSealer ??= createMachineLoginSealer()) };
+  return { appUserPool: auth.appUserPool, origin: process.env.FX_APP_ORIGIN, failRunnerLeases, leases, engineUsage: { record: recordEngineUsage }, maxRunners: (plan) => runnerLimitsFor(plan).maxRunners, accountRunnerCaps: accountRunnerCaps, accountJobLimit, repoVisibility: (accountId, repoId) => liveVisibility().visibility({ accountId, repoId }), installationAccount: (installationAccount ??= createInstallationAccountReader()), pullRequests: (pullRequests ??= createAppRunPullRequestPort()), planePush: (planePush ??= createLivePlanePushPort()), setupPush: (setupPush ??= createLiveSetupPushPort()), planeMerge: (planeMerge ??= livePlaneMerge()), readAllowanceFile, planePushIdentity, wakeKey, runnerSeen: runnerSeenFromCache(), deviceCodeKey: () => readDeviceCodeKey(process.env), deviceFlowGlobalPerHour: () => readDeviceGlobalLimit(process.env), engineCommandSigner: async () => (await getWorker())?.engineCommandSigner ?? null, machineLoginSealer: (machineLoginSealer ??= createMachineLoginSealer()) };
 }
 
 /** D#6 RUNNER-WAKE R3a: the wake token's HMAC key, read on every call. Missing or shorter than 32 bytes: null, and no runner is sent a wake grant. */

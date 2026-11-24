@@ -19,6 +19,7 @@ import { MICROVM_ENV_NAMES, guestEnvOf } from "../../src/vm/sandboxd/guestEnv.js
 import { runInGuest } from "../../src/vm/workspace/guestWorkspace.js";
 import { checkCanLaunch } from "../helpers/bwrapProbe.js";
 import { fixtureEngineTgz } from "../helpers/fixtureEngine.js";
+import { pushWorld } from "../helpers/pushWorld.js";
 import { compact, fakeCloud, serveBytes } from "../helpers/setupWorld.js";
 import { socketTmpRoot } from "../helpers/tmpRoot.js";
 import { fixtureRepo, git, hostDeps, hostWorkspace, localGuest } from "../vm/workspace/helpers.js";
@@ -508,10 +509,12 @@ async function setupThrough(fx: ReturnType<typeof fixtureRepo>, slice: "microvm-
     vm = { guestOf: async () => wrapped, lifecycle: { port, ...lifecycleBase } };
     paths = guest.paths;
   }
+  const pw = await pushWorld({ seed: { repo: fx.repo, branch: "main" } });
   try {
-    await createProjectSetupHandler({ client: world.client, vm, repos, apply: (input) => applyBundle({ git: deps.git, gitLarge: deps.gitLarge, scratchDir: deps.scratchDir, policy: workflowPolicy(deps.gitLarge) }, input), logDir, transport: serveBytes(engine), ...(paths === undefined ? {} : { paths }) })({ job: world.job, reporter: world.reporter, signal: world.signal });
+    await createProjectSetupHandler({ client: world.client, vm, repos, push: pw.deps, apply: (input) => applyBundle({ git: deps.git, gitLarge: deps.gitLarge, scratchDir: deps.scratchDir, policy: workflowPolicy(deps.gitLarge) }, input), logDir, transport: serveBytes(engine), ...(paths === undefined ? {} : { paths }) })({ job: world.job, reporter: world.reporter, signal: world.signal });
   } finally {
     rmSync(logDir, { recursive: true, force: true });
+    await pw.close();
   }
   return { progress: world.progress, tree: git(hostWs, "rev-parse", "HEAD^{tree}"), commit: git(hostWs, "rev-parse", "HEAD"), files: git(hostWs, "ls-tree", "-r", "--name-only", "HEAD").split("\n"), guestHosts: [] };
 }
@@ -524,7 +527,7 @@ describe.skipIf(!usable)("a whole project setup on the standard tier", () => {
     const micro = await setupThrough(fx, "microvm-stand-in");
     const standard = await setupThrough(fx, "standard");
     expect(compact(standard.progress).filter((line) => !line.startsWith("engine_") && !line.startsWith("plan_"))).toEqual(compact(micro.progress).filter((line) => !line.startsWith("engine_") && !line.startsWith("plan_")));
-    expect(compact(standard.progress).slice(-17)).toEqual(["bootstrap:started", "bootstrap:ok", ...CORE, "finalize:started", "finalize:ok", "bundle_out:started", "bundle_out:ok"].slice(-17));
+    expect(compact(standard.progress).slice(-19)).toEqual(["bootstrap:started", "bootstrap:ok", ...CORE, "finalize:started", "finalize:ok", "bundle_out:started", "bundle_out:ok", "push:started", "push:ok"].slice(-19));
     expect(standard.tree).toBe(micro.tree);
     expect(standard.commit).toBe(micro.commit);
     expect(standard.files).toEqual(expect.arrayContaining([".autonomous-team/project.json", ".autonomous-team/config.json", ".autonomous-team/CLAUDE.project.md", "docs/PRD.md", "README.md"]));
@@ -533,7 +536,7 @@ describe.skipIf(!usable)("a whole project setup on the standard tier", () => {
   it("leaves no job root in the jobs directory once a setup has ended", async () => {
     const fx = fixtureRepo();
     const standard = await setupThrough(fx, "standard");
-    expect(compact(standard.progress).at(-1)).toBe("bundle_out:ok");
+    expect(compact(standard.progress).at(-1)).toBe("push:ok");
     expect(existsSync(jobsRoot) ? readdirSync(jobsRoot).filter((name) => name.startsWith("g-") && !name.startsWith("g-t")) : []).toEqual([]);
   }, 120_000);
 

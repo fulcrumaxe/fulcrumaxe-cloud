@@ -26,6 +26,8 @@ export interface Step {
   failure_code?: SetupProgressBody["failure_code"];
   failure_reason?: string;
   bundle_bytes?: number;
+  /** The `push` step's `ok` carries the commit that was pushed (Ruling 73). */
+  head_sha?: string;
 }
 /** `recorded`: the cloud has it. `lost`: no answer after the tries (the job goes on). `closed`: the job is over, nothing was sent. */
 export type ReportResult = "recorded" | "lost" | "closed";
@@ -124,7 +126,7 @@ export function createStepReporter(deps: { client: Pick<RunnerClient, "setupProg
         if (at < highest) throw new Error("step_order");
         highest = at;
       }
-      const body: SetupProgressBody = { job_id: job.job_id, seq: seq++, sub_step: step.sub_step, state: step.state, ...(step.failure_code === undefined ? {} : { failure_code: step.failure_code }), ...(step.failure_reason === undefined ? {} : { failure_reason: step.failure_reason }), ...(step.bundle_bytes === undefined ? {} : { bundle_bytes: step.bundle_bytes }) };
+      const body: SetupProgressBody = { job_id: job.job_id, seq: seq++, sub_step: step.sub_step, state: step.state, ...(step.failure_code === undefined ? {} : { failure_code: step.failure_code }), ...(step.failure_reason === undefined ? {} : { failure_reason: step.failure_reason }), ...(step.bundle_bytes === undefined ? {} : { bundle_bytes: step.bundle_bytes }), ...(step.head_sha === undefined ? {} : { head_sha: step.head_sha }) };
       const result = await sendWithRetry(() => deps.client.setupProgress(job.setup_id as string, body));
       if (result === "refused") {
         end();

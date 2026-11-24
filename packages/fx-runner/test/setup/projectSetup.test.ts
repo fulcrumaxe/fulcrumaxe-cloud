@@ -18,6 +18,7 @@ import { DEFAULT_PACK_LIMITS } from "../../src/vm/workspace/packScan.js";
 import { fixtureEngineTgz, type FixtureEngineOptions } from "../helpers/fixtureEngine.js";
 import { compact, fakeCloud, serveBytes } from "../helpers/setupWorld.js";
 import { fixtureRepo, git, hostDeps, hostWorkspace, localGuest, type LocalGuest } from "../vm/workspace/helpers.js";
+import { pushWorld, type PushWorld } from "../helpers/pushWorld.js";
 
 /**
  * D#845 ON-8d, the whole handler against a LOCAL guest: the three guest commands are real processes (sh, bash, python3, git, tar) in a directory standing for the guest, the engine is a fixture that follows the
@@ -33,7 +34,9 @@ const lstatOrNull = (target: string): unknown => {
   }
 };
 const logDirs: string[] = [];
-afterEach(() => {
+const pushWorlds: PushWorld[] = [];
+afterEach(async () => {
+  for (const w of pushWorlds.splice(0)) await w.close();
   for (const dir of logDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
@@ -49,9 +52,10 @@ interface Run {
   job: ReturnType<typeof fakeCloud>["job"];
   released: number;
   copyDirs: string[];
+  push: PushWorld;
 }
 
-async function run(options: { engine?: FixtureEngineOptions; fx?: ReturnType<typeof fixtureRepo>; failCreate?: boolean; failPolicy?: boolean; limits?: Partial<typeof DEFAULT_PACK_LIMITS>; logDir?: string; kind?: "existing" | "new" } = {}): Promise<Run> {
+async function run(options: { engine?: FixtureEngineOptions; fx?: ReturnType<typeof fixtureRepo>; failCreate?: boolean; failPolicy?: boolean; limits?: Partial<typeof DEFAULT_PACK_LIMITS>; logDir?: string; kind?: "existing" | "new"; pushWorld?: { token?: (n: number) => string | undefined } } = {}): Promise<Run> {
   const fx = options.fx ?? fixtureRepo();
   const engine = fixtureEngineTgz(options.engine);
   const world = fakeCloud({ engine, baseSha: fx.commit, issuedAt: "2026-11-21T12:00:00.000Z", ...(options.kind === undefined ? {} : { kind: options.kind }) });
@@ -97,6 +101,8 @@ async function run(options: { engine?: FixtureEngineOptions; fx?: ReturnType<typ
       return { mirrorDir: fx.mirror, workspace: hostWs, archive: await buildWorkspaceArchive(deps, fx.mirror, fx.commit), release: async () => void state.released++ };
     },
   };
+  const push = await pushWorld({ seed: { repo: fx.repo, branch: "main" }, ...options.pushWorld });
+  pushWorlds.push(push);
   const logDir = options.logDir ?? mkdtempSync(path.join(tmpdir(), "fx-setup-log-"));
   if (options.logDir === undefined) logDirs.push(logDir);
   const handlerDeps: ProjectSetupDeps = {
@@ -108,22 +114,30 @@ async function run(options: { engine?: FixtureEngineOptions; fx?: ReturnType<typ
     repos,
     apply: (input) => applyBundle({ git: deps.git, gitLarge: deps.gitLarge, scratchDir: deps.scratchDir, ...(options.limits === undefined ? {} : { limits: options.limits }), policy: workflowPolicy(deps.gitLarge) }, input),
     logDir,
+    push: push.deps,
     transport: serveBytes(engine),
     paths: guest.paths,
   };
   await createProjectSetupHandler(handlerDeps)({ job: world.job, reporter: world.reporter, signal: world.signal });
-  return { progress: world.progress, guest, events, vmCalls, get tokenAsked() { return state.tokenAsked; }, logDir, hostWs, fx, job: world.job, get released() { return state.released; }, copyDirs: state.copyDirs };
+  return { progress: world.progress, guest, events, vmCalls, get tokenAsked() { return state.tokenAsked; }, logDir, hostWs, fx, job: world.job, get released() { return state.released; }, copyDirs: state.copyDirs, push };
 }
 
 const CORE = ["preflight:started", "preflight:ok", "interview:started", "interview:ok", "wiring:started", "wiring:ok", "deps:started", "deps:ok", "labels:skipped:cloud_owned", "sandbox_hook:started", "sandbox_hook:ok", "bundle:ok", "done:ok"];
 const BEFORE = ["engine_fetch:started", "engine_fetch:ok", "plan_fetch:started", "plan_fetch:ok", "sandbox_boot:started", "sandbox_boot:ok", "workspace_in:started", "workspace_in:ok", "bootstrap:started", "bootstrap:ok"];
 
 describe("a whole setup, on the three fixed guest commands", () => {
-  it("reports every step in order, one report per status line, ends on bundle_out ok, and applies the verified tree to the host copy", async () => {
+  it("reports every step in order, one report per status line, ends on push ok, and applies the verified tree to the host copy", async () => {
     const r = await run();
-    expect(compact(r.progress)).toEqual([...BEFORE, ...CORE, "finalize:started", "finalize:ok", "bundle_out:started", "bundle_out:ok"]);
+    expect(compact(r.progress)).toEqual([...BEFORE, ...CORE, "finalize:started", "finalize:ok", "bundle_out:started", "bundle_out:ok", "push:started", "push:ok"]);
     expect(r.progress.map((p) => p.seq)).toEqual(r.progress.map((_, i) => i));
-    expect(r.progress[r.progress.length - 1]?.bundle_bytes).toBeGreaterThan(0);
+    expect(r.progress.find((p) => p.sub_step === "bundle_out" && p.state === "ok")?.bundle_bytes).toBeGreaterThan(0);
+    // the push: `push ok` carries the pushed commit, which is the verified commit on the install branch of the remote, and the default branch is untouched
+    const head = git(r.hostWs, "rev-parse", "HEAD");
+    expect(r.progress[r.progress.length - 1]).toMatchObject({ sub_step: "push", state: "ok", head_sha: head });
+    expect(r.push.tip("fx/engine-install-1.2.3")).toBe(head);
+    expect(r.push.tip("main")).toBe(r.fx.commit);
+    expect(r.push.asked).toHaveLength(1);
+    expect(r.push.revoked).toHaveLength(1);
     // the runner's own steps are the protocol's, in its order
     const own = r.progress.map((p) => p.sub_step).filter((s): s is (typeof SETUP_RUNNER_STEPS)[number] => (SETUP_RUNNER_STEPS as readonly string[]).includes(s));
     expect(own.map((s) => SETUP_RUNNER_STEPS.indexOf(s))).toEqual([...own.map((s) => SETUP_RUNNER_STEPS.indexOf(s))].sort((a, b) => a - b));
@@ -175,7 +189,7 @@ describe("a whole setup, on the three fixed guest commands", () => {
     const fx = fixtureRepo();
     const plain = await run({ fx });
     const withCommits = await run({ fx, engine: { bootstrapCommits: "second" } });
-    expect(compact(withCommits.progress).at(-1)).toBe("bundle_out:ok");
+    expect(compact(withCommits.progress).at(-1)).toBe("push:ok");
     expect(git(withCommits.hostWs, "rev-list", "--count", `${fx.commit}..HEAD`)).toBe("1");
     expect(git(withCommits.hostWs, "rev-parse", "HEAD^")).toBe(fx.commit);
     expect(git(withCommits.hostWs, "ls-tree", "-r", "--name-only", "HEAD").split("\n")).toEqual([...git(plain.hostWs, "ls-tree", "-r", "--name-only", "HEAD").split("\n"), "engine-note.txt"].sort());
@@ -183,7 +197,7 @@ describe("a whole setup, on the three fixed guest commands", () => {
 
   it("a link the engine committed and then removed is not in the bundle's history", async () => {
     const r = await run({ engine: { bootstrapCommits: "link_removed" } });
-    expect(compact(r.progress).at(-1)).toBe("bundle_out:ok");
+    expect(compact(r.progress).at(-1)).toBe("push:ok");
     expect(git(r.hostWs, "rev-list", "--count", `${r.fx.commit}..HEAD`)).toBe("1");
     expect(git(r.hostWs, "log", "--format=%H", `${r.fx.commit}..HEAD`, "--", "escape")).toBe("");
   }, 60_000);
@@ -196,7 +210,7 @@ describe("a whole setup, on the three fixed guest commands", () => {
 
   it("makes its commit whatever hooks the engine installed in the repository (none runs)", async () => {
     const r = await run({ engine: { failingHook: true } });
-    expect(compact(r.progress).at(-1)).toBe("bundle_out:ok");
+    expect(compact(r.progress).at(-1)).toBe("push:ok");
     expect(git(r.hostWs, "rev-list", "--count", `${r.fx.commit}..HEAD`)).toBe("1");
     expect(lstatOrNull(path.join(r.guest.paths.workspace, "hook-ran.txt"))).toBeNull();
   }, 60_000);
@@ -281,6 +295,21 @@ describe("the bundle policy: a hostile guest is refused with its closed reason, 
     }
   }, 240_000);
 
+  it("a refused bundle asks for no push credential and pushes nothing", async () => {
+    const r = await hostile('ln -s ../../outside "$P/escape"');
+    expect(r.push.asked).toEqual([]);
+    expect(r.push.revoked).toEqual([]);
+    expect(r.push.tip("fx/engine-install-1.2.3")).toBeNull();
+    expect(compact(r.progress).some((p) => p.startsWith("push:"))).toBe(false);
+  }, 60_000);
+
+  it("a push the cloud will not give a credential for ends push_failed with its reason, and the verified commit stays on the host only", async () => {
+    const r = await run({ pushWorld: { token: () => undefined } });
+    expect(compact(r.progress).slice(-3)).toEqual(["bundle_out:ok", "push:started", "push:failed:push_failed/token_refused"]);
+    expect(r.push.tip("fx/engine-install-1.2.3")).toBeNull();
+    expect(r.push.revoked).toEqual([]);
+  }, 60_000);
+
   it("a link out of the tree is bundle_refused/symlink", async () => {
     const r = await hostile('ln -s ../../outside "$P/escape"');
     expect(refused(r)).toBe("bundle_out:failed:bundle_refused/symlink");
@@ -289,7 +318,7 @@ describe("the bundle policy: a hostile guest is refused with its closed reason, 
 
   it("commits made in the guest before finalize are folded into the one install commit: a link added and removed again never reaches the bundle's history", async () => {
     const r = await hostile('ln -s ../../outside "$P/escape"; git -C "$P" add escape; git -C "$P" -c user.name=g -c user.email=g@example.test commit -qm guest; rm "$P/escape"');
-    expect(refused(r)).toBe("bundle_out:ok");
+    expect(refused(r)).toBe("push:ok");
     expect(git(r.hostWs, "rev-list", "--count", `${r.fx.commit}..HEAD`)).toBe("1");
     expect(git(r.hostWs, "log", "--all", "--format=%H", "--diff-filter=A", "--name-only", "-1", "--", "escape")).toBe("");
     expect(git(r.hostWs, "rev-parse", "HEAD^")).toBe(r.fx.commit);

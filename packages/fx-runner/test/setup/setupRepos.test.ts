@@ -19,7 +19,7 @@ describe("createSetupRepos", () => {
   it("opens a pinned work tree at base_sha below the root, an archive of that commit, and release removes it", async () => {
     const fx = fixtureRepo();
     const m = make(fx);
-    const copy = await m.repos.open({ repoId: 7, owner: "acme", name: "w", baseSha: fx.commit, signal: sig });
+    const copy = await m.repos.open({ repoId: 7, owner: "acme", name: "w", baseSha: fx.commit, mode: "pr", signal: sig });
     expect(path.dirname(copy.workspace)).toBe(m.root);
     expect(git(copy.workspace, "rev-parse", "HEAD")).toBe(fx.commit);
     expect(copy.archive.commit).toBe(fx.commit);
@@ -31,7 +31,7 @@ describe("createSetupRepos", () => {
   it("the archive holds no host path", async () => {
     const fx = fixtureRepo();
     const m = make(fx);
-    const copy = await m.repos.open({ repoId: 7, owner: "acme", name: "w", baseSha: fx.commit, signal: sig });
+    const copy = await m.repos.open({ repoId: 7, owner: "acme", name: "w", baseSha: fx.commit, mode: "pr", signal: sig });
     const text = JSON.stringify(Object.fromEntries(Object.entries(copy.archive).map(([k, v]) => [k, Buffer.isBuffer(v) ? (k === "gz" ? gunzipSync(v) : v).toString("latin1") : v])));
     for (const p of [fx.mirror, fx.repo, copy.workspace, m.root]) expect(text.includes(p), p).toBe(false);
     await copy.release();
@@ -40,15 +40,15 @@ describe("createSetupRepos", () => {
   it.each(["", "abc", "A".repeat(40), `${"a".repeat(40)}\n`, "--upload-pack=x"])("refuses a base %j that is not a full lower-hex id, before any sync", async (bad) => {
     const fx = fixtureRepo();
     const m = make(fx);
-    await expect(m.repos.open({ repoId: 7, owner: "acme", name: "w", baseSha: bad, signal: sig })).rejects.toThrow();
+    await expect(m.repos.open({ repoId: 7, owner: "acme", name: "w", baseSha: bad, mode: "pr", signal: sig })).rejects.toThrow();
     expect(m.synced()).toBeUndefined();
   });
 
   it("a base that is not a commit in the mirror refuses and leaves no work tree behind", async () => {
     const fx = fixtureRepo();
     const m = make(fx);
-    await expect(m.repos.open({ repoId: 7, owner: "acme", name: "w", baseSha: "b".repeat(40), signal: sig })).rejects.toThrow();
-    await expect(m.repos.open({ repoId: 7, owner: "acme", name: "w", baseSha: fx.tree, signal: sig })).rejects.toThrow();
+    await expect(m.repos.open({ repoId: 7, owner: "acme", name: "w", baseSha: "b".repeat(40), mode: "pr", signal: sig })).rejects.toThrow();
+    await expect(m.repos.open({ repoId: 7, owner: "acme", name: "w", baseSha: fx.tree, mode: "pr", signal: sig })).rejects.toThrow();
     expect(existsSync(m.root) ? readdirSync(m.root) : []).toEqual([]);
   });
 });

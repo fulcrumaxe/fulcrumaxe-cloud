@@ -1,6 +1,6 @@
 import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { MACHINE_JOB_CLAIM_PATH, PlanFile, setupPlanPath, signMachineJob, verifyMachineJob, type MachineJob } from "@fulcrumaxe/runner-protocol";
+import { EMPTY_BASE_COMMIT, MACHINE_JOB_CLAIM_PATH, PlanFile, setupPlanPath, signMachineJob, verifyMachineJob, type MachineJob } from "@fulcrumaxe/runner-protocol";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { ENGINE_SOURCE_REPO, issueProjectSetup, machineJobClaimRun, retryInstall, setupPlanRun, type RunnerCloudDeps, type RunPullRequestPort } from "../src/index.js";
@@ -163,18 +163,33 @@ describe("issuing project_setup and the plan route [pg]", () => {
     expect((await h.admin.query("SELECT phase FROM project_setups WHERE id = $1", [dangling.setupId])).rows[0]!.phase).toBe("plan");
   });
 
-  it("refuses a public or unknown repo, an empty default branch, a GitHub failure, an unconfigured signer or port, a phase that is not plan or install, and another account's setup", async () => {
+  it("refuses a public or unknown repo, a GitHub failure, an unconfigured signer or port, a phase that is not plan or install, and another account's setup", async () => {
     await h.admin.query("DELETE FROM engine_releases");
     await release("2.0.0");
     const r = await rig();
     expect(await refusal(issue(r, { repoVisibility: async () => "public" }))).toEqual({ status: 409, code: "public_repo" });
     expect(await refusal(issue(r, { repoVisibility: async () => "unknown" }))).toEqual({ status: 409, code: "repo_visibility_unknown" });
-    expect(await refusal(issue(r, { pullRequests: github({ head: null }) }))).toEqual({ status: 409, code: "default_branch_empty" });
     expect(await refusal(issue(r, { engineCommandSigner: async () => null }))).toEqual({ status: 503, code: "not_configured" });
     expect(await refusal(issue(r, { pullRequests: null }))).toEqual({ status: 503, code: "not_configured" });
     await h.admin.query("UPDATE project_setups SET phase = 'finish' WHERE id = $1", [r.setupId]);
     expect(await refusal(issue(r))).toEqual({ status: 409, code: "setup_phase" });
     expect(await refusal(issueProjectSetup(depsFor(), principal(await rig()), r.setupId))).toEqual({ status: 404, code: "not_found" });
+  });
+
+  it("issues a default branch with no commit in direct mode, with the empty base commit, and the next attempt as a pull request once the branch has one", async () => {
+    await h.admin.query("DELETE FROM engine_releases");
+    await release("2.1.0");
+    const r = await rig();
+    expect((await issue(r, { pullRequests: github({ head: null }) })).attempt).toBe(1);
+    const first = verifyMachineJob((await lastJob(r.setupId)).job, keyring, r.runnerId);
+    if (first.kind !== "project_setup") throw new Error("kind");
+    expect(first.args).toMatchObject({ mode: "direct", base_sha: EMPTY_BASE_COMMIT, branch: "fx/engine-install-2.1.0" });
+    await h.admin.query("UPDATE project_setups SET state = 'failed', failure_code = 'direct_raced', failure_at = now(), install_head_sha = $2 WHERE id = $1", [r.setupId, "a".repeat(40)]);
+    expect((await retryInstall(depsFor(), principal(r), r.setupId)).status).toBe(200);
+    const second = verifyMachineJob((await lastJob(r.setupId)).job, keyring, r.runnerId);
+    if (second.kind !== "project_setup") throw new Error("kind");
+    expect(second.args).toMatchObject({ mode: "pr", base_sha: HEAD });
+    expect((await h.admin.query("SELECT install_head_sha, attempt FROM project_setups WHERE id = $1", [r.setupId])).rows[0]).toEqual({ install_head_sha: null, attempt: 2 });
   });
 
   it("writes nothing when the plan changes while the job is made", async () => {

@@ -36,6 +36,8 @@ export interface IssueOptions {
   lifeS?: number;
   /** How long ago it was issued, in seconds (default 5, so a clock a little behind the cloud's still takes it). */
   issuedAgoS?: number;
+  /** Arguments that replace the kind's defaults (e.g. a direct-mode `project_setup`). */
+  args?: Record<string, unknown>;
   /** Parameters the call to the definer disagrees with its own signed bytes on (a test of the binding): the setup, and the issue and expiry times moved by some milliseconds. */
   callAs?: { setupId?: string | null; issuedDeltaMs?: number; expiresDeltaMs?: number };
 }
@@ -47,7 +49,7 @@ export async function issueTestJob(appPool: Pool, admin: PoolClient, o: IssueOpt
   const issued = new Date(Date.now() - (o.issuedAgoS ?? 5) * 1000 + counter++);
   const expires = new Date(issued.getTime() + (o.lifeS ?? 600) * 1000);
   const setupId = o.setupId === undefined ? null : o.setupId;
-  const job = { v: 1, job_id: id, runner_id: o.runnerId, repo_gh_id: ghRepoId, ...(setupId ? { setup_id: setupId } : {}), requires_engine: o.requiresEngine ?? "any", issued_at: issued.toISOString(), expires_at: expires.toISOString(), kind, args: ARGS[kind] } as MachineJob;
+  const job = { v: 1, job_id: id, runner_id: o.runnerId, repo_gh_id: ghRepoId, ...(setupId ? { setup_id: setupId } : {}), requires_engine: o.requiresEngine ?? "any", issued_at: issued.toISOString(), expires_at: expires.toISOString(), kind, args: { ...ARGS[kind], ...o.args } } as MachineJob;
   const signed = signMachineJob(job, JOB_KEY_ID, keys.privateKey);
   const attempt = await withTenant(appPool, o.accountId, o.userId, async (client) => {
     const asked = { setup: o.callAs && "setupId" in o.callAs ? o.callAs.setupId : setupId, issued: new Date(issued.getTime() + (o.callAs?.issuedDeltaMs ?? 0)), expires: new Date(expires.getTime() + (o.callAs?.expiresDeltaMs ?? 0)) };

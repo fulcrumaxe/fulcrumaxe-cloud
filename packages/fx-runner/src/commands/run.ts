@@ -760,10 +760,11 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       const deployOrder = verifyLocal.deployOrderHandler(client);
       // D#845 ON-8d/ON-8e: `project_setup` runs the same fixed guest commands on either engine, in a microVM or in the OS sandbox through the host guest (`setup/hostGuest.ts`). The engine is read fresh for each job, as the
       // dispatcher's own gate reads it; every other kind has no handler yet and is reported `kind_unsupported`.
+      const setupRevoker = createPlanePushGithub();
       const setupParts = createSetupVmParts({ stateDir, capture: host.engine.capture, captureLarge: host.engine.captureLarge, envOptions });
       const mirrors = createMirrors({ git: setupParts.git, mirrorsRoot, stateDir, keepClear, signal: stopped.signal, ...(hooks.remoteUrl === undefined ? {} : { remoteUrl: hooks.remoteUrl }) });
       const setupRepos = createSetupRepos({ git: setupParts.git, gitLarge: setupParts.gitLarge, mirrors, workspaceRoot, scratchDir: setupParts.scratch });
-      const setupWith = (slice: Parameters<typeof createProjectSetupHandler>[0]["vm"]) => createProjectSetupHandler({ client, vm: slice, apply: setupParts.apply, logDir: path.join(home, ".local", "state", "fx-runner", "setup"), repos: setupRepos });
+      const setupWith = (slice: Parameters<typeof createProjectSetupHandler>[0]["vm"]) => createProjectSetupHandler({ client, vm: slice, apply: setupParts.apply, logDir: path.join(home, ".local", "state", "fx-runner", "setup"), push: { git: setupParts.git, client, revoke: (token) => setupRevoker.revokeToken(token), snapshotsRoot: path.join(stateDir, "git-snapshots") }, repos: setupRepos });
       const guestPath = cleanEnv(credentials, envOptions).PATH ?? searchPath;
       const guestDeps: HostGuestDeps | undefined = host.engine.installCapture === undefined || host.selfCommand === undefined ? undefined : { start: host.engine.installCapture, host: host.sandbox, platform: host.platform, home, stateDir, binaryDir: path.dirname(binaryPath), jobsRoot: path.join(path.dirname(mirrorsRoot), "setup-guests"), cacheDir: path.dirname(mirrorsRoot), searchPath: guestPath, selfCommand: host.selfCommand, uid: host.uid, wsl: host.sandbox.wsl };
       const standardVm = guestDeps === undefined ? undefined : createHostSetupVm(guestDeps);

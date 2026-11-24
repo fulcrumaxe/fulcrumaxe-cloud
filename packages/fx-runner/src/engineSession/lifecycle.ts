@@ -177,7 +177,7 @@ export function createEngineSessionHandlers(deps: EngineSessionDeps): { engine_s
           await p.say("seed", "started");
           const who = await deps.repoOf(job.repo_gh_id);
           if (who === undefined) await p.fail("seed", "vm_workspace_failed", "repo");
-          copy = await deps.repos.open({ repoId: job.repo_gh_id, owner: (who as { owner: string }).owner, name: (who as { name: string }).name, baseSha: job.args.at_sha, signal }).catch(() => p.fail("seed", "vm_workspace_failed", "repo"));
+          copy = await deps.repos.open({ repoId: job.repo_gh_id, owner: (who as { owner: string }).owner, name: (who as { name: string }).name, baseSha: job.args.at_sha, mode: "pr", signal }).catch(() => p.fail("seed", "vm_workspace_failed", "repo"));
           await sendWorkspace(guest, (copy as SetupRepoCopy).archive, deps.paths ?? DEFAULT_GUEST_PATHS).catch((error: unknown) => p.fail("seed", "vm_workspace_failed", error instanceof GuestWorkspaceError ? error.code : "workspace"));
           await p.say("seed", "ok");
         }

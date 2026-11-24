@@ -151,7 +151,10 @@ export const SetupProgressBody = strict({
   failure_code: z.union([ColdstartCode, z.enum(SETUP_FAILURE_CODES)]).optional(),
   failure_reason: z.string().regex(SETUP_FAILURE_REASON_PATTERN).optional(),
   bundle_bytes: z.number().int().min(0).max(2_147_483_647).optional(),
+  /** D#845 Ruling 73: the commit the runner pushed. Only on the `push` step reported `ok`; the cloud keeps it as `install_head_sha`. */
+  head_sha: z.string().regex(SHA40_PATTERN).optional(),
 }).superRefine((body, ctx) => {
+  if (body.head_sha !== undefined && !(body.sub_step === "push" && body.state === "ok")) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a head is reported with the push step ok and nowhere else", path: ["head_sha"] });
   // A failed step names its code; a skipped one may (`cloud_owned`); a started or ok one names none. A reason needs a code, and a code that already carries its topic takes none.
   if ((body.state === "failed" && body.failure_code === undefined) || ((body.state === "started" || body.state === "ok") && body.failure_code !== undefined)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a failed step names its code and a started or ok one names none", path: ["failure_code"] });
   if (body.failure_reason !== undefined && (body.failure_code === undefined || body.failure_code.includes(":"))) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a reason needs a code that has no topic", path: ["failure_reason"] });
@@ -192,6 +195,20 @@ export const SessionJobProgressBody = strict({
 });
 export type SessionJobProgressBody = z.infer<typeof SessionJobProgressBody>;
 export const machineJobProgressPath = (jobId: string): string => `/api/runner/machine-job/${jobId}/progress`;
+
+/**
+ * D#845 ON-8f: the empty-tree commit a direct-mode setup starts from (the default branch has no commit yet). Its bytes are fixed (an empty tree, one fixed identity, epoch date), so every runner makes the same id.
+ * The runner writes it into its own scratch repository with `hash-object -t commit -w` and never pushes it.
+ */
+export const EMPTY_BASE_COMMIT_TEXT = "tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\nauthor fulcrumaxe <runner@localhost> 0 +0000\ncommitter fulcrumaxe <runner@localhost> 0 +0000\n\nEmpty base\n";
+export const EMPTY_BASE_COMMIT = "39800c809d73fe8ac54ad2ae55ad4dac1c8d98cb";
+
+/** D#845 ON-8f: where the runner asks for its one push credential for a setup's job. Once per attempt, only after it reported the `push` step started. */
+export const setupPushTokenPath = (setupId: string): string => `/api/runner/setup/${setupId}/push-token`;
+export const SetupPushTokenMessage = strict({ job_id: z.string().uuid() });
+/** One installation token for the one repository, `contents: write` and `metadata: read` only. It never enters a guest and is revoked by the runner after the push. */
+export const SetupPushTokenReply = strict({ token: z.string().min(1).max(512), expires_at: z.string().datetime() });
+export type SetupPushTokenReply = z.infer<typeof SetupPushTokenReply>;
 
 /** D#845 ON-8a: where a runner told `machine_job: true` on a claim reply takes its one job, and where it reports on a setup. */
 export const MACHINE_JOB_CLAIM_PATH = "/api/runner/machine-job/claim";

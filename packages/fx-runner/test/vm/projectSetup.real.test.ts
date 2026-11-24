@@ -22,6 +22,7 @@ import { fixtureEngineTgz, type FixtureEngineOptions } from "../helpers/fixtureE
 import { compact, fakeCloud, serveBytes } from "../helpers/setupWorld.js";
 import { connectUnix } from "./sandboxd/helpers.js";
 import { fixtureRepo, git, hostDeps, hostWorkspace } from "./workspace/helpers.js";
+import { pushWorld } from "../helpers/pushWorld.js";
 
 /**
  * D#845 ON-8d against a REAL microVM: a whole project setup, from the engine archive and the plan through the three guest commands to the verified tree in the host copy. The stand-ins are the least that can be: the cloud
@@ -57,15 +58,18 @@ async function setup(engineOptions: FixtureEngineOptions, fx = fixtureRepo()) {
   const deps = hostDeps();
   const hostWs = hostWorkspace(fx.mirror, fx.commit);
   const repos: SetupRepos = { open: async () => ({ mirrorDir: fx.mirror, workspace: hostWs, archive: await buildWorkspaceArchive(deps, fx.mirror, fx.commit), release: async () => undefined }) };
+  const pw = await pushWorld({ seed: { repo: fx.repo, branch: "main" } });
   const handler = createProjectSetupHandler({
     client: world.client,
     vm: { guestOf: async (handle) => { const guest = await port.guestOf(handle); return { ...guest, name: guest.name, status: guest.status, runCommand: guest.runCommand.bind(guest), writeFiles: guest.writeFiles.bind(guest), updateNetworkPolicy: async (policy: unknown) => { const answered = await guest.updateNetworkPolicy(policy); policies.push(policy); return answered; } } as typeof guest; }, lifecycle: { port: vmPort, registry: new VmRegistry(), caps: { maxVms: 2, maxVcpus: 2, maxMemoryMb: 2048, snapshotDir: "/unused", snapshotQuotaBytes: 0 }, request: { vcpus: 1, memoryMb: 512 }, readMemAvailableBytes: () => freemem() } },
     repos,
     apply: (input) => applyBundle({ git: deps.git, gitLarge: deps.gitLarge, scratchDir: deps.scratchDir, policy: workflowPolicy(deps.gitLarge) }, input),
     logDir: path.join(deps.scratchDir, "log"),
+    push: pw.deps,
     transport: serveBytes(engine),
   });
   await handler({ job: world.job, reporter: world.reporter, signal: world.signal });
+  await pw.close();
   const left = (await helper.list()).map((entry) => entry.sandboxId).filter((id) => made.has(id));
   // the guest's own text is in the local log only; it is shown with a failed assertion so a dispatched run explains itself
   let log = "";
@@ -80,7 +84,7 @@ async function setup(engineOptions: FixtureEngineOptions, fx = fixtureRepo()) {
 describe.skipIf(!ready)("a project setup in a real microVM", () => {
   it("runs the engine archive and the plan through bootstrap, coldstart and finalize in the guest, reports every step in order, and brings back one verified commit; the real egress policy port took the closed package-host template", async () => {
     const r = await setup({});
-    expect(compact(r.world.progress), r.log).toEqual([...BEFORE, ...CORE, "finalize:started", "finalize:ok", "bundle_out:started", "bundle_out:ok"]);
+    expect(compact(r.world.progress), r.log).toEqual([...BEFORE, ...CORE, "finalize:started", "finalize:ok", "bundle_out:started", "bundle_out:ok", "push:started", "push:ok"]);
     expect(r.world.progress.map((p) => p.seq)).toEqual(r.world.progress.map((_, i) => i));
     expect(r.world.progress[r.world.progress.length - 1]?.bundle_bytes).toBeGreaterThan(0);
     expect(git(r.hostWs, "rev-list", "--count", `${r.fx.commit}..HEAD`)).toBe("1");

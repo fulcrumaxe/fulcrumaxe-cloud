@@ -21,6 +21,7 @@ import type { EngineTransport } from "./engineArchive.js";
 import { BOOTSTRAP, COLDSTART, FINALIZE, MERGE_PROGRAM, runSetupCommand, sendSetupInputs, SetupGuestError } from "./guestScripts.js";
 import { prepareProjectSetup, type Prepared } from "./prepare.js";
 import { bundleReasonOf, projectSetupPolicy } from "./setupPolicy.js";
+import { pushSetup, type SetupPushDeps } from "./setupPush.js";
 import { createStatusReader } from "./statusStream.js";
 
 /** The runner's host copy of the repository at the job's `base_sha`: the mirror its objects come from, a work tree at that commit (the bundle is applied to it) and the archive that goes into the guest. */
@@ -31,7 +32,7 @@ export interface SetupRepoCopy {
   release(): Promise<void>;
 }
 export interface SetupRepos {
-  open(input: { repoId: number; owner: string; name: string; baseSha: string; signal: AbortSignal }): Promise<SetupRepoCopy>;
+  open(input: { repoId: number; owner: string; name: string; baseSha: string; mode: "pr" | "direct"; signal: AbortSignal }): Promise<SetupRepoCopy>;
 }
 
 export interface ProjectSetupDeps {
@@ -41,6 +42,8 @@ export interface ProjectSetupDeps {
   repos: SetupRepos;
   apply: (input: { bundle: Buffer; base: string; mirrorDir: string; workspace: string }) => Promise<AppliedBundle>;
   logDir: string;
+  /** The push (ON-8f1, `setupPush.ts`): the credential call, its revoke and the snapshots directory. The target and the commit come from the verified job, the plan and the applied bundle. */
+  push: SetupPushDeps;
   transport?: EngineTransport;
   paths?: GuestPaths;
   stepTimeoutMs?: number;
@@ -130,6 +133,15 @@ async function setUp(deps: ProjectSetupDeps, job: MachineJobOf<"project_setup">,
   const guestOf = (name: string) => deps.vm.guestOf(handleOf(name));
   const sink = (_stream: string, text: string): undefined => (log.write(text), undefined);
 
+  /** The push, made on the host after the sandbox is gone, with the credential the cloud hands over once `push` is reported started. A rejected direct push is `direct_raced`; every other failure is `push_failed`. */
+  const pushStep = async (tip: string): Promise<void> => {
+    await step("push", "started");
+    const { mirrorDir, workspace } = copy as SetupRepoCopy;
+    const result = await pushSetup(deps.push, { job, repo: { id: String(job.repo_gh_id), owner: setup.repo_owner, name: setup.repo_name, defaultBranch: setup.default_branch }, mirrorDir, workspace, tip });
+    if (result.ok) await reporter.report({ sub_step: "push", state: "ok", head_sha: result.head });
+    else await reporter.report({ sub_step: "push", state: "failed", failure_code: result.code, failure_reason: result.reason });
+  };
+
   try {
     await reporter.report({ sub_step: "sandbox_boot", state: "started" });
     const outcome: VmJobOutcome<void, AppliedBundle, void> = await runVmJob<void, { bundle: Buffer; base: string }, AppliedBundle, void>({
@@ -145,7 +157,7 @@ async function setUp(deps: ProjectSetupDeps, job: MachineJobOf<"project_setup">,
           const guest = await guestOf(name);
           // the closed template goes in force before a byte is sent in
           await guest.updateNetworkPolicy(projectSetupPolicy()).catch(() => fail("workspace_in", "vm_egress_unavailable", "policy"));
-          copy = await deps.repos.open({ repoId: job.repo_gh_id, owner: setup.repo_owner, name: setup.repo_name, baseSha: job.args.base_sha, signal }).catch(() => fail("workspace_in", "vm_workspace_failed", "repo"));
+          copy = await deps.repos.open({ repoId: job.repo_gh_id, owner: setup.repo_owner, name: setup.repo_name, baseSha: job.args.base_sha, mode: job.args.mode, signal }).catch(() => fail("workspace_in", "vm_workspace_failed", "repo"));
           await sendWorkspace(guest, copy.archive, paths).catch((error: unknown) => fail("workspace_in", "vm_workspace_failed", error instanceof GuestWorkspaceError ? error.code : "workspace"));
           await sendSetupInputs(guest, { engineTar: prepared.engine.tar, answers: prepared.host.answers, files: prepared.files }, paths).catch((error: unknown) => fail("workspace_in", "vm_workspace_failed", error instanceof SetupGuestError ? error.code : "inputs"));
           await step("workspace_in", "ok");
@@ -192,8 +204,10 @@ async function setUp(deps: ProjectSetupDeps, job: MachineJobOf<"project_setup">,
         needsCheck: () => false,
       },
     });
-    if (outcome.ok) await reporter.report({ sub_step: "bundle_out", state: "ok", bundle_bytes: bundleBytes });
-    else if (!reporter.closed && !signal.aborted) {
+    if (outcome.ok) {
+      await reporter.report({ sub_step: "bundle_out", state: "ok", bundle_bytes: bundleBytes });
+      if (!reporter.closed && !signal.aborted) await pushStep(outcome.applied.tip);
+    } else if (!reporter.closed && !signal.aborted) {
       // a failure no step reported itself: the VM could not be made, reached or ended
       const code = (SETUP_FAILURE_CODES as readonly string[]).includes(outcome.code) ? outcome.code : "vm_workspace_failed";
       await reporter.report({ sub_step: current, state: "failed", failure_code: code, ...(reasonOf(outcome.step) === undefined ? {} : { failure_reason: reasonOf(outcome.step) as string }) });

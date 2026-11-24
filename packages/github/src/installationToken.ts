@@ -224,7 +224,7 @@ export class InstallationTokenCache {
  * permission set no other purpose may ask for (see MERGE_GATE_PERMISSIONS). It exists so the check-run, status and
  * branch-protection reads, and the commit-status write, are NOT in the allowlist of every other purpose.
  */
-export const MINT_PURPOSES = ["run", "preview_read", "sitekit_read", "merge_gate", "plan_read", "runner_git", "plane_push", "plane_merge", "plane_publish_read", "branch_delete", "branch_sync", "pairing_read", "receipt_block", "retraction", "revert_pr", "plane_parity"] as const;
+export const MINT_PURPOSES = ["run", "preview_read", "sitekit_read", "merge_gate", "plan_read", "runner_git", "plane_push", "plane_merge", "plane_publish_read", "branch_delete", "branch_sync", "pairing_read", "receipt_block", "retraction", "revert_pr", "plane_parity", "setup_push"] as const;
 export type MintPurpose = (typeof MINT_PURPOSES)[number];
 
 /**
@@ -272,6 +272,22 @@ export const PLANE_MERGE_PERMISSIONS: Readonly<Record<string, "write">> = Object
  * ref, once) and the signed one-use grant in front of that (`branchDeleteToken.ts`). The token itself covers one repository and is never cached.
  */
 export const BRANCH_DELETE_PERMISSIONS: Readonly<Record<string, "write">> = Object.freeze({ contents: "write" });
+
+/**
+ * D#845 ON-8f: the only permissions a `setup_push` token asks for: `contents: write` and `metadata: read` of ONE customer repository, for the runner's push of a project setup's install branch (or, when the
+ * repository has no commit yet, its first commit). Never `workflows`, `pull_requests` or anything else. The token goes to the runner, never to a sandbox, is minted fresh for one job attempt and is revoked by the runner after the push.
+ */
+export const SETUP_PUSH_PERMISSIONS: Readonly<Record<string, "read" | "write">> = Object.freeze({ metadata: "read", contents: "write" });
+
+/** D#845 ON-8f: a `setup_push` mint must cover exactly the one repository and say `contents: write` and `metadata: read` and nothing else; a response that does not say is refused. */
+export function assertSetupPushToken(minted: Pick<MintedAccessToken, "permissions" | "repositories">, repo: string): void {
+  const perms = minted.permissions;
+  if (perms === undefined || perms === null || typeof perms !== "object" || Array.isArray(perms)) throw new InstallationTokenError("token_scope_mismatch");
+  const repos = minted.repositories;
+  const coversOnly = Array.isArray(repos) && repos.length === 1 && repos[0]!.toLowerCase() === repo.toLowerCase();
+  const keys = Object.keys(perms);
+  if (perms.contents !== "write" || (perms.metadata !== undefined && perms.metadata !== "read") || keys.some((k) => k !== "contents" && k !== "metadata") || !coversOnly) throw new InstallationTokenError("token_scope_mismatch");
+}
 
 /**
  * FIXROUND-BASE-SYNC: the only permissions a `branch_sync` token ever asks for: `contents: write` (GitHub's merges endpoint needs it) and `pull_requests: read` (the
@@ -550,6 +566,14 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
     allowed = Object.keys(BRANCH_DELETE_PERMISSIONS);
     appKind = params.appKind;
     namespace = "branch_delete:";
+  } else if (params.purpose === "setup_push") {
+    // D#845 ON-8f: the write App, ONE repository and exactly the fixed set. Fresh every time.
+    assertWriteInstallation(params.appKind);
+    if (isWide(params.scope)) throw new InstallationTokenError("purpose_not_allowed");
+    scope = { repositories: params.scope.repositories, permissions: SETUP_PUSH_PERMISSIONS };
+    allowed = Object.keys(SETUP_PUSH_PERMISSIONS);
+    appKind = params.appKind;
+    namespace = "setup_push:";
   } else if (params.purpose === "branch_sync") {
     // FIXROUND-BASE-SYNC: the write App, ONE repository (the private repository whose pull request branch is brought up to date), a fixed set. Fresh every time.
     assertWriteInstallation(params.appKind);
@@ -626,7 +650,7 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
     throw new InstallationTokenError("permission_not_allowed");
   }
 
-  const neverCached = params.purpose === "plane_push" || params.purpose === "plane_merge" || params.purpose === "plane_publish_read" || params.purpose === "branch_delete" || params.purpose === "branch_sync" || params.purpose === "pairing_read" || params.purpose === "retraction" || params.purpose === "revert_pr" || params.purpose === "plane_parity";
+  const neverCached = params.purpose === "plane_push" || params.purpose === "plane_merge" || params.purpose === "plane_publish_read" || params.purpose === "branch_delete" || params.purpose === "branch_sync" || params.purpose === "pairing_read" || params.purpose === "retraction" || params.purpose === "revert_pr" || params.purpose === "plane_parity" || params.purpose === "setup_push";
   if (params.fresh === true && !neverCached) throw new InstallationTokenError("purpose_not_allowed");
   // D#598 C4: a plane_push token is never cached on any path, so it is fresh whatever the caller passes. Nothing is read from or written to the cache for it.
   // The same holds for a plane_publish_read token, which is minted and revoked for one proxied request.
@@ -694,6 +718,14 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
       assertBranchDeleteToken(minted, (scope as MergeGateScope).repositories[0]);
     } catch (error) {
       // A token wider than asked for is revoked at once rather than left to expire; the original refusal is what the caller sees.
+      await params.revoke?.(minted.token).catch(() => undefined);
+      throw error;
+    }
+  }
+  if (params.purpose === "setup_push") {
+    try {
+      assertSetupPushToken(minted, (scope as MergeGateScope).repositories[0]);
+    } catch (error) {
       await params.revoke?.(minted.token).catch(() => undefined);
       throw error;
     }

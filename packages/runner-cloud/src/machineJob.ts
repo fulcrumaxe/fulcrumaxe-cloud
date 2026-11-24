@@ -15,6 +15,7 @@ import {
 import type { PoolClient } from "pg";
 import { emitSetupChanged } from "@fx/core/src/onboarding/engineTrack.js";
 import { RunnerHttpError, asRunner, parseJsonBody, parseMessage, pgCode, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse } from "./http.js";
+import { reissueRacedSetup } from "./setupReissue.js";
 import { verifyRunnerRequest, withRunnerSession } from "./verifyRunnerRequest.js";
 
 /**
@@ -31,6 +32,7 @@ import { verifyRunnerRequest, withRunnerSession } from "./verifyRunnerRequest.js
  *
  * Statuses: 401 (unsigned or wrong runner), 400 (invalid message), 404, 409.
  */
+class HeadNotRecorded extends Error {}
 const NO_STORE = { "cache-control": "no-store" } as const;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -80,6 +82,8 @@ export async function setupProgressRun(deps: RunnerCloudDeps, req: RunnerHttpReq
   // After the signature, not before: an unsigned caller must not learn from a 404 which ids are well formed.
   if (!UUID.test(setupId)) throw new RunnerHttpError(404, "not_found", "no such setup");
   const body = parseMessage(SetupProgressBody, parseJsonBody(req));
+  // D#845 Ruling 73: the push step's `ok` is the report that carries the pushed commit; without it the cloud has no record of what the repository now holds.
+  if (body.sub_step === "push" && body.state === "ok" && body.head_sha === undefined) throw new RunnerHttpError(400, "invalid_message", "the message does not match the protocol");
   const result = await asRunner(async () => {
     try {
       return await withRunnerSession(deps.appUserPool, runner, async (client) => {
@@ -87,15 +91,23 @@ export async function setupProgressRun(deps: RunnerCloudDeps, req: RunnerHttpReq
           setupId.toLowerCase(), body.job_id, body.seq, body.sub_step, body.state, body.failure_code ?? null, body.failure_reason ?? null,
         ]);
         const row = rows[0];
+        if (row?.o_result === "ok" && body.head_sha !== undefined) {
+          // in the report's own transaction: a head that cannot be recorded undoes the report
+          const stored = (await client.query<{ ok: boolean }>("SELECT setup_head_record($1::uuid, $2::uuid, $3) AS ok", [setupId.toLowerCase(), body.job_id, body.head_sha])).rows[0]?.ok;
+          if (stored !== true) throw new HeadNotRecorded();
+        }
         if (row?.o_result === "ok" && row.o_repo_id) await emitSetupChanged(client, { accountId: runner.accountId, setupId: setupId.toLowerCase(), repoId: row.o_repo_id });
         return row?.o_result ?? "not_found";
       });
     } catch (error) {
+      if (error instanceof HeadNotRecorded) throw new RunnerHttpError(409, "head_not_recorded", "the pushed commit could not be recorded for this job");
       // A reason or a topic the table's own rules refuse (a shape the schema allows but the column does not): a bad report, not a server fault.
       if (pgCode(error) === "23514" || pgCode(error) === "22023") throw new RunnerHttpError(400, "invalid_message", "the message does not match the protocol");
       throw error;
     }
   });
+  // A direct-mode job that lost the race for the default branch is replaced by the same setup in PR mode; when that cannot be done it stays failed for a person's Retry.
+  if (result === "ok" && body.state === "failed" && body.failure_code === "direct_raced") await reissueRacedSetup(deps, runner, setupId.toLowerCase(), body.job_id);
   if (result === "ok") return { status: 200, body: SetupProgressReply.parse({ recorded: true }), headers: NO_STORE };
   if (result === "superseded") throw new RunnerHttpError(409, "job_superseded", "a later attempt replaced this job");
   if (result === "not_active") throw new RunnerHttpError(409, "job_not_active", "this job is not running");

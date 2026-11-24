@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
-import { MAX_PLAN_BYTES, MACHINE_JOB_MAX_LIFE_S, PlanFile, canonicalJson, setupPlanPath, type MachineJob } from "@fulcrumaxe/runner-protocol";
+import { EMPTY_BASE_COMMIT, MAX_PLAN_BYTES, MACHINE_JOB_MAX_LIFE_S, PlanFile, canonicalJson, setupPlanPath, type MachineJob } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { RunnerHttpError, asRunner, pgCode, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse, type SessionPrincipal } from "./http.js";
 import { requireMemberRole } from "./memberRole.js";
@@ -15,7 +15,8 @@ import { verifyRunnerRequest, withRunnerSession } from "./verifyRunnerRequest.js
  * the newest engine release that machine can run; asks GitHub (through the App's read-only port) for the default branch's head and the repo's visibility; builds the plan file and hashes its exact bytes; signs the job;
  * and then, in a second transaction that takes the setup's row lock and reads everything again, inserts the job and puts the setup in phase `install`. If anything the job was built from changed between the two, nothing is
  * written (409 `setup_changed`). The cloud facts the plan file carries are stored on the setup (`plan_setup`) so the plan route rebuilds the same bytes later.
- * Refusals (all 409 unless noted): `plan_not_approved`, `setup_not_placed`, `engine_release_unset`, `boss_login_missing`, `plan_invalid`, `public_repo`, `repo_visibility_unknown`, `default_branch_empty`, `setup_phase`;
+ * A default branch with no commit yet is issued in direct mode (ON-8f): `base_sha` is `EMPTY_BASE_COMMIT` and the runner pushes one root commit to it. Any other default branch is a pull request job at its head.
+ * Refusals (all 409 unless noted): `plan_not_approved`, `setup_not_placed`, `engine_release_unset`, `boss_login_missing`, `plan_invalid`, `public_repo`, `repo_visibility_unknown`, `setup_phase`;
  * 403 `forbidden`; 404 `not_found`; 503 `not_configured` and `github_unavailable`; 502 `github_refused`.
  */
 
@@ -141,13 +142,12 @@ export async function issueProjectSetup(deps: RunnerCloudDeps, principal: Sessio
   const seen = await readRepoVisibility(deps, principal.accountId, first.setup.repoId);
   const block = blockFor(seen);
   if (block !== null) throw blockError(block);
-  let facts: CloudFacts, head: string;
+  let facts: CloudFacts, head: string | null;
   try {
     const branch = await github.defaultBranch(repo);
     const state = await github.branchState({ repo, branch, base: branch });
-    if (!state.exists || state.headOid === null) throw refuse(409, "default_branch_empty", "the default branch has no commit yet");
     facts = { default_branch: branch, visibility: "private" };
-    head = state.headOid;
+    head = state.exists ? state.headOid : null;
   } catch (error) {
     if (error instanceof RunnerHttpError) throw error;
     return githubFailure(error);
@@ -160,7 +160,7 @@ export async function issueProjectSetup(deps: RunnerCloudDeps, principal: Sessio
   const signed = signer.signMachineJob({
     v: 1, job_id: jobId, runner_id: first.runnerId, repo_gh_id: first.repo.ghRepoId, setup_id: first.setup.id, requires_engine: "any", issued_at: issued.toISOString(), expires_at: expires.toISOString(), kind: "project_setup",
     args: {
-      mode: "pr", base_sha: head,
+      mode: head === null ? "direct" : "pr", base_sha: head ?? EMPTY_BASE_COMMIT,
       engine: { version: first.release.version, commit_sha: first.release.commit_sha, tarball_url: engineTarballUrl(first.release.commit_sha), tarball_sha256: first.release.tarball_sha256 },
       plan_ref: { draft_id: first.draft.id, version: first.draft.version, sha256: built.sha256 },
       branch: `fx/engine-install-${first.release.version}`,
@@ -174,7 +174,7 @@ export async function issueProjectSetup(deps: RunnerCloudDeps, principal: Sessio
     const { rows } = await client.query<{ attempt: number }>("SELECT machine_job_issue($1, $2, $3, $4, 'project_setup', $5::jsonb, $6, $7) AS attempt", [jobId, first.runnerId, first.setup.repoId, first.setup.id, JSON.stringify(signed), issued, expires]);
     const attempt = rows[0]!.attempt;
     await client.query(
-      `UPDATE project_setups SET phase = 'install', state = 'started', sub_step = NULL, failure_code = NULL, failure_reason = NULL, failure_at = NULL, engine_version = $3, attempt = $4, plan_setup = $5::jsonb, updated_at = now()
+      `UPDATE project_setups SET phase = 'install', state = 'started', sub_step = NULL, failure_code = NULL, failure_reason = NULL, failure_at = NULL, install_head_sha = NULL, engine_version = $3, attempt = $4, plan_setup = $5::jsonb, updated_at = now()
         WHERE account_id = $1 AND id = $2`,
       [principal.accountId, first.setup.id, first.release.version, attempt, JSON.stringify(built.plan.setup)],
     );
