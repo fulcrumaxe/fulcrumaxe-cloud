@@ -3,7 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { activePreset, activePresetsFor, classTwo, currentRows, presetDisposition } from "@fx/db/src/dialPreset.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedF2, type F2Fixture } from "@fx/db/test/helpers/members.js";
-import { PICKER_OWNERS_TTL_MS, PICKER_VISIBILITY_TTL_MS, clearPickerVisibilityCache, listPickerRepos } from "../src/index.js";
+import { PICKER_OWNERS_TTL_MS, PICKER_UNKNOWN_TTL_MS, PICKER_VISIBILITY_TTL_MS, clearPickerVisibilityCache, listPickerRepos } from "../src/index.js";
 import { harness, respond, type Harness } from "./helpers.js";
 
 /**
@@ -95,7 +95,7 @@ describe("the project picker read [pg]", () => {
     expect(JSON.stringify(out)).not.toContain("ghs_secret");
   });
 
-  it("remembers a definite answer for 60 s and no longer; never remembers unknown; an answer is per account", async () => {
+  it("remembers a definite answer for 60 s and no longer; remembers unknown for 15 s only; an answer is per account", async () => {
     const f = await fresh();
     const other = await fresh();
     const id = await repo(f, "cached");
@@ -112,14 +112,17 @@ describe("the project picker read [pg]", () => {
     const later = await repos(f, f.o1, { repoVisibility: nowPublic, now: () => new Date(T0.getTime() + PICKER_VISIBILITY_TTL_MS) });
     expect(nowPublic).toHaveBeenCalledTimes(1);
     expect(later.find((r) => r.id === id)?.visibility).toBe("public");
-    // A failure is not remembered: the next read asks again and shows the answer it gets.
+    // A failure is remembered for 15 s only: a loop does not ask again inside it, and the next read after it does.
     clearPickerVisibilityCache();
     const failing = vi.fn(async () => {
       throw new Error("down");
     });
     expect((await repos(f, f.o1, { repoVisibility: failing }))[0]?.visibility).toBe("unknown");
+    expect(failing).toHaveBeenCalledTimes(1);
     const up = vi.fn(async () => "private" as const);
-    expect((await repos(f, f.o1, { repoVisibility: up }))[0]?.visibility).toBe("private");
+    expect((await repos(f, f.o1, { repoVisibility: up, now: () => new Date(T0.getTime() + PICKER_UNKNOWN_TTL_MS - 1) }))[0]?.visibility).toBe("unknown");
+    expect(up).not.toHaveBeenCalled();
+    expect((await repos(f, f.o1, { repoVisibility: up, now: () => new Date(T0.getTime() + PICKER_UNKNOWN_TTL_MS) }))[0]?.visibility).toBe("private");
     expect(up).toHaveBeenCalledTimes(1);
   });
 
