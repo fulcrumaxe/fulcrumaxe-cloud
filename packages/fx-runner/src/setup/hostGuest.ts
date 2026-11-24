@@ -26,6 +26,7 @@ import type { JobHandlerDeps } from "../daemon/jobHandler.js";
 import { unixSocketFilter } from "../sandbox/checkSeccomp.js";
 import { USER_RUNTIME_ROOT } from "../sandbox/hostSandbox.js";
 import { quoted, sandboxLaunch, type SandboxHost, type SandboxProbeInput } from "../sandbox/probe.js";
+import { scopedLaunch, type Budget, type ScopeTools } from "../sandbox/jobLimits.js";
 import { assertEnabledSandbox, sandboxSettings } from "../sandbox/sandboxSettings.js";
 import { wslDenyPaths } from "../sandbox/wslChecks.js";
 import type { WslMachine } from "../sandbox/platform.js";
@@ -64,11 +65,20 @@ export interface HostGuestDeps {
   uid: number | undefined;
   /** WSL2: the Windows side is denied exactly as the host sandbox denies it, and a machine whose clearance went away refuses. */
   wsl?: WslMachine | undefined;
+  /** Where a held command (`hold`) is started: a transient systemd user scope of its own, with this budget. Absent: `hold` refuses. */
+  scope?: { tools: ScopeTools; runtimeDir: string; budget: Budget } | undefined;
   /** Test seams of the egress proxy (the resolver and the upstream connect). */
   egress?: Pick<EgressProxyOptions, "lookup" | "connect" | "ownAddresses" | "onDecision">;
 }
 
-export type HostGuest = SdkSandbox & { close(): Promise<void> };
+/** A held command: one process that outlives the job that started it, in the scope `unit`. */
+export interface HoldParams {
+  cmd: string;
+  args: readonly string[];
+  unit: string;
+  limitMs: number;
+}
+export type HostGuest = SdkSandbox & { close(): Promise<void>; hold(params: HoldParams): Promise<SdkCommand> };
 
 const COMMAND_LIMIT_MS = 4 * 60 * 60_000;
 /** How long `close` waits for an aborted command's process group to be gone before it refuses to let the root be removed. */
@@ -113,7 +123,7 @@ const inside = (root: string, target: string): boolean => {
 };
 
 /** One file below `root`: every parent a real directory (made 0700 when missing), the last name opened without following a link. */
-function putFile(root: string, file: string, content: string, mode: number): void {
+export function putFile(root: string, file: string, content: string, mode: number): void {
   if (!inside(root, file)) throw new HostGuestRefused("path_refused");
   let dir = root;
   for (const part of path.relative(root, path.dirname(file)).split(path.sep).filter((p) => p !== "")) {
@@ -132,7 +142,7 @@ function putFile(root: string, file: string, content: string, mode: number): voi
 }
 
 /** Where a job root's workspace and stage directories are: the guest paths of every command and file of the job. */
-const pathsOfRoot = (root: string): GuestPaths => ({ workspace: path.join(root, "work"), stage: path.join(root, "stage") });
+export const pathsOfRoot =(root: string): GuestPaths => ({ workspace: path.join(root, "work"), stage: path.join(root, "stage") });
 
 /** A guest over a fresh job root. `root` exists (0700) and is a direct child of `deps.jobsRoot`. */
 export function createHostGuest(deps: HostGuestDeps, name: string, root: string): { guest: HostGuest; paths: GuestPaths; egressDir: string } {
@@ -147,7 +157,7 @@ export function createHostGuest(deps: HostGuestDeps, name: string, root: string)
   const egressDir = path.join(egressRoot, path.basename(root));
   removeRoot(egressDir); // a directory a crashed run left under this name
   const socket = egressSocketPath(egressDir);
-  mkdirSync(tempDir, { mode: 0o700 });
+  mkdirSync(tempDir, { mode: 0o700, recursive: true }); // a session's root is kept between jobs: its tmp may exist
   mkdirSync(egressDir, { mode: 0o700 });
   chmodSync(egressDir, 0o1770); // the mode the proxy's own check demands: owner and group, sticky
   const paths = pathsOfRoot(root);
@@ -196,10 +206,13 @@ export function createHostGuest(deps: HostGuestDeps, name: string, root: string)
       if (closed) throw new HostGuestRefused("closed");
       for (const file of files) putFile(root, file.path, file.content, file.mode ?? 0o644);
     },
-    async runCommand(params: { cmd: string; args?: string[]; cwd?: string; env?: Record<string, string>; signal?: AbortSignal }): Promise<SdkCommand> {
+    /** One process that outlives the job that started it (D#845 ON-13a3): the same sandbox, forwarder and filter as `runCommand`, started in a scope of its own. */
+    hold: (params: HoldParams): Promise<SdkCommand> => (guest.runCommand as unknown as (p: { cmd: string; args: string[] }, h: HoldParams) => Promise<SdkCommand>)({ cmd: params.cmd, args: [...params.args] }, params),
+    async runCommand(params: { cmd: string; args?: string[]; cwd?: string; env?: Record<string, string>; signal?: AbortSignal }, hold?: HoldParams): Promise<SdkCommand> {
       if (closed) throw new HostGuestRefused("closed");
       const cwd = params.cwd ?? root;
       if (cwd !== root && !inside(root, cwd)) throw new HostGuestRefused("path_refused");
+      if (hold !== undefined && (deps.scope === undefined || deps.platform !== "linux")) throw new HostGuestRefused("sandbox_unavailable");
       const env = envOf(params.env);
       const files = deps.selfCommand.filter((word) => path.isAbsolute(word) && deps.host.isFile(word));
       const settings = settingsNow();
@@ -222,6 +235,15 @@ export function createHostGuest(deps: HostGuestDeps, name: string, root: string)
         const split = launch.args.indexOf("--");
         argv = [...launch.args.slice(0, split), ...(deps.host.isDir(USER_RUNTIME_ROOT) ? ["--tmpfs", USER_RUNTIME_ROOT] : []), ...launch.args.slice(split)];
       }
+      let program = launch.tool;
+      let programArgs = argv;
+      let programEnv = env;
+      if (hold !== undefined && deps.scope !== undefined) {
+        const scoped = scopedLaunch(deps.scope.tools, hold.unit, deps.scope.budget, launch.tool, argv);
+        program = scoped.command;
+        programArgs = scoped.args;
+        programEnv = { ...env, XDG_RUNTIME_DIR: deps.scope.runtimeDir };
+      }
       const abort = new AbortController();
       params.signal?.addEventListener("abort", () => abort.abort(), { once: true });
       const queue: { stream: string; data: string }[] = [];
@@ -229,7 +251,7 @@ export function createHostGuest(deps: HostGuestDeps, name: string, root: string)
       let wake: (() => void) | undefined;
       let over = false;
       const done = deps
-        .start(launch.tool, argv, env, cwd, COMMAND_LIMIT_MS, 1, abort.signal, filter, undefined, (stream, chunk) => {
+        .start(program, programArgs, programEnv, cwd, hold?.limitMs ?? COMMAND_LIMIT_MS, 1, abort.signal, filter, undefined, (stream, chunk) => {
           const data = decoders[stream].write(chunk);
           if (data !== "") queue.push({ stream, data });
           wake?.();
@@ -293,7 +315,7 @@ export function createHostGuest(deps: HostGuestDeps, name: string, root: string)
  * nothing swaps an entry between the look and the change. No link is followed: an entry is looked at with `lstat`, only a real directory is opened up and entered, and a link is unlinked itself (a link left in the
  * root would otherwise be a way to make the runner change the mode of, or list, anything its owner can reach).
  */
-function removeRoot(root: string): void {
+export function removeRoot(root: string): void {
   const reopen = (entry: string): void => {
     const info = lstatOrUndefined(entry);
     if (info === undefined) return;
@@ -310,13 +332,13 @@ function removeRoot(root: string): void {
 }
 
 /** The directory of one job's guest, named from the sandbox name (a name is never a path). */
-const rootNameOf = (name: string): string => `g-${createHash("sha256").update(name).digest("hex").slice(0, 16)}`;
+export const rootNameOf = (name: string): string => `g-${createHash("sha256").update(name).digest("hex").slice(0, 16)}`;
 
 /** The runner's own directory of per-job egress directories: next to the jobs root, never inside a job root. */
 export const egressRootOf = (jobsRoot: string): string => path.join(path.dirname(jobsRoot), "setup-egress");
 
 /** A runner-owned directory (the jobs root, the egress root): a real directory, 0700, made if missing; anything else refuses. */
-function ensureRunnerDir(dir: string, uid: number | undefined): void {
+export function ensureRunnerDir(dir: string, uid: number | undefined): void {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const info = lstatSync(dir);
   if (!info.isDirectory() || (info.mode & 0o077) !== 0 || (uid !== undefined && info.uid !== uid)) throw new HostGuestRefused("root_unusable");

@@ -150,6 +150,18 @@ export async function setUpJobLimits(deps: SupportDeps, budgets: () => Budgets):
   return { enforced: true, limits: createScopeLimits({ tools: support.tools, runtimeDir: support.runtimeDir, budgets, capture: deps.capture, readText: deps.readText }) };
 }
 
+/** The program and arguments that start `command` in a transient scope named `unit` with this budget; the runner's bus variables are taken back out of the command's environment. */
+export function scopedLaunch(tools: ScopeTools, unit: string, budget: Budget, command: string, args: readonly string[]): { command: string; args: string[] } {
+  return {
+    command: tools.systemdRun,
+    args: [
+      "--user", "--scope", "--quiet", `--unit=${unit}`,
+      "-p", `MemoryMax=${budget.memoryBytes}`, "-p", "MemorySwapMax=0", "-p", `TasksMax=${budget.tasks}`, "-p", "CPUWeight=100", "-p", "OOMPolicy=kill",
+      "--", tools.env, "-u", "XDG_RUNTIME_DIR", "-u", "DBUS_SESSION_BUS_ADDRESS", command, ...args,
+    ],
+  };
+}
+
 const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SETTLE_TRIES = 30;
 const SETTLE_MS = 100;
@@ -173,15 +185,7 @@ export function createScopeLimits(config: ScopeLimitsConfig): JobLimits {
       units.set(job.runId, unit);
       caps.set(job.runId, budget.memoryBytes);
       peaks.set(job.runId, { unit, resolving: false });
-      return {
-        command: config.tools.systemdRun,
-        args: [
-          "--user", "--scope", "--quiet", `--unit=${unit}`,
-          "-p", `MemoryMax=${budget.memoryBytes}`, "-p", "MemorySwapMax=0", "-p", `TasksMax=${budget.tasks}`, "-p", "CPUWeight=100", "-p", "OOMPolicy=kill",
-          "--", config.tools.env, "-u", "XDG_RUNTIME_DIR", "-u", "DBUS_SESSION_BUS_ADDRESS", command, ...args,
-        ],
-        env: { ...env, ...busEnv },
-      };
+      return { ...scopedLaunch(config.tools, unit, budget, command, args), env: { ...env, ...busEnv } };
     },
     peak(runId) {
       const record = peaks.get(runId);

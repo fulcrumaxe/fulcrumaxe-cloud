@@ -37,6 +37,8 @@ export const BACKOFF_MS: readonly number[] = [60_000, 120_000, 300_000];
 export const CRASH_LIMIT = 6;
 export const CRASH_WINDOW_MS = 3_600_000;
 export const HEARTBEAT_MS = 60_000;
+/** The systemd scope (EB-12a's pattern) of the engine host of one repository; an engine session on the standard tier is named the same way. */
+export const engineHostUnit = (repoGhId: number | string): string => `fx-engine-host-${String(repoGhId)}`;
 /** How often `engine-host.json` gets a fresh `heartbeat_at`. The engine's reader trusts a host for 60 s, so this stays well inside it. */
 export const FILE_BEAT_MS = 15_000;
 /** After stdin is closed for a clean stop, how long the host gets to leave before the kill path ends it. */
@@ -191,7 +193,7 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
       if (state === undefined || !state.bridge_enabled) return "bridge_disabled";
       if (!state.operate_enabled) return "operate_off";
       if (readHaltFile(deps.stateDir, deps.uid)?.halted === true) return "halted";
-      unit = `fx-engine-host-${state.repo_gh_id}.scope`;
+      unit = `${engineHostUnit(state.repo_gh_id)}.scope`;
       checkout = state.repo_checkout;
     } catch (error) {
       if (error instanceof EngineStateError) return "state_unreadable";
