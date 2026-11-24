@@ -2,7 +2,7 @@ import { HetznerError, MANAGED_LABEL, MANAGED_LABEL_VALUE, type HetznerClient } 
 import { RunnerHttpError, revokeProvisioningToken, revokeRunner, type RunnerCloudDeps } from "@fx/runner-cloud";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { ApiError } from "../errors.js";
-import { machineServerDeps, toApiError, withHetznerClient, type ServerCtx } from "./servers.js";
+import { machineServerDeps, toApiError, withHetznerClient, withHetznerServerClient, type ServerCtx } from "./servers.js";
 
 /**
  * D#845 MC-7: what happens to a server after it is made. Three jobs, none of them in a request that a person waits on, except Delete, which is the person's own act.
@@ -120,8 +120,18 @@ export async function deleteManagedServer(ctx: ServerCtx, id: string, input: Del
       if ((await placed()) > 0) throw new ApiError(409, "projects_placed", "Projects are still placed on this server");
     }
   }
-  // A row that began as a create has a token; an orphan does not and has no `deleting` step (its CHECK allows no token only while it is orphaned).
-  if (row.provisioning_token_id !== null) await inTx((c) => c.query(`UPDATE managed_servers SET status = 'deleting', status_at = now() WHERE account_id = $1 AND id = $2 AND status <> 'deleted'`, [accountId, id]));
+  // An orphan that is linked to a Hetzner server: the sweep found it by our label, but the label may have been taken off since. A server that no longer says it is ours is not
+  // deleted from here, by either route (this one and delete-orphan). Gone at Hetzner is fine (404 is done).
+  if (row.status === "orphaned" && row.provider_server_id !== null) {
+    const labels = await withHetznerServerClient(ctx, row.provider_server_id, (client) => client.getServer(Number(row.provider_server_id)).then((s) => s.labels, (e: unknown) => {
+      if (e instanceof HetznerError && e.code === "not_found") return null;
+      throw e;
+    })).catch((e: unknown) => { throw toApiError(e); });
+    if (labels !== null && labels[MANAGED_LABEL] !== MANAGED_LABEL_VALUE) throw new ApiError(409, "not_an_orphan", "That server no longer carries our label, so it isn't deleted from here");
+  }
+  // A row that began as a create has a token; an orphan found by the sweep does not and has no `deleting` step. A sweep-returned orphan that kept its token does, and a "kept" mark
+  // (only valid while orphaned or deleted) is cleared by the same update, so the CHECK keeps its meaning.
+  if (row.provisioning_token_id !== null) await inTx((c) => c.query(`UPDATE managed_servers SET status = 'deleting', status_at = now(), kept_at = NULL, kept_by = NULL WHERE account_id = $1 AND id = $2 AND status <> 'deleted'`, [accountId, id]));
 
   // 2. The runner and the token: both are made useless before the machine goes, so neither can be used from a copy of its secrets.
   // Each has its own try: a runner that is already gone answers 404, and the token must still be revoked.
@@ -135,7 +145,9 @@ export async function deleteManagedServer(ctx: ServerCtx, id: string, input: Del
     // The server belongs to the Hetzner project of the credential that made it. Another token (or none) must never be used to delete it.
     if (active !== row.credential_id) throw new ApiError(409, "credential_changed", "The Hetzner token that made this server is no longer connected. Connect it again to delete the server");
     try {
-      await withHetznerClient(ctx, async (client) => {
+      const door = row.provider_server_id !== null ? (f: (client: HetznerClient) => Promise<void>) => withHetznerServerClient(ctx, row.provider_server_id!, f) : (f: (client: HetznerClient) => Promise<void>) => withHetznerClient(ctx, f);
+      // A row with a Hetzner server id opens the token for that server through the machine-ops reader, which refuses an id that is not this account's.
+      await door(async (client) => {
         // A row with no ids (a create that was killed) is found by the label its server and firewall were made with: both labels, and this row's id.
         const servers = row.provider_server_id !== null ? [Number(row.provider_server_id)] : byLabel ? (await client.listServers({ labelSelector: `fx-server=${id}` })).filter(ownedBy).map((s) => s.id) : [];
         let firewalls: number[] = [];
@@ -199,7 +211,7 @@ export async function sweepOrphans(ctx: ServerCtx, credentialId: string): Promis
       } else if (held.status === "deleted") {
         // A row says this server is gone but Hetzner still lists it with our labels (a delete that raced a create, or a mistake): it is a leftover, so the row says so again.
         const back = await withTenant(ctx.pool, accountId, userId, (c) => c.query(
-          `UPDATE managed_servers SET status = 'orphaned', status_at = now(), deleted_at = NULL, deleted_by = NULL, provider_server_id = $3
+          `UPDATE managed_servers SET status = 'orphaned', status_at = now(), deleted_at = NULL, deleted_by = NULL, kept_at = NULL, kept_by = NULL, provider_server_id = $3
             WHERE account_id = $1 AND id = $2 AND status = 'deleted'`, [accountId, held.id, sid]));
         orphaned += back.rowCount ?? 0;
       } else if (held.status === "creating" && held.provider_server_id === null && held.old) {

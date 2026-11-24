@@ -94,6 +94,10 @@ export const SESSION_LIMITS = {
   machineServerCreate: { name: "machine-server-create", account: [{ limit: 1, seconds: 10 }, { limit: 20, seconds: 3600 }] },
   /** A delete calls Hetzner and revokes a runner: a few a minute is plenty for a person. */
   machineServerDelete: { name: "machine-server-delete", account: [{ limit: 5, seconds: 60 }, { limit: 60, seconds: 3600 }] },
+  /** A reboot interrupts a running machine: a few a minute is plenty for a person. */
+  machineServerReboot: { name: "machine-server-reboot", account: [{ limit: 3, seconds: 60 }, { limit: 30, seconds: 3600 }] },
+  /** Keeping an orphan calls nothing outside; the limit only stops a loop. */
+  machineServerKeep: { name: "machine-server-keep", account: [{ limit: 10, seconds: 60 }, { limit: 120, seconds: 3600 }] },
   /** Connecting a Hetzner token calls Hetzner three times (a read, a probe key made and deleted, a server list): same budget as a model key. */
   machineCredentialPut: { name: "machine-credential-put", account: [{ limit: 1, seconds: 10 }, { limit: 30, seconds: 3600 }] },
   /** Building a GitHub install link, and minting a repo-create link (which also has its own hour and day count). */

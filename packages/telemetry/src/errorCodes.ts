@@ -61,6 +61,10 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "credential_changed",
   "leases_not_failed",
   "registration_timeout",
+  // D#845 MC-7b: reboot, keep and delete an orphan.
+  "not_an_orphan",
+  "server_not_rebootable",
+  "server_gone",
   "hetzner_unauthorized",
   "hetzner_forbidden",
   "hetzner_resource_limit_exceeded",

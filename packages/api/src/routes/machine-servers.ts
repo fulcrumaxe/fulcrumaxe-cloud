@@ -5,6 +5,7 @@ import { ApiError } from "../errors.js";
 import { createServer, getServer, listServers, quoteServer, type ServerCtx } from "../machines/servers.js";
 import { getCatalog } from "../machines/catalog.js";
 import { deleteManagedServer } from "../machines/lifecycle.js";
+import { deleteOrphan, keepOrphan, rebootManagedServer } from "../machines/actions.js";
 import { mapError } from "./machine-credential.js";
 
 /**
@@ -30,6 +31,8 @@ const quoteQuery = z.strictObject({ server_type: z.string().regex(TYPE), locatio
 const catalogQuery = z.strictObject({ location: z.string().regex(LOCATION).optional() });
 const idParams = z.object({ id: z.string() });
 const deleteQuery = z.strictObject({ remove_projects: z.enum(["true", "false"]).optional() });
+export const rebootResultSchema = z.object({ id: z.string().uuid(), status: z.string(), rebooting: z.literal(true) });
+export const keepResultSchema = z.object({ id: z.string().uuid(), status: z.literal("orphaned"), kept: z.literal(true), already_kept: z.boolean() });
 export const deleteResultSchema = z.object({ id: z.string().uuid(), status: z.literal("deleted"), already_deleted: z.boolean() });
 
 export const serverQuoteSchema = priceSchema.extend({
@@ -210,6 +213,77 @@ export const machineServerRoutes: RouteEntry[] = [
       const q = input.query as z.infer<typeof deleteQuery>;
       try {
         return await deleteManagedServer(serverCtx(ctx), id.toLowerCase(), { removeProjects: q.remove_projects === "true" });
+      } catch (err) {
+        throw mapError(err);
+      }
+    },
+  },
+  {
+    method: "POST",
+    path: "/api/v1/machine-servers/{id}/reboot",
+    operationId: "rebootHetznerServer",
+    summary: "Ask Hetzner to reboot a Hetzner Cloud server of this account",
+    description:
+      "Session only, owner or admin. Sends Hetzner's `reboot` action for a server that is registering, waiting for its Claude sign-in or ready; any other state is 409 `server_not_rebootable`. " +
+      "A server Hetzner no longer has is 409 `server_gone`. A malformed id is 400 `invalid_request`; an id that is not this account's, or a server that is not one of its managed servers (`server_not_managed`), is 404.",
+    minRole: "admin",
+    idempotency: "never",
+    rateClass: "write",
+    sessionLimit: SESSION_LIMITS.machineServerReboot,
+    paramsSchema: idParams,
+    responseSchema: rebootResultSchema,
+    extraResponses: { "409": "Error `server_not_rebootable`, `server_gone`, `credential_invalid` or a `hetzner_*` code (such as `hetzner_locked`: Hetzner is busy with the server)." },
+    async handler(ctx, input) {
+      try {
+        return await rebootManagedServer(serverCtx(ctx), (input.params as { id: string }).id.toLowerCase());
+      } catch (err) {
+        throw mapError(err);
+      }
+    },
+  },
+  {
+    method: "POST",
+    path: "/api/v1/machine-servers/{id}/keep",
+    operationId: "keepOrphanedServer",
+    summary: "Keep an orphaned server: the person knows about it and wants it left alone (nothing changes at Hetzner)",
+    description:
+      "Session only, owner or admin. Only for an orphan (a server with our labels that has no create here): anything else is 409 `not_an_orphan`. Writes one audit row the first time; " +
+      "a repeat answers `already_kept: true` and writes nothing. A malformed id is 400 `invalid_request`; an id that is not this account's is 404.",
+    minRole: "admin",
+    idempotency: "never",
+    rateClass: "write",
+    sessionLimit: SESSION_LIMITS.machineServerKeep,
+    paramsSchema: idParams,
+    responseSchema: keepResultSchema,
+    extraResponses: { "409": "Error `not_an_orphan`." },
+    async handler(ctx, input) {
+      try {
+        return await keepOrphan(serverCtx(ctx), (input.params as { id: string }).id.toLowerCase());
+      } catch (err) {
+        throw mapError(err);
+      }
+    },
+  },
+  {
+    method: "POST",
+    path: "/api/v1/machine-servers/{id}/delete-orphan",
+    operationId: "deleteOrphanedServer",
+    summary: "Delete an orphaned server at Hetzner: the server, then its labelled firewall (a server or firewall Hetzner no longer has counts as deleted)",
+    description:
+      "Session only, owner or admin. Only for an orphan: any other server is 409 `not_an_orphan` (the ordinary delete is for those). Safe to repeat: a repeat finishes what an earlier call left, " +
+      "and an orphan already deleted answers `already_deleted: true` without calling Hetzner. A malformed id is 400 `invalid_request`; an id that is not this account's is 404.",
+    minRole: "admin",
+    idempotency: "never",
+    rateClass: "write",
+    sessionLimit: SESSION_LIMITS.machineServerDelete,
+    paramsSchema: idParams,
+    responseSchema: deleteResultSchema,
+    extraResponses: {
+      "409": "Error `not_an_orphan`, `credential_changed` (the token that found the orphan is no longer the connected one), `credential_invalid` or a `hetzner_*` code. Repeat the call to finish.",
+    },
+    async handler(ctx, input) {
+      try {
+        return await deleteOrphan(serverCtx(ctx), (input.params as { id: string }).id.toLowerCase());
       } catch (err) {
         throw mapError(err);
       }
