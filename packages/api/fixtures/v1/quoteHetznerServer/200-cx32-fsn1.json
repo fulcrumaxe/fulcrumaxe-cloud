@@ -1,0 +1,12 @@
+{
+  "currency": "EUR",
+  "hourly_gross": "0.0070",
+  "monthly_gross": "4.5101",
+  "ipv4_monthly_gross": "0.5950",
+  "tier": "standard",
+  "tier_notice": "Hetzner Cloud servers can't run microVMs (Hetzner doesn't offer nested virtualization on cloud servers). This server will use Standard isolation and host one project. For microVM isolation, add a server you already have that has KVM (see 'A computer or server I have').",
+  "billed_by": "Hetzner bills you directly",
+  "server_type": "cx32",
+  "location": "fsn1",
+  "available": true
+}

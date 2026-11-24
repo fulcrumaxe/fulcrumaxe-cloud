@@ -105,8 +105,8 @@ describe("checkShipForbiddenSignin: the Model Key password-input exemption", () 
     ]);
   });
 
-  it("keeps the allowed-path list at exactly two frozen entries", () => {
-    expect(SHIP_PASSWORD_INPUT_ALLOWED_PATHS).toEqual([EXEMPT, "apps/vercel/vercel-app.js"]);
+  it("keeps the allowed-path list at exactly three frozen entries", () => {
+    expect(SHIP_PASSWORD_INPUT_ALLOWED_PATHS).toEqual([EXEMPT, "apps/vercel/vercel-app.js", "apps/runners/runners-app.js"]);
     expect(Object.isFrozen(SHIP_PASSWORD_INPUT_ALLOWED_PATHS)).toBe(true);
   });
 });

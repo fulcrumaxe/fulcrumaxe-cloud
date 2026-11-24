@@ -9,8 +9,10 @@ import { h, timeNode } from "../_lib/dom.js";
 import { onRefresh } from "../../core/cloud-live.js";
 import {
   CHECK_READ_FAILED, SANDBOX_ACTION, MODE_WORDS, ONLY_ADMINS, TTL_CHOICES, FLEET_REFRESH_MS, accountText, agoText, capacityText, controlList, createAdder, createFleet, factsText, NO_PREFLIGHT, PREFLIGHT_OK, preflightLines, heldBackText, loadRepoChoices, provText, runnerLimitText, sandboxCommandText, sandboxConfirm, sandboxControls, sandboxLine, sandboxQuotaLines, sandboxStatusText, stateParts, versionText,
-  KVM_NOTE, MACHINES_UNAVAILABLE, NO_MACHINES, ONLY_ADMINS_ADD, SERVERS_UNAVAILABLE, TABS, addSteps, createMachines, tierText, needsVmInstall, vmInstallLine, VM_INSTALL_COMMAND, needsVmToken, VM_TOKEN_COMMAND, VM_TOKEN_LINE, VM_TOKEN_STAYS,
+  KVM_NOTE, MACHINES_UNAVAILABLE, NO_MACHINES, ONLY_ADMINS_ADD, TABS, addSteps, createMachines, tierText, needsVmInstall, vmInstallLine, VM_INSTALL_COMMAND, needsVmToken, VM_TOKEN_COMMAND, VM_TOKEN_LINE, VM_TOKEN_STAYS,
+  BILLED_BY, CONNECT_FIRST, HETZNER_REFUSED, HETZNER_STEPS, ONLY_ADMINS_CREATE, ONLY_ADMINS_HETZNER, ONLY_ADMINS_SEE, PRICES_FAILED, SLOW_DOWN, TIER_NOTICE, availableIn, connectedText, createCreator, createSentence, createServers, offeredIn, priceLine, specsText, totalText, unlabelledText,
 } from "./runners-fleet.js";
+import { retryWords } from "../_lib/api.js";
 
 const FULC = window.FULC;
 if (!FULC || typeof FULC.register !== "function") {
@@ -37,9 +39,15 @@ function mountApp(contentEl) {
   let tab = "machines";
   let repoChoices = { status: "idle", list: [] };
   const rowErrors = new Map();
-  const fleet = createFleet({ signal: ac.signal, onChange: () => paint() });
+  let serversWaiting = false; // the Servers tab opened before the fleet read said who the caller is
+  const fleet = createFleet({ signal: ac.signal, onChange: () => (paint(), serversWaiting && fleet.state.status !== "loading" && ((serversWaiting = false), loadServers())) });
   const machines = createMachines({ signal: ac.signal, onChange: () => paint() });
   const adder = createAdder({ signal: ac.signal, origin: window.location.origin, onChange: () => paintSheet() });
+  const servers = createServers({ signal: ac.signal, onChange: () => (paint(), syncConnect && syncConnect()) });
+  const creator = createCreator({ signal: ac.signal, onChange: () => paintCreate() });
+  let createEl = null; // the create dialog's container, repainted as the catalog and the quote arrive
+  let syncConnect = null; // brings the open connect dialog in line with the rate-limit wait
+  let created = false; // a create was accepted: the list says so until the next read
 
   const root = h("div", { class: "runners-app", "data-testid": "runners-app" });
   contentEl.replaceChildren(root);
@@ -65,6 +73,9 @@ function mountApp(contentEl) {
     const { dlg } = dialog;
     dialog = null;
     sheetEl = null;
+    createEl = null;
+    syncConnect = null;
+    creator.close();
     adder.close(); // the secret goes with the sheet
     dlg.close();
     dlg.remove();
@@ -262,24 +273,39 @@ function mountApp(contentEl) {
       body: h("div", { "data-testid": "runners-addm" },
         h("section", { "aria-labelledby": "runners-addm-own" }, h("h3", { id: "runners-addm-own", class: "runners-subtitle" }, "A computer or server I have"), h("ol", null, steps), h("p", { class: "runners-muted", "data-testid": "runners-addm-kvm" }, KVM_NOTE)),
         h("section", { "aria-labelledby": "runners-addm-hz" }, h("h3", { id: "runners-addm-hz", class: "runners-subtitle" }, "A new Hetzner Cloud server"), h("p", { class: "runners-muted" }, "Hetzner makes the server and bills you directly."),
-          button("Open Servers", { id: "runners-addm-servers", "data-testid": "runners-addm-servers" }, () => (closeDialog(), (tab = "servers"), paint(), focusId("runners-tab-servers"))))),
+          button("Open Servers", { id: "runners-addm-servers", "data-testid": "runners-addm-servers" }, () => (closeDialog(), selectTab("servers"), focusId("runners-tab-servers"))))),
       actions: [button("Close", { id: "runners-addm-close" }, closeDialog)],
     });
     focusId("runners-addm-close");
   }
 
   // ── the tabs ──
+  // The Servers reads are made while that tab is showing, so a member (who cannot read the credential) and a page that never opens it ask for nothing.
+  function loadServers() {
+    const f = fleet.state.fleet;
+    if (fleet.state.status === "loading") return void (serversWaiting = true);
+    // The credential and the list are owner and admin reads. Only a fleet answer that names an owner or admin asks for them: a member asks for neither, and
+    // neither does a page whose fleet read failed (the role is not known), which shows that failure instead.
+    if (!f || !f.isAdmin) return;
+    servers.loadCredential();
+    servers.loadList();
+  }
+  function selectTab(id) {
+    tab = id;
+    created = false;
+    paint();
+    if (id === "servers") loadServers();
+  }
   const tabBar = () =>
     h("div", { class: "runners-tabs", role: "tablist", "aria-label": "Machines sections" }, TABS.map(([id, label], i) =>
       h("button", {
         type: "button", role: "tab", id: "runners-tab-" + id, class: "runners-btn", "aria-selected": tab === id ? "true" : "false", "aria-controls": "runners-panel", "data-testid": "runners-tab-" + id,
-        onClick: () => ((tab = id), paint()),
+        onClick: () => selectTab(id),
         onKeydown: (e) => {
           const to = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
           if (to === 0) return;
           e.preventDefault();
-          tab = TABS[(i + to + TABS.length) % TABS.length][0];
-          paint();
+          selectTab(TABS[(i + to + TABS.length) % TABS.length][0]);
           focusId("runners-tab-" + tab);
         },
       }, label)));
@@ -309,7 +335,167 @@ function mountApp(contentEl) {
         button("Add a machine", { id: "runners-addm", "aria-disabled": off ? "true" : "false", "aria-describedby": f && off ? "runners-addm-why" : null, "data-testid": "runners-addm-open" }, () => f && f.isAdmin && openAddMachine("runners-addm"))),
       f && off ? h("span", { id: "runners-addm-why", class: "runners-reason runners-muted", "data-testid": "runners-reason" }, ONLY_ADMINS_ADD) : null), body);
   }
-  const paintServers = () => panel(h("h2", { class: "runners-title" }, "Servers"), h("p", { class: "runners-muted", "data-testid": "runners-servers-unavailable" }, SERVERS_UNAVAILABLE));
+
+  // ── the Servers tab: the Hetzner credential, the create dialog and the list (D#845 MC-10b1) ──
+  function connectHetzner(from) {
+    const input = h("input", { type: "password", id: "runners-hz-token", class: "runners-input", autocomplete: "off", "aria-describedby": "runners-hz-msg", "data-testid": "runners-hz-token" });
+    const msg = h("p", { id: "runners-hz-msg", class: "runners-error", role: "alert", tabindex: "-1", "data-testid": "runners-hz-error" });
+    const status = h("p", { class: "runners-muted", role: "status", "data-testid": "runners-hz-status" });
+    let sending = false;
+    function sync() {
+      const w = servers.wait;
+      save.setAttribute("aria-disabled", sending || w > 0 ? "true" : "false");
+      status.textContent = sending ? "Checking…" : w > 0 ? retryWords(w) : "";
+    }
+    const save = button("Check and save", { id: "runners-hz-save", "data-testid": "runners-hz-save" }, async () => {
+      if (save.getAttribute("aria-disabled") === "true") return;
+      const token = input.value.trim();
+      input.value = ""; // the box holds the token only until it is sent
+      if (token === "") return (msg.textContent = "Paste your Hetzner token first."), msg.focus();
+      sending = true;
+      msg.textContent = "";
+      sync();
+      const said = await servers.connect(token);
+      sending = false;
+      if (said === "") return (returnTo = "runners-srv-create"), closeDialog();
+      msg.textContent = said;
+      sync();
+      msg.focus();
+    });
+    syncConnect = sync;
+    input.addEventListener("keydown", (e) => e.key === "Enter" && save.click());
+    openDialog({
+      title: "Connect Hetzner", from, labelId: "runners-hz-h",
+      body: h("div", { "data-testid": "runners-hz-sheet" }, h("ol", { class: "runners-steps" }, HETZNER_STEPS.map((x) => h("li", null, x))), h("label", { for: "runners-hz-token" }, "Hetzner API token"), input, status, msg),
+      actions: [save, button("Cancel", { id: "runners-hz-cancel", "data-testid": "runners-hz-cancel" }, closeDialog)],
+    });
+    focusId("runners-hz-token");
+  }
+
+  function removeHetzner(from) {
+    const err = h("p", { class: "runners-error", role: "alert", tabindex: "-1", "data-testid": "runners-hz-remove-error" });
+    const yes = button("Remove token", { id: "runners-hz-remove-confirm", "data-testid": "runners-hz-remove-confirm" }, async () => {
+      if (yes.getAttribute("aria-disabled") === "true") return;
+      yes.setAttribute("aria-disabled", "true");
+      const said = await servers.remove();
+      if (said === "") return (returnTo = "runners-hz-connect"), closeDialog();
+      yes.setAttribute("aria-disabled", "false");
+      err.textContent = said;
+      err.focus();
+    });
+    openDialog({
+      title: "Remove the Hetzner token?", from, labelId: "runners-hz-remove-h",
+      body: h("div", null, h("p", null, "This deletes our copy of the token. Servers already made stay at Hetzner. You can connect a token again at any time."), err),
+      actions: [yes, button("Cancel", { id: "runners-hz-remove-cancel" }, closeDialog)],
+    });
+    focusId("runners-hz-remove-cancel");
+  }
+
+  function openCreate(from) {
+    created = false;
+    createEl = h("div", { class: "runners-create", "data-testid": "runners-create" });
+    openDialog({ title: "Create a server", from, body: createEl, actions: [], labelId: "runners-create-h" });
+    creator.open();
+    paintCreate();
+    focusId("runners-create-loc");
+  }
+
+  function paintCreate() {
+    const c = creator.state;
+    if (!createEl || !c) return;
+    const held = createEl.contains(root.ownerDocument.activeElement) ? root.ownerDocument.activeElement.id : "";
+    const cat = c.catalog;
+    const q = c.quote;
+    const where = (cat.locations.find((l) => l.name === c.location) || { label: c.location }).label;
+    const radio = (t, words, off) =>
+      h("label", { class: "runners-choice", for: "runners-size-" + t.name },
+        h("input", { type: "radio", name: "runners-size", id: "runners-size-" + t.name, value: t.name, checked: c.type === t.name, disabled: off || c.locked, onChange: () => creator.choose(t.name) }),
+        h("span", null, words, off ? " · Not available in " + where : ""));
+    const preset = (word, name) => {
+      const t = name && cat.types.find((x) => x.name === name);
+      return t ? radio(t, word + " · " + t.label + " · " + specsText(t), !availableIn(t, c.location)) : h("p", { class: "runners-muted", "data-testid": "runners-size-none" }, word + ": not available in " + where);
+    };
+    const rest = cat.types.filter((t) => offeredIn(t, c.location) && t.name !== cat.presets.small && t.name !== cat.presets.medium);
+    const loading = cat.status === "loading" || q.status === "loading" || (c.type !== "" && q.status === "idle");
+    const ready = !loading && q.status === "ready" && q.available && c.type !== "";
+    const price =
+      loading ? "Loading price…"
+      : q.status === "error" ? [PRICES_FAILED, " ", button("Retry", { id: "runners-create-requote", "data-testid": "runners-create-requote" }, () => creator.requote())]
+      : c.type === "" ? "Choose a size."
+      : !q.available ? createSentence({ status: 409, code: "hetzner_resource_unavailable" }, where)
+      : priceLine(q.price) + ". " + BILLED_BY;
+    const said = c.wait > 0 ? SLOW_DOWN + " " + retryWords(c.wait) : c.error;
+    const off = !ready || c.sending || c.wait > 0 || c.reused;
+    createEl.replaceChildren(h("div", null,
+      h("p", { "data-testid": "runners-create-tier" }, TIER_NOTICE),
+      cat.status === "error"
+        ? h("div", null, h("p", { class: "runners-error", role: "alert", "data-testid": "runners-create-error" }, "Locations couldn't be loaded"), button("Retry", { id: "runners-create-retry", "data-testid": "runners-create-retry" }, () => creator.retry()))
+        : h("div", null,
+          h("label", { for: "runners-create-loc" }, "Location"),
+          h("select", { id: "runners-create-loc", class: "runners-input", "data-testid": "runners-create-loc", disabled: c.locked, onChange: (e) => creator.pick(e.target.value) }, cat.locations.map((l) => h("option", { value: l.name, selected: l.name === c.location }, l.label))),
+          h("fieldset", { class: "runners-fieldset" }, h("legend", null, "Size"), preset("Small", cat.presets.small), preset("Medium", cat.presets.medium),
+            button(c.all ? "Show fewer types" : "Show all types", { id: "runners-create-all", "aria-expanded": c.all ? "true" : "false", "data-testid": "runners-create-all" }, () => creator.toggleAll()),
+            c.all ? h("div", { "data-testid": "runners-create-types" }, rest.map((t) => radio(t, t.label + " · " + specsText(t), !availableIn(t, c.location)))) : null),
+          h("p", { class: "runners-price", role: "status", "data-testid": "runners-create-price" }, price)),
+      said ? h("p", { class: "runners-error", role: "alert", "data-testid": "runners-create-error" }, said) : null,
+      h("div", { class: "runners-actions" },
+        button(c.sending ? "Creating…" : ready ? "Create server, " + totalText(q.price) : loading ? "Loading price…" : "Create server", { id: "runners-create-go", "aria-disabled": off ? "true" : "false", "data-testid": "runners-create-go" }, async () => {
+          if (off) return;
+          const r = await creator.submit();
+          // The dialog that sent this may be gone, and another open now: a late answer only reads the list again and never touches the dialog on screen.
+          // Made, even when the dialog that sent it was cancelled: the notice shows, and a reopened create dialog (locked to this attempt) closes. Another dialog is left alone.
+          if (r.ok) return (created = true), createEl ? ((returnTo = "runners-srv-create"), closeDialog(), servers.loadList()) : (paint(), servers.loadList());
+          if (r.stale || r.unknown) return servers.loadList();
+          if (["hetzner_unauthorized", "credential_invalid", "not_connected"].includes(r.code)) servers.loadCredential();
+        }),
+        c.reused ? button("Create a new one", { id: "runners-create-new", "data-testid": "runners-create-new" }, () => creator.startOver()) : null,
+        button("Cancel", { id: "runners-create-cancel", "data-testid": "runners-create-cancel" }, closeDialog))));
+    if (held) focusId(held);
+  }
+
+  function serverRow(s) {
+    return h("li", { class: "runners-row", "data-testid": "runners-server" },
+      h("h3", { class: "runners-name", "data-testid": "runners-server-name" }, h("bdi", null, s.name)),
+      h("p", { class: "runners-state", "data-testid": "runners-server-status" }, s.status),
+      h("p", { class: "runners-muted" }, [s.size, s.location].filter(Boolean).join(" in "), s.created ? [" · created ", timeNode(s.created, true)] : ""));
+  }
+  function paintServers() {
+    const f = fleet.state.fleet;
+    const c = servers.cred;
+    const l = servers.list;
+    const v = c.value;
+    const member = (f && !f.isAdmin) || c.status === "forbidden";
+    const fleetDown = !f && fleet.state.status === "error"; // who the caller is was never read, so nothing about servers was asked
+    const checking = c.status === "loading" || c.status === "checking";
+    const connected = !member && c.status === "ready" && v !== null && v.status === "connected";
+    const why = member ? ONLY_ADMINS_CREATE : fleetDown ? UNAVAILABLE : connected ? "" : checking ? "Checking Hetzner…" : CONNECT_FIRST;
+    const text = (words, props) => h("p", { "data-testid": "runners-cred-text", ...props }, words);
+    const credBody =
+      member ? [text(ONLY_ADMINS_HETZNER, { class: "runners-muted" })]
+      : fleetDown ? [text(UNAVAILABLE, { class: "runners-error", role: "alert", "data-testid": "runners-servers-fleet-error" }), button("Retry", { id: "runners-servers-fleet-retry", "data-testid": "runners-servers-fleet-retry" }, () => ((serversWaiting = true), fleet.load()))]
+      : checking ? [text("Checking…", { role: "status" })]
+      : c.status === "error" || v === null ? [text("Hetzner status couldn't be loaded", { class: "runners-error", role: "alert" }), button("Retry", { id: "runners-cred-retry", "data-testid": "runners-cred-retry" }, () => servers.loadCredential())]
+      : v.status === "none" ? [text("No Hetzner token is connected."), button("Connect Hetzner", { id: "runners-hz-connect", "data-testid": "runners-hz-connect" }, () => connectHetzner("runners-hz-connect"))]
+      : [text(v.status === "invalid" ? HETZNER_REFUSED : connectedText(v), v.status === "invalid" ? { class: "runners-error", role: "alert" } : null),
+        v.status === "invalid" ? h("p", { class: "runners-muted" }, "Remove it, then connect a new one.") : null,
+        c.unlabelled ? h("p", { class: "runners-note", "data-testid": "runners-hz-unlabelled" }, unlabelledText(c.unlabelled)) : null,
+        button("Remove", { id: "runners-hz-remove", "aria-label": "Remove the Hetzner token", "data-testid": "runners-hz-remove" }, () => removeHetzner("runners-hz-remove"))];
+    const body =
+      fleetDown ? h("p", { class: "runners-muted" }, "Servers show here once the page can tell who you are.")
+      : member || l.status === "forbidden" ? h("p", { class: "runners-muted", "data-testid": "runners-servers-forbidden" }, ONLY_ADMINS_SEE)
+      : l.status === "loading" ? h("p", { class: "runners-muted", "data-testid": "runners-servers-loading" }, "Loading servers…")
+      : l.status === "error" ? h("div", null, h("p", { class: "runners-error", role: "alert", "data-testid": "runners-servers-error" }, "Servers couldn't be loaded"), button("Retry", { id: "runners-servers-retry", "data-testid": "runners-servers-retry" }, () => servers.loadList()))
+      : l.items.length === 0 ? h("p", { class: "runners-muted", "data-testid": "runners-servers-empty" }, "No servers yet")
+      : h("ul", { class: "runners-rows", "data-testid": "runners-servers" }, l.items.map(serverRow));
+    return panel(
+      h("div", { class: "runners-head" }, h("h2", { class: "runners-title" }, "Servers"),
+        h("span", { class: "runners-actions" }, button("Refresh", { id: "runners-servers-refresh", "data-testid": "runners-servers-refresh" }, () => ((created = false), loadServers())),
+          button("Create server", { id: "runners-srv-create", "aria-disabled": why ? "true" : "false", "aria-describedby": why ? "runners-srv-create-why" : null, "data-testid": "runners-srv-create" }, () => !why && openCreate("runners-srv-create"))),
+        why ? h("span", { id: "runners-srv-create-why", class: "runners-reason runners-muted", "data-testid": "runners-reason" }, why) : null),
+      h("section", { class: "runners-cred", "data-testid": "runners-cred", "aria-label": "Hetzner Cloud" }, h("h3", { class: "runners-subtitle" }, "Hetzner Cloud"), ...credBody),
+      created ? h("p", { role: "status", "data-testid": "runners-servers-created" }, "Your server is being created. It shows below as soon as Hetzner has it.") : null,
+      body);
+  }
 
   // ── the list ──
   function line(label, ...value) {
@@ -394,12 +580,13 @@ function mountApp(contentEl) {
   paint();
   fleet.load();
   machines.load();
-  const off = onRefresh(() => (fleet.load(), machines.load()));
+  const off = onRefresh(() => (fleet.load(), machines.load(), tab === "servers" && loadServers()));
   // Read again on its own while the page is open and showing, so the check-in time and capacity never go stale on screen.
   const refreshTimer = setInterval(() => {
     if (root.ownerDocument.hidden) return;
     fleet.load();
     machines.load();
+    if (tab === "servers") loadServers();
   }, FLEET_REFRESH_MS);
   return {
     destroy() {
@@ -407,6 +594,8 @@ function mountApp(contentEl) {
       off();
       ac.abort();
       adder.close();
+      servers.stop();
+      creator.close();
       if (dialog) {
         dialog.dlg.close();
         dialog.dlg.remove();

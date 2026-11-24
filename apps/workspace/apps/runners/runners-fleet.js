@@ -4,7 +4,7 @@
 // for each they are not), the account line, and the data "Register this machine again" starts from. The cloud decides all of it; this file
 // only words it. A refusal is shown as a sentence chosen by status and code here, never the server's message. Nothing here puts null or
 // undefined on a screen: every text function returns a string.
-import { api } from "../_lib/api.js";
+import { api, createRetryGate, waitSeconds } from "../_lib/api.js";
 
 export const RUNNERS_URL = "/api/runners";
 export const TOKENS_URL = "/api/runners/provisioning-tokens";
@@ -569,4 +569,392 @@ export function createMachines({ call = api, signal, onChange = () => {} } = {})
     onChange();
   }
   return { get state() { return st; }, load };
+}
+
+// ── D#845 MC-10b1: the Servers tab, the Hetzner credential and the create dialog ──────────────────────────────────────────────────────────────────────────────
+// Every refusal is worded here from the status and the closed code; nothing the server wrote is shown. A price is never guessed: it is the live quote or nothing.
+// The token is typed into one box, sent once and cleared; this file holds only its last four characters, which the cloud sends back.
+
+export const CREDENTIAL_URL = "/api/v1/machine-credentials/hetzner";
+export const SERVERS_URL = "/api/v1/machine-servers";
+const enc = encodeURIComponent;
+export const catalogUrl = (location) => SERVERS_URL + "/catalog" + (location ? "?location=" + enc(location) : "");
+export const quoteUrl = (type, location) => SERVERS_URL + "/quote?server_type=" + enc(type) + "&location=" + enc(location);
+
+/** The statement that comes before any price. They are the cloud's own words (the quote carries the same ones); a test pins that they match. */
+export const TIER_NOTICE =
+  "Hetzner Cloud servers can't run microVMs (Hetzner doesn't offer nested virtualization on cloud servers). This server will use Standard isolation and host one project. For microVM isolation, add a server you already have that has KVM (see 'A computer or server I have').";
+export const BILLED_BY = "Hetzner bills you directly";
+export const HETZNER_STEPS = [
+  "Create a project named fulcrumaxe in the Hetzner Cloud Console.",
+  "Open Security, then API tokens, and generate a token with Read & Write access.",
+  "Paste it here.",
+  "You can revoke it in Hetzner at any time. Removing it here deletes our copy.",
+];
+export const ONLY_ADMINS_HETZNER = "Only owners and admins can connect Hetzner.";
+export const ONLY_ADMINS_SEE = "Only owners and admins can see servers.";
+export const ONLY_ADMINS_CREATE = "Only owners and admins can create a server.";
+export const CONNECT_FIRST = "Connect Hetzner first.";
+export const HETZNER_REFUSED = "Hetzner refused this token. It may have been revoked";
+export const HETZNER_DOWN = "Hetzner didn't answer. Try again in a minute";
+export const PRICES_FAILED = "Prices couldn't be loaded";
+export const PRICE_CHANGED = "The price changed. Check the new price and confirm again";
+export const SLOW_DOWN = "That was too fast.";
+export const SERVER_WORDS = {
+  creating: "Creating", booting: "Starting up", installing: "Installing", registering: "Registering", needs_claude_login: "Needs a Claude sign-in", ready: "Ready",
+  offline: "Offline", deleting: "Deleting…", failed: "Failed", orphaned: "A server we created that isn't linked any more",
+};
+
+const CONNECT_BY_CODE = {
+  token_read_only: "This token is Read only. Nothing was saved. Make a Read & Write token and try again",
+  token_invalid: HETZNER_REFUSED,
+  invalid_token_format: "That doesn't look like a Hetzner token. Check that you copied all of it",
+  already_connected: "A token is already connected. Remove it first",
+  provider_unreachable: HETZNER_DOWN,
+  not_configured: SERVERS_UNAVAILABLE,
+  machine_kek_unset: SERVERS_UNAVAILABLE,
+};
+/** The sentence for a refused connect, by closed code first and then by status. */
+export const connectSentence = (e) =>
+  statusOf(e) === 429 ? SLOW_DOWN
+  : e && Object.hasOwn(CONNECT_BY_CODE, e.code) ? CONNECT_BY_CODE[e.code]
+  : statusOf(e) === 403 ? ONLY_ADMINS_HETZNER
+  : "That token couldn't be saved. Try again.";
+export const removeSentence = (e) => (statusOf(e) === 403 ? ONLY_ADMINS_HETZNER : "That token couldn't be removed. Try again.");
+
+const FULL = (where) => "That size isn't available in " + where + " right now. Choose another size or location";
+const CREATE_BY_CODE = (where) => ({
+  price_changed: PRICE_CHANGED,
+  price_unavailable: PRICES_FAILED,
+  hetzner_resource_limit_exceeded: "Hetzner's server limit for your Hetzner account was reached. Ask Hetzner to raise it, or delete a server",
+  hetzner_resource_unavailable: FULL(where),
+  hetzner_placement_error: FULL(where),
+  hetzner_unauthorized: HETZNER_REFUSED + ". Remove it and add a new one",
+  hetzner_forbidden: "The Hetzner token can't do that. It needs Read & Write access",
+  hetzner_server_error: HETZNER_DOWN,
+  hetzner_unavailable: HETZNER_DOWN,
+  hetzner_locked: "Hetzner reports the item is busy. Try again in a minute",
+  credential_invalid: HETZNER_REFUSED + ". Remove it and add a new one",
+  not_connected: "Hetzner isn't connected. Connect it first",
+  not_configured: SERVERS_UNAVAILABLE,
+  machine_kek_unset: SERVERS_UNAVAILABLE,
+});
+/** The sentence for a refused create, or "" for a 429 (the page shows the countdown). `where` is the location as the person saw it. */
+export function createSentence(e, where) {
+  if (statusOf(e) === 429) return "";
+  const table = CREATE_BY_CODE(where);
+  return e && Object.hasOwn(table, e.code) ? table[e.code] : statusOf(e) === 403 ? ONLY_ADMINS_CREATE : "That server couldn't be created. Try again.";
+}
+
+// Money is a decimal string from Hetzner. It is added in whole millionths, never as a float, and drawn exactly, with two to six decimals.
+const MONEY = /^[0-9]{1,6}(\.[0-9]{1,6})?$/;
+const millionths = (s) => {
+  const [i, f = ""] = s.split(".");
+  return BigInt(i) * 1000000n + BigInt(f.padEnd(6, "0"));
+};
+export function moneyText(currency, ...amounts) {
+  const total = amounts.reduce((n, a) => n + millionths(a), 0n);
+  const frac = String(total % 1000000n).padStart(6, "0").replace(/0+$/, "").padEnd(2, "0");
+  return (currency === "EUR" ? "€" : currency + " ") + String(total / 1000000n) + "." + frac;
+}
+/** The live quote's prices, or null when the answer is not a price for exactly this size and place. */
+export function readQuote(b, type, location) {
+  const p = b && typeof b === "object" ? [b.hourly_gross, b.monthly_gross, b.ipv4_monthly_gross] : [];
+  if (!b || b.server_type !== type || b.location !== location || typeof b.currency !== "string" || !/^[A-Z]{3}$/.test(b.currency) || !p.every((v) => typeof v === "string" && MONEY.test(v))) return null;
+  return { available: b.available === true, price: { currency: b.currency, hourly_gross: p[0], monthly_gross: p[1], ipv4_monthly_gross: p[2] } };
+}
+export const priceLine = (p) => moneyText(p.currency, p.monthly_gross) + " a month for the server and " + moneyText(p.currency, p.ipv4_monthly_gross) + " a month for its IPv4";
+/** What the Create button shows: the server and its IPv4, added. */
+export const totalText = (p) => moneyText(p.currency, p.monthly_gross, p.ipv4_monthly_gross) + " a month";
+
+/** The credential read: connected, invalid or none, with the last four characters of the token. */
+export function readCredential(b) {
+  if (!b || !["connected", "invalid", "none"].includes(b.status)) return null;
+  return { status: b.status, hint: typeof b.token_hint === "string" ? b.token_hint.slice(-4) : "" };
+}
+export const connectedText = (c) => "Connected" + (c.hint ? " (token …" + c.hint + ")" : "");
+export const unlabelledText = (n) => "This Hetzner project has " + n + (n === 1 ? " server" : " servers") + " we didn't create. We never change them.";
+
+/** One server of the list, or null. Its status is words, never the stored word. */
+export function readServer(s) {
+  if (!s || typeof s !== "object" || typeof s.id !== "string" || s.id === "") return null;
+  const str = (v) => (typeof v === "string" ? v : "");
+  return { id: s.id, name: str(s.name).trim() || "Unnamed server", status: Object.hasOwn(SERVER_WORDS, s.status) ? SERVER_WORDS[s.status] : "Status not reported", size: str(s.server_type), location: str(s.location), created: str(s.created_at) };
+}
+export const readServers = (b) => (b && Array.isArray(b.servers) ? b.servers.map(readServer).filter(Boolean) : null);
+
+/** The catalog: the locations, every type with where it is offered, and the cloud's own Small and Medium picks for the location asked for. */
+export function readCatalog(b) {
+  if (!b || !Array.isArray(b.locations) || !Array.isArray(b.server_types)) return null;
+  const word = (v) => (typeof v === "string" ? v : "");
+  const locations = b.locations.filter((l) => l && word(l.name)).map((l) => ({ name: l.name, label: [word(l.city) || l.name, word(l.country)].filter(Boolean).join(", ") + " (" + l.name + ")" }));
+  const types = b.server_types
+    .filter((t) => t && word(t.name) && Number.isFinite(t.cores) && Number.isFinite(t.memory_gb) && Number.isFinite(t.disk_gb) && Array.isArray(t.locations))
+    .map((t) => ({
+      name: t.name, label: word(t.description) || t.name, cores: t.cores, memory: t.memory_gb, disk: t.disk_gb, arch: t.architecture === "arm" ? "Arm" : t.architecture === "x86" ? "x86" : "",
+      at: t.locations.filter((x) => x && word(x.location)).map((x) => ({ location: x.location, available: x.available === true })),
+    }))
+    .sort((a, z) => a.cores - z.cores || a.memory - z.memory || a.name.localeCompare(z.name));
+  const pick = (n) => (typeof n === "string" && n ? n : null);
+  return { locations, types, presets: { small: pick(b.presets && b.presets.small), medium: pick(b.presets && b.presets.medium) } };
+}
+export const offeredIn = (t, location) => t.at.some((x) => x.location === location);
+export const availableIn = (t, location) => t.at.some((x) => x.location === location && x.available);
+export const specsText = (t) => t.cores + " vCPU, " + t.memory + " GB memory, " + t.disk + " GB disk" + (t.arch ? ", " + t.arch : "");
+
+/** The credential and the server list: two reads that keep their last good answer, and the connect and remove actions. */
+export function createServers({ call = api, signal, onChange = () => {} } = {}) {
+  let cred = { status: "loading", value: null, unlabelled: null };
+  let list = { status: "loading", items: [] };
+  let busy = false;
+  let wait = 0;
+  const gens = { c: 0, l: 0 };
+  const gate = createRetryGate({ onChange: (n) => ((wait = n), onChange()) });
+  async function loadCredential() {
+    const mine = ++gens.c;
+    try {
+      const v = readCredential(await call("GET", CREDENTIAL_URL, undefined, signal));
+      if (mine !== gens.c) return;
+      cred = v ? { ...cred, status: "ready", value: v } : { ...cred, status: cred.status === "ready" ? "ready" : "error" };
+    } catch (e) {
+      if (mine !== gens.c || cancelled(e)) return;
+      cred = statusOf(e) === 403 ? { status: "forbidden", value: null, unlabelled: null } : cred.status === "ready" ? cred : { ...cred, status: "error" };
+    }
+    onChange();
+  }
+  async function loadList() {
+    const mine = ++gens.l;
+    try {
+      const items = readServers(await call("GET", SERVERS_URL, undefined, signal));
+      if (mine !== gens.l) return;
+      list = items ? { status: "ready", items } : { status: list.status === "ready" ? "ready" : "error", items: list.items };
+    } catch (e) {
+      if (mine !== gens.l || cancelled(e)) return;
+      if (statusOf(e) === 403) list = { status: "forbidden", items: [] };
+      else if (list.status !== "ready") list = { status: "error", items: [] };
+    }
+    onChange();
+  }
+  /** Sends the token once. It resolves to "" when saved, else the sentence to show. Nothing about the token is kept. */
+  async function connect(token) {
+    if (busy || wait > 0) return "";
+    busy = true;
+    const before = cred;
+    cred = { ...cred, status: "checking" };
+    onChange();
+    let said = "";
+    try {
+      const b = await call("POST", CREDENTIAL_URL, { token }, signal);
+      const n = b && Number.isInteger(b.unlabelled_server_count) && b.unlabelled_server_count > 0 ? b.unlabelled_server_count : null;
+      cred = { status: "ready", value: { status: b && b.status === "ok" ? "connected" : "invalid", hint: String((b && b.token_hint) || "").slice(-4) }, unlabelled: n };
+    } catch (e) {
+      said = cancelled(e) ? "" : connectSentence(e);
+      cred = before;
+      if (statusOf(e) === 429) gate.start(waitSeconds(e));
+    }
+    busy = false;
+    onChange();
+    if (said) await loadCredential(); // the stored state may be what the refusal says (a token already there)
+    return said;
+  }
+  /** Removes our copy of the token. Its servers stay. A token already gone counts as removed. */
+  async function remove() {
+    if (busy) return "";
+    busy = true;
+    let said = "";
+    try {
+      await call("DELETE", CREDENTIAL_URL, undefined, signal);
+    } catch (e) {
+      if (!cancelled(e) && !(statusOf(e) === 404 && e.code === "not_connected")) said = removeSentence(e);
+    }
+    busy = false;
+    if (!said) cred = { status: "ready", value: { status: "none", hint: "" }, unlabelled: null };
+    onChange();
+    await loadList();
+    return said;
+  }
+  return { loadCredential, loadList, connect, remove, stop: () => gate.cancel(), get cred() { return cred; }, get list() { return list; }, get wait() { return wait; } };
+}
+
+/** The one sentence for a create whose outcome nobody knows: the cloud may have made the server. The same words follow a reused key. */
+export const UNKNOWN_OUTCOME = "We couldn't tell whether your last server was made. Check the list below before trying again.";
+/** After an unknown outcome, answers that never reached the create (rate limit, session, anything in front of it) keep the key; these are their sentences. */
+export const TOO_MANY_TRIES = "Too many tries, wait a moment, then press Create again.";
+export const SIGN_IN_AGAIN = "Your session has ended. Sign in again, then press Create again.";
+export const SERVER_BEING_CREATED = "A server is already being created for this account. Check the list below.";
+/**
+ * The answers that say nothing was made, and so end an attempt: the server's own clean refusals (its REFUSED set, as `hetzner_<code>` on the wire; a test pins the two lists
+ * together) and the refusals the create handler writes before any Hetzner call. Everything else keeps the key and the lock: a 5xx, `hetzner_locked`, `hetzner_rate_limit_exceeded`,
+ * any other `hetzner_*`, `server_outcome_unknown`, a code nobody here knows. An allowlist, never a denylist: a code added later is unknown until it is listed.
+ */
+export const CLEAN_REFUSALS = new Set([
+  "hetzner_unauthorized", "hetzner_forbidden", "hetzner_resource_limit_exceeded", "hetzner_resource_unavailable", "hetzner_placement_error", "hetzner_invalid_input", "hetzner_uniqueness_error", "hetzner_not_found",
+  "price_changed", "price_unavailable", "credential_invalid", "not_connected", "not_configured", "machine_kek_unset",
+]);
+
+/**
+ * The create dialog's state, null while it is closed. One read of the live catalog, one of the live quote for the size and place chosen, and the create.
+ * The newest read wins, so a slow answer for an earlier choice is dropped. The button is live only for an available size with a quote in hand. A refused price
+ * leaves the dialog open with the new quote and nothing created, so the next press is the second click.
+ *
+ * One attempt is one Idempotency-Key and one body. It lives until the cloud gives a definite answer: made (201), or a refusal that says nothing was made. While
+ * its outcome is unknown (offline, timeout, 5xx, 409 idempotency_in_progress or 409 server_creating) the dialog is locked to that size, place and price, a press sends the same key and
+ * body again, and the attempt survives Cancel and reopening. Only a 201 or a clean refusal (CLEAN_REFUSALS) ends an attempt, on the first press as on any later one:
+ * a 429, a 401 or a 403 from in front of the create, `hetzner_locked`, `server_outcome_unknown`, or any other answer, keeps the key and the lock. A 422 idempotency_key_reused never gets a new key silently: the person chooses "Create a new one".
+ * Each answer carries the generation of the dialog that sent it, so a late answer never changes or closes a newer dialog (the caller refreshes the list instead).
+ */
+export function createCreator({ call = api, signal, onChange = () => {}, uuid = () => crypto.randomUUID() } = {}) {
+  let st = null;
+  let seq = 0;
+  let gen = 0; // one per open and per close: which dialog a create answer belongs to
+  let attempt = null; // { key, body, where, inflight, unknown, reused, everUnknown, note }
+  const gate = createRetryGate({ onChange: (n) => { if (st) st = { ...st, wait: n }; onChange(); } });
+  const set = (patch) => {
+    st = { ...st, ...patch };
+    onChange();
+  };
+  const noCatalog = (status) => ({ status, locations: [], types: [], presets: { small: null, medium: null } });
+  const chooseType = (c, location, current) => {
+    const ok = (n) => (n ? c.types.find((t) => t.name === n && availableIn(t, location)) : undefined);
+    return (ok(current) || ok(c.presets.small) || ok(c.presets.medium) || { name: "" }).name;
+  };
+  async function quote() {
+    const my = ++seq;
+    const { type, location } = st;
+    set({ quote: { status: "loading" } });
+    let q = null;
+    try {
+      q = readQuote(await call("GET", quoteUrl(type, location), undefined, signal), type, location);
+    } catch (e) {
+      if (cancelled(e)) return;
+    }
+    if (my === seq && st) set({ quote: q ? { status: "ready", ...q } : { status: "error" } });
+  }
+  async function pick(location) {
+    const my = ++seq;
+    const current = st.type;
+    set({ location, type: "", error: "", quote: { status: "idle" }, catalog: { ...st.catalog, status: "loading" } });
+    let c = null;
+    try {
+      c = readCatalog(await call("GET", catalogUrl(location), undefined, signal));
+    } catch (e) {
+      if (cancelled(e)) return;
+    }
+    if (my !== seq || !st) return;
+    if (!c) return set({ catalog: { ...st.catalog, status: "error" } });
+    // A locked dialog shows the size, place and price that were sent, whatever the catalog says now.
+    if (attempt) return set({ catalog: { ...c, status: "ready" }, type: attempt.body.server_type, quote: { status: "ready", available: true, price: attempt.body.quoted } });
+    set({ catalog: { ...c, status: "ready" }, type: chooseType(c, location, current) });
+    if (st.type) await quote();
+  }
+  /** The first read names the locations; the second, for the first of them (or the locked one), names Small and Medium there. */
+  async function start() {
+    const my = ++seq;
+    set({ catalog: noCatalog("loading") });
+    let c = null;
+    try {
+      c = readCatalog(await call("GET", catalogUrl(), undefined, signal));
+    } catch (e) {
+      if (cancelled(e)) return;
+    }
+    if (my !== seq || !st) return;
+    if (!c || c.locations.length === 0) return set({ catalog: noCatalog("error") });
+    set({ catalog: { ...c, status: "loading" } });
+    await pick(attempt ? attempt.body.location : c.locations[0].name);
+  }
+  function open() {
+    seq++;
+    gen++;
+    gate.cancel();
+    st = { catalog: noCatalog("loading"), location: attempt ? attempt.body.location : "", type: "", all: false, quote: { status: "idle" }, error: "", wait: 0 };
+    onChange();
+    return start();
+  }
+  function close() {
+    seq++;
+    gen++;
+    gate.cancel();
+    st = null; // an attempt stays: its key is kept until the cloud answers for certain
+  }
+  /**
+   * Sends the create. It resolves to { ok, code, unknown, stale }: the closed code of the refusal ("" when there was none), whether the outcome is unknown (the
+   * list should be read again), and whether the dialog that sent it has gone (then nothing here was changed in the dialog now open).
+   */
+  async function submit() {
+    const s = st;
+    if (!s || s.wait > 0 || (attempt && (attempt.inflight || attempt.reused))) return { ok: false, code: "", unknown: false, stale: false };
+    if (!attempt) {
+      if (s.quote.status !== "ready" || !s.quote.available || !s.type) return { ok: false, code: "", unknown: false, stale: false };
+      const where = (s.catalog.locations.find((l) => l.name === s.location) || { label: s.location }).label;
+      attempt = { key: uuid(), body: { server_type: s.type, location: s.location, quoted: s.quote.price }, where, inflight: false, unknown: false, reused: false, everUnknown: false, note: "" };
+    }
+    const mine = attempt;
+    const sentIn = gen;
+    mine.inflight = true;
+    mine.unknown = false;
+    st = { ...st, error: "" };
+    onChange();
+    let failure = null;
+    try {
+      await call("POST", SERVERS_URL, mine.body, signal, { idempotencyKey: mine.key });
+    } catch (e) {
+      failure = e || {};
+    }
+    const stale = sentIn !== gen;
+    if (failure === null) {
+      if (attempt === mine) attempt = null;
+      // A dialog reopened while this was in the air is locked to this attempt, which is now made: it closes (the caller shows the notice) and never offers Create again.
+      if (stale && st) close();
+      onChange();
+      return { ok: true, code: "", unknown: false, stale };
+    }
+    if (cancelled(failure) && signal && signal.aborted) return { ok: false, code: "", unknown: false, stale: true }; // the page itself is gone
+    // An abort the page did not ask for is the write deadline: the cloud may still be working.
+    const code = failure.code || "";
+    const status = statusOf(failure);
+    mine.inflight = false;
+    if (code === "idempotency_key_reused") mine.reused = true;
+    else if (status === 0 || status >= 500 || code === "idempotency_in_progress" || code === "server_creating") mine.unknown = mine.everUnknown = true;
+    else if (!CLEAN_REFUSALS.has(code)) {
+      // Not an answer the create gives when it made nothing: the outcome stays unknown, so the key and the lock stay, on the first press as on any later one.
+      mine.unknown = mine.everUnknown = true;
+      mine.note = status === 429 ? TOO_MANY_TRIES : status === 401 ? SIGN_IN_AGAIN : status === 403 ? ONLY_ADMINS_CREATE : "";
+    } else if (attempt === mine) attempt = null; // the create answered and nothing was made under this key
+    if (mine.reused || mine.unknown) {
+      if (code === "server_creating") mine.note = SERVER_BEING_CREATED;
+      else if (code === "idempotency_in_progress" || status === 0 || status >= 500) mine.note = "";
+      if (status === 429 && mine.unknown && !stale) gate.start(waitSeconds(failure));
+      onChange();
+      return { ok: false, code, unknown: true, stale };
+    }
+    if (stale) {
+      onChange();
+      return { ok: false, code, unknown: false, stale: true };
+    }
+    set({ error: createSentence(failure, mine.where) });
+    if (statusOf(failure) === 429) gate.start(waitSeconds(failure));
+    else if (["price_changed", "hetzner_resource_unavailable", "hetzner_placement_error"].includes(code)) await quote();
+    return { ok: false, code, unknown: false, stale: false };
+  }
+  /** After a reused key: forget the old attempt on purpose and read the price again, so the next press is a new create with a new key. */
+  function startOver() {
+    if (!st || !attempt || !attempt.reused) return undefined;
+    attempt = null;
+    set({ error: "" });
+    return st.type ? quote() : undefined;
+  }
+  const locked = () => attempt !== null;
+  return {
+    open, close, submit, startOver, requote: () => (st && !locked() ? quote() : undefined),
+    retry: () => (st && st.location ? pick(st.location) : start()),
+    pick: (location) => (st && !locked() && location !== st.location ? pick(location) : undefined),
+    choose: (type) => (st && !locked() && type !== st.type ? (set({ type, error: "" }), quote()) : undefined),
+    toggleAll: () => st && set({ all: !st.all }),
+    /** The dialog's state, with what the attempt says laid over it: sending, locked to the attempt, and the sentence for an unknown outcome. */
+    get state() {
+      if (!st) return null;
+      const a = attempt;
+      return { ...st, sending: !!(a && a.inflight), locked: a !== null, reused: !!(a && a.reused), error: a && (a.unknown || a.reused) ? a.note || UNKNOWN_OUTCOME : st.error };
+    },
+  };
 }

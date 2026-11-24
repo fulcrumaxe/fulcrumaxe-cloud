@@ -9,6 +9,13 @@
 import { test, expect, type Page, type Route } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import { waitForDesktop } from "./helpers/boot";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+// D#845 MC-10b1: the Servers tab's answers are the contract fixtures (packages/api/fixtures/v1/**, checked against each route's schema by packages/api/test/contract.test.ts).
+const V1 = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages", "api", "fixtures", "v1");
+const fx = (op: string, name: string) => JSON.parse(readFileSync(join(V1, op, name), "utf8")) as Record<string, unknown>;
 
 const CSP = "script-src 'self'; object-src 'none'; base-uri 'self'; require-trusted-types-for 'script'; trusted-types 'none'";
 const SERVER_TEXT = "server text that must never be shown";
@@ -66,17 +73,51 @@ interface Mock {
   /** D#845 MC-10a: what GET /api/machines answers, and whether it fails. */
   machines: unknown[];
   machinesFail: boolean;
+  /** D#845 MC-10b1: the Hetzner credential, the servers, the catalog and the quote, and what the app sent. */
+  hz: Hz;
+}
+interface Answer { status: number; code: string; retryAfter?: number }
+interface Hz {
+  credential: Record<string, unknown>;
+  credentialFail: number;
+  servers: unknown[];
+  serversFail: boolean;
+  catalogFail: boolean;
+  quoteFail: boolean;
+  quoteDelay: number;
+  /** How long a create waits before it answers, and how many times the server list was read. */
+  createDelay: number;
+  listReads: number;
+  /** Fields of the quote the cloud answers (a live price that moved). */
+  quotePatch: Record<string, unknown>;
+  /** The refusal the next connect gets; null connects. */
+  connect: Answer | null;
+  /** The refusals the next creates get, one each; empty creates. */
+  creates: Answer[];
+  removeFail: number;
+  connects: Array<{ token?: string }>;
+  created: Array<{ body: { quoted?: { monthly_gross?: string } }; key: string | undefined }>;
+  removes: number;
+  quotes: string[];
 }
 const json = (route: Route, status: number, body: unknown) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 
-async function setup(page: Page, tweak: Partial<Mock> = {}) {
+const hzDefaults = (): Hz => ({
+  credential: fx("getHetznerCredential", "200-none.json"), credentialFail: 0, servers: (fx("listHetznerServers", "200-list.json").servers as unknown[]).slice(1), serversFail: false, catalogFail: false, quoteFail: false, quoteDelay: 0, createDelay: 0, listReads: 0, quotePatch: {},
+  connect: null, creates: [], removeFail: 0, connects: [], created: [], removes: 0, quotes: [],
+});
+const refusal = (route: Route, status: number, code: string, retryAfter?: number) =>
+  route.fulfill({ status, contentType: "application/json", headers: retryAfter ? { "Retry-After": String(retryAfter) } : {}, body: JSON.stringify({ error: { code, message: SERVER_TEXT, request_id: "r" } }) });
+
+async function setup(page: Page, tweak: Omit<Partial<Mock>, "hz"> & { hz?: Partial<Hz> } = {}) {
   const errors: string[] = [];
   page.on("console", (m) => m.type() === "error" && !m.text().startsWith("Failed to load resource") && errors.push(m.text()));
   page.on("pageerror", (e) => errors.push(`pageerror: ${e.message}`));
   await page.addInitScript(() => document.addEventListener("securitypolicyviolation", (e) => console.error(`CSP ${e.violatedDirective}`)));
   const mock: Mock = {
-    runners: [runner()], role: "admin", account: { limit: 16, capacity: 8, running: 1, runner_count: 1, runner_limit: 5 }, tokens: [], posts: [], deletes: [], mintStatus: 201, mintDelay: 0, runFetches: [], isAdmin: true, gets: 0, getFails: false, checkReplies: [], sandboxRefusal: null, machines: [], machinesFail: false, ...tweak,
+    runners: [runner()], role: "admin", account: { limit: 16, capacity: 8, running: 1, runner_count: 1, runner_limit: 5 }, tokens: [], posts: [], deletes: [], mintStatus: 201, mintDelay: 0, runFetches: [], isAdmin: true, gets: 0, getFails: false, checkReplies: [], sandboxRefusal: null, machines: [], machinesFail: false, ...tweak, hz: { ...hzDefaults(), ...tweak.hz },
   };
+  const hz = mock.hz;
   await page.route((u) => u.pathname === "/", async (route) => {
     const res = await route.fetch();
     await route.fulfill({ response: res, headers: { ...res.headers(), "content-security-policy": CSP } });
@@ -93,6 +134,41 @@ async function setup(page: Page, tweak: Partial<Mock> = {}) {
     if (p.startsWith("/api/v1/runs/")) mock.runFetches.push(p.split("/")[4]!);
     if (p === "/api/v1/repos") return json(route, 200, REPOS);
     if (p === "/api/machines") return mock.machinesFail ? json(route, 503, { error: { code: "unavailable", message: SERVER_TEXT, request_id: "r" } }) : json(route, 200, { machines: mock.machines });
+    if (p === "/api/v1/machine-credentials/hetzner") {
+      if (req.method() === "GET") return hz.credentialFail ? refusal(route, hz.credentialFail, hz.credentialFail === 403 ? "forbidden" : "unavailable") : json(route, 200, hz.credential);
+      if (req.method() === "DELETE") {
+        hz.removes++;
+        if (hz.removeFail) return refusal(route, hz.removeFail, "server_error");
+        hz.credential = fx("getHetznerCredential", "200-none.json");
+        return route.fulfill({ status: 204 });
+      }
+      hz.connects.push(JSON.parse(req.postData() ?? "{}"));
+      if (hz.connect) return refusal(route, hz.connect.status, hz.connect.code, hz.connect.retryAfter);
+      hz.credential = fx("getHetznerCredential", "200-connected.json");
+      return json(route, 201, fx("connectHetznerCredential", "201-connected.json"));
+    }
+    if (p === "/api/v1/machine-servers" && req.method() === "GET") hz.listReads++;
+    if (p === "/api/v1/machine-servers" && req.method() === "GET") return hz.serversFail ? refusal(route, 503, "unavailable") : json(route, 200, { servers: hz.servers });
+    if (p === "/api/v1/machine-servers" && req.method() === "POST") {
+      hz.created.push({ body: JSON.parse(req.postData() ?? "{}"), key: req.headers()["idempotency-key"] });
+      const answer = hz.creates.shift();
+      if (hz.createDelay) await new Promise((r) => setTimeout(r, hz.createDelay));
+      if (answer && answer.status === 0) return route.abort("connectionreset"); // the answer never arrives: an unknown outcome
+      if (answer) return refusal(route, answer.status, answer.code, answer.retryAfter);
+      hz.servers = [fx("createHetznerServer", "201-creating.json"), ...hz.servers];
+      return json(route, 201, hz.servers[0]);
+    }
+    if (p === "/api/v1/machine-servers/catalog") {
+      if (hz.catalogFail) return refusal(route, 503, "hetzner_unavailable");
+      const where = new URL(req.url()).searchParams.get("location");
+      return json(route, 200, fx("getHetznerCatalog", where === "fsn1" || where === "nbg1" ? `200-${where}.json` : "200-all-locations.json"));
+    }
+    if (p === "/api/v1/machine-servers/quote") {
+      const q = new URL(req.url()).searchParams;
+      hz.quotes.push(`${q.get("server_type")} ${q.get("location")}`);
+      if (hz.quoteDelay) await new Promise((r) => setTimeout(r, hz.quoteDelay));
+      return hz.quoteFail ? refusal(route, 503, "price_unavailable") : json(route, 200, { ...fx("quoteHetznerServer", "200-cx32-fsn1.json"), server_type: q.get("server_type"), location: q.get("location"), ...hz.quotePatch });
+    }
     if (p === "/api/runners") {
       mock.gets++;
       if (mock.getFails) return json(route, 503, { error: { code: "unavailable", message: SERVER_TEXT, request_id: "r" } });
@@ -721,7 +797,7 @@ test.describe("D#845 MC-10a: the Machines app", () => {
     await expect(t(page, "runners-reason")).toHaveText("Only owners and admins can add a machine.");
     await t(page, "runners-tab-machines").focus();
     await page.keyboard.press("ArrowRight");
-    await expect(t(page, "runners-servers-unavailable")).toHaveText("Hetzner Cloud servers aren't available right now");
+    await expect(t(page, "runners-cred-text")).toHaveText("Only owners and admins can connect Hetzner."); // a member reads the servers but cannot connect
     await page.keyboard.press("ArrowRight");
     await expect(t(page, "runners-account")).toBeVisible();
     await clean(page, errors);
@@ -737,8 +813,483 @@ test.describe("D#845 MC-10a: the Machines app", () => {
     await expect(page.locator('dialog [data-testid="runners-addm-kvm"]')).toContainText("sudo fx-runner vm install");
     expect(await axeSeriousOrCritical(page, "dialog[open]")).toEqual([]);
     await press(page.locator('dialog [data-testid="runners-addm-servers"]'));
-    await expect(t(page, "runners-servers-unavailable")).toBeVisible();
+    await expect(t(page, "runners-cred")).toBeVisible();
     await expect(t(page, "runners-tab-servers")).toBeFocused();
+    await clean(page, errors);
+  });
+});
+
+// ── D#845 MC-10b1: Servers part 1, the Hetzner credential and the create dialog ──
+const HZ_TOKEN = ["hz", "Qm9bT1x7Yw3nKd82LfRp5uJc0VtAe4Sg6Zi1HoNy", "a1b2"].join("_"); // gitleaks:allow
+const CONNECTED = fx("getHetznerCredential", "200-connected.json");
+const TIER = fx("quoteHetznerServer", "200-cx32-fsn1.json").tier_notice as string;
+const FSN1 = "Falkenstein, DE (fsn1)";
+const openServers = async (page: Page) => {
+  await openMachines(page);
+  await press(t(page, "runners-tab-servers"));
+};
+const dlgOf = (page: Page) => page.locator("dialog[open]");
+const go = (page: Page) => dlgOf(page).locator('[data-testid="runners-create-go"]');
+const openCreate = async (page: Page) => {
+  await press(t(page, "runners-srv-create"));
+  await expect(go(page)).toHaveText(/^Create server, /);
+};
+
+test.describe("D#845 MC-10b1: the Hetzner credential", () => {
+  test("Connect Hetzner: the four steps, then read only, refused and down each say so and save nothing, then connected; the token is sent once per press and never shown", async ({ page }) => {
+    const { mock, errors } = await setup(page);
+    await openServers(page);
+    await expect(t(page, "runners-cred-text")).toHaveText("No Hetzner token is connected.");
+    await expect(t(page, "runners-srv-create")).toHaveAttribute("aria-disabled", "true");
+    await expect(t(page, "runners-reason")).toHaveText("Connect Hetzner first.");
+    await press(t(page, "runners-hz-connect"));
+    const dlg = dlgOf(page);
+    await expect(dlg.locator("ol li")).toHaveCount(4);
+    await expect(dlg.locator("ol li").nth(3)).toHaveText("You can revoke it in Hetzner at any time. Removing it here deletes our copy.");
+    const input = dlg.locator('[data-testid="runners-hz-token"]');
+    await expect(input).toHaveAttribute("type", "password");
+    await expect(input).toHaveAttribute("autocomplete", "off");
+    await expect(input).toBeFocused();
+    const send = async () => {
+      await input.fill(HZ_TOKEN);
+      await press(dlg.locator('[data-testid="runners-hz-save"]'));
+    };
+    for (const [answer, words] of [
+      [{ status: 422, code: "token_read_only" }, "This token is Read only. Nothing was saved. Make a Read & Write token and try again"],
+      [{ status: 422, code: "token_invalid" }, "Hetzner refused this token. It may have been revoked"],
+      [{ status: 503, code: "provider_unreachable" }, "Hetzner didn't answer. Try again in a minute"],
+    ] as const) {
+      mock.hz.connect = answer;
+      await send();
+      await expect(dlg.locator('[data-testid="runners-hz-error"]')).toHaveText(words);
+      await expect(input).toHaveValue(""); // cleared after sending, whatever the answer
+      await expect(dlg).toHaveCount(1);
+    }
+    await expect(t(page, "runners-cred-text")).toHaveText("No Hetzner token is connected."); // nothing was saved
+    mock.hz.connect = null;
+    await send();
+    await expect(dlg).toHaveCount(0);
+    await expect(t(page, "runners-cred-text")).toHaveText("Connected (token …a1b2)");
+    await expect(t(page, "runners-hz-unlabelled")).toHaveText("This Hetzner project has 2 servers we didn't create. We never change them.");
+    await expect(t(page, "runners-srv-create")).toHaveAttribute("aria-disabled", "false");
+    await expect(t(page, "runners-srv-create")).toBeFocused();
+    expect(mock.hz.connects.map((c) => c.token)).toEqual([HZ_TOKEN, HZ_TOKEN, HZ_TOKEN, HZ_TOKEN]);
+    expect(await page.content()).not.toContain(HZ_TOKEN);
+    expect(await page.evaluate(() => document.body.innerText)).not.toContain(HZ_TOKEN);
+    await clean(page, errors);
+  });
+
+  test("a rate-limited connect keeps Check and save off for the wait; an empty box asks for the token and sends nothing", async ({ page }) => {
+    const { mock, errors } = await setup(page, { hz: { connect: { status: 429, code: "rate_limited", retryAfter: 2 } } });
+    await openServers(page);
+    await press(t(page, "runners-hz-connect"));
+    const dlg = dlgOf(page);
+    const save = dlg.locator('[data-testid="runners-hz-save"]');
+    await press(save);
+    await expect(dlg.locator('[data-testid="runners-hz-error"]')).toHaveText("Paste your Hetzner token first.");
+    expect(mock.hz.connects).toHaveLength(0);
+    await dlg.locator('[data-testid="runners-hz-token"]').fill(HZ_TOKEN);
+    await press(save);
+    await expect(dlg.locator('[data-testid="runners-hz-error"]')).toHaveText("That was too fast.");
+    await expect(save).toHaveAttribute("aria-disabled", "true");
+    await expect(dlg.locator('[data-testid="runners-hz-status"]')).toHaveText(/^Try again in [12] seconds?\.$/);
+    await expect(save).toHaveAttribute("aria-disabled", "false", { timeout: 6000 });
+    await clean(page, errors);
+  });
+
+  test("Remove asks first, says so when it fails, and then Hetzner can be connected again; Cancel changes nothing", async ({ page }) => {
+    const { mock, errors } = await setup(page, { hz: { credential: CONNECTED, removeFail: 500 } });
+    await openServers(page);
+    await expect(t(page, "runners-cred-text")).toHaveText("Connected (token …a1b2)");
+    await press(t(page, "runners-hz-remove"));
+    const dlg = dlgOf(page);
+    await expect(dlg).toContainText("This deletes our copy of the token. Servers already made stay at Hetzner.");
+    await press(dlg.locator("#runners-hz-remove-cancel"));
+    await expect(dlg).toHaveCount(0);
+    expect(mock.hz.removes).toBe(0);
+    await expect(t(page, "runners-hz-remove")).toBeFocused();
+    await press(t(page, "runners-hz-remove"));
+    await press(dlg.locator('[data-testid="runners-hz-remove-confirm"]'));
+    await expect(dlg.locator('[data-testid="runners-hz-remove-error"]')).toHaveText("That token couldn't be removed. Try again.");
+    await expect(t(page, "runners-cred-text")).toHaveText("Connected (token …a1b2)"); // nothing was claimed removed
+    mock.hz.removeFail = 0;
+    await press(dlg.locator('[data-testid="runners-hz-remove-confirm"]'));
+    await expect(dlg).toHaveCount(0);
+    expect(mock.hz.removes).toBe(2);
+    await expect(t(page, "runners-cred-text")).toHaveText("No Hetzner token is connected.");
+    await expect(t(page, "runners-hz-connect")).toBeFocused();
+    await expect(t(page, "runners-srv-create")).toHaveAttribute("aria-disabled", "true");
+    await clean(page, errors);
+  });
+
+  test("a refused token is told so with Remove, a failed read has Retry, and a 403 reads as owners and admins only", async ({ page }) => {
+    const { mock, errors } = await setup(page, { hz: { credential: fx("getHetznerCredential", "200-invalid.json") } });
+    await openServers(page);
+    await expect(t(page, "runners-cred-text")).toHaveText("Hetzner refused this token. It may have been revoked");
+    await expect(t(page, "runners-hz-remove")).toBeVisible();
+    await expect(t(page, "runners-srv-create")).toHaveAttribute("aria-disabled", "true");
+    mock.hz.credentialFail = 503;
+    await press(t(page, "runners-servers-refresh"));
+    await expect(t(page, "runners-cred-text")).toHaveText("Hetzner refused this token. It may have been revoked"); // the last good read stays
+    await page.reload();
+    await waitForDesktop(page);
+    await openServers(page);
+    await expect(t(page, "runners-cred-text")).toHaveText("Hetzner status couldn't be loaded");
+    mock.hz.credentialFail = 0;
+    mock.hz.credential = CONNECTED;
+    await press(t(page, "runners-cred-retry"));
+    await expect(t(page, "runners-cred-text")).toHaveText("Connected (token …a1b2)");
+    mock.hz.credentialFail = 403;
+    await press(t(page, "runners-servers-refresh"));
+    await expect(t(page, "runners-cred-text")).toHaveText("Only owners and admins can connect Hetzner.");
+    await expect(t(page, "runners-reason")).toHaveText("Only owners and admins can create a server.");
+    await clean(page, errors);
+  });
+});
+
+test.describe("D#845 MC-10b1: the server list and the create dialog", () => {
+  test("the list shows names, words and the size and place; empty and failed reads say so", async ({ page }) => {
+    const { mock, errors } = await setup(page, { hz: { credential: CONNECTED, servers: fx("listHetznerServers", "200-list.json").servers as unknown[] } });
+    await openServers(page);
+    const rows = t(page, "runners-server");
+    await expect(rows).toHaveCount(2);
+    await expect(rows.nth(0).locator('[data-testid="runners-server-status"]')).toHaveText("Installing");
+    await expect(rows.nth(0)).toContainText("cx32 in fsn1");
+    await expect(rows.nth(1).locator('[data-testid="runners-server-status"]')).toHaveText("Ready");
+    await expect(page.locator(`${WIN} [data-testid="runners-server-name"] bdi`)).toHaveText(["fx-5d1e7a32", "fx-7a2c9e10"]);
+    mock.hz.servers = [];
+    await press(t(page, "runners-servers-refresh"));
+    await expect(t(page, "runners-servers-empty")).toHaveText("No servers yet");
+    mock.hz.serversFail = true;
+    await page.reload();
+    await waitForDesktop(page);
+    await openServers(page);
+    await expect(t(page, "runners-servers-error")).toHaveText("Servers couldn't be loaded");
+    mock.hz.serversFail = false;
+    await press(t(page, "runners-servers-retry"));
+    await expect(t(page, "runners-servers-empty")).toBeVisible();
+    await clean(page, errors);
+  });
+
+  test("Create a server: the standard-tier sentence before the price, live sizes, the total on the button, and a create with exactly the quoted price", async ({ page }) => {
+    const { mock, errors } = await setup(page, { hz: { credential: CONNECTED, servers: [] } });
+    await openServers(page);
+    await openCreate(page);
+    const dlg = dlgOf(page);
+    await expect(dlg.locator('[data-testid="runners-create-tier"]')).toHaveText(TIER);
+    expect(await dlg.locator('[data-testid="runners-create-tier"]').evaluate((el) => !!(el.compareDocumentPosition(document.querySelector('dialog [data-testid="runners-create-price"]')!) & Node.DOCUMENT_POSITION_FOLLOWING))).toBe(true);
+    await expect(dlg.locator("#runners-create-loc option")).toHaveText([FSN1, "Nuremberg, DE (nbg1)", "Helsinki, FI (hel1)"]);
+    await expect(dlg.locator("#runners-size-cx32")).toBeChecked(); // Small: the cheapest available x86 shared type with 4 vCPU and 8 GB, picked by the cloud
+    await expect(dlg.locator('label[for="runners-size-cx32"]')).toContainText("Small · CX32 · 4 vCPU, 8 GB memory, 80 GB disk, x86");
+    await expect(dlg.locator('label[for="runners-size-cx42"]')).toContainText("Medium · CX42 · 8 vCPU, 16 GB memory");
+    await expect(dlg.locator('[data-testid="runners-create-price"]')).toHaveText("€4.5101 a month for the server and €0.595 a month for its IPv4. Hetzner bills you directly");
+    await expect(go(page)).toHaveText("Create server, €5.1051 a month");
+    await press(dlg.locator("#runners-size-cx42"));
+    await expect(dlg.locator("#runners-size-cx42")).toBeChecked();
+    expect(mock.hz.quotes.at(-1)).toBe("cx42 fsn1");
+    await press(dlg.locator('[data-testid="runners-create-all"]'));
+    await expect(dlg.locator('[data-testid="runners-create-types"] input')).toHaveCount(3); // the rest: CX22, CCX13, CAX21
+    await expect(dlg.locator('[data-testid="runners-create-all"]')).toHaveAttribute("aria-expanded", "true");
+    await dlg.locator("#runners-create-loc").selectOption("nbg1");
+    await expect(dlg.locator('[data-testid="runners-size-none"]')).toHaveText("Medium: not available in Nuremberg, DE (nbg1)");
+    await expect(dlg.locator("#runners-size-cx42")).toBeDisabled(); // offered there but full
+    await expect(dlg.locator("#runners-size-cx32")).toBeChecked(); // the choice moved to Small
+    await dlg.locator("#runners-create-loc").selectOption("fsn1");
+    await press(dlg.locator("#runners-size-cx32"));
+    await expect(go(page)).toHaveText("Create server, €5.1051 a month");
+    await press(go(page));
+    await expect(dlg).toHaveCount(0);
+    expect(mock.hz.created).toHaveLength(1);
+    expect(mock.hz.created[0]!.body).toEqual({ server_type: "cx32", location: "fsn1", quoted: { currency: "EUR", hourly_gross: "0.0070", monthly_gross: "4.5101", ipv4_monthly_gross: "0.5950" } });
+    expect(mock.hz.created[0]!.key).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    await expect(t(page, "runners-servers-created")).toBeVisible();
+    await expect(t(page, "runners-server").first().locator('[data-testid="runners-server-status"]')).toHaveText("Creating");
+    await expect(t(page, "runners-srv-create")).toBeFocused();
+    await clean(page, errors);
+  });
+
+  test("the button is off while the price loads and when it failed, and a full size says so; nothing is guessed", async ({ page }) => {
+    const { mock, errors } = await setup(page, { hz: { credential: CONNECTED, quoteDelay: 2500 } });
+    await openServers(page);
+    await press(t(page, "runners-srv-create"));
+    await expect(go(page)).toHaveText("Loading price…");
+    await expect(go(page)).toHaveAttribute("aria-disabled", "true");
+    await go(page).dispatchEvent("click"); // a press while the price is still loading
+    expect(mock.hz.created).toHaveLength(0);
+    await expect(go(page)).toHaveText(/^Create server, €/);
+    await press(dlgOf(page).locator('[data-testid="runners-create-cancel"]'));
+    mock.hz.quoteDelay = 0;
+    mock.hz.quoteFail = true;
+    await press(t(page, "runners-srv-create"));
+    await expect(dlgOf(page).locator('[data-testid="runners-create-price"]')).toContainText("Prices couldn't be loaded");
+    await expect(go(page)).toHaveText("Create server");
+    await expect(go(page)).toHaveAttribute("aria-disabled", "true");
+    expect(await dlgOf(page).innerText()).not.toContain("€");
+    mock.hz.quoteFail = false;
+    await press(dlgOf(page).locator('[data-testid="runners-create-requote"]'));
+    await expect(go(page)).toHaveAttribute("aria-disabled", "false");
+    mock.hz.quotePatch = { available: false };
+    await press(dlgOf(page).locator("#runners-size-cx42"));
+    await expect(dlgOf(page).locator('[data-testid="runners-create-price"]')).toHaveText(`That size isn't available in ${FSN1} right now. Choose another size or location`);
+    await expect(go(page)).toHaveAttribute("aria-disabled", "true");
+    expect(mock.hz.created).toHaveLength(0);
+    await clean(page, errors);
+  });
+
+  test("locations that cannot be read say so with Retry", async ({ page }) => {
+    const { mock, errors } = await setup(page, { hz: { credential: CONNECTED, catalogFail: true } });
+    await openServers(page);
+    await press(t(page, "runners-srv-create"));
+    await expect(dlgOf(page).locator('[data-testid="runners-create-error"]')).toHaveText("Locations couldn't be loaded");
+    await expect(go(page)).toHaveAttribute("aria-disabled", "true");
+    mock.hz.catalogFail = false;
+    await press(dlgOf(page).locator('[data-testid="runners-create-retry"]'));
+    await expect(go(page)).toHaveText(/^Create server, €/);
+    await clean(page, errors);
+  });
+
+  test("after a price change nothing is created and the new price shows; the second click creates at that price", async ({ page }) => {
+    const { mock, errors } = await setup(page, { hz: { credential: CONNECTED, servers: [], creates: [{ status: 409, code: "price_changed" }] } });
+    await openServers(page);
+    await openCreate(page);
+    mock.hz.quotePatch = { monthly_gross: "5.0000" }; // Hetzner moved the price after it was shown
+    await press(go(page));
+    await expect(dlgOf(page).locator('[data-testid="runners-create-error"]')).toHaveText("The price changed. Check the new price and confirm again");
+    await expect(go(page)).toHaveText("Create server, €5.595 a month");
+    await expect(go(page)).toHaveAttribute("aria-disabled", "false");
+    await expect(go(page)).toBeFocused();
+    expect(mock.hz.created).toHaveLength(1); // the refused press made nothing, and nothing was sent by itself
+    await press(go(page));
+    await expect(dlgOf(page)).toHaveCount(0);
+    expect(mock.hz.created).toHaveLength(2);
+    expect(mock.hz.created[1]!.body.quoted.monthly_gross).toBe("5.0000");
+    await clean(page, errors);
+  });
+
+  test("every refusal of a create is its own sentence, leaves the dialog open, and a rate limit holds the button for the wait", async ({ page }) => {
+    const { mock, errors } = await setup(page, { hz: { credential: CONNECTED, servers: [] } });
+    await openServers(page);
+    await openCreate(page);
+    for (const [answer, words] of [
+      [{ status: 409, code: "hetzner_resource_limit_exceeded" }, "Hetzner's server limit for your Hetzner account was reached. Ask Hetzner to raise it, or delete a server"],
+      [{ status: 409, code: "hetzner_resource_unavailable" }, `That size isn't available in ${FSN1} right now. Choose another size or location`],
+      [{ status: 409, code: "hetzner_unauthorized" }, "Hetzner refused this token. It may have been revoked. Remove it and add a new one"],
+      [{ status: 409, code: "hetzner_forbidden" }, "The Hetzner token can't do that. It needs Read & Write access"],
+    ] as const) {
+      mock.hz.creates = [answer];
+      const before = mock.hz.created.length;
+      await press(go(page));
+      await expect(dlgOf(page).locator('[data-testid="runners-create-error"]')).toHaveText(words);
+      expect(mock.hz.created).toHaveLength(before + 1);
+      await expect(go(page)).toHaveAttribute("aria-disabled", "false");
+    }
+    expect(mock.hz.created[0]!.key).not.toBe(mock.hz.created[1]!.key); // an answer ends the key
+    // A 429 is not an answer from the create: it may have come from in front of one that landed, so the key and the lock stay, even on a first press.
+    mock.hz.creates = [{ status: 429, code: "rate_limited", retryAfter: 2 }];
+    const before = mock.hz.created.length;
+    await press(go(page));
+    await expect(dlgOf(page).locator('[data-testid="runners-create-error"]')).toHaveText(/^That was too fast\. Try again in [12] seconds?\.$/);
+    await expect(go(page)).toHaveAttribute("aria-disabled", "true");
+    await expect(go(page)).toHaveAttribute("aria-disabled", "false", { timeout: 6000 });
+    await expect(dlgOf(page).locator('[data-testid="runners-create-error"]')).toHaveText("Too many tries, wait a moment, then press Create again."); // the wait is over; the key was kept
+    await press(go(page));
+    await expect(dlgOf(page)).toHaveCount(0);
+    expect(mock.hz.created).toHaveLength(before + 2);
+    expect(mock.hz.created[before + 1]!.key).toBe(mock.hz.created[before]!.key);
+    await clean(page, errors);
+  });
+
+  test("Cancel and Escape make nothing and return focus; both dialogs pass axe under two themes and fit the window", async ({ page }) => {
+    const { mock, errors } = await setup(page, { hz: { credential: fx("getHetznerCredential", "200-none.json") } });
+    await openServers(page);
+    for (const theme of ["classic-crt", "nord"]) {
+      await applyTheme(page, theme);
+      expect(await axeSeriousOrCritical(page, WIN), theme).toEqual([]);
+      await press(t(page, "runners-hz-connect"));
+      expect(await axeSeriousOrCritical(page, "dialog[open]"), `connect ${theme}`).toEqual([]);
+      expect(await dlgOf(page).evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+      await page.keyboard.press("Escape");
+      await expect(dlgOf(page)).toHaveCount(0);
+      await expect(t(page, "runners-hz-connect")).toBeFocused();
+    }
+    mock.hz.credential = CONNECTED;
+    await press(t(page, "runners-servers-refresh"));
+    for (const theme of ["classic-crt", "nord"]) {
+      await applyTheme(page, theme);
+      await press(t(page, "runners-srv-create"));
+      await expect(go(page)).toHaveText(/^Create server, €/);
+      await press(dlgOf(page).locator('[data-testid="runners-create-all"]'));
+      expect(await axeSeriousOrCritical(page, "dialog[open]"), `create ${theme}`).toEqual([]);
+      expect(await dlgOf(page).evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+      await page.keyboard.press("Escape");
+      await expect(dlgOf(page)).toHaveCount(0);
+      await expect(t(page, "runners-srv-create")).toBeFocused();
+    }
+    expect(mock.hz.created).toHaveLength(0);
+    expect(await axeSeriousOrCritical(page, WIN)).toEqual([]);
+    expect(await page.locator(`${WIN} .runners-app`).evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+    await clean(page, errors);
+  });
+});
+
+const UNKNOWN = "We couldn't tell whether your last server was made. Check the list below before trying again.";
+test.describe("D#845 MC-10b1: a create whose outcome is unknown", () => {
+  test("a lost answer, then 409 in progress, then more presses: one key, one body, the size and place locked, the list read again, and the one that settles it closes the dialog", async ({ page }) => {
+    const { mock, errors } = await setup(page, { hz: { credential: CONNECTED, servers: [], creates: [{ status: 0, code: "" }, { status: 409, code: "idempotency_in_progress" }, { status: 500, code: "server_error" }] } });
+    await openServers(page);
+    await openCreate(page);
+    const dlg = dlgOf(page);
+    const reads = mock.hz.listReads;
+    await press(go(page));
+    await expect(dlg.locator('[data-testid="runners-create-error"]')).toHaveText(UNKNOWN);
+    await expect.poll(() => mock.hz.listReads).toBeGreaterThan(reads); // the list is read again at once
+    await expect(dlg.locator("#runners-create-loc")).toBeDisabled();
+    await expect(dlg.locator("#runners-size-cx42")).toBeDisabled();
+    await expect(dlg.locator("#runners-size-cx32")).toBeDisabled();
+    for (let i = 0; i < 2; i++) {
+      await press(go(page));
+      await expect(dlg.locator('[data-testid="runners-create-error"]')).toHaveText(UNKNOWN);
+      expect(mock.hz.created).toHaveLength(i + 2);
+    }
+    await press(go(page)); // nothing left to refuse: made
+    await expect(dlg).toHaveCount(0);
+    expect(mock.hz.created).toHaveLength(4);
+    expect(new Set(mock.hz.created.map((c) => c.key)).size).toBe(1);
+    expect(new Set(mock.hz.created.map((c) => JSON.stringify(c.body))).size).toBe(1);
+    await clean(page, errors);
+  });
+
+  test("a lost answer, then a 429: the button waits, and the next press sends the SAME key and body", async ({ page }) => {
+    const { mock, errors } = await setup(page, { hz: { credential: CONNECTED, servers: [], creates: [{ status: 0, code: "" }, { status: 429, code: "rate_limited", retryAfter: 2 }] } });
+    await openServers(page);
+    await openCreate(page);
+    await press(go(page));
+    await expect(dlgOf(page).locator('[data-testid="runners-create-error"]')).toHaveText(UNKNOWN);
+    await press(go(page));
+    await expect(dlgOf(page).locator('[data-testid="runners-create-error"]')).toHaveText(/^That was too fast\. Try again in [12] seconds?\.$/);
+    await expect(go(page)).toHaveAttribute("aria-disabled", "true");
+    await expect(go(page)).toHaveAttribute("aria-disabled", "false", { timeout: 6000 });
+    await expect(dlgOf(page).locator('[data-testid="runners-create-error"]')).toHaveText("Too many tries, wait a moment, then press Create again."); // the wait is over; the key was kept
+    await press(go(page));
+    await expect(dlgOf(page)).toHaveCount(0);
+    expect(mock.hz.created).toHaveLength(3);
+    expect(new Set(mock.hz.created.map((c) => c.key)).size).toBe(1);
+    expect(new Set(mock.hz.created.map((c) => JSON.stringify(c.body))).size).toBe(1);
+    await clean(page, errors);
+  });
+
+  test("hetzner_locked on a first press keeps the key and the lock: the next press sends the same key", async ({ page }) => {
+    const { mock, errors } = await setup(page, { hz: { credential: CONNECTED, servers: [], creates: [{ status: 409, code: "hetzner_locked" }] } });
+    await openServers(page);
+    await openCreate(page);
+    await press(go(page));
+    await expect(dlgOf(page).locator('[data-testid="runners-create-error"]')).toHaveText(UNKNOWN);
+    await expect(dlgOf(page).locator("#runners-create-loc")).toBeDisabled();
+    await press(go(page));
+    await expect(dlgOf(page)).toHaveCount(0);
+    expect(mock.hz.created).toHaveLength(2);
+    expect(mock.hz.created[1]!.key).toBe(mock.hz.created[0]!.key);
+    await clean(page, errors);
+  });
+
+  test("Cancel and Escape after a lost answer keep the key: the reopened dialog is locked to the same size and says so, and its press sends the same key", async ({ page }) => {
+    const { mock, errors } = await setup(page, { hz: { credential: CONNECTED, servers: [], creates: [{ status: 0, code: "" }] } });
+    await openServers(page);
+    await openCreate(page);
+    await press(dlgOf(page).locator("#runners-size-cx42"));
+    await expect(go(page)).toHaveText(/^Create server, /);
+    await press(go(page));
+    await expect(dlgOf(page).locator('[data-testid="runners-create-error"]')).toHaveText(UNKNOWN);
+    await press(dlgOf(page).locator('[data-testid="runners-create-cancel"]'));
+    await expect(dlgOf(page)).toHaveCount(0);
+    await openCreate(page);
+    await expect(dlgOf(page).locator("#runners-size-cx42")).toBeChecked();
+    await expect(dlgOf(page).locator("#runners-size-cx42")).toBeDisabled();
+    await expect(dlgOf(page).locator('[data-testid="runners-create-error"]')).toHaveText(UNKNOWN);
+    await page.keyboard.press("Escape");
+    await expect(dlgOf(page)).toHaveCount(0);
+    await openCreate(page);
+    await press(go(page));
+    await expect(dlgOf(page)).toHaveCount(0);
+    expect(mock.hz.created).toHaveLength(2);
+    expect(mock.hz.created[1]!.key).toBe(mock.hz.created[0]!.key);
+    expect(mock.hz.created[1]!.body).toEqual(mock.hz.created[0]!.body);
+    await clean(page, errors);
+  });
+
+  test("a key reused is never answered with a new key: the person is told to check the list and chooses Create a new one", async ({ page }) => {
+    const { mock, errors } = await setup(page, { hz: { credential: CONNECTED, servers: [], creates: [{ status: 0, code: "" }, { status: 422, code: "idempotency_key_reused" }] } });
+    await openServers(page);
+    await openCreate(page);
+    await press(go(page));
+    await press(go(page));
+    await expect(dlgOf(page).locator('[data-testid="runners-create-error"]')).toHaveText(UNKNOWN);
+    await expect(go(page)).toHaveAttribute("aria-disabled", "true");
+    expect(mock.hz.created).toHaveLength(2);
+    await press(dlgOf(page).locator('[data-testid="runners-create-new"]'));
+    await expect(dlgOf(page).locator('[data-testid="runners-create-error"]')).toHaveCount(0);
+    await expect(dlgOf(page).locator("#runners-size-cx42")).toBeEnabled();
+    await expect(go(page)).toHaveText(/^Create server, /);
+    await expect(go(page)).toHaveAttribute("aria-disabled", "false");
+    await press(go(page));
+    await expect(dlgOf(page)).toHaveCount(0);
+    expect(mock.hz.created).toHaveLength(3);
+    expect(mock.hz.created[2]!.key).not.toBe(mock.hz.created[0]!.key);
+    await clean(page, errors);
+  });
+
+  test("a late 201 for a dialog that was cancelled and reopened closes it with the notice: no Create button is live and nothing is sent again", async ({ page }) => {
+    const { mock, errors } = await setup(page, { hz: { credential: CONNECTED, servers: [], createDelay: 5000 } });
+    await openServers(page);
+    await openCreate(page);
+    await press(go(page));
+    await expect(go(page)).toHaveText("Creating…");
+    await press(dlgOf(page).locator('[data-testid="runners-create-cancel"]'));
+    await expect(dlgOf(page)).toHaveCount(0);
+    await press(t(page, "runners-srv-create"));
+    await expect(go(page)).toHaveText("Creating…"); // the attempt is still in the air; a press cannot send a second
+    await go(page).dispatchEvent("click"); // Playwright would wait for aria-disabled to clear, so the press is sent as an event
+    expect(mock.hz.created).toHaveLength(1);
+    await expect(dlgOf(page)).toHaveCount(0, { timeout: 15000 }); // the answer arrived: the reopened dialog is closed by it
+    await expect(t(page, "runners-servers-created")).toHaveCount(1); // with the normal notice
+    await expect(t(page, "runners-server")).toHaveCount(1); // and the list was read
+    await expect(go(page)).toHaveCount(0); // no Create button is live
+    await page.waitForTimeout(300);
+    expect(mock.hz.created).toHaveLength(1); // and nothing was sent after the answer
+    await clean(page, errors);
+  });
+});
+
+test.describe("D#845 MC-10b1: a member on the Servers tab", () => {
+  test("a member is told only owners and admins can see servers, and the credential and the list are never asked for", async ({ page }) => {
+    const asked: string[] = [];
+    page.on("request", (r) => /\/api\/v1\/machine-/.test(r.url()) && asked.push(r.url()));
+    const { errors } = await setup(page, { role: "member", isAdmin: false });
+    await openServers(page);
+    await expect(t(page, "runners-servers-forbidden")).toHaveText("Only owners and admins can see servers.");
+    await expect(t(page, "runners-cred-text")).toHaveText("Only owners and admins can connect Hetzner.");
+    await expect(t(page, "runners-srv-create")).toHaveAttribute("aria-disabled", "true");
+    await expect(t(page, "runners-reason")).toHaveText("Only owners and admins can create a server.");
+    await expect(t(page, "runners-server")).toHaveCount(0);
+    expect(asked).toEqual([]);
+    expect(await axeSeriousOrCritical(page, WIN)).toEqual([]);
+    await clean(page, errors);
+  });
+
+  test("when the fleet read fails nobody's role is known: the failure shows with Retry, no machine read is made, and a good read then loads the Servers", async ({ page }) => {
+    const asked: string[] = [];
+    page.on("request", (r) => /\/api\/v1\/machine-/.test(r.url()) && asked.push(r.url()));
+    const { mock, errors } = await setup(page, { role: "member", isAdmin: false, getFails: true, hz: { credential: CONNECTED, servers: [] } });
+    await openServers(page);
+    await expect(t(page, "runners-servers-fleet-error")).toHaveText("Runners aren't available right now.");
+    await expect(t(page, "runners-srv-create")).toHaveAttribute("aria-disabled", "true");
+    await page.waitForTimeout(500);
+    expect(asked).toEqual([]);
+    mock.getFails = false;
+    mock.role = "admin";
+    await press(t(page, "runners-servers-fleet-retry"));
+    await expect(t(page, "runners-servers-empty")).toBeVisible();
+    expect(asked.length).toBeGreaterThan(0);
     await clean(page, errors);
   });
 });
