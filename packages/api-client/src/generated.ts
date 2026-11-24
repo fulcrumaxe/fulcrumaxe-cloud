@@ -3195,6 +3195,8 @@ export interface Operations {
           cache_write_tokens: string;
           api_equivalent_usd: number | null;
           priced: boolean;
+          sign_in_kind: "subscription" | "api_key" | "unknown";
+          paid_note: string | null;
           projects: Array<{
             repo_id: (string) | (null);
             name: string | null;

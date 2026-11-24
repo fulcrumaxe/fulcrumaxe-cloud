@@ -285,6 +285,43 @@ describe('D#845 MC-11b: machine spend (servers and Claude usage), real Postgres'
       expect((await asTenant(me)).usage.input_tokens).toBe('18014398509481986');
     });
 
+    it("says how each machine's usage is paid from its sign-in kind (88.0a): plan, API key, and no line when unknown, revoked or never said", async () => {
+      const me = await seedAccountWithMember(admin, { role: 'owner' });
+      const mk = async (mode: 'subscription' | 'api_key', auth: boolean | null, revoked = false): Promise<string> => {
+        const id = await insertRunner(admin, me.accountId, me.userId, { credentialMode: mode });
+        await admin.query(`UPDATE runners SET model_auth_present = $2, revoked_at = $3 WHERE id = $1`, [id, auth, revoked ? new Date('2026-11-10T00:00:00Z') : null]);
+        await usage(me, { runner: id, repo: null, day: '2026-11-05', tier: 'sonnet', i: 5 });
+        return id;
+      };
+      const sub = await mk('subscription', true);
+      const key = await mk('api_key', true);
+      const noAuth = await mk('subscription', false);
+      const silent = await mk('api_key', null);
+      const gone = await mk('subscription', true, true);
+      const u = (await asTenant(me)).usage;
+      const of = (id: string) => u.machines.find((m) => m.runner_id === id)!;
+      expect(of(sub)).toMatchObject({ sign_in_kind: 'subscription', paid_note: 'Covered by your Claude plan; shown at API prices for comparison' });
+      expect(of(key)).toMatchObject({ sign_in_kind: 'api_key', paid_note: 'Billed to your API key' });
+      for (const id of [noAuth, silent, gone]) expect(of(id)).toMatchObject({ sign_in_kind: 'unknown', paid_note: null });
+      // The sign-in kind only labels a machine: it never splits a machine's rows or changes a figure.
+      expect(u.machines).toHaveLength(5);
+      expect(of(sub)).toMatchObject({ input_tokens: '5' });
+    });
+
+    it("another account's machine sign-in never leaks onto this account's usage", async () => {
+      const mine = await seedAccountWithMember(admin, { role: 'owner' });
+      const theirs = await seedAccountWithMember(admin, { role: 'owner' });
+      const rm = await insertRunner(admin, mine.accountId, mine.userId, { credentialMode: 'subscription' });
+      const rt = await insertRunner(admin, theirs.accountId, theirs.userId, { credentialMode: 'api_key' });
+      await admin.query(`UPDATE runners SET model_auth_present = true WHERE id = ANY($1::uuid[])`, [[rm, rt]]);
+      await usage(mine, { runner: rm, repo: null, day: '2026-11-05', tier: 'sonnet', i: 1 });
+      await usage(theirs, { runner: rt, repo: null, day: '2026-11-05', tier: 'sonnet', i: 1 });
+      expect((await asTenant(mine)).usage.machines.map((m) => [m.runner_id, m.sign_in_kind])).toEqual([[rm, 'subscription']]);
+      expect((await readMachineSpend(admin, theirs.accountId, { includeServerRows: true }, NOW)).usage.machines.map((m) => [m.runner_id, m.sign_in_kind])).toEqual([[rt, 'api_key']]);
+      // The RLS-bypassing client with a foreign account id: nothing of mine, nothing of theirs.
+      expect((await readMachineSpend(admin, randomUUID(), { includeServerRows: true }, NOW)).usage.machines).toEqual([]);
+    });
+
     it("another account's usage never appears, with the same machine id space and through the admin client", async () => {
       const mine = await seedAccountWithMember(admin, { role: 'owner' });
       const theirs = await seedAccountWithMember(admin, { role: 'owner' });

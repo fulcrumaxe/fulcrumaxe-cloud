@@ -1108,6 +1108,16 @@ test.describe("D#845 MC-11b: Budget & Billing machine figures", () => {
     return text;
   };
 
+  test("says how each machine's usage is paid: an API key, and no line at all when the sign-in is unknown", async ({ page }) => {
+    const m = MACHINES_BODY.usage.machines[0];
+    const second = { ...m, runner_id: "0d2e7c3a-8f55-4d6e-b1a3-2c9d5e7f4444", name: "Cloud box", sign_in_kind: "unknown", paid_note: null };
+    await boot(page, { machines: (route) => json(route, 200, body({ usage: usage({ machines: [{ ...m, sign_in_kind: "api_key", paid_note: "Billed to your API key" }, second] }) })) });
+    await expect(tid(page, "bb-usage-machine")).toHaveCount(2);
+    await expect(tid(page, "bb-usage-paid")).toHaveCount(1);
+    await expect(tid(page, "bb-usage-paid")).toHaveText("Billed to your API key.");
+    await noMachineText(page);
+  });
+
   test("prints the served figures: servers with the Hetzner note, usage with tokens and the API-price dollars, by machine and project, and never a percentage", async ({ page }) => {
     const seen = await boot(page, {});
     await expect(tid(page, "bb-servers-total")).toHaveText("\u20ac12.34");
@@ -1117,6 +1127,7 @@ test.describe("D#845 MC-11b: Budget & Billing machine figures", () => {
     await expect(tid(page, "bb-usage-tokens")).toHaveText("1,200,000 in, 340,000 out, 5,000,000 cache read, 250,000 cache write");
     await expect(tid(page, "bb-usage-machine")).toContainText("Studio laptop");
     await expect(tid(page, "bb-usage-project")).toContainText("acme/site: \u2248 $4.20 at API prices");
+    await expect(tid(page, "bb-usage-paid")).toHaveText("Covered by your Claude plan; shown at API prices for comparison.");
     await expect(tid(page, "bb-machines-asof")).toContainText("As of");
     await noMachineText(page);
     expect(seen.errors).toEqual([]);

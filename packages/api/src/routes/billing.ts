@@ -194,6 +194,8 @@ export const machineSpendResponseSchema = z.object({
     priced: z.boolean().describe("False when some tokens are on a model with no price, so the dollars cover the priced part only."),
     machines: z.array(z.object({
       runner_id: z.string().uuid(), name: z.string().nullable(), ...usageTokens, api_equivalent_usd: usd, priced: z.boolean(),
+      sign_in_kind: z.enum(["subscription", "api_key", "unknown"]).describe("How Claude is signed in on this machine now, derived from its registration and its latest hello; never stored."),
+      paid_note: z.string().nullable().describe("Who pays for this machine's usage: a plan (shown at API prices for comparison) or the person's API key; null when the sign-in kind is unknown."),
       projects: z.array(z.object({ repo_id: z.string().uuid().nullable(), name: z.string().nullable().describe("owner/name; null for a project that was removed."), ...usageTokens, api_equivalent_usd: usd, priced: z.boolean() })),
     })),
   }),
