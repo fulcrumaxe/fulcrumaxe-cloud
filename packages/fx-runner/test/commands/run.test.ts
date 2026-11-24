@@ -102,7 +102,7 @@ const newSignals = (): Signals => new EventEmitter() as unknown as Signals;
 /** What the program's entry point hands `run`: the real pid, the real kill and the real process start. */
 // D#845 ON-6b: the hello now reads the CLI's sign-in through `inspect`, which starts the fake CLI; the default host answers it without a spawn so the tests that count spawns still count jobs only. Tests of the reading itself pass their own `inspect`.
 const quietInspect = (kit: RunHost["engine"]): RunHost["engine"] => ({ ...kit, inspect: async () => ({ version: "2.1.0", minimumVersion: "2.0.0", versionSupported: true, login: "yes" }) as Awaited<ReturnType<RunHost["engine"]["inspect"]>> });
-const hostWith = (signals: RunHost["signals"]): RunHost => ({ home, platform: "linux", signals, pid: process.pid, kill: (pid, signal) => process.kill(pid, signal), chdir: () => undefined, engine: quietInspect(createClaudeKit(spawn, { launch: testLaunch(), bashSandboxUnusable: shellSandboxUsable })), sandbox: fakeSandboxHost() });
+const hostWith = (signals: RunHost["signals"]): RunHost => ({ home, platform: "linux", signals, pid: process.pid, kill: (pid, signal) => process.kill(pid, signal), chdir: () => undefined, engine: quietInspect(createClaudeKit(spawn, { launch: testLaunch(), bashSandboxUnusable: shellSandboxUsable })), sandbox: fakeSandboxHost(), managedServer: () => true });
 
 /** A machine with room for everything: the composed-daemon tests are about other things than this machine's free memory. */
 const GB = 1024 ** 3;
@@ -255,6 +255,8 @@ describe("1-hello. the machine's facts are sent once on start (D#605 FL-2)", () 
     cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     // D#845 watch mode: watch_mode_v1 is the newest capability, so it goes first: one more refusal.
     cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
+    // D#845 MC-8b: machine_login_v1 is the newest, so it goes before watch_mode_v1: one more refusal.
+    cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     const run = start({ hooks });
     await until(() => claims() >= 1);
     while (ordered.length < 2) await clock.advance(5000);
@@ -302,10 +304,12 @@ describe("1-hello. the machine's facts are sent once on start (D#605 FL-2)", () 
     cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     // D#845 watch mode: watch_mode_v1 is the newest capability, so it goes first: one more refusal.
     cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
+    // D#845 MC-8b: machine_login_v1 is the newest, so it goes before watch_mode_v1: one more refusal.
+    cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     const dropped = start({ hooks });
     await until(() => answers.length >= 1);
     expect(hellos()[0]!.body).toMatchObject({ capabilities: expect.arrayContaining(["conflict_facts_v1"]) });
-    expect(HelloMessage.parse(hellos()[8]!.body).capabilities).not.toContain("conflict_facts_v1");
+    expect(HelloMessage.parse(hellos()[9]!.body).capabilities).not.toContain("conflict_facts_v1");
     expect(answers).toEqual([false]);
     expect(await stop(dropped)).toMatchObject({ code: 0 });
     // A hello that failed outright leaves it unsent too.
@@ -337,11 +341,13 @@ describe("1-hello. the machine's facts are sent once on start (D#605 FL-2)", () 
     cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     // D#845 watch mode: watch_mode_v1 is the newest capability, so it goes first: one more refusal.
     cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
+    // D#845 MC-8b: machine_login_v1 is the newest, so it goes before watch_mode_v1: one more refusal.
+    cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     const dropped = start({ hooks });
     await until(() => ordered.length >= 1);
     expect(HelloMessage.parse(hellos()[0]!.body).capabilities).toContain("ordered_facts_v1");
-    expect(HelloMessage.parse(hellos()[7]!.body).capabilities).not.toContain("ordered_facts_v1");
-    expect(HelloMessage.parse(hellos()[7]!.body).capabilities).toContain("conflict_facts_v1");
+    expect(HelloMessage.parse(hellos()[8]!.body).capabilities).not.toContain("ordered_facts_v1");
+    expect(HelloMessage.parse(hellos()[8]!.body).capabilities).toContain("conflict_facts_v1");
     expect([ordered, conflict]).toEqual([[false], [true]]);
     expect(await stop(dropped)).toMatchObject({ code: 0 });
     cloud.force.hello.push({ status: 404, body: { error: { code: "not_found", message: "not_found" } } });
@@ -369,10 +375,12 @@ describe("1-hello. the machine's facts are sent once on start (D#605 FL-2)", () 
     cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     // D#845 watch mode: watch_mode_v1 is the newest capability, so it goes first: one more refusal.
     cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
+    // D#845 MC-8b: machine_login_v1 is the newest, so it goes before watch_mode_v1: one more refusal.
+    cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     const dropped = start({ hooks });
     await until(() => tip.length >= 1);
     expect(HelloMessage.parse(hellos()[0]!.body).capabilities).toContain("tip_publish_v1");
-    expect(HelloMessage.parse(hellos()[6]!.body).capabilities).not.toContain("tip_publish_v1");
+    expect(HelloMessage.parse(hellos()[7]!.body).capabilities).not.toContain("tip_publish_v1");
     expect(tip).toEqual([false]);
     expect(await stop(dropped)).toMatchObject({ code: 0 });
     cloud.force.hello.push({ status: 404, body: { error: { code: "not_found", message: "not_found" } } });
@@ -402,11 +410,13 @@ describe("1-hello. the machine's facts are sent once on start (D#605 FL-2)", () 
     cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     // D#845 watch mode: watch_mode_v1 is the newest capability, so it goes first: one more refusal.
     cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
+    // D#845 MC-8b: machine_login_v1 is the newest, so it goes before watch_mode_v1: one more refusal.
+    cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     const dropped = start({ hooks });
     await until(() => offered.length >= 1);
     expect(HelloMessage.parse(hellos()[0]!.body).capabilities).toContain("mem_proposal_v1");
-    expect(HelloMessage.parse(hellos()[5]!.body).capabilities).not.toContain("mem_proposal_v1");
-    expect(HelloMessage.parse(hellos()[5]!.body).capabilities).toContain("tip_publish_v1");
+    expect(HelloMessage.parse(hellos()[6]!.body).capabilities).not.toContain("mem_proposal_v1");
+    expect(HelloMessage.parse(hellos()[6]!.body).capabilities).toContain("tip_publish_v1");
     expect(offered).toEqual([false]);
     wired.push(built!.enabled());
     expect(built!.interactive).toBe(false);
@@ -449,7 +459,7 @@ describe("1-hello. the machine's facts are sent once on start (D#605 FL-2)", () 
       let built: Parameters<NonNullable<RunHooks["onPlanePushBuilt"]>>[0] | undefined;
       const tip: boolean[] = [];
       // mem_proposal_v1 is newer than tip_publish_v1, so it goes first: two refusals take the hello down past the tip capability.
-      if (dropCapability) for (let i = 0; i < 6; i++) cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
+      if (dropCapability) for (let i = 0; i < 7; i++) cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
       const run = start({ ctx: { fetchFn }, hooks: { onPlanePushBuilt: (p) => void (built = p), onTipPublishAccepted: (a) => void tip.push(a) } });
       await until(() => tip.length >= 1 && built !== undefined);
       expect(tip).toEqual([!dropCapability]);
@@ -473,9 +483,28 @@ describe("1-hello. the machine's facts are sent once on start (D#605 FL-2)", () 
     const run = start();
     await until(() => claims() >= 1);
     const sent = hellos().map((h) => HelloMessage.parse(h.body).capabilities);
-    expect(sent).toEqual([["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", "overlap_facts_v1", "engine_bridge_v1", "watch_mode_v1", "sandbox_commands_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", "overlap_facts_v1", "engine_bridge_v1", "watch_mode_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", "overlap_facts_v1", "engine_bridge_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", "overlap_facts_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1"], ["proposal_verifier", "wake_v1"], ["proposal_verifier"]]);
+    expect(sent).toEqual([["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", "overlap_facts_v1", "engine_bridge_v1", "watch_mode_v1", "machine_login_v1", "sandbox_commands_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", "overlap_facts_v1", "engine_bridge_v1", "watch_mode_v1", "machine_login_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", "overlap_facts_v1", "engine_bridge_v1", "watch_mode_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", "overlap_facts_v1", "engine_bridge_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", "overlap_facts_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1"], ["proposal_verifier", "wake_v1", "plane_merge_v1"], ["proposal_verifier", "wake_v1"], ["proposal_verifier"]]);
     expect(cloud.seen.some((s) => s.path === "/api/runner/wake")).toBe(false);
     expect(await stop(run)).toMatchObject({ code: 0 });
+  });
+
+  // D#845 MC-8b: the sign-in link is for a server the cloud set up itself; every other runner leaves `machine_login_v1` out of its hello.
+  it("machine_login_v1 is advertised only by a runner that knows it is a cloud-managed server", async () => {
+    const managed = start({ host: { managedServer: () => true } });
+    await until(() => claims() >= 1);
+    expect(HelloMessage.parse(hellos()[0]!.body).capabilities).toContain("machine_login_v1");
+    expect(await stop(managed)).toMatchObject({ code: 0 });
+    cloud.seen.length = 0;
+    for (const unmanaged of [{ managedServer: () => false }, { managedServer: undefined }]) {
+      cloud.seen.length = 0;
+      const run = start({ host: unmanaged });
+      await until(() => claims() >= 1);
+      const sent = HelloMessage.parse(hellos()[0]!.body).capabilities;
+      expect(sent).not.toContain("machine_login_v1");
+      expect(sent).toContain("watch_mode_v1");
+      expect(sent).toContain("sandbox_commands_v1");
+      expect(await stop(run)).toMatchObject({ code: 0 });
+    }
   });
 
   // D#845 ON-6c: `facts.kvm` is a handshake. The first hello never carries it; it goes on the hello after a reply that listed `kvm_fact`, to a cloud that takes it.
@@ -1670,7 +1699,7 @@ describe("7. the memory cap on a resource_limit end follows the hello (D#6 CARD-
   it.skipIf(process.platform !== "linux")("a cloud that refused memory_limit_v1 on the hello (but took the rest) gets no cap", async () => {
     // The overlap capability (D#483 S5-j2e-RUNNER) goes first, then the memory-proposal capability (D#601 MEM-6), then the tip-publish capability (D#598 P1g-3a-3), then the ordering capability (D#483 S5-j2c2), then the conflict capability (D#519 MQ4-e2-a), then the analyst capability (D#483 S4-f4), then the queue capability (D#694 B7-1), so eight refusals take the hello down to the memory capability being dropped too.
     const ended = await endOfKilledJob(() => {
-      for (let i = 0; i < 11; i++) cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
+      for (let i = 0; i < 12; i++) cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     });
     expect(ended).toMatchObject({ type: "run_ended", reason: "resource_limit" });
     expect(ended).not.toHaveProperty("memory_limit_bytes");

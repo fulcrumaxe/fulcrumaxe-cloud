@@ -52,6 +52,8 @@ import { readHostFacts } from "../hostFacts.js";
 import { chooseEngine, reasonChangeLine, RESTART_LINE, selectSandbox, UNWIRED_LINE } from "../vm/engineGate.js";
 import { RUNNER_BUILD_CAPABILITIES, RUNNER_PROTOCOL_VERSION, RUNNER_VERSION } from "../version.js";
 import { createSandboxCommandReceiver } from "../daemon/sandboxCommands.js";
+import { createClaudeLoginRunner, type ClaudeLoginHost } from "../daemon/claudeLogin.js";
+import { createMachineCommandReceiver } from "../daemon/machineCommands.js";
 import { createInventoryReporter } from "../daemon/sandboxInventory.js";
 import { createBridgeApply, type EngineBridgeCommandOptions } from "./engineBridge.js";
 import { createHostLoadReporter } from "../daemon/hostLoad.js";
@@ -69,7 +71,7 @@ import { computeConflictAttestation } from "../daemon/conflictAttest.js";
 import { createPlaneBaseLedger, createPlanePushHook, type PlaneBaseLedger } from "../daemon/planePush.js";
 import { createPlanePushGithub } from "../daemon/planePushGithub.js";
 import { createPlaneMergeHandler } from "../daemon/planeMerge.js";
-import { CONFLICT_FACTS_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, HEARTBEAT_INVENTORY_HELLO_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, MEMORY_LIMIT_CAPABILITY, ORDERED_FACTS_CAPABILITY, OVERLAP_FACTS_CAPABILITY, PROJECT_SETUP_CAPABILITY, SANDBOX_COMMAND_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, type LimitedBy, type PreflightCode } from "@fulcrumaxe/runner-protocol";
+import { CONFLICT_FACTS_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, HEARTBEAT_INVENTORY_HELLO_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, MACHINE_LOGIN_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, MEMORY_LIMIT_CAPABILITY, ORDERED_FACTS_CAPABILITY, OVERLAP_FACTS_CAPABILITY, PROJECT_SETUP_CAPABILITY, SANDBOX_COMMAND_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, type LimitedBy, type PreflightCode } from "@fulcrumaxe/runner-protocol";
 import { createGitTransport, createPublicHeadsReader } from "@fulcrumaxe/runner-protocol/planePush";
 import { createNixShell, findNix, findTool, identityVia } from "../daemon/nixShell.js";
 import { createDepsInstaller } from "../daemon/depsInstall.js";
@@ -161,6 +163,10 @@ export interface RunHost {
   microvm?: LiveMicrovmParts | undefined;
   /** D#845 ON-BR-2: what the machine gives the runner's own Connect handling (home, the engine's state directory variable, discovery roots). Absent: `bridge_enable` and `bridge_disable` are not pulled. */
   engineBridgeOptions?: EngineBridgeCommandOptions | undefined;
+  /** D#845 MC-8b: how the Claude sign-in link starts the installed CLI (the entry point's real process start, its path, its fixed environment). Absent: every sign-in command is refused and reported failed. */
+  claudeLogin?: ClaudeLoginHost | undefined;
+  /** D#845 MC-8b: whether this machine is a server the cloud set up itself (`isManagedServer`, read from the install's own marker). Absent: no, so `machine_login_v1` is not advertised and every sign-in command is refused. */
+  managedServer?: (() => boolean) | undefined;
 }
 
 /** Replaceable by a test only: `runCli` never passes any, and nothing in the environment or on the command line can. */
@@ -446,7 +452,31 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     const vm = engine === "microvm" ? built : undefined;
     // One reporter serves the claim and the heartbeat, so the two share what was last sent. A host with no VM stack has none.
     const inventoryReporter = vm !== undefined && readHostFacts(engine)?.sandbox_engine === "microvm" ? createInventoryReporter({ source: daemonInventorySource(vm.sdk), now: ctx.now }) : undefined;
-    const client = createRunnerClient({ origin: registration.cloud_origin, key, now: ctx.now, fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass), protocolVersion: RUNNER_PROTOCOL_VERSION, sandboxCommands: createSandboxCommandReceiver({ keyring, runnerId: registration.runner_id, now: ctx.now, log: (line) => ctx.out(line), statePath: path.join(ctx.stateDir, "sandbox-commands-state.json"), uid: ctx.uid, ...(vm === undefined ? {} : { lifecycle: daemonSandboxLifecycle(vm.sdk) }) }), ...(inventoryReporter === undefined ? {} : { sandboxInventory: inventoryReporter, heartbeatInventory: () => cloudHeartbeatInventory }),
+    // D#845 MC-8b: the Claude sign-in link. The receiver and the runner it drives are built before the client, and reach it only through these two calls (made later, from a claim).
+    const claudeLogin = createClaudeLoginRunner({
+      host: host.claudeLogin,
+      managed: () => host.managedServer?.() === true,
+      now: () => ctx.now().getTime(),
+      platform: host.platform,
+      cloud: {
+        report: async (requestId, report) => {
+          const r = await client.machineLoginReport(requestId, report);
+          return r.kind === "recorded" ? { kind: "recorded" } : r.kind === "refused" ? { kind: "refused", status: r.status } : { kind: "error" };
+        },
+        takeCode: async (requestId) => {
+          const r = await client.machineLoginCode(requestId);
+          return r.kind === "code" ? { kind: "code", code: r.code } : r.kind === "gone" ? { kind: "gone" } : { kind: "error" };
+        },
+      },
+      stateDir: ctx.stateDir,
+      uid: ctx.uid,
+      after: (ms, fn) => {
+        const timer = setTimeout(fn, ms);
+        return () => clearTimeout(timer);
+      },
+      log: (line) => ctx.out(line),
+    });
+    const client = createRunnerClient({ machineCommands: createMachineCommandReceiver({ keyring, runnerId: registration.runner_id, now: ctx.now, login: claudeLogin, log: (line) => ctx.out(line), statePath: path.join(ctx.stateDir, "machine-commands-state.json"), uid: ctx.uid }), origin: registration.cloud_origin, key, now: ctx.now, fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass), protocolVersion: RUNNER_PROTOCOL_VERSION, sandboxCommands: createSandboxCommandReceiver({ keyring, runnerId: registration.runner_id, now: ctx.now, log: (line) => ctx.out(line), statePath: path.join(ctx.stateDir, "sandbox-commands-state.json"), uid: ctx.uid, ...(vm === undefined ? {} : { lifecycle: daemonSandboxLifecycle(vm.sdk) }) }), ...(inventoryReporter === undefined ? {} : { sandboxInventory: inventoryReporter, heartbeatInventory: () => cloudHeartbeatInventory }),
       // D#845 ON-1b: the machine's load rides the claim, but only for a build that advertises `project_setup_v1` (none does yet, so today the claim body is unchanged). No setup runs here yet: the count is 0.
       ...((RUNNER_BUILD_CAPABILITIES as readonly string[]).includes(PROJECT_SETUP_CAPABILITY) ? { hostLoad: createHostLoadReporter({ probe: hooks.probe ?? realResourceProbe({ platform: host.platform, diskPaths: [workspaceRoot, path.dirname(mirrorsRoot)], vmStatText: () => vmStat }), setupsRunning: () => machineJobDispatcher?.setupsRunning() ?? 0, now: ctx.now }) } : {}), verifySignIn: () => readSignInState({ settings: () => loadSettings(stateDir).verify, home, now: () => ctx.now().getTime() }) });
     // macOS: a resumed workspace's ignored build output is purged in a child under sandbox-exec that can write below the workspace only (D#6 RESUME-CLEAN-MAC).
@@ -703,7 +733,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
         return helloBody(facts);
       };
       // `kvm_fact_v1` is declared only by a runner that has a KVM reading to send (a plain present or absent), so a runner without one says what it always said.
-      const capabilityList = async () => [...RUNNER_BUILD_CAPABILITIES, SANDBOX_COMMAND_CAPABILITY, ...(factsWithKvm?.kvm === undefined ? [] : [KVM_FACT_HELLO_CAPABILITY]), ...(preflightReporter === undefined ? [] : [PREFLIGHT_HELLO_CAPABILITY]), ...(inventoryReporter === undefined ? [] : [HEARTBEAT_INVENTORY_HELLO_CAPABILITY]), ...(await verifyLocal.capabilities())];
+      const capabilityList = async () => [...RUNNER_BUILD_CAPABILITIES.filter((c) => c !== MACHINE_LOGIN_CAPABILITY || host.managedServer?.() === true), SANDBOX_COMMAND_CAPABILITY, ...(factsWithKvm?.kvm === undefined ? [] : [KVM_FACT_HELLO_CAPABILITY]), ...(preflightReporter === undefined ? [] : [PREFLIGHT_HELLO_CAPABILITY]), ...(inventoryReporter === undefined ? [] : [HEARTBEAT_INVENTORY_HELLO_CAPABILITY]), ...(await verifyLocal.capabilities())];
       const helloBody = async (facts: typeof factsPlain) => ({ protocol_version: RUNNER_PROTOCOL_VERSION, binary_version: RUNNER_VERSION, model_auth_present: await modelAuth(), isolation: "host_sandbox" as const, ...(facts === undefined ? {} : { facts }), capabilities: await capabilityList() });
       const firstHello = await helloMessage();
       let advertised = JSON.stringify(firstHello.capabilities);
