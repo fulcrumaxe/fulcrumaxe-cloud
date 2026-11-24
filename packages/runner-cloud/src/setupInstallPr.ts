@@ -1,5 +1,6 @@
 import type { Pool } from "pg";
 import { EMPTY_BASE_COMMIT } from "@fulcrumaxe/runner-protocol";
+import { LocalOnlyGithubError } from "./localOnlyGithub.js";
 import { RunPullRequestError, type PullRequestRepo, type SetupInstallPort } from "./runPullRequest.js";
 
 /**
@@ -10,6 +11,10 @@ import { RunPullRequestError, type PullRequestRepo, type SetupInstallPort } from
  *                      `install_head_changed`), opens the pull request DRAFT-first through the run port (the open one is reused on a rerun), reads its changed files and holds them to the path policy (a workflow
  *                      path or an odd one closes it: `pr_scope_refused`), only then marks it ready, and records the number: phase `await_merge`, the job done.
  *   direct mode        there is no branch and no pull request: it holds the default branch's head to `install_head_sha` and that commit to be a root commit (else `install_head_changed`) and records phase `finish`.
+ *
+ * D#845 ON-8f2b adds to both modes the engine's 11 labels (`ensureLabels`, A26, before the pull request exists or the setup finishes; a label that exists counts as made), and in pull request mode a second hold
+ * on the pull request's own head (it must be the pushed commit; else it is closed and `install_head_changed`). A call the fence refuses is recorded as `pr_open_failed` instead of thrown. The watch (a merge or
+ * a close of the pull request, including one that lands before its number is recorded) is the webhook's, through `setup_install_pr_closed` (migration 1073).
  *
  * A GitHub that cannot be asked (a 5xx, a rate limit, a timeout) leaves the lease to lapse and the next pass tries again; a refusal that no retry fixes fails the setup `pr_open_failed` and the person's Retry issues the
  * next attempt. Every write is a definer that re-reads the setup under its lock and does nothing unless it still says what the claim saw.
@@ -87,6 +92,8 @@ export async function completeSetupInstall(deps: SetupInstallDeps, claim: SetupI
     return await pullRequest(deps, claim, repo, fail);
   } catch (error) {
     if (error instanceof RunPullRequestError) return error.retryable ? "retry" : fail("pr_open_failed");
+    // D#845 ON-8f2b (FU-235): a call the fence refused is a bug in this step, not a GitHub failure, and no retry fixes it. It is recorded as a failure, so the setup does not sit leased and unseen.
+    if (error instanceof LocalOnlyGithubError) return fail("pr_open_failed");
     throw error;
   }
 }
@@ -99,6 +106,7 @@ async function direct(deps: SetupInstallDeps, claim: SetupInstallClaim, repo: Pu
   if (!state.exists || state.headOid !== claim.headSha) return fail("install_head_changed");
   const parents = await deps.port.commitParents({ repo, sha: claim.headSha });
   if (parents === null || parents.length !== 0) return fail("install_head_changed");
+  await deps.port.ensureLabels({ repo });
   const { rows } = await deps.pool.query<{ ok: boolean }>("SELECT setup_install_pr_record($1::uuid, $2::int, $3, NULL) AS ok", [claim.setupId, claim.attempt, claim.headSha]);
   return rows[0]?.ok === true ? "finished" : "skipped";
 }
@@ -110,7 +118,14 @@ async function pullRequest(deps: SetupInstallDeps, claim: SetupInstallClaim, rep
   if (!state.exists || state.headOid !== claim.headSha) return fail("install_head_changed");
   const parents = await deps.port.commitParents({ repo, sha: claim.headSha });
   if (parents === null || parents.length !== 1 || parents[0] !== claim.baseSha) return fail("install_head_changed");
+  // The engine's labels exist before anybody can see the pull request (a second pass makes them again; one that exists counts as made).
+  await deps.port.ensureLabels({ repo });
   const ref = await deps.port.openDraft({ repo, branch: claim.branch, base, text: installPullRequestText(claim.version) });
+  // The pull request shows what its head is: the commit that was pushed. A head that moved between the branch read above and the pull request (a push to the branch, or a reused pull request on a moved branch) is not ours to publish.
+  if (ref.headSha !== claim.headSha) {
+    await deps.port.close({ repo, number: ref.number });
+    return fail("install_head_changed");
+  }
   const files = await deps.port.changedFiles({ repo, number: ref.number });
   if (!files.complete || files.files.length === 0 || files.files.some((f) => installPathRefused(f.path))) {
     // an open pull request that cannot be shown to a person is closed; a failure to close is a retry (the lease lapses and the next pass looks again)

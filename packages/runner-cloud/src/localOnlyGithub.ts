@@ -94,6 +94,8 @@ export interface GithubResponse {
 }
 export interface GithubClient {
   request(req: GithubRequest): Promise<GithubResponse>;
+  /** Releases the client's credential (a `setup_labels` client revokes its token here; it never throws). Clients with nothing to release have none. */
+  close?(): Promise<void>;
 }
 
 /** Thrown, before any request is made, for a call the allowlist does not hold. The message names the rule, never the path. */
@@ -252,6 +254,25 @@ export const SETUP_INSTALL_DOCUMENTS = Object.freeze({
   }
 }`,
 });
+/**
+ * D#845 ON-8f2b (A26): the engine's 11 labels, as the engine's own label bootstrap script creates them (a test reads that script against this table). The install step creates them in the project's
+ * repository after the engine's files are pushed, one call each. The call is allowed only with exactly one of these rows as its body, so a runner, a job or a person can never choose a label.
+ */
+export const SETUP_INSTALL_LABELS: readonly Readonly<{ name: string; color: string; description: string }>[] = Object.freeze(
+  [
+    { name: "code-review-passed", color: "0E8A16", description: "Code review passed — ready for next gate" },
+    { name: "code-review-needs-fix", color: "B60205", description: "Code review found issues — needs fixes" },
+    { name: "acceptance-passed", color: "0E8A16", description: "Acceptance tests passed" },
+    { name: "acceptance-failed", color: "B60205", description: "Acceptance tests failed" },
+    { name: "security-review-passed", color: "0E8A16", description: "Security review passed" },
+    { name: "security-needs-fix", color: "B60205", description: "Security review found issues — needs fixes" },
+    { name: "browser-test-passed", color: "0E8A16", description: "Browser test passed — dashboard-conditional gate" },
+    { name: "debater-confirmed", color: "0E8A16", description: "Debater pass confirmed — gate off by default" },
+    { name: "SPEC_READY", color: "0E8A16", description: "Discussion spec is finalized — ready for implementation" },
+    { name: "team-log", color: "1D76DB", description: "Marks the team-log tracking issue" },
+    { name: "verification-substance-absent", color: "FBCA04", description: "Backend PR has no verification substance of any recognised shape — flags, does not block (D#2008)" },
+  ].map((row) => Object.freeze(row)),
+);
 const ALL_DOCUMENTS: Readonly<Record<string, string>> = Object.freeze({ ...GITHUB_GRAPHQL_DOCUMENTS, ...MERGE_QUEUE_READ_DOCUMENTS, ...GATE1_ATTEST_DOCUMENTS, ...GATE1_STATUS_DOCUMENTS, ...GATE1_QUEUE_DOCUMENTS, ...SETUP_INSTALL_DOCUMENTS });
 export type GithubGraphqlOperation = keyof typeof GITHUB_GRAPHQL_DOCUMENTS | keyof typeof MERGE_QUEUE_READ_DOCUMENTS | keyof typeof GATE1_ATTEST_DOCUMENTS | keyof typeof GATE1_STATUS_DOCUMENTS | keyof typeof GATE1_QUEUE_DOCUMENTS | keyof typeof SETUP_INSTALL_DOCUMENTS;
 
@@ -309,6 +330,8 @@ export const LOCAL_ONLY_ALLOWLIST: readonly LocalOnlyAllowlistEntry[] = Object.f
     { id: "A24", method: "POST", paths: ["/repos/{owner}/{repo}/git/refs"], query: [], body: "{ ref: refs/heads/fx/engine-remove-<major.minor.patch>, sha }", only: "engineRemove" },
     // D#845 ON-8f2a: the install step's one extra read, on a client built with `setupInstall` only.
     { id: "A25", method: "POST", paths: ["/graphql"], query: [], body: "{ query: CommitParents, variables: exactly owner, name, sha }", only: "setupInstall" },
+    // D#845 ON-8f2b: the engine's labels, on the same opt-in client.
+    { id: "A26", method: "POST", paths: ["/repos/{owner}/{repo}/labels"], query: [], body: "{ name, color, description }: exactly one row of SETUP_INSTALL_LABELS", only: "setupInstall" },
   ].map((entry) => Object.freeze(entry) as LocalOnlyAllowlistEntry),
 );
 
@@ -476,6 +499,8 @@ function bodyFits(entry: LocalOnlyAllowlistEntry, body: unknown, gate1Attest: bo
       return documentBodyFits(body, GATE1_QUEUE_DOCUMENTS, GATE1_QUEUE_VARIABLES, "Gate1QueueEntries");
     case "A25":
       return documentBodyFits(body, SETUP_INSTALL_DOCUMENTS, SETUP_INSTALL_VARIABLES, "CommitParents");
+    case "A26":
+      return isPlainObject(body) && hasExactKeys(body, ["name", "color", "description"]) && SETUP_INSTALL_LABELS.some((row) => row.name === body.name && row.color === body.color && row.description === body.description);
     case "A22":
     case "A23":
     case "A24":
@@ -584,6 +609,7 @@ export function localOnlyGithub(inner: GithubClient, options: { exclude?: readon
   };
   return {
     request: send,
+    ...(inner.close === undefined ? {} : { close: () => inner.close!() }),
     graphql(op, variables) {
       if (typeof op !== "string" || !Object.hasOwn(ALL_DOCUMENTS, op)) return Promise.reject(new LocalOnlyGithubError(NOT_ALLOWLISTED));
       return send({ method: "POST", path: "/graphql", body: { query: ALL_DOCUMENTS[op], variables } });

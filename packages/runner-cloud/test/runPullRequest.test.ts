@@ -147,7 +147,7 @@ describe("openDraft (A3, A4)", () => {
   it("opens a draft whose title is the work item's and whose body is the fixed template with the two ids", async () => {
     const { repo, port } = setup();
     const pr = await port.openDraft({ repo: REPO, branch: BRANCH, base: "main", run: RUN });
-    expect(pr).toEqual({ number: 1, nodeId: expect.stringMatching(/^PR_/), draft: true, reused: false });
+    expect(pr).toEqual({ number: 1, nodeId: expect.stringMatching(/^PR_/), draft: true, reused: false, headSha: "b".repeat(40) });
     expect(repo.pulls[0]).toMatchObject({ title: "Add the footer", head: BRANCH, base: "main", draft: true });
     expect(repo.pulls[0]!.body).toBe(COPY.pullRequestBody.replace("{run}", RUN.runId).replace("{item}", RUN.workItemId));
     expect(repo.pulls[0]!.body).toContain(RUN.runId);
@@ -254,7 +254,7 @@ describe("openDraft (A3, A4)", () => {
     it("retries once with draft: false and the fixed line in the body, and the result is ready, so markReady does nothing", async () => {
       const { fake, repo, port } = setup({ drafts: false });
       const pr = await port.openDraft({ repo: REPO, branch: BRANCH, base: "main", run: RUN });
-      expect(pr).toEqual({ number: 1, nodeId: expect.stringMatching(/^PR_/), draft: false, reused: false });
+      expect(pr).toEqual({ number: 1, nodeId: expect.stringMatching(/^PR_/), draft: false, reused: false, headSha: "b".repeat(40) });
       expect(labels(fake)).toEqual(["A3", "A4", "A3", "A4"]);
       expect(repo.pulls).toHaveLength(1);
       expect(repo.pulls[0]).toMatchObject({ draft: false, state: "open" });
