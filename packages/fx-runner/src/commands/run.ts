@@ -35,14 +35,15 @@ import { completeCaps, engineLineOf, engineMismatchClaimBlock, limitsClaimBlock,
 import { createLiveMicrovm, type LiveMicrovm, type LiveMicrovmParts } from "../vm/sandboxd/live.js";
 import { createSetupVmParts, createVmClaimGuard, createVmJobDeps, runEventHooks, type VmRunBlock } from "../daemon/vmJobDeps.js";
 import { createProjectSetupHandler, setupHandlerFor } from "../setup/projectSetup.js";
-import { createHostSetupVm } from "../setup/hostGuest.js";
+import { createHostSetupVm, type HostGuestDeps } from "../setup/hostGuest.js";
 import { createEngineSessionHandlers } from "../engineSession/lifecycle.js";
+import { createStandardSessionParts, sessionHandlersFor } from "../engineSession/standardTier.js";
 import { createOperateMark } from "../engineSession/operateMark.js";
 import { createRepoLookup } from "../engineSession/repoLookup.js";
 import { createSetupRepos } from "../setup/setupRepos.js";
 import { daemonInventorySource, daemonSandboxLifecycle } from "../vm/sandboxd/management.js";
 import { createMicrovmGate } from "../daemon/microvmGate.js";
-import { budgetsOf, capUnenforced, setUpJobLimits, UNENFORCED_LINE, type Budgets, type JobLimits } from "../sandbox/jobLimits.js";
+import { budgetsOf, capUnenforced, detectScopeSupport, setUpJobLimits, UNENFORCED_LINE, type Budgets, type JobLimits } from "../sandbox/jobLimits.js";
 import { createJobsInHand } from "../daemon/jobsInHand.js";
 import { readVerifyAnswer } from "../daemon/answerFile.js";
 import { createVerifyLocal } from "../daemon/verifyLocal.js";
@@ -764,21 +765,38 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       const setupRepos = createSetupRepos({ git: setupParts.git, gitLarge: setupParts.gitLarge, mirrors, workspaceRoot, scratchDir: setupParts.scratch });
       const setupWith = (slice: Parameters<typeof createProjectSetupHandler>[0]["vm"]) => createProjectSetupHandler({ client, vm: slice, apply: setupParts.apply, logDir: path.join(home, ".local", "state", "fx-runner", "setup"), repos: setupRepos });
       const guestPath = cleanEnv(credentials, envOptions).PATH ?? searchPath;
-      const standardVm = host.engine.installCapture === undefined || host.selfCommand === undefined ? undefined : createHostSetupVm({ start: host.engine.installCapture, host: host.sandbox, platform: host.platform, home, stateDir, binaryDir: path.dirname(binaryPath), jobsRoot: path.join(path.dirname(mirrorsRoot), "setup-guests"), searchPath: guestPath, selfCommand: host.selfCommand, uid: host.uid, wsl: host.sandbox.wsl });
+      const guestDeps: HostGuestDeps | undefined = host.engine.installCapture === undefined || host.selfCommand === undefined ? undefined : { start: host.engine.installCapture, host: host.sandbox, platform: host.platform, home, stateDir, binaryDir: path.dirname(binaryPath), jobsRoot: path.join(path.dirname(mirrorsRoot), "setup-guests"), cacheDir: path.dirname(mirrorsRoot), searchPath: guestPath, selfCommand: host.selfCommand, uid: host.uid, wsl: host.sandbox.wsl };
+      const standardVm = guestDeps === undefined ? undefined : createHostSetupVm(guestDeps);
       const setupHandler = setupHandlerFor({ microvm: vmDeps === undefined ? undefined : setupWith(vmDeps), standard: standardVm === undefined ? undefined : setupWith(standardVm) }, () => effectiveEngine(engine, loadSettings(stateDir).sandboxEngine));
       // D#845 ON-13a1: the three session kinds, on the same microVM stack. A persistent VM per repository; the repository is seeded from this machine's own mirror (`repoOf`), never from a name the cloud sent.
-      const sessionHandlers =
-        vm === undefined || vmDeps === undefined || host.uid === undefined
+      // ON-13a3: on the standard tier the same handlers run over a root kept on this machine and one held process in a systemd user scope (`engineSession/standardTier.ts`); a machine with no user manager has none.
+      const sessionCommon =
+        host.uid === undefined
+          ? undefined
+          : {
+              repos: setupRepos,
+              repoOf: createRepoLookup({ git: setupParts.git, mirrorDir: (id: number) => mirrors.dir({ id: String(id), owner: "-", name: "-" }) }),
+              mark: createOperateMark({ stateDir, uid: host.uid, log: (event) => ctx.out(`fx-runner: ${event.event}`) }),
+              runnerId: registration.runner_id,
+            };
+      const microvmSessions =
+        vm === undefined || vmDeps === undefined || sessionCommon === undefined
           ? undefined
           : createEngineSessionHandlers({
               vm: vmDeps,
               port: (options) => vm.vmPort(options),
               state: async (name) => (await vm.port.sandboxState?.({ runId: "", sandboxName: name, sessionId: "" })) ?? "unknown",
-              repos: setupRepos,
-              repoOf: createRepoLookup({ git: setupParts.git, mirrorDir: (id) => mirrors.dir({ id: String(id), owner: "-", name: "-" }) }),
-              mark: createOperateMark({ stateDir, uid: host.uid, log: (event) => ctx.out(`fx-runner: ${event.event}`) }),
-              runnerId: registration.runner_id,
+              ...sessionCommon,
             });
+      const scopes = guestDeps === undefined || sessionCommon === undefined ? undefined : await detectScopeSupport({ platform: host.platform, uid: host.uid, runtimeDir: host.xdgRuntimeDir, searchPath, capture: host.engine.capture, isDir: host.sandbox.isDir, readText: host.sandbox.readText });
+      const standardSessions =
+        guestDeps === undefined || sessionCommon === undefined || scopes?.ok !== true
+          ? undefined
+          : (() => {
+              const parts = createStandardSessionParts({ guest: { ...guestDeps, jobsRoot: path.join(path.dirname(mirrorsRoot), "engine-sessions", "roots"), cacheDir: path.dirname(mirrorsRoot), scope: { tools: scopes.tools, runtimeDir: scopes.runtimeDir, budget: budgets().heavy } }, xdgRuntimeDir: host.xdgRuntimeDir, capture: host.engine.capture });
+              return createEngineSessionHandlers({ vm: parts.vm, port: () => parts.port, state: parts.state, wipeToken: parts.wipeToken, minGuestMb: 1, get paths() { return parts.paths(); }, ...sessionCommon });
+            })();
+      const sessionHandlers = sessionHandlersFor({ microvm: microvmSessions, standard: standardSessions }, () => effectiveEngine(engine, loadSettings(stateDir).sandboxEngine));
       const machineJobs = (machineJobDispatcher = createMachineJobDispatcher({ client, keyring, runnerId: registration.runner_id, now: ctx.now, handlers: { ...(setupHandler === undefined ? {} : { project_setup: setupHandler }), ...(sessionHandlers ?? {}) },sandboxEngine: () => effectiveEngine(engine, loadSettings(stateDir).sandboxEngine), signal: stopped.signal, log: (event) => ctx.out(`fx-runner: machine job ${event.event}`) }));
       // D#842 EB-3c: the engine bridge runs beside the claim loop, never under it: it is started here, nothing below awaits it, and it ends only when `finally` stops it.
       if (host.engineBridge !== undefined) {
