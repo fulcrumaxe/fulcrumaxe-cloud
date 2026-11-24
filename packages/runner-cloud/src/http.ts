@@ -161,6 +161,13 @@ export interface RunnerCloudDeps {
    * runner. Absent is "unknown".
    */
   repoVisibility?: (accountId: string, repoId: string, signal?: AbortSignal) => Promise<"private" | "public" | "unknown">;
+  /**
+   * D#845 ON-7b: the GitHub account (user or organisation) one team installation sits on, asked of GitHub live (apps/web supplies it: `GET /app/installations/{id}` with the App
+   * JWT). `null` is "not an owner" (gone, suspended, another App's). Throws when GitHub cannot say. Absent, the picker reports its owners as unknown.
+   */
+  installationAccount?: (ghInstallationId: number, signal: AbortSignal) => Promise<{ gh_id: number; login: string } | null>;
+  /** Test seam: the deadline for all of one picker read's installation reads together (default `PICKER_OWNERS_TIMEOUT_MS`). */
+  installationAccountTimeoutMs?: number;
   /** Test seam: the deadline for one visibility read (default `REPO_VISIBILITY_READ_TIMEOUT_MS`). Past it the read is "unknown". */
   repoVisibilityTimeoutMs?: number;
   /** Test seam: the deadline for all of one request's visibility reads together (default `REPO_VISIBILITY_TOTAL_TIMEOUT_MS`). */

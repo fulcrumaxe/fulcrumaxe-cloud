@@ -12,6 +12,7 @@ import { PREFLIGHT_CODES, PREFLIGHT_FIX, preflightView } from "../../../packages
 import { parseSteps, parseTracks, shownTracks } from "../shell/core/onboarding-mode.js";
 import {
   ASK_OWNER, LABELS, NO_KVM, OPERATE_OFF, STATE_WORDS, TIME_TO_LIVE,
+  COULDNT_CHECK, NEW_PRESET, NO_MACHINE, NO_OWNERS, PUBLIC_COPY, PUBLIC_OPERATE, createRefusal, dialsLine, linkedLine, machineChoices, operateBox, parseReturn, pickVisibility, placeRefusal, presetName, readPicker,
   cleanOrigin, copyText, describeStep, enginePrice, installDetail, fixFor, machineChoiceLine, machineCommands, machineContext, prerequisites, visibilityLabel,
 } from "../apps/onboarding/onboarding-engine.js";
 
@@ -564,5 +565,126 @@ describe("installDetail (D#845 ON-8a)", () => {
     expect(list({ phase: "install", sub_step: "gh_labels", state: "skipped" })).toEqual([{ label: "Create the labels", word: "Done" }]);
     expect(list({ phase: "install", sub_step: "bundle_out", state: "failed" })).toEqual([{ label: "Bundle the changes", word: "Failed" }]);
     for (const row of [{ phase: "survey", sub_step: "deps", state: "started" }, { phase: "install", sub_step: "nope", state: "ok" }, { phase: "install", sub_step: "constructor", state: "ok" }, null]) expect(installDetail(row)).toEqual({});
+  });
+});
+
+// D#845 ON-7b: the project step's picker and confirm. The words and the decisions are pure and tested here; the drawn screen (phone width, every stage) is in e2e/onboarding-picker.spec.ts.
+describe("the project picker's reads and words (ON-7b)", () => {
+  const A = "11111111-1111-4111-8111-111111111111";
+  const B = "22222222-2222-4222-8222-222222222222";
+  const C = "33333333-3333-4333-8333-333333333333";
+
+  it("readPicker keeps well-formed repos and owners, reads any other visibility as unknown, and refuses a body that is not a picker", () => {
+    const r = readPicker({ repos: [{ id: A.toUpperCase(), name: "acme/a", visibility: "private", active_preset: "balanced" }, { id: B, name: "acme/b", visibility: "internal", active_preset: 3 }, { id: "nope", name: "x" }, { id: C, name: "" }], owners: [{ gh_id: 9, login: "acme", extra: 1 }, { gh_id: 0, login: "z" }, { gh_id: 4, login: "" }] });
+    expect(r.repos).toEqual([{ id: A, name: "acme/a", visibility: "private", active_preset: "balanced" }, { id: B, name: "acme/b", visibility: "unknown", active_preset: null }]);
+    expect(r.owners).toEqual([{ gh_id: 9, login: "acme" }]);
+    expect(r.ownersUnknown).toBe(false);
+    expect(readPicker({ repos: [], owners: [], owners_unknown: true }).ownersUnknown).toBe(true);
+    for (const bad of [null, {}, { repos: "x" }, []]) expect(readPicker(bad)).toBeNull();
+    expect(readPicker({ repos: [] }).owners).toEqual([]);
+  });
+
+  it("each visibility has its word, and a repo GitHub could not be asked about reads Couldn't check", () => {
+    expect(["public", "private", "unknown", undefined, "x"].map(pickVisibility)).toEqual(["Public", "Private", COULDNT_CHECK, COULDNT_CHECK, COULDNT_CHECK]);
+  });
+
+  it("the dials line names the repo's preset, Custom when none matches, and the starting setting for a new repo", () => {
+    expect(["cautious", "balanced", "autonomous"].map((p) => dialsLine({ active_preset: p }, false))).toEqual(["Dials: Cautious", "Dials: Balanced", "Dials: Autonomous"]);
+    expect(dialsLine({ active_preset: null }, false)).toBe("Dials: Custom");
+    expect(dialsLine({ active_preset: "weird" }, false)).toBe("Dials: Custom");
+    expect(presetName(undefined)).toBe("Custom");
+    expect(dialsLine({ active_preset: "autonomous" }, true)).toBe("Dials: " + NEW_PRESET);
+    expect(NEW_PRESET).toBe("Balanced (the starting setting)");
+  });
+
+  it("the public-repo copy is Ruling 87's sentence, word for word", () => {
+    expect(PUBLIC_COPY).toBe("Anyone can open issues on a public repo, and the engine reads them. The engine starts work only from collaborators' items.");
+  });
+
+  it("the linked line is 'Linked <date> from <IP>' with no country, and empty when the machine has no link facts", () => {
+    expect(linkedLine("2026-11-20T10:00:00.000Z", "203.0.113.9")).toBe("Linked 2026-11-20 from 203.0.113.9");
+    expect(linkedLine("2026-11-20T10:00:00.000Z", null)).toBe("Linked 2026-11-20");
+    expect(linkedLine(null, "203.0.113.9")).toBe("");
+    expect(linkedLine("not a date", "203.0.113.9")).toBe("");
+  });
+
+  it("machines: offline and revoked are not offered, a standard machine with a project is greyed with its reason, names come out clean", () => {
+    const runners = { runners: [
+      { id: A, name: " box-1 ", state: "online_idle", facts: { engine: "microvm" }, linked_at: "2026-11-20T10:00:00.000Z", linked_from_ip: "203.0.113.9" },
+      { id: B, name: "", state: "offline", facts: { engine: "microvm" }, linked_at: null, linked_from_ip: null },
+      { id: C, name: "std", state: "busy", facts: { engine: "os_sandbox" } },
+      { id: "44444444-4444-4444-8444-444444444444", name: "gone", state: "revoked" },
+    ] };
+    const machines = { machines: [{ id: C, tier: "standard", live: true, running: { repo_id: A, name: "acme/a" } }] };
+    const out = machineChoices(runners, machines);
+    expect(out.map((m) => [m.name, m.ok, m.note])).toEqual([["box-1", true, ""], ["Unnamed machine", false, "Offline"], ["std", false, "Standard isolation hosts one project"]]);
+    expect(out[0].linked).toBe("Linked 2026-11-20 from 203.0.113.9");
+    expect(out[1].linked).toBe("");
+    // Without the machines read, tier comes from what the runner reported and nothing is greyed for a project it cannot see.
+    expect(machineChoices(runners, null).find((m) => m.id === C)).toMatchObject({ ok: true, tier: "standard" });
+    expect(machineChoices(null, null)).toEqual([]);
+    expect(NO_MACHINE).toBe("Every machine is full or offline");
+  });
+
+  describe("the operate box", () => {
+    const settings = (o) => ({ watch_enabled: true, operate_enabled: false, can_edit: true, repos: [{ repo_id: A, full_name: "acme/a", enabled: true }, { repo_id: B, full_name: "acme/b", enabled: true }, { repo_id: C, full_name: "acme/c", enabled: false }], ...o });
+    it("switch on: nothing to consent to", () => {
+      expect(operateBox(settings({ operate_enabled: true }), C, "private")).toMatchObject({ on: true, text: expect.stringContaining("already on") });
+    });
+    it("switch off with no other ticked repo: the plain sentence", () => {
+      const box = operateBox(settings({ repos: [{ repo_id: C, full_name: "acme/c", enabled: false }] }), C, "private");
+      expect(box).toMatchObject({ on: false, others: [], text: "Turn on operate for this account." });
+    });
+    it("switch off with others: it names the count and the other repos, and operate_others is exactly the enabled repos other than the chosen one", () => {
+      const box = operateBox(settings(), C, "private");
+      expect(box.text).toBe("Turn on operate for this account. This also operates 2 other repos: acme/a, acme/b");
+      expect(box.others.map((o) => o.id)).toEqual([A, B]);
+      // The chosen repo is never among them, even when it is already ticked.
+      expect(operateBox(settings(), A, "private").others.map((o) => o.id)).toEqual([B]);
+      expect(operateBox(settings(), A, "private").text).toBe("Turn on operate for this account. This also operates 1 other repo: acme/b");
+    });
+    it("a public repo cannot be operated yet, so the box is blocked with the server's own sentence; an unreadable settings read shows no box", () => {
+      expect(operateBox(settings(), C, "public").blocked).toBe(PUBLIC_OPERATE);
+      expect(operateBox(settings(), C, "private").blocked).toBe("");
+      expect(operateBox(null, C, "private")).toBeNull();
+      expect(operateBox({ operate_enabled: "yes" }, C, "private")).toBeNull();
+    });
+  });
+
+  it("every refusal of the place route has its sentence, none is the server's text, and none reads null or undefined", () => {
+    const codes = ["setup_exists", "account_not_active", "repo_visibility_unknown", "project_already_placed", "machine_single_project", "machine_not_eligible", "no_eligible_machine", "operate_consent_stale", "operate_public_pending", "placement_busy"];
+    const seen = new Set();
+    for (const code of codes) {
+      const r = placeRefusal({ code, status: 409, message: "SERVER WORDS" }, "acme/a");
+      expect(r.code).toBe(code);
+      expect(r.text, code).not.toMatch(/SERVER WORDS|null|undefined/);
+      expect(r.text.length).toBeGreaterThan(10);
+      seen.add(r.text);
+    }
+    expect(seen.size).toBe(codes.length);
+    expect(placeRefusal({ code: "setup_exists" }).also).toBe("setup");
+    expect(placeRefusal({ code: "no_eligible_machine" }).also).toBe("machine");
+    expect(placeRefusal({ code: "repo_visibility_unknown" }, "acme/a").text).toBe("GitHub didn't say whether acme/a is public or private. Try again in a minute.");
+    expect(placeRefusal({ code: "operate_public_pending" }).text).toBe(PUBLIC_OPERATE);
+    expect(new Set([403, 404, 400].map((status) => placeRefusal({ status, code: "forbidden" }).text)).size).toBe(3);
+    expect(placeRefusal({ status: 403 }).text).toBe("Only an owner or admin can place a project.");
+    for (const odd of [undefined, null, {}, { status: 500 }, { code: "invented" }]) expect(placeRefusal(odd).text).toBe("The project couldn't be placed. Try again.");
+  });
+
+  it("create-intent refusals and the outcomes GitHub's return carries each have a sentence", () => {
+    expect(createRefusal({ code: "install_first" })).toBe(NO_OWNERS);
+    expect(createRefusal({ status: 403, code: "forbidden" })).toBe("Only an owner or admin can create a repo.");
+    expect(createRefusal({ code: "rate_limited" })).toMatch(/Try again later/);
+    expect(createRefusal({ code: "validation_failed" })).toMatch(/valid repo name/);
+    expect(createRefusal(new Error("x"))).toBe("The repo couldn't be created. Try again.");
+    for (const outcome of ["created_not_connected", "name_taken", "visibility_not_allowed", "refused", "github_busy", "rate_limited", "install_first", "failed"]) expect(parseReturn("?create=" + outcome)).toEqual({ outcome, repo: "" });
+  });
+
+  it("parseReturn takes a repo id only on ok and only in the shape of an id; any other value is nothing", () => {
+    expect(parseReturn("?create=ok&repo=" + A.toUpperCase())).toEqual({ outcome: "ok", repo: A });
+    expect(parseReturn("?create=ok&repo=not-an-id")).toEqual({ outcome: "ok", repo: "" });
+    expect(parseReturn("?create=ok")).toEqual({ outcome: "ok", repo: "" });
+    expect(parseReturn("?create=failed&repo=" + A)).toEqual({ outcome: "failed", repo: "" });
+    for (const s of ["", "?create=bogus", "?create=__proto__", "?x=1", undefined, null]) expect(parseReturn(s)).toBeNull();
   });
 });

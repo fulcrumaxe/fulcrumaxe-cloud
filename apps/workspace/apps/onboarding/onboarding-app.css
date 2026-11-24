@@ -109,3 +109,10 @@
 .ob-code { flex: 1 1 14rem; min-width: 0; padding: 6px 8px; border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); white-space: pre-wrap; overflow-wrap: anywhere; user-select: all; }
 .ob-failed { border-color: #ff6b6b; border-width: 2px; }
 .ob-link { background: none; border: 0; padding: 0; font: inherit; color: var(--accent, #1aff80); text-decoration: underline; cursor: pointer; }
+
+/* D#845 ON-7b: the project step's picker. A repo is one full-width 44 px button; the machine and operate rows reuse the 44 px preset label; nothing is wider than a phone. */
+.ob-picker { margin-top: 8px; min-width: 0; }
+.ob-repo { display: block; width: 100%; text-align: left; margin: 0; overflow-wrap: anywhere; }
+.ob-operate { margin: 8px 0; }
+.ob-picker .ob-input { max-width: 100%; }
+.ob-picker .ob-btn { margin-right: 8px; }

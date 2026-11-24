@@ -255,6 +255,14 @@ export function startFixtureServer({ distDir = DEFAULT_DIST_DIR, port = DEFAULT_
       return;
     }
 
+    // D#845 ON-7b: the Onboarding app's project picker reads the account's repos and the owners a new repo can be created under; the fixture account has neither.
+    // onboarding-picker.spec.ts mocks every other answer, and the place and create-intent writes.
+    if (urlPath === "/api/runners/repos/picker" && req.method === "GET") {
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+      res.end(JSON.stringify({ repos: [], owners: [] }));
+      return;
+    }
+
     // D#845 MC-10a: the Machines app reads the account's machines when it opens; the fixture account has none.
     if (urlPath === "/api/machines" && req.method === "GET") {
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
