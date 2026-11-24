@@ -11,7 +11,7 @@ import { handleApiRequest } from '../src/handler.js';
 import { ROUTES } from '../src/routes/index.js';
 import { generateToken } from '../src/tokens/format.js';
 import { hashToken } from '../src/tokens/resolve.js';
-import { machineServerDeps, type PriceTriple, type ServerCtx } from '../src/machines/servers.js';
+import { getServer, machineServerDeps, type PriceTriple, type ServerCtx } from '../src/machines/servers.js';
 import { advanceServer, sweepOrphans } from '../src/machines/lifecycle.js';
 import { seedAccountWithMember, seedUser } from './helpers/seed.js';
 
@@ -494,10 +494,64 @@ describe('machine servers: lifecycle, orphans and delete', () => {
       await link(who, id, false);
       expect(await advanceServer(ctxOf(who), id)).toMatchObject({ final: false, status: 'registering' });
       await admin.query(`UPDATE runners SET last_seen_at = now() WHERE id = (SELECT runner_id FROM managed_servers WHERE id = $1)`, [id]);
+      // A hello that has not said whether the machine is signed in to Claude is not read as signed in.
+      expect(await advanceServer(ctxOf(who), id)).toMatchObject({ final: false, status: 'registering' });
+      await admin.query(`UPDATE runners SET model_auth_present = true WHERE id = (SELECT runner_id FROM managed_servers WHERE id = $1)`, [id]);
       expect(await advanceServer(ctxOf(who), id)).toEqual({ final: true, status: 'ready', delaySeconds: 0 });
       const before = world.requests.length;
       expect((await advanceServer(ctxOf(who), id)).final).toBe(true);
       expect(world.requests.length).toBe(before);
+    });
+
+    it('a registered runner that says it is not signed in to Claude makes the row needs_claude_login, which is final; a ready row is never restamped when the fact later changes', async () => {
+      const who = await owner();
+      const id = await create(who, 's3b');
+      (world.servers[0]!.status as string) = 'running';
+      await advanceServer(ctxOf(who), id);
+      await link(who, id, false);
+      await admin.query(`UPDATE runners SET last_seen_at = now(), model_auth_present = false WHERE id = (SELECT runner_id FROM managed_servers WHERE id = $1)`, [id]);
+      expect(await advanceServer(ctxOf(who), id)).toEqual({ final: true, status: 'needs_claude_login', delaySeconds: 0 });
+      expect(await advanceServer(ctxOf(who), id)).toMatchObject({ final: true, status: 'needs_claude_login' });
+      const id2 = await create(who, 's3c');
+      await admin.query(`UPDATE managed_servers SET status = 'registering' WHERE id = $1`, [id2]);
+      await link(who, id2, false);
+      await admin.query(`UPDATE runners SET last_seen_at = now(), model_auth_present = true WHERE id = (SELECT runner_id FROM managed_servers WHERE id = $1)`, [id2]);
+      expect(await advanceServer(ctxOf(who), id2)).toEqual({ final: true, status: 'ready', delaySeconds: 0 });
+      await admin.query(`UPDATE runners SET model_auth_present = false WHERE id = (SELECT runner_id FROM managed_servers WHERE id = $1)`, [id2]);
+      expect(await advanceServer(ctxOf(who), id2)).toMatchObject({ final: true, status: 'ready' });
+      expect((await row(id2)).status).toBe('ready');
+    });
+
+    it('the card\'s sign-in state is derived on each read from the linked runner, never stamped: ready then logout reads false, needs_claude_login then a hello that says true reads true, no runner reads null', async () => {
+      const who = await owner();
+      const signedIn = async (id: string) => (await getServer(ctxOf(who), id))!.claude_signed_in;
+      const runnerOf = (id: string) => `(SELECT runner_id FROM managed_servers WHERE id = '${id}')`;
+      // No runner linked yet: nothing to derive from.
+      const none = await create(who, 's3d');
+      expect(await signedIn(none)).toBeNull();
+      // Ready, then the machine signs out: the next read says false and the row's own status is untouched.
+      const a = await create(who, 's3e');
+      await admin.query(`UPDATE managed_servers SET status = 'registering' WHERE id = $1`, [a]);
+      await link(who, a, false);
+      expect(await signedIn(a)).toBeNull();
+      await admin.query(`UPDATE runners SET last_seen_at = now(), model_auth_present = true WHERE id = ${runnerOf(a)}`);
+      expect(await advanceServer(ctxOf(who), a)).toMatchObject({ final: true, status: 'ready' });
+      expect(await signedIn(a)).toBe(true);
+      await admin.query(`UPDATE runners SET model_auth_present = false WHERE id = ${runnerOf(a)}`);
+      expect(await signedIn(a)).toBe(false);
+      expect((await row(a)).status).toBe('ready');
+      // needs_claude_login, then a hello that says it is signed in.
+      const b = await create(who, 's3f');
+      await admin.query(`UPDATE managed_servers SET status = 'registering' WHERE id = $1`, [b]);
+      await link(who, b, false);
+      await admin.query(`UPDATE runners SET last_seen_at = now(), model_auth_present = false WHERE id = ${runnerOf(b)}`);
+      expect(await advanceServer(ctxOf(who), b)).toMatchObject({ final: true, status: 'needs_claude_login' });
+      expect(await signedIn(b)).toBe(false);
+      await admin.query(`UPDATE runners SET model_auth_present = true WHERE id = ${runnerOf(b)}`);
+      expect(await signedIn(b)).toBe(true);
+      // A runner that was removed no longer speaks for the card.
+      await admin.query(`UPDATE runners SET revoked_at = now() WHERE id = ${runnerOf(b)}`);
+      expect(await signedIn(b)).toBeNull();
     });
 
     it('stays booting while the create action runs, and fails the row when it errors', async () => {

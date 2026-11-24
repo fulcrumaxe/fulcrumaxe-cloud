@@ -50,6 +50,7 @@ export const serverSchema = z.object({
   public_ipv4: z.string().nullable(),
   failure_code: z.string().nullable(),
   price: priceSchema.nullable(),
+  claude_signed_in: z.boolean().nullable(),
   created_at: z.string(),
 });
 

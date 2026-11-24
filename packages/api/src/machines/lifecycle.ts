@@ -7,7 +7,7 @@ import { machineServerDeps, toApiError, withHetznerClient, type ServerCtx } from
 /**
  * D#845 MC-7: what happens to a server after it is made. Three jobs, none of them in a request that a person waits on, except Delete, which is the person's own act.
  *
- *  - `advanceServer`: one look at a server that is not final, run by the queued status worker. It writes the status (creating, booting, registering, ready) from Hetzner's
+ *  - `advanceServer`: one look at a server that is not final, run by the queued status worker. It writes the status (creating, booting, registering, then ready or needs_claude_login) from Hetzner's
  *    state and from the registered runner, and past 35 minutes it marks the row failed. It is never run on a schedule: the create starts the worker, which sleeps between
  *    looks and stops at the first final status (push, not poll).
  *  - `deleteManagedServer`: refuses while projects are placed, revokes the runner and the provisioning token, deletes the server and then the firewall (a 404 counts as
@@ -20,7 +20,7 @@ const FINAL = new Set(["ready", "needs_claude_login", "deleting", "deleted", "fa
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 interface StatusRow {
-  status: string; provider_server_id: string | null; create_action_id: string | null; runner_id: string | null; age_seconds: number; heartbeated: boolean;
+  status: string; provider_server_id: string | null; create_action_id: string | null; runner_id: string | null; age_seconds: number; heartbeated: boolean; model_auth_present: boolean | null;
 }
 
 /** One look at one server. `final` is true once the worker has nothing more to do; `delaySeconds` is how long it sleeps before the next look. */
@@ -28,7 +28,7 @@ export async function advanceServer(ctx: ServerCtx, serverId: string): Promise<{
   const { accountId, userId } = ctx.principal;
   const read = () => withTenant(ctx.pool, accountId, userId, async (c) => (await c.query<StatusRow>(
     `SELECT s.status, s.provider_server_id, s.create_action_id, s.runner_id, extract(epoch FROM now() - s.created_at)::float8 AS age_seconds,
-            COALESCE(r.last_seen_at IS NOT NULL AND r.revoked_at IS NULL, false) AS heartbeated
+            COALESCE(r.last_seen_at IS NOT NULL AND r.revoked_at IS NULL, false) AS heartbeated, r.model_auth_present
        FROM managed_servers s LEFT JOIN runners r ON r.account_id = s.account_id AND r.id = s.runner_id
       WHERE s.account_id = $1 AND s.id = $2`, [accountId, serverId])).rows[0]);
   /** Moves the status only from the one the worker saw, so a delete that began in between is never overwritten. */
@@ -36,7 +36,13 @@ export async function advanceServer(ctx: ServerCtx, serverId: string): Promise<{
     c.query(`UPDATE managed_servers SET status = $4, status_at = now(), failure_code = $5 WHERE account_id = $1 AND id = $2 AND status = $3`, [accountId, serverId, from, to, failure]));
   let row = await read();
   if (!row || FINAL.has(row.status)) return { final: true, status: row?.status ?? "deleted", delaySeconds: 0 };
-  if (row.runner_id !== null && row.heartbeated) { await move(row.status, "ready"); return { final: true, status: "ready", delaySeconds: 0 }; }
+  // D#845 MC-8a: the linked runner's hello says whether the machine is signed in to Claude: yes is `ready`, no is `needs_claude_login` (the sign-in link takes it from there). A runner that has not said
+  // keeps the row `registering` (never read as signed in). After this the card's sign-in state is read from the runner's own fact on each read, and no status is written for it again.
+  if (row.runner_id !== null && row.heartbeated && row.model_auth_present !== null) {
+    const to = row.model_auth_present ? "ready" : "needs_claude_login";
+    await move(row.status, to);
+    return { final: true, status: to, delaySeconds: 0 };
+  }
   if (row.provider_server_id !== null && (row.status === "creating" || row.status === "booting")) {
     const providerId = Number(row.provider_server_id);
     try {

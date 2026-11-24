@@ -55,6 +55,7 @@ export { DEPLOY_ORDER_ELIGIBLE_SQL, deployOrderClaimRun, deployOrderReportRun, d
 export { machineJobClaimRun, machineJobProgressRun, offeredMachineJobs, setupProgressRun } from "./machineJob.js";
 export { ENGINE_SOURCE_REPO, buildPlanFile, engineTarballUrl, issueProjectSetup, retryInstall, setupPlanRun, type IssuedSetupJob } from "./setupJobs.js";
 export { ENGINE_SESSION_NAME_PREFIX, issueEngineSessionDelete, issueEngineSessionStart, issueEngineSessionStop, startEngine, type EngineStopReason, type IssuedSessionJob, type PersonStopReason } from "./engineSession.js";
+export { cancelClaudeLogin, exchangeMachineCommands, machineLoginCodeRun, machineLoginReportRun, readClaudeLogin, signOutOfClaude, startClaudeLogin, submitClaudeLoginCode } from "./machineLogin.js";
 export { memoryProposalsRun } from "./memoryProposals.js";
 export { PLANE_PUSH_REPORT_CODES, planePushPairingRun, planePushReportRun, planePushTokenRun } from "./planePush.js";
 export {

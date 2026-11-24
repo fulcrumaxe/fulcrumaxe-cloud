@@ -24,6 +24,7 @@ import { DeployOrderClaimReply, DeployOrderReportReply } from "./deployOrder.js"
 import { MachineJobClaimReply, SetupProgressReply } from "./machineJobs.js";
 import { SignedJobSchema } from "./job.js";
 import { pairingDigest } from "./pairingDigest.js";
+import { SignedMachineCommands } from "./machineCommands.js";
 import { SignedSandboxCommands } from "./sandboxCommands.js";
 import { WakeGrant } from "./wake.js";
 
@@ -72,9 +73,11 @@ const machineJob = z.literal(true).optional();
 
 /** D#587 B-7b: signed sandbox commands for this runner (at most five), sent only to a runner whose latest hello listed `sandbox_commands_v1` at protocol 21 or later. Absent when there are none. */
 const sandboxCommands = SignedSandboxCommands.optional();
+/** D#845 MC-8a: signed machine commands (the Claude sign-in link) for this runner, at most five, sent only to a runner whose latest hello listed `machine_login_v1` at protocol 22 or later. Absent when there are none. */
+const machineCommands = SignedMachineCommands.optional();
 
 /** Nothing for this runner to do right now. */
-export const ClaimIdleReply = z.object({ retry_after: retryAfter(3600), wake, merge_order: mergeOrder, deploy_order: deployOrder, machine_job: machineJob, sandbox_commands: sandboxCommands }).strict();
+export const ClaimIdleReply = z.object({ retry_after: retryAfter(3600), wake, merge_order: mergeOrder, deploy_order: deployOrder, machine_job: machineJob, sandbox_commands: sandboxCommands, machine_commands: machineCommands }).strict();
 export type ClaimIdleReply = z.infer<typeof ClaimIdleReply>;
 
 /**
@@ -82,7 +85,7 @@ export type ClaimIdleReply = z.infer<typeof ClaimIdleReply>;
  * later write with it. `run_id` repeats the signed job's own so a runner can key on it before it opens the job.
  */
 export const ClaimedReply = z
-  .object({ signed_job: SignedJobSchema, run_id: z.string().uuid(), lease_generation: safeInt.min(1), wake, merge_order: mergeOrder, deploy_order: deployOrder, machine_job: machineJob, sandbox_commands: sandboxCommands })
+  .object({ signed_job: SignedJobSchema, run_id: z.string().uuid(), lease_generation: safeInt.min(1), wake, merge_order: mergeOrder, deploy_order: deployOrder, machine_job: machineJob, sandbox_commands: sandboxCommands, machine_commands: machineCommands })
   .strict()
   .refine((reply) => reply.signed_job.job.run_id === reply.run_id, { message: "run_id must be the signed job's run" });
 export type ClaimedReply = z.infer<typeof ClaimedReply>;

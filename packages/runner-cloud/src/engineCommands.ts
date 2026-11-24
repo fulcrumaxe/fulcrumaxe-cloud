@@ -1,4 +1,4 @@
-import { BRIDGE_COMMAND_KINDS, BRIDGE_INCOMPLETE_ACK_PROTOCOL, BRIDGE_REFUSALS, ENGINE_COMMAND_PURPOSE, type SandboxCommand, type SignedSandboxCommand, EngineCommandAck, EngineCommandsPullReply, EngineCommandsPullRequest, commandSendableTo, engineCommandsPullSchemaFor, type EngineCommand, type EngineAllowedRepo, type SignedEngineCommand, type MachineJob, type SignedMachineJob } from "@fulcrumaxe/runner-protocol";
+import { BRIDGE_COMMAND_KINDS, BRIDGE_INCOMPLETE_ACK_PROTOCOL, BRIDGE_REFUSALS, ENGINE_COMMAND_PURPOSE, type SandboxCommand, type SignedSandboxCommand, EngineCommandAck, EngineCommandsPullReply, EngineCommandsPullRequest, commandSendableTo, engineCommandsPullSchemaFor, type EngineCommand, type EngineAllowedRepo, type SignedEngineCommand, type MachineJob, type SignedMachineJob, type MachineCommand, type SignedMachineCommand } from "@fulcrumaxe/runner-protocol";
 import { START_LIKE_KINDS, readHaltStates } from "@fx/db/src/engineCommands.js";
 import { writeEngineAudit } from "@fx/db/src/engineAudit.js";
 import type { PoolClient } from "pg";
@@ -19,6 +19,8 @@ export interface EngineCommandSigner {
   signSandboxCommand?(command: SandboxCommand): SignedSandboxCommand;
   /** D#845 ON-8b: the same key and `key_id`, signing a machine job. Absent in a deployment that signs none (issuing a setup job is then 503). */
   signMachineJob?(job: MachineJob): SignedMachineJob;
+  /** D#845 MC-8a: the same key and `key_id`, signing a machine command (the Claude sign-in link). Absent in a deployment that signs none (nothing is then delivered). */
+  signMachineCommand?(command: MachineCommand): SignedMachineCommand;
 }
 
 interface CoveredRepo {

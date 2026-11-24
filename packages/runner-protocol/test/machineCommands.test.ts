@@ -1,7 +1,8 @@
 import { generateKeyPairSync, sign } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { JobSignatureError, canonicalJson } from "../src/jobSignature.js";
-import { CLAUDE_AUTH_URL_PATTERN, ClaudeAuthUrl, MACHINE_COMMAND_KINDS, MACHINE_COMMAND_PURPOSE, MachineCommand, signMachineCommand, verifyMachineCommand, type MachineCommand as Command } from "../src/machineCommands.js";
+import { ENGINE_COMMAND_MAX_LIFE_S, MAX_CLOCK_SKEW_S } from "../src/engineCommands.js";
+import { CLAUDE_AUTH_ORIGIN, CLAUDE_AUTH_URL_PATTERN, MACHINE_COMMAND_MAX_CLOCK_SKEW_S, MACHINE_COMMAND_MAX_LIFE_S, MACHINE_COMMAND_REFUSALS, MachineCommandAck, MachineLoginCode, MachineLoginReport, ClaudeAuthUrl, MACHINE_COMMAND_KINDS, MACHINE_COMMAND_PURPOSE, MachineCommand, signMachineCommand, verifyMachineCommand, type MachineCommand as Command } from "../src/machineCommands.js";
 import { SANDBOX_COMMAND_PURPOSE, signSandboxCommand } from "../src/sandboxCommands.js";
 
 const { publicKey, privateKey } = generateKeyPairSync("ed25519");
@@ -12,6 +13,8 @@ const RUNNER = "0b9b3a52-6c1e-4c53-9d5f-1f3f2a6f7a10";
 const ID = "5d0c6f0e-2a54-4f3b-8d1e-7a9c2b3d4e5f";
 const at = (s: number): string => new Date(NOW.getTime() + s * 1000).toISOString();
 const cmd = (over: Record<string, unknown> = {}): Command => ({ v: 1, purpose: MACHINE_COMMAND_PURPOSE, command_id: ID, runner_id: RUNNER, issued_by: ID, issued_at: at(0), expires_at: at(300), kind: "claude_login_start", args: { request_id: ID }, ...over }) as Command;
+/** The logout command names no request; the two sign-in commands name exactly one. */
+const ofKind = (kind: (typeof MACHINE_COMMAND_KINDS)[number]): Command => cmd({ kind, args: kind === "claude_logout" ? {} : { request_id: ID } });
 const failsWith = (run: () => unknown, code: string): void => {
   try {
     run();
@@ -24,9 +27,11 @@ const failsWith = (run: () => unknown, code: string): void => {
 };
 
 describe("machine command schema", () => {
-  it("has the two sign-in commands, each with a request id and nothing else, and no repo", () => {
-    expect([...MACHINE_COMMAND_KINDS]).toEqual(["claude_login_start", "claude_login_code"]);
-    for (const kind of MACHINE_COMMAND_KINDS) expect(MachineCommand.safeParse(cmd({ kind })).success, kind).toBe(true);
+  it("has the two sign-in commands, each with a request id and nothing else, the logout with none, and no repo", () => {
+    expect([...MACHINE_COMMAND_KINDS]).toEqual(["claude_login_start", "claude_login_code", "claude_logout"]);
+    for (const kind of MACHINE_COMMAND_KINDS) expect(MachineCommand.safeParse(ofKind(kind)).success, kind).toBe(true);
+    expect(MachineCommand.safeParse(cmd({ kind: "claude_logout" })).success).toBe(false);
+    expect(MachineCommand.safeParse(cmd({ kind: "claude_logout", args: { request_id: ID } })).success).toBe(false);
     expect(MachineCommand.safeParse(cmd({ repo_gh_id: 7 })).success).toBe(false);
     expect(MachineCommand.safeParse(cmd({ args: { request_id: ID, extra: 1 } })).success).toBe(false);
     expect(MachineCommand.safeParse(cmd({ args: {} })).success).toBe(false);
@@ -44,24 +49,34 @@ describe("machine command schema", () => {
 describe("claude auth url", () => {
   const good = (value: unknown): boolean => ClaudeAuthUrl.safeParse(value).success;
   it("takes an https URL on claude.ai or console.anthropic.com", () => {
-    expect(good("https://claude.ai/oauth/authorize?code=true&client_id=abc-1&state=x%20y")).toBe(true);
-    expect(good("https://console.anthropic.com/login/x")).toBe(true);
+    expect(good("https://claude.ai/cai/oauth/authorize?code=true&client_id=abc-1&state=x%20y")).toBe(true);
+    expect(good("https://console.anthropic.com/cai/oauth/authorize?x=1")).toBe(true);
+    // The real URL (Ruling 52.10, values redacted): claude.com, and a scope parameter that joins its words with `+`.
+    expect(good("https://claude.com/cai/oauth/authorize?code=true&client_id=REDACTED&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=user%3Aprofile+user%3Ainference&code_challenge=REDACTED&code_challenge_method=S256&state=REDACTED")).toBe(true);
+    expect(CLAUDE_AUTH_ORIGIN).toBe("https://claude.com");
     expect(CLAUDE_AUTH_URL_PATTERN.source.startsWith("^https:")).toBe(true);
   });
   it("refuses any other host, scheme, space, control character, quote or length over 2,000", () => {
-    for (const url of ["https://evil.example/x", "https://claude.ai.evil.example/x", "https://claude.ai@evil.example/x", "https://claude.aix/x", "http://claude.ai/x", "javascript:alert(1)", "//claude.ai/x", "https://claude.ai", "https://claude.ai/", "https://claude.ai/a b", "https://claude.ai/a\tb", "https://claude.ai/a\nb", "https://claude.ai/a\u0000b", "https://claude.ai/x\n", "https://claude.ai/a\"b", "https://claude.ai/a<b", "https://claude.ai/a#frag", "https://claude.ai/a:b", "https://CLAUDE.AI/x", "https://claude.ai/é", "https://api.claude.ai/x"]) expect(good(url), JSON.stringify(url)).toBe(false);
-    const prefix = "https://claude.ai/";
+    const P = "/cai/oauth/authorize?";
+    for (const host of ["https://evil.example", "https://claude.ai.evil.example", "https://claude.ai@evil.example", "https://claude.aix", "http://claude.ai", "//claude.ai", "https://CLAUDE.AI", "https://api.claude.ai", "https://claude.com.evil.example", "https://claude.com@evil.example", "https://claude.comx", "https://evilclaude.com", "http://claude.com"]) expect(good(host + P + "x=1"), host).toBe(false);
+    for (const url of ["javascript:alert(1)", "https://claude.ai", "https://claude.ai/", "https://claude.ai/x", "https://claude.com/a b"]) expect(good(url), JSON.stringify(url)).toBe(false);
+    for (const tail of ["a b", "a\tb", "a\nb", "a\u0000b", "x\n", "a\"b", "a<b", "a#frag", "a:b", "é"]) expect(good("https://claude.com" + P + tail), JSON.stringify(tail)).toBe(false);
+    const prefix = "https://claude.ai" + P;
     expect(good(prefix + "a".repeat(2000 - prefix.length))).toBe(true);
     expect(good(prefix + "a".repeat(2001 - prefix.length))).toBe(false);
     expect(good(prefix + "a".repeat(2001))).toBe(false);
     for (const junk of [null, 5, undefined, {}]) expect(good(junk)).toBe(false);
+  });
+  it("pins the path to /cai/oauth/authorize? (a link on an allowed host at any other path is refused)", () => {
+    for (const url of ["https://claude.com/login?x=1", "https://claude.com/oauth/authorize?x=1", "https://claude.com/cai/oauth/authorizeX?x=1", "https://claude.com/cai/oauth/authorize", "https://claude.com/cai/oauth/authorize?", "https://claude.com/x/cai/oauth/authorize?x=1", "https://claude.com//cai/oauth/authorize?x=1", "https://claude.ai/oauth/authorize?x=1", "https://console.anthropic.com/login/x", "https://claude.com/cai/oauth/../logout?x=1"]) expect(good(url), url).toBe(false);
+    expect(good("https://claude.com/cai/oauth/authorize?x=1")).toBe(true);
   });
 });
 
 describe("verifyMachineCommand", () => {
   const signed = (command: Command = cmd()) => signMachineCommand(command, "job-key-1", privateKey);
   it("returns what it signed", () => {
-    for (const kind of MACHINE_COMMAND_KINDS) expect(verifyMachineCommand(signed(cmd({ kind })), keyring, RUNNER, NOW)).toEqual(cmd({ kind }));
+    for (const kind of MACHINE_COMMAND_KINDS) expect(verifyMachineCommand(signed(ofKind(kind)), keyring, RUNNER, NOW)).toEqual(ofKind(kind));
   });
   it("rejects a flipped byte, another key, another runner, an expired or future command", () => {
     const s = signed();
@@ -81,5 +96,29 @@ describe("verifyMachineCommand", () => {
     const body = cmd({ purpose: "engine_command_v1" });
     const signature = sign(null, Buffer.from(canonicalJson(body), "utf8"), privateKey).toString("base64url");
     failsWith(() => verifyMachineCommand({ command: body, key_id: "job-key-1", signature }, keyring, RUNNER, NOW), "malformed");
+  });
+});
+
+describe("the bounds, the ack, the report and the code", () => {
+  it("hold the same life and clock skew as the engine commands (the two cannot import each other)", () => {
+    expect([MACHINE_COMMAND_MAX_LIFE_S, MACHINE_COMMAND_MAX_CLOCK_SKEW_S]).toEqual([ENGINE_COMMAND_MAX_LIFE_S, MAX_CLOCK_SKEW_S]);
+  });
+  it("an ack names a reason exactly when it refused", () => {
+    expect(MachineCommandAck.safeParse({ command_id: ID, outcome: "applied" }).success).toBe(true);
+    for (const refusal of MACHINE_COMMAND_REFUSALS) expect(MachineCommandAck.safeParse({ command_id: ID, outcome: "refused", refusal }).success).toBe(true);
+    expect(MachineCommandAck.safeParse({ command_id: ID, outcome: "refused" }).success).toBe(false);
+    expect(MachineCommandAck.safeParse({ command_id: ID, outcome: "applied", refusal: "failed" }).success).toBe(false);
+    expect(MachineCommandAck.safeParse({ command_id: ID, outcome: "applied", extra: 1 }).success).toBe(false);
+  });
+  it("a report carries the link with awaiting_code and with nothing else, and a failure word only with failed", () => {
+    const url = "https://claude.com/cai/oauth/authorize?scope=a+b";
+    expect(MachineLoginReport.safeParse({ state: "awaiting_code", auth_url: url }).success).toBe(true);
+    expect(MachineLoginReport.safeParse({ state: "done" }).success).toBe(true);
+    expect(MachineLoginReport.safeParse({ state: "failed", failure_code: "login_timeout" }).success).toBe(true);
+    for (const bad of [{ state: "awaiting_code" }, { state: "done", auth_url: url }, { state: "awaiting_code", auth_url: "https://evil.example/x" }, { state: "done", failure_code: "x" }, { state: "failed", failure_code: "Not A Word" }, { state: "pending" }, { state: "done", extra: 1 }]) expect(MachineLoginReport.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
+  });
+  it("a code is a short run of the characters a code page shows", () => {
+    for (const ok of ["abc123", "Ab-9_x.y~z+/=#"]) expect(MachineLoginCode.safeParse(ok).success, ok).toBe(true);
+    for (const bad of ["", " ", "a b", "a\nb", "a\u0000b", "x".repeat(513), 5, null]) expect(MachineLoginCode.safeParse(bad).success, String(bad)).toBe(false);
   });
 });

@@ -11,6 +11,7 @@ import { MAX_ENVELOPE_INPUT_BYTES } from "./envelope.js";
 import { MEMORY_HIDDEN_CLASS, MEMORY_KEPT_JOINER } from "./memoryText.js";
 import { DeployOrderClaimMessage, DeployOrderReportMessage } from "./deployOrder.js";
 import { ENGINE_BRIDGE_CAPABILITY, HEARTBEAT_INVENTORY_HELLO_CAPABILITY, RUNNER_CAPABILITIES, SANDBOX_COMMAND_CAPABILITY, SESSION_ID_PATTERN, SURVEY_CAPABILITY } from "./job.js";
+import { MachineCommandAcks } from "./machineCommands.js";
 import { SandboxCommandAcks } from "./sandboxCommands.js";
 import { PREFLIGHT_CODES } from "./preflight.js";
 
@@ -569,7 +570,7 @@ export const HOST_LOAD_MIN_INTERVAL_SECONDS = 60;
 export const HostLoad = z.object({ mem_avail_mb: safeInt.min(0).max(HOST_LOAD_MAX_MB), disk_free_mb: safeInt.min(0).max(HOST_LOAD_MAX_MB), setups_running: safeInt.min(0).max(HOST_LOAD_MAX_SETUPS) }).strict();
 export type HostLoad = z.infer<typeof HostLoad>;
 
-export const ClaimMessage = z.object({ sandbox_unavailable: SandboxUnavailableReason.optional(), capacity: ClaimCapacity.optional(), verify_sign_in: VerifySignInState.optional(), sandboxes: SandboxInventory.optional(), sandbox_acks: SandboxCommandAcks.optional(), host_load: HostLoad.optional() }).strict();
+export const ClaimMessage = z.object({ sandbox_unavailable: SandboxUnavailableReason.optional(), capacity: ClaimCapacity.optional(), verify_sign_in: VerifySignInState.optional(), sandboxes: SandboxInventory.optional(), sandbox_acks: SandboxCommandAcks.optional(), host_load: HostLoad.optional(), machine_acks: MachineCommandAcks.optional() }).strict();
 
 /** D#587 FU-179: `sandboxes` is the same block a claim carries, sent only after a hello reply that listed `heartbeat_inventory`; the cloud answers `sandboxes_recorded: true` once it stored it. */
 export const HeartbeatMessage = z.object({ run_id: uuid, lease_generation: leaseGeneration, sandboxes: SandboxInventory.optional() }).strict();

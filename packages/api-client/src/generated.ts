@@ -1700,6 +1700,7 @@ export interface Operations {
           monthly_gross: string;
           ipv4_monthly_gross: string;
         }) | (null);
+        claude_signed_in: boolean | null;
         created_at: string;
       }>;
     };
@@ -1734,6 +1735,7 @@ export interface Operations {
         monthly_gross: string;
         ipv4_monthly_gross: string;
       }) | (null);
+      claude_signed_in: boolean | null;
       created_at: string;
     };
   };
@@ -1816,6 +1818,7 @@ export interface Operations {
         monthly_gross: string;
         ipv4_monthly_gross: string;
       }) | (null);
+      claude_signed_in: boolean | null;
       created_at: string;
     };
   };

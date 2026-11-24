@@ -1,7 +1,8 @@
-import { CLAIM_IDLE_RETRY_AFTER_SECONDS, CLAIM_MIN_INTERVAL_SECONDS, ClaimMessage, ClaimReply, ClaimRateLimitedReply, PLANE_MERGE_CAPABILITY, PLANE_MERGE_MAX_ATTEMPTS, type SignedSandboxCommand } from "@fulcrumaxe/runner-protocol";
+import { CLAIM_IDLE_RETRY_AFTER_SECONDS, CLAIM_MIN_INTERVAL_SECONDS, ClaimMessage, ClaimReply, ClaimRateLimitedReply, PLANE_MERGE_CAPABILITY, PLANE_MERGE_MAX_ATTEMPTS, type SignedMachineCommand, type SignedSandboxCommand } from "@fulcrumaxe/runner-protocol";
 import { PAUSED_RETRY_AFTER_SECONDS } from "@fx/runner";
 import { allowRunnerWake } from "@fx/core/src/pendingWork.js";
 import { deployOrderWaiting } from "./deployOrder.js";
+import { exchangeMachineCommands } from "./machineLogin.js";
 import { exchangeSandboxCommands } from "./sandboxCommands.js";
 import { offeredMachineJobs } from "./machineJob.js";
 import { RunnerHttpError, asRunner, parseJsonBody, parseMessage, pgCode, requireLeases, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse } from "./http.js";
@@ -71,6 +72,9 @@ export async function claimRun(deps: RunnerCloudDeps, req: RunnerHttpRequest): P
       // that did not list `sandbox_commands_v1`). Delivery reads nothing about the inventory.
       let sandboxCommands: SignedSandboxCommand[] = [];
       if (waited <= 0 && message.sandbox_unavailable === undefined) sandboxCommands = await exchangeSandboxCommands(client, runner, message.sandbox_acks ?? [], async () => (deps.engineCommandSigner ? await deps.engineCommandSigner() : null));
+      // D#845 MC-8a: the same for the machine commands (the Claude sign-in link), to a runner whose latest hello listed `machine_login_v1` at protocol 22 or later.
+      let machineCommands: SignedMachineCommand[] = [];
+      if (waited <= 0 && message.sandbox_unavailable === undefined) machineCommands = await exchangeMachineCommands(client, runner, message.machine_acks ?? [], async () => (deps.engineCommandSigner ? await deps.engineCommandSigner() : null));
       // D#6 C43-6: how long this runner is still held back by its plan's usage limit, in whole seconds rounded up (0: not at all). Worked out from the
       // stored end time against the database clock on every claim, so a pause that has ended needs no cleanup and the next claim just goes ahead.
       let pausedFor = 0;
@@ -118,7 +122,7 @@ export async function claimRun(deps: RunnerCloudDeps, req: RunnerHttpRequest): P
       // D#845 ON-8a: whether a machine job waits for THIS runner and it may be offered it (not held, its latest hello's capability, protocol 22, its sandbox engine for a microVM job): `machineJobOffered`, the same rule the pickup applies.
       let machineJob = false;
       if (waited <= 0 && message.sandbox_unavailable === undefined && !heldByPerson) machineJob = (await offeredMachineJobs(client, runner)).length > 0;
-      return { waited, pausedFor, heldByPerson, capabilities, mergeOrder, deployOrder, machineJob, sandboxCommands };
+      return { waited, pausedFor, heldByPerson, capabilities, mergeOrder, deployOrder, machineJob, sandboxCommands, machineCommands };
     }),
   ));
   const wait = gate.waited;
@@ -140,6 +144,8 @@ export async function claimRun(deps: RunnerCloudDeps, req: RunnerHttpRequest): P
     ...(gate.machineJob ? { machine_job: true as const } : {}),
     // D#587 B-7b: only a runner that listed `sandbox_commands_v1` is ever handed any (the query joins its latest hello); absent when there are none.
     ...(gate.sandboxCommands.length > 0 ? { sandbox_commands: gate.sandboxCommands } : {}),
+    // D#845 MC-8a: only a runner that listed `machine_login_v1` is ever handed any; absent when there are none.
+    ...(gate.machineCommands.length > 0 ? { machine_commands: gate.machineCommands } : {}),
   };
   // D#6 RUNNER-WAKE R3b: the allow record the wake check requires, written only for a runner this claim just verified in the database and granted.
   if (wakeGrant) await allowRunnerWake(runner, (deps.now?.() ?? new Date()).getTime());

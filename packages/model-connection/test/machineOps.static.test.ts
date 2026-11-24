@@ -32,9 +32,15 @@ describe('machine_ops is the only code path that touches the machine key and the
     expect(filesMatching(/server\.unsealed/)).toEqual([MACHINE_OPS]);
   });
 
-  it('is imported only by the package index and the credential route (the route is the one caller)', () => {
-    const users = filesMatching(/machineOps|machineKekSource|withHetznerToken|withManagedServer|connectHetznerCredential|removeHetznerCredential/);
-    expect(users).toEqual([MACHINE_OPS, 'packages/api-client/src/generated.ts', 'packages/api/src/machines/servers.ts', 'packages/api/src/routes/machine-credential.ts', 'packages/model-connection/src/index.ts'].sort());
+  it('is imported only by the package index, the credential route, the server routes and the runner-route deps (each a named caller)', () => {
+    const users = filesMatching(/machineOps|machineKekSource|withHetznerToken|withManagedServer|connectHetznerCredential|removeHetznerCredential|createMachineLoginSealer/);
+    expect(users).toEqual([MACHINE_OPS, 'apps/web/lib/runnerRoutes.ts', 'packages/api-client/src/generated.ts', 'packages/api/src/machines/servers.ts', 'packages/api/src/routes/machine-credential.ts', 'packages/model-connection/src/index.ts'].sort());
+  });
+
+  it('D#845 MC-8a: the sealed sign-in columns are read through their two definers in the one runner-cloud file, and the sealer is built in the runner routes alone', () => {
+    expect(filesMatching(/machine_login_code_take|machine_login_auth_url/)).toEqual(['packages/runner-cloud/src/machineLogin.ts']);
+    expect(filesMatching(/createMachineLoginSealer\(/)).toEqual([MACHINE_OPS, 'apps/web/lib/runnerRoutes.ts'].sort());
+    expect(filesMatching(/\b(?:auth_url_ct|code_ct)\b/)).toEqual(['packages/runner-cloud/src/machineLogin.ts']);
   });
 
   it('the guard can fail: the scan finds the three words in machineOps.ts, so an empty result is not a broken scan', () => {

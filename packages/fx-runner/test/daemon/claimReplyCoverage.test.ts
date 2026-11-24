@@ -29,6 +29,9 @@ const ABSENT_ON_PURPOSE: Record<string, string> = {
   "sandbox_commands.command.exp": "signed sandbox commands ride on a claim answer for a runner that lists sandbox_commands_v1: at most five, every field short and fixed in shape (envelope)",
   "sandbox_commands.key_id": "signed sandbox commands ride on a claim answer for a runner that lists sandbox_commands_v1: at most five, every field short and fixed in shape (envelope)",
   "sandbox_commands.signature": "signed sandbox commands ride on a claim answer for a runner that lists sandbox_commands_v1: at most five, every field short and fixed in shape (envelope)",
+  ...Object.fromEntries(
+    ["machine_commands", "machine_commands.command", "machine_commands.command.v", "machine_commands.command.purpose", "machine_commands.command.command_id", "machine_commands.command.runner_id", "machine_commands.command.issued_by", "machine_commands.command.issued_at", "machine_commands.command.expires_at", "machine_commands.command.kind", "machine_commands.command.args", "machine_commands.command.args.request_id", "machine_commands.key_id", "machine_commands.signature"].map((p) => [p, "signed machine commands ride on a claim answer for a runner that lists machine_login_v1: at most five, every field short and fixed in shape (envelope)"]),
+  ),
   "signed_job.job.browser_method": "only on a deploy-verifier job",
   "signed_job.job.fix_round_kind": "only on an executor fix job, one short word",
   retry_after: "only on an idle claim answer",
