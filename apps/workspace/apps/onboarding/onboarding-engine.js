@@ -8,6 +8,7 @@
 // Commands are fixed templates filled with the page's own origin. A Copy button copies exactly the text drawn beside it.
 // onboarding-app.js loads this file with import() when the engine track is on screen, so it is not a boot request (the boot budget is full).
 import { h, timeNode, usd } from "../_lib/dom.js";
+import { api } from "../_lib/api.js";
 
 export const LABELS = {
   machine: "Connect a machine", claude: "Sign in to Claude on the machine", github_app: "Install the GitHub App (write)", project: "Choose a project",
@@ -26,6 +27,7 @@ export const TIME_TO_LIVE = "usually 15–30 minutes"; // until J1 measures it
 export const NO_KVM = "This machine has no KVM, so jobs run in the OS sandbox. That's fine for one project.";
 export const OPERATE_OFF = "The engine runs only while operate is on. Operate lets the cloud send commands to the engine, and your dials decide what it may do by itself.";
 export const ASK_OWNER = "Ask an owner or admin to turn on operate";
+export const ASK_PICK = "Ask an owner or admin to pick the project";
 const GENERIC_FAIL = "This step stopped. Try again.";
 const CLAUDE_INSTALL = "curl -fsSL https://claude.ai/install.sh | bash";
 const SUB_STEPS = {
@@ -317,10 +319,268 @@ export function engineSection(steps, env) {
         h("span", { class: "ob-state", "data-testid": "ob-engine-state" }, v.word, s.completed_at ? [" ", timeNode(s.completed_at, true)] : null)),
       v.lines.map((t) => h("p", { class: "ob-muted", "data-testid": "ob-engine-line" }, env.ctx.planLink && t === env.ctx.planNote && env.canOpen(BUDGET_APP) && t.includes(BUDGET_PHRASE) ? budgetLinked(t, env) : lineNodes(t, env.ctx.name))),
       v.list.length ? h("ul", { class: "ob-issues", "aria-label": "Install progress" }, v.list.map((x) => h("li", { "data-testid": "ob-engine-sub" }, x.label + ": " + x.word))) : null,
-      v.commands.map((c) => commandBox(c, env)), buttons);
+      v.commands.map((c) => commandBox(c, env)), buttons,
+      // D#845 ON-7b: the picker lives in a host the app keeps across redraws; a member is told who can pick.
+      s.step === "project" && s.state === "active" && !s.plan_gate ? (env.ctx.isAdmin === false ? h("p", { class: "ob-muted", "data-testid": "ob-engine-line" }, ASK_PICK) : env.projectHost || null) : null);
   });
   return h("section", { class: "ob-track", "data-testid": "ob-track-engine", "aria-label": "Engine setup" },
     first === 0 ? h("div", { class: "ob-prereq", "data-testid": "ob-prereq" }, h("h3", { class: "ob-sub" }, "Before you start"),
       h("ul", { class: "ob-issues" }, prerequisites(env.price).map((t) => h("li", { "data-testid": "ob-prereq-line" }, t)))) : null,
     h("ol", { class: "ob-steps", "aria-label": "Engine setup steps" }, items));
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+// D#845 ON-7b: the project step's picker and confirm. The first half is pure (parsing the three reads, the machine list, the operate box, every refusal's sentence) and is unit-tested;
+// the second draws it with h() only. Nothing is stored in the browser: the state lives in this closure, and what the server decides (the placement, the setup) is read again after.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const REPO_NAME_RE = /^[A-Za-z0-9._-]{1,100}$/;
+export const PUBLIC_COPY = "Anyone can open issues on a public repo, and the engine reads them. The engine starts work only from collaborators' items.";
+export const COULDNT_CHECK = "Couldn't check";
+export const NO_OWNERS = "Install the GitHub app first";
+export const OWNERS_UNKNOWN = "Couldn't load your GitHub accounts";
+export const NO_MACHINE = "Every machine is full or offline";
+export const NEW_PRESET = "Balanced (the starting setting)";
+export const PUBLIC_OPERATE = "Operate isn't available for public repos yet. The engine can watch this repo, but won't act on it.";
+export const pickVisibility = (v) => visibilityLabel(v) || COULDNT_CHECK;
+const PRESET_NAMES = { cautious: "Cautious", balanced: "Balanced", autonomous: "Autonomous" };
+export const presetName = (p) => (typeof p === "string" && Object.hasOwn(PRESET_NAMES, p) ? PRESET_NAMES[p] : "Custom");
+/** The confirm's dials line: the repo's own preset (a hand-moved dial is "Custom"), or the runtime's starting setting for a repo that has no dials yet. */
+export const dialsLine = (repo, isNew) => "Dials: " + (isNew ? NEW_PRESET : presetName(repo && repo.active_preset));
+
+/** GET /api/runners/repos/picker, or null when it is not that shape. A repo's visibility is "public", "private" or "unknown". */
+export function readPicker(body) {
+  if (!body || !Array.isArray(body.repos)) return null;
+  const repos = body.repos.filter((r) => r && typeof r.id === "string" && UUID_RE.test(r.id) && typeof r.name === "string" && r.name !== "")
+    .map((r) => ({ id: r.id.toLowerCase(), name: r.name, visibility: r.visibility === "public" || r.visibility === "private" ? r.visibility : "unknown", active_preset: typeof r.active_preset === "string" ? r.active_preset : null }));
+  const owners = (Array.isArray(body.owners) ? body.owners : []).filter((o) => o && Number.isSafeInteger(o.gh_id) && o.gh_id > 0 && typeof o.login === "string" && o.login !== "").map((o) => ({ gh_id: o.gh_id, login: o.login }));
+  return { repos, owners, ownersUnknown: body.owners_unknown === true };
+}
+
+/** "Linked 2026-11-20 from 203.0.113.9". No country: nothing here looks an address up. "" when the machine has no link facts (a member's read, an older machine). */
+export function linkedLine(at, ip) {
+  const d = typeof at === "string" ? new Date(at) : null;
+  if (!d || Number.isNaN(d.getTime())) return "";
+  return "Linked " + d.toISOString().slice(0, 10) + (typeof ip === "string" && ip !== "" ? " from " + ip : "");
+}
+
+/**
+ * The machines the confirm offers, from GET /api/runners (names, state, link facts) and, when it answered, GET /api/machines (isolation tier and the project a machine hosts).
+ * `ok` is whether it can take this project now; otherwise `note` says why. A standard-isolation machine that hosts a project is greyed, never hidden.
+ */
+export function machineChoices(runners, machines) {
+  const extra = new Map((machines && Array.isArray(machines.machines) ? machines.machines : []).filter((m) => m && typeof m.id === "string").map((m) => [m.id, m]));
+  return (runners && Array.isArray(runners.runners) ? runners.runners : []).filter((r) => r && typeof r.id === "string" && UUID_RE.test(r.id) && r.state !== "revoked").map((r) => {
+    const m = extra.get(r.id) || {};
+    const engine = r.facts && r.facts.engine;
+    const tier = m.tier === "microvm" || m.tier === "standard" ? m.tier : engine === "microvm" ? "microvm" : engine === "os_sandbox" ? "standard" : null;
+    const live = m.live === true || (m.live === undefined && (r.state === "online_idle" || r.state === "busy"));
+    const full = machineChoiceLine({ tier, hasProject: !!m.running });
+    return { id: r.id, name: typeof r.name === "string" && r.name.trim() !== "" ? r.name.trim() : "Unnamed machine", tier, linked: linkedLine(r.linked_at, r.linked_from_ip), ok: live && !full, note: !live ? "Offline" : full };
+  });
+}
+
+/**
+ * The operate box from GET /api/v1/engine/settings: `operate_others` are the enabled repos other than the chosen one. With operate already on there is nothing to consent to; with it off the box
+ * says what ticking it also operates. A public repo cannot be operated yet, so its box is off. `null` settings (the read failed) show no box, and the placement leaves operate as it is.
+ */
+export function operateBox(settings, repoId, visibility) {
+  if (!settings || typeof settings.operate_enabled !== "boolean") return null;
+  const others = (Array.isArray(settings.repos) ? settings.repos : []).filter((r) => r && r.enabled === true && r.repo_id !== repoId && typeof r.repo_id === "string").map((r) => ({ id: r.repo_id, name: typeof r.full_name === "string" && r.full_name !== "" ? r.full_name : "a repo" }));
+  if (settings.operate_enabled) return { on: true, others, text: "Operate is already on for this account, so the engine may act on this repo too." };
+  const text = "Turn on operate for this account." + (others.length ? " This also operates " + others.length + " other " + (others.length === 1 ? "repo" : "repos") + ": " + others.map((o) => o.name).join(", ") : "");
+  return { on: false, others, text, blocked: visibility === "public" ? PUBLIC_OPERATE : "" };
+}
+
+// Every refusal of the place route: by its closed code, then by status. `link` marks the one that points at the setup that already exists.
+const PLACE_BY_CODE = {
+  setup_exists: ["This repo is already being set up.", "setup"],
+  account_not_active: ["This account isn't active, so a project can't be placed right now."],
+  project_already_placed: ["This project is already placed on a machine."],
+  machine_single_project: ["Standard isolation hosts one project, and that machine already has one. Pick another machine."],
+  machine_not_eligible: ["That machine can't take a project right now. Pick another machine."],
+  no_eligible_machine: [NO_MACHINE + ". Add a machine, or free one up.", "machine"],
+  operate_consent_stale: ["The repos operate would also run have changed. Read the list again and confirm again."],
+  operate_public_pending: [PUBLIC_OPERATE],
+  placement_busy: ["The machine was busy with another change. Try again."],
+};
+const PLACE_BY_STATUS = { 400: "That request wasn't accepted. Reload the list and try again.", 403: "Only an owner or admin can place a project.", 404: "That repo wasn't found. Reload the list and pick again." };
+/** `e` is anything the call threw; the text is never empty and never the server's own words. */
+export function placeRefusal(e, name) {
+  const code = e && typeof e.code === "string" ? e.code : "";
+  if (code === "repo_visibility_unknown") return { code, text: "GitHub didn't say whether " + (name || "this repo") + " is public or private. Try again in a minute." };
+  if (Object.hasOwn(PLACE_BY_CODE, code)) return { code, text: PLACE_BY_CODE[code][0], also: PLACE_BY_CODE[code][1] || "" };
+  const status = e && typeof e.status === "number" ? e.status : 0;
+  return { code, text: Object.hasOwn(PLACE_BY_STATUS, status) ? PLACE_BY_STATUS[status] : "The project couldn't be placed. Try again." };
+}
+const CREATE_BY_CODE = { install_first: NO_OWNERS, account_not_active: "This account isn't active, so a repo can't be created right now.", rate_limited: "You've created a lot of repos lately. Try again later.", github_app_not_configured: "Creating a repo isn't available right now.", validation_failed: "That name isn't a valid repo name. Use letters, numbers, dots, dashes and underscores." };
+export const createRefusal = (e) => (e && Object.hasOwn(CREATE_BY_CODE, e.code) ? CREATE_BY_CODE[e.code] : e && e.status === 403 ? "Only an owner or admin can create a repo." : "The repo couldn't be created. Try again.");
+// The words for where GitHub's authorization sent the browser back (`?create=<outcome>`). Only `ok` carries a repo id.
+const CREATE_OUTCOMES = {
+  created_not_connected: "The repo was created, but the GitHub App can't see it yet. Add it to the App's repos on GitHub, then reload.",
+  name_taken: "A repo with that name already exists there. Pick another name.", visibility_not_allowed: "That owner doesn't allow that visibility. Pick the other one.",
+  refused: "GitHub refused to create the repo.", github_busy: "GitHub was busy. Try again in a minute.", rate_limited: CREATE_BY_CODE.rate_limited, install_first: NO_OWNERS, failed: "The repo couldn't be created. Try again.",
+};
+/** What the page's query string says about a create that just returned: { outcome, repo } or null. The repo id is used only when the picker read lists it. */
+export function parseReturn(search) {
+  const p = new URLSearchParams(typeof search === "string" ? search : "");
+  const outcome = p.get("create");
+  if (outcome === "ok") return { outcome, repo: UUID_RE.test(p.get("repo") || "") ? p.get("repo").toLowerCase() : "" };
+  return Object.hasOwn(CREATE_OUTCOMES, outcome || "") ? { outcome, repo: "" } : null;
+}
+
+/**
+ * Draws the project step's picker into `host`. `env`: { announce, openApp, canOpen(id), onPlaced(), search, clearReturn(), signal }. Stages: loading, pick, create, confirm, placed.
+ * Nothing is sent until Confirm (or "Continue to GitHub"), and every stage has a way back.
+ */
+export function mountProjectPicker(host, env) {
+  const S = { stage: "loading", err: null, note: "", data: null, machines: [], settings: null, repo: null, isNew: false, runner: "", operate: false, owner: 0, name: "", vis: "private", busy: false, loadFailed: false };
+  let dead = false;
+  const bdi = (t) => h("bdi", null, t);
+  const p = (t, id) => h("p", { class: "ob-muted", "data-testid": id }, t);
+  const btn = (id, label, fn, o = {}) => h("button", { type: "button", class: "ob-btn" + (o.primary ? " ob-btn-primary" : ""), "data-testid": "ob-pick-" + id, "data-focus": id, disabled: o.disabled || S.busy, onClick: fn }, label);
+  const go = (stage) => { S.stage = stage; S.err = null; S.note = ""; draw(); };
+  function draw(focus) {
+    if (dead) return;
+    host.replaceChildren(h("div", { class: "ob-picker", "data-testid": "ob-picker", "data-stage": S.stage }, S.err ? h("p", { class: "ob-error", role: "alert", "data-testid": "ob-pick-error" }, S.err.text) : "", S.err && S.err.also === "setup" ? btn("see-setup", "See that setup", env.onPlaced) : "", S.err && S.err.also === "machine" && env.canOpen("runners") ? btn("add-machine", "Add a machine", () => env.openApp("runners")) : "", S.note ? p(S.note, "ob-pick-note") : "", view()));
+    const f = focus && host.querySelector('[data-focus="' + focus + '"]');
+    if (f) f.focus();
+  }
+  async function read() {
+    S.loadFailed = false;
+    try {
+      const [picker, runners, machines, settings] = await Promise.all([api("GET", "/api/runners/repos/picker", undefined, env.signal), api("GET", "/api/runners", undefined, env.signal).catch(soft), api("GET", "/api/machines", undefined, env.signal).catch(soft), api("GET", "/api/v1/engine/settings", undefined, env.signal).catch(soft)]);
+      S.data = readPicker(picker);
+      if (!S.data) throw new Error("shape");
+      S.machines = machineChoices(runners, machines);
+      S.settings = settings;
+    } catch (e) {
+      if (e && e.name === "AbortError") throw e;
+      S.loadFailed = true;
+    }
+  }
+  const soft = (e) => { if (e && e.name === "AbortError") throw e; return null; };
+  async function start() {
+    S.stage = "loading"; draw();
+    try { await read(); } catch { return; } // fx-swallow-ok: an aborted read means the picker was closed
+    const back = parseReturn(env.search);
+    if (back) {
+      env.clearReturn();
+      const hit = back.outcome === "ok" && S.data && S.data.repos.find((r) => r.id === back.repo);
+      // `kind: "new"` is sent only for a repo this very read lists: the id in the address is never trusted on its own.
+      if (hit) { choose(hit, true); return; }
+      S.note = back.outcome === "ok" ? "The new repo isn't in your list yet. Reload the list to see it." : CREATE_OUTCOMES[back.outcome];
+    }
+    S.stage = S.loadFailed ? "failed" : "pick";
+    draw();
+  }
+  function choose(repo, isNew) {
+    S.repo = repo; S.isNew = isNew; S.operate = false; S.err = null; S.note = "";
+    const first = S.machines.find((m) => m.ok);
+    S.runner = first ? first.id : "";
+    S.stage = "confirm"; draw();
+    say("Confirm " + repo.name);
+  }
+  const say = (t) => env.announce(t);
+  async function reload() { S.busy = true; draw(); try { await read(); } catch { return; } S.busy = false; if (S.loadFailed) S.stage = "failed"; else if (S.stage === "failed" || S.stage === "loading") S.stage = "pick"; draw(); } // fx-swallow-ok: an aborted read means the picker was closed
+  async function install() {
+    S.busy = true; draw();
+    try {
+      const res = await api("GET", "/api/v1/github/install-url?app_kind=team", undefined, env.signal);
+      if (res && typeof res.url === "string" && res.url.startsWith("https://github.com/")) { window.location.assign(res.url); return; }
+      throw new Error("link");
+    } catch (e) {
+      if (e && e.name === "AbortError") return;
+      S.err = { text: e && e.status === 403 ? "Only an owner or admin can install the GitHub App." : "Installing the GitHub App isn't available right now." };
+    }
+    S.busy = false; draw();
+  }
+  async function createIntent() {
+    const owner = S.data.owners.length === 1 ? S.data.owners[0] : S.data.owners.find((o) => o.gh_id === S.owner);
+    if (!owner || !REPO_NAME_RE.test(S.name)) { S.err = { text: !owner ? "Choose who will own the repo." : createRefusal({ code: "validation_failed" }) }; draw(); return; }
+    S.busy = true; S.err = null; draw();
+    try {
+      const res = await api("POST", "/api/v1/repos/create-intent", { owner_gh_id: owner.gh_id, name: S.name, visibility: S.vis }, env.signal);
+      if (res && typeof res.authorize_url === "string" && res.authorize_url.startsWith("https://github.com/")) { window.location.assign(res.authorize_url); return; } // GitHub's own page; it returns here with ?create=<outcome>
+      throw new Error("link");
+    } catch (e) {
+      if (e && e.name === "AbortError") return;
+      S.err = { text: createRefusal(e), code: e && e.code };
+    }
+    S.busy = false; draw();
+  }
+  async function place() {
+    const box = operateBox(S.settings, S.repo.id, S.repo.visibility);
+    const ticked = !!box && !box.on && !box.blocked && S.operate;
+    S.busy = true; S.err = null; draw();
+    try {
+      await api("POST", "/api/runners/repos/" + S.repo.id + "/place", { kind: S.isNew ? "new" : "existing", ...(S.runner ? { runner_id: S.runner } : {}), ...(ticked ? { turn_on_operate: true, operate_others: box.others.map((o) => o.id) } : {}) }, env.signal);
+    } catch (e) {
+      if (e && e.name === "AbortError") return;
+      S.err = placeRefusal(e, S.repo.name);
+      S.busy = false;
+      if (["operate_consent_stale", "machine_single_project", "machine_not_eligible", "no_eligible_machine"].includes(S.err.code)) { S.operate = false; try { await read(); } catch { return; } } // fx-swallow-ok: an aborted read means the picker was closed
+      if (S.loadFailed) S.stage = "failed";
+      else if (S.runner && !(S.machines.find((m) => m.id === S.runner) || {}).ok) S.runner = (S.machines.find((m) => m.ok) || {}).id || "";
+      draw();
+      say(S.err.text);
+      return;
+    }
+    S.busy = false; S.stage = "placed"; draw();
+    say("Placed " + S.repo.name);
+    env.onPlaced();
+  }
+
+  function createView() {
+    const { owners, ownersUnknown } = S.data;
+    const back = btn("back", "Back", () => go("pick"));
+    if (ownersUnknown) return [p(OWNERS_UNKNOWN, "ob-pick-owners-unknown"), btn("retry-owners", "Try again", reload, { primary: true }), back];
+    if (!owners.length) return [p(NO_OWNERS, "ob-pick-no-owner"), btn("install", "Install the GitHub App", install, { primary: true }), back];
+    const field = (label, node) => h("label", { class: "ob-label" }, label, node);
+    return [
+      h("h3", { class: "ob-sub" }, "Create a new project"),
+      owners.length === 1 ? p(["Owner: ", bdi(owners[0].login)], "ob-pick-owner")
+        : field("Owner", h("select", { class: "ob-input", "data-testid": "ob-pick-owner", onChange: (ev) => { S.owner = Number(ev.target.value); } }, h("option", { value: "0" }, "Choose an owner"), owners.map((o) => h("option", { value: String(o.gh_id), selected: S.owner === o.gh_id }, o.login)))),
+      field("Name", h("input", { class: "ob-input", type: "text", value: S.name, maxLength: 100, autocomplete: "off", "data-testid": "ob-pick-name", onInput: (ev) => { S.name = ev.target.value.trim(); } })),
+      field("Visibility", h("select", { class: "ob-input", "data-testid": "ob-pick-vis", onChange: (ev) => { S.vis = ev.target.value; } }, h("option", { value: "private", selected: S.vis === "private" }, "Private"), h("option", { value: "public", selected: S.vis === "public" }, "Public"))),
+      p("GitHub asks you to approve this. The repo is created under your own GitHub authority and stays on GitHub if you stop here.", "ob-pick-create-note"),
+      btn("continue", "Continue to GitHub", createIntent, { primary: true }), back,
+    ];
+  }
+  function confirmView() {
+    const r = S.repo;
+    const box = operateBox(S.settings, r.id, r.visibility);
+    const choices = S.machines;
+    const eligible = choices.some((m) => m.ok);
+    return [
+      h("h3", { class: "ob-sub" }, ["Set up ", bdi(r.name)]),
+      p(pickVisibility(r.visibility) + (S.isNew ? " · new repo" : ""), "ob-pick-vis-line"),
+      r.visibility === "public" ? p(PUBLIC_COPY, "ob-pick-public") : "",
+      p(dialsLine(r, S.isNew), "ob-pick-dials"),
+      h("fieldset", { class: "ob-fieldset" }, h("legend", null, "Machine"),
+        choices.length ? choices.map((m) => h("label", { class: "ob-preset", "data-testid": "ob-pick-machine" },
+          h("input", { type: "radio", name: "ob-machine", value: m.id, checked: S.runner === m.id, disabled: !m.ok || S.busy, onChange: () => { S.runner = m.id; draw("machine-" + m.id); }, "data-focus": "machine-" + m.id }),
+          h("span", { class: "ob-preset-text" }, h("strong", null, bdi(m.name)), m.linked ? h("span", { class: "ob-preset-role", "data-testid": "ob-pick-linked" }, m.linked) : "", m.note ? h("span", { class: "ob-preset-role" }, m.note) : "")))
+          : p("No machine is connected yet.", "ob-pick-no-machine"),
+        eligible ? "" : [p(NO_MACHINE, "ob-pick-no-eligible"), env.canOpen("runners") ? btn("add-machine", "Add a machine", () => env.openApp("runners")) : ""]),
+      box ? h("div", { class: "ob-operate", "data-testid": "ob-pick-operate" },
+        box.on ? p(box.text, "ob-pick-operate-on")
+          : h("label", { class: "ob-preset" }, h("input", { type: "checkbox", checked: S.operate && !box.blocked, disabled: !!box.blocked || S.busy, "data-focus": "operate", onChange: (ev) => { S.operate = ev.target.checked; draw("operate"); } }), h("span", { class: "ob-preset-text" }, box.text, box.blocked ? h("span", { class: "ob-preset-role" }, box.blocked) : ""))) : "",
+      btn("confirm", S.busy ? "Placing…" : "Confirm", place, { primary: true, disabled: !S.runner || !choices.some((m) => m.id === S.runner && m.ok) }),
+      btn("change", "Change repo", () => go("pick")),
+    ];
+  }
+  function view() {
+    if (S.stage === "loading") return [p("Loading your repos…", "ob-pick-loading")];
+    if (S.stage === "failed") return [p("Your repos couldn't be loaded.", "ob-pick-load-failed"), btn("retry", "Try again", reload, { primary: true })];
+    if (S.stage === "create") return createView();
+    if (S.stage === "confirm") return confirmView();
+    if (S.stage === "placed") return [p(["Placed ", bdi(S.repo.name), "."], "ob-pick-placed")];
+    return [
+      S.data.repos.length ? h("ul", { class: "ob-issues", "aria-label": "Your repos" }, S.data.repos.map((r) => h("li", null, h("button", { type: "button", class: "ob-btn ob-repo", "data-testid": "ob-pick-repo", "data-repo": r.id, onClick: () => choose(r, false) }, bdi(r.name), " · ", pickVisibility(r.visibility)))))
+        : p("You have no repos yet. Create a new project.", "ob-pick-empty"),
+      btn("create", "Create a new project", () => go("create")), btn("reload", "Reload the list", reload),
+    ];
+  }
+  start();
+  return { destroy() { dead = true; host.replaceChildren(); } };
 }

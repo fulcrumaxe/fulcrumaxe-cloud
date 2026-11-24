@@ -8,6 +8,7 @@ import { bucketKeyForAnonIp, clientIpFromRequest } from "@fx/api/src/ratelimit/l
 import { defaultAuthDeps } from "../app/api/auth/_lib/deps";
 import { recordEngineUsage, runnerLimitsFor } from "@fx/worker";
 import { createAppRepoVisibility } from "./github/repoVisibility";
+import { createInstallationAccountReader } from "./github/installationAccount";
 import { getWorker } from "./worker";
 import { createAppRunPullRequestPort } from "./github/runnerPullRequest";
 import { readPlanePushIdentity } from "@fx/core/src/repos/planePushIdentity.js";
@@ -50,6 +51,7 @@ const leases: RunnerLeaseOps = {
 };
 
 /** The live GitHub side of an executor's `done` (D#6 R2b-3f). Built once; it opens a client per call, so nothing is read from the environment until a `done` needs one. */
+let installationAccount: ReturnType<typeof createInstallationAccountReader> | undefined;
 let pullRequests: RunPullRequestPort | undefined;
 /** D#598 P1f-2: the GitHub side of the public-push routes. Built on first use; a missing App answers the routes' fixed `not_configured`. */
 let planePush: PlanePushHostedPort | undefined;
@@ -114,7 +116,7 @@ function planePushIdentity(): { name: string; email: string } | null {
 
 export function runnerDeps(): RunnerCloudDeps {
   const auth = defaultAuthDeps();
-  return { appUserPool: auth.appUserPool, origin: process.env.FX_APP_ORIGIN, failRunnerLeases, leases, engineUsage: { record: recordEngineUsage }, maxRunners: (plan) => runnerLimitsFor(plan).maxRunners, accountRunnerCaps: accountRunnerCaps, accountJobLimit, repoVisibility: (accountId, repoId) => liveVisibility().visibility({ accountId, repoId }), pullRequests: (pullRequests ??= createAppRunPullRequestPort()), planePush: (planePush ??= createLivePlanePushPort()), planeMerge: (planeMerge ??= livePlaneMerge()), readAllowanceFile, planePushIdentity, wakeKey, runnerSeen: runnerSeenFromCache(), deviceCodeKey: () => readDeviceCodeKey(process.env), deviceFlowGlobalPerHour: () => readDeviceGlobalLimit(process.env), engineCommandSigner: async () => (await getWorker())?.engineCommandSigner ?? null };
+  return { appUserPool: auth.appUserPool, origin: process.env.FX_APP_ORIGIN, failRunnerLeases, leases, engineUsage: { record: recordEngineUsage }, maxRunners: (plan) => runnerLimitsFor(plan).maxRunners, accountRunnerCaps: accountRunnerCaps, accountJobLimit, repoVisibility: (accountId, repoId) => liveVisibility().visibility({ accountId, repoId }), installationAccount: (installationAccount ??= createInstallationAccountReader()), pullRequests: (pullRequests ??= createAppRunPullRequestPort()), planePush: (planePush ??= createLivePlanePushPort()), planeMerge: (planeMerge ??= livePlaneMerge()), readAllowanceFile, planePushIdentity, wakeKey, runnerSeen: runnerSeenFromCache(), deviceCodeKey: () => readDeviceCodeKey(process.env), deviceFlowGlobalPerHour: () => readDeviceGlobalLimit(process.env), engineCommandSigner: async () => (await getWorker())?.engineCommandSigner ?? null };
 }
 
 /** D#6 RUNNER-WAKE R3a: the wake token's HMAC key, read on every call. Missing or shorter than 32 bytes: null, and no runner is sent a wake grant. */

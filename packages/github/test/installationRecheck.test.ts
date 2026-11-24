@@ -1,6 +1,6 @@
 import { generateKeyPairSync } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { recheckInstallationActive } from "../src/installationRecheck.js";
+import { readInstallationAccount, recheckInstallationActive } from "../src/installationRecheck.js";
 import { strictGithubFetch } from "./helpers/strictGithub.js";
 import { captureReports } from "./helpers/captureReports.js";
 
@@ -46,6 +46,48 @@ describe("recheckInstallationActive", () => {
   it("refuses, with no GitHub call, when the App key is unusable", async () => {
     const fetchImpl = vi.fn();
     expect(await check(fetchImpl as unknown as typeof fetch, { privateKeyPem: "" })).toBe(false);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+/** D#845 ON-7b: which account an installation sits on, asked of GitHub with the App JWT through the strict fake. */
+describe("readInstallationAccount", () => {
+  const read = (fetchImpl: typeof fetch, over: { appId?: string; signal?: AbortSignal } = {}) =>
+    readInstallationAccount({ appId: "7", privateKeyPem, ghInstallationId: 42, fetchImpl: strictGithubFetch(fetchImpl), ...over });
+  const live = { id: 42, app_id: 7, suspended_at: null, account: { id: 9001, login: "acme-org", type: "Organization" } };
+
+  it("returns the account's id and login, asking for that installation with an App JWT", async () => {
+    const fetchImpl = vi.fn(async (_u: string | URL | Request, _i?: RequestInit) => Response.json(live));
+    expect(await read(fetchImpl as unknown as typeof fetch)).toEqual({ gh_id: 9001, login: "acme-org" });
+    expect(String(fetchImpl.mock.calls[0]![0])).toBe("https://api.github.com/app/installations/42");
+    expect(new Headers(fetchImpl.mock.calls[0]![1]?.headers).get("authorization")).toMatch(/^Bearer ey/);
+  });
+
+  it.each([
+    ["removed (404)", reply(404)],
+    ["another App's", reply(200, { ...live, app_id: 8 })],
+    ["a different installation", reply(200, { ...live, id: 43 })],
+    ["suspended", reply(200, { ...live, suspended_at: "2026-09-29T00:00:00Z" })],
+    ["no account", reply(200, { ...live, account: null })],
+    ["a non-numeric account id", reply(200, { ...live, account: { id: "9001", login: "acme" } })],
+    ["a login that is not a login", reply(200, { ...live, account: { id: 1, login: "a/b" } })],
+  ])("is not an owner when %s", async (_name, fetchImpl) => {
+    expect(await read(fetchImpl)).toBeNull();
+  });
+
+  it.each([
+    ["a server error", reply(502)],
+    ["a rate limit", reply(403)],
+    ["a network failure", (async () => { throw new Error("net"); }) as unknown as typeof fetch],
+  ])("throws on %s, so a caller can tell none from could-not-check", async (_name, fetchImpl) => {
+    await expect(read(fetchImpl)).rejects.toThrow();
+  });
+
+  it("honours the caller's deadline and makes no call with an unusable key", async () => {
+    const hang = ((_u: unknown, init?: RequestInit) => new Promise((_, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("aborted"))))) as unknown as typeof fetch;
+    await expect(read(hang, { signal: AbortSignal.timeout(30) })).rejects.toThrow();
+    const fetchImpl = vi.fn();
+    await expect(readInstallationAccount({ appId: "7", privateKeyPem: "", ghInstallationId: 42, fetchImpl: fetchImpl as unknown as typeof fetch })).rejects.toThrow();
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 });

@@ -3,14 +3,14 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { activePreset, activePresetsFor, classTwo, currentRows, presetDisposition } from "@fx/db/src/dialPreset.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedF2, type F2Fixture } from "@fx/db/test/helpers/members.js";
-import { PICKER_VISIBILITY_TTL_MS, clearPickerVisibilityCache, listPickerRepos } from "../src/index.js";
+import { PICKER_OWNERS_TTL_MS, PICKER_VISIBILITY_TTL_MS, clearPickerVisibilityCache, listPickerRepos } from "../src/index.js";
 import { harness, respond, type Harness } from "./helpers.js";
 
 /**
  * [pg] D#845 ON-7a2: GET /api/runners/repos/picker on real Postgres with row security forced. No test here reaches GitHub: the visibility port is a stub the test owns, and
  * the environment carries invalid GitHub credentials as a second wall (see the `beforeAll`).
  */
-type Body = { repos: Array<{ id: string; name: string; visibility: string; active_preset: string | null }> };
+type Body = { repos: Array<{ id: string; name: string; visibility: string; active_preset: string | null }>; owners: Array<{ gh_id: number; login: string }>; owners_unknown?: true };
 const T0 = new Date("2026-11-23T12:00:00.000Z");
 
 describe("the project picker read [pg]", () => {
@@ -198,5 +198,132 @@ describe("the project picker read [pg]", () => {
     const port = vi.fn(async () => "private" as const);
     expect(await repos(f, f.o1, { repoVisibility: port })).toEqual([]);
     expect(port).not.toHaveBeenCalled();
+  });
+
+  // ON-7b (Ruling 87.1): owners, asked of GitHub live per team installation. The port here is a strict stub the test owns; nothing reaches GitHub.
+  let ghInstall = 880_000_000 + Math.floor(Math.random() * 1_000_000);
+  async function installation(f: F2Fixture, kind = "team"): Promise<number> {
+    const gh = ++ghInstall;
+    await h.admin.query("INSERT INTO installations (account_id, gh_installation_id, app_kind) VALUES ($1, $2, $3)", [f.accountId, gh, kind]);
+    return gh;
+  }
+  const ownersOf = async (f: F2Fixture, over: Parameters<Harness["deps"]>[0], userId = f.o1): Promise<Body> => {
+    const res = await pick(f, userId, over);
+    expect(res.status).toBe(200);
+    return res.body as Body;
+  };
+
+  it("lists the owners of the account's team installations, sorted, deduplicated, with only gh_id and login", async () => {
+    const f = await fresh();
+    const a = await installation(f);
+    const b = await installation(f);
+    const c = await installation(f);
+    await installation(f, "sitekit"); // not the team App: never asked about
+    const accounts: Record<number, { gh_id: number; login: string } | null> = { [a]: { gh_id: 20, login: "zeta" }, [b]: { gh_id: 10, login: "alpha" }, [c]: { gh_id: 20, login: "zeta" } };
+    const port = vi.fn(async (id: number) => accounts[id] ?? null);
+    const body = await ownersOf(f, { installationAccount: port });
+    expect(body.owners).toEqual([{ gh_id: 10, login: "alpha" }, { gh_id: 20, login: "zeta" }]);
+    expect(body.owners_unknown).toBeUndefined();
+    expect(port.mock.calls.map((x) => x[0]).sort()).toEqual([a, b, c].sort());
+  });
+
+  it("an account with no installation has no owners and asks GitHub nothing; a gone or suspended installation (null) is not an owner", async () => {
+    const f = await fresh();
+    const port = vi.fn(async () => null);
+    expect(await ownersOf(f, { installationAccount: port })).toMatchObject({ owners: [] });
+    expect(port).not.toHaveBeenCalled();
+    await installation(f);
+    const body = await ownersOf(f, { installationAccount: port });
+    expect(body.owners).toEqual([]);
+    expect(body.owners_unknown).toBeUndefined();
+  });
+
+  it("owners are unknown (empty list plus owners_unknown) on a throw, a hang past the deadline, or no reader; the repos still list", async () => {
+    const f = await fresh();
+    const id = await repo(f, "still-here");
+    const ghId = await installation(f);
+    await installation(f);
+    const reasons: Array<Parameters<Harness["deps"]>[0]> = [
+      { installationAccount: async () => { throw new Error("boom ghs_secret"); } },
+      { installationAccount: () => new Promise<never>(() => undefined), installationAccountTimeoutMs: 50 },
+      { installationAccount: async (n: number) => (n === ghId ? { gh_id: 1, login: "ok" } : (() => { throw new Error("one failed"); })()) },
+      {},
+    ];
+    for (const over of reasons) {
+      clearPickerVisibilityCache();
+      const t0 = Date.now();
+      const res = await pick(f, f.o1, { repoVisibility: async () => "private", ...over });
+      expect(Date.now() - t0).toBeLessThan(2000);
+      const body = res.body as Body;
+      expect(body.owners).toEqual([]);
+      expect(body.owners_unknown).toBe(true);
+      expect(body.repos.map((r) => r.id)).toEqual([id]);
+      expect(JSON.stringify(body)).not.toContain("ghs_secret");
+    }
+  });
+
+  it("asks at most 4 installations at once", async () => {
+    const f = await fresh();
+    for (let i = 0; i < 12; i++) await installation(f);
+    let open = 0;
+    let most = 0;
+    const port = async (n: number) => {
+      most = Math.max(most, ++open);
+      await new Promise((r) => setTimeout(r, 5));
+      open--;
+      return { gh_id: n, login: `o${n}` };
+    };
+    expect((await ownersOf(f, { installationAccount: port })).owners).toHaveLength(12);
+    expect(most).toBeLessThanOrEqual(4);
+  });
+
+  it("keeps a good answer for 60 s per account; never keeps unknown or an empty answer; each account asks for itself", async () => {
+    const f = await fresh();
+    const other = await fresh();
+    await installation(f);
+    await installation(other);
+    const port = vi.fn(async (n: number) => ({ gh_id: n, login: `o${n}` }));
+    await ownersOf(f, { installationAccount: port });
+    await ownersOf(f, { installationAccount: port, now: () => new Date(T0.getTime() + PICKER_OWNERS_TTL_MS - 1) });
+    expect(port).toHaveBeenCalledTimes(1);
+    await ownersOf(other, { installationAccount: port }, other.o1);
+    expect(port).toHaveBeenCalledTimes(2);
+    await ownersOf(f, { installationAccount: port, now: () => new Date(T0.getTime() + PICKER_OWNERS_TTL_MS) });
+    expect(port).toHaveBeenCalledTimes(3);
+    // A failure is not kept: the next read asks again.
+    clearPickerVisibilityCache();
+    const down = vi.fn(async () => { throw new Error("down"); });
+    expect((await ownersOf(f, { installationAccount: down })).owners_unknown).toBe(true);
+    const up = vi.fn(async (n: number) => ({ gh_id: n, login: "back" }));
+    expect((await ownersOf(f, { installationAccount: up })).owners).toHaveLength(1);
+    // An empty answer is not kept either, so an App installed a moment ago shows at once.
+    clearPickerVisibilityCache();
+    const none = vi.fn(async () => null);
+    await ownersOf(f, { installationAccount: none });
+    await ownersOf(f, { installationAccount: none });
+    expect(none).toHaveBeenCalledTimes(2);
+  });
+
+  it("members get 403 and GitHub is not asked", async () => {
+    const f = await fresh();
+    await installation(f);
+    const port = vi.fn(async () => ({ gh_id: 1, login: "x" }));
+    expect((await pick(f, f.m1, { installationAccount: port })).status).toBe(403);
+    expect(port).not.toHaveBeenCalled();
+  });
+
+  it("tenant: a second account's installations never appear, even through a connection that bypasses row security", async () => {
+    const f = await fresh();
+    const other = await fresh();
+    const mine = await installation(f);
+    const theirs = await installation(other);
+    await installation(other);
+    const port = vi.fn(async (n: number) => ({ gh_id: n, login: `o${n}` }));
+    expect((await ownersOf(f, { installationAccount: port })).owners.map((o) => o.gh_id)).toEqual([mine]);
+    clearPickerVisibilityCache();
+    port.mockClear();
+    const bypass = await ownersOf(f, { installationAccount: port, appUserPool: h.adminPool });
+    expect(bypass.owners.map((o) => o.gh_id)).toEqual([mine]);
+    expect(port.mock.calls.map((c) => c[0])).not.toContain(theirs);
   });
 });
