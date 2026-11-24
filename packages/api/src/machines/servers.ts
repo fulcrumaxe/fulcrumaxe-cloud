@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { HetznerError, MANAGED_LABEL, MANAGED_LABEL_VALUE, createHetznerClient, type HetznerClient, type HetznerCode, type HetznerOptions } from "@fx/hetzner";
-import { MachineOpsError, machineKekSource, withHetznerToken, type KekSource } from "@fx/model-connection";
+import { MachineOpsError, machineKekSource, withHetznerToken, withManagedServer, type KekSource } from "@fx/model-connection";
 import { reportError } from "@fx/telemetry";
 import { RunnerHttpError, mintServerProvisioningToken, renderUserData, revokeProvisioningToken, type RunnerCloudDeps } from "@fx/runner-cloud";
 import { withTenant } from "@fx/db/src/withTenant.js";
@@ -132,6 +132,13 @@ const opsCtx = (ctx: ServerCtx) => ({ pool: ctx.pool, principal: ctx.principal, 
  * which keeps the set of files that touch the sealed token pinned by the static guard in model-connection.
  */
 export const withHetznerClient = <T>(ctx: ServerCtx, f: (client: HetznerClient) => Promise<T>): Promise<T> => withHetznerToken(opsCtx(ctx), (token) => f(clientFor(token)));
+
+/**
+ * MC-7b: the same door for a call on ONE server. The machine-ops reader refuses with `server_not_managed`, before the seal is read and before any Hetzner call, unless the id
+ * is one of this account's `managed_servers` that is not deleted, and the unseal audit row names the server.
+ */
+export const withHetznerServerClient = <T>(ctx: ServerCtx, providerServerId: string, f: (client: HetznerClient) => Promise<T>): Promise<T> =>
+  withManagedServer(opsCtx(ctx), providerServerId, (token) => f(clientFor(token)));
 
 /** The live prices of one size in one location, or null when Hetzner does not list a price there. Reads nothing but Hetzner. */
 async function livePrice(client: HetznerClient, serverType: string, location: string): Promise<(PriceTriple & { available: boolean }) | null> {

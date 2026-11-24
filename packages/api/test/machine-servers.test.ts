@@ -101,7 +101,7 @@ describe('machine servers: quote and create', () => {
   describe('the routes', () => {
     it('are session-only and owner-or-admin; create needs an idempotency key; the Hetzner routes have their own session limits', () => {
       const mine = ROUTES.filter((r) => r.path.startsWith('/api/v1/machine-servers'));
-      expect(mine.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /api/v1/machine-servers', 'GET /api/v1/machine-servers/catalog', 'GET /api/v1/machine-servers/quote', 'POST /api/v1/machine-servers', 'GET /api/v1/machine-servers/{id}', 'DELETE /api/v1/machine-servers/{id}']);
+      expect(mine.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /api/v1/machine-servers', 'GET /api/v1/machine-servers/catalog', 'GET /api/v1/machine-servers/quote', 'POST /api/v1/machine-servers', 'GET /api/v1/machine-servers/{id}', 'DELETE /api/v1/machine-servers/{id}', 'POST /api/v1/machine-servers/{id}/reboot', 'POST /api/v1/machine-servers/{id}/keep', 'POST /api/v1/machine-servers/{id}/delete-orphan']);
       for (const r of mine) { expect(effectivePrincipals(r), r.operationId).toEqual(['session']); expect(r.minRole, r.operationId).toBe('admin'); }
       expect(mine.find((r) => r.method === 'POST')).toMatchObject({ idempotency: 'required', sessionLimit: { name: 'machine-server-create' } });
       expect(mine.find((r) => r.operationId === 'quoteHetznerServer')?.sessionLimit?.name).toBe('machine-server-quote');

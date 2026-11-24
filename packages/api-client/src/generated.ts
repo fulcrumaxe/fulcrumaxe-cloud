@@ -1836,6 +1836,43 @@ export interface Operations {
       already_deleted: boolean;
     };
   };
+  rebootHetznerServer: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      id: string;
+      status: string;
+      rebooting: true;
+    };
+  };
+  keepOrphanedServer: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      id: string;
+      status: "orphaned";
+      kept: true;
+      already_kept: boolean;
+    };
+  };
+  deleteOrphanedServer: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      id: string;
+      status: "deleted";
+      already_deleted: boolean;
+    };
+  };
   listRepos: {
     path: undefined;
     query: {
@@ -6963,6 +7000,39 @@ export const operations = {
     idempotency: "never",
     pathParams: ["id"],
     queryParams: ["remove_projects"],
+    hasBody: false,
+  },
+  rebootHetznerServer: {
+    method: "POST",
+    path: "/api/v1/machine-servers/{id}/reboot",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  keepOrphanedServer: {
+    method: "POST",
+    path: "/api/v1/machine-servers/{id}/keep",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  deleteOrphanedServer: {
+    method: "POST",
+    path: "/api/v1/machine-servers/{id}/delete-orphan",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
     hasBody: false,
   },
   listRepos: {
