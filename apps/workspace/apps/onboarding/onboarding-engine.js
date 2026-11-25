@@ -344,7 +344,9 @@ export function engineSection(steps, env) {
       v.list.length ? h("ul", { class: "ob-issues", "aria-label": "Install progress" }, v.list.map((x) => h("li", { "data-testid": "ob-engine-sub" }, x.label + ": " + x.word))) : null,
       v.commands.map((c) => commandBox(c, env)), buttons,
       // D#845 ON-7b: the picker lives in a host the app keeps across redraws; a member is told who can pick.
-      s.step === "project" && s.state === "active" && !s.plan_gate ? (env.ctx.isAdmin === false ? h("p", { class: "ob-muted", "data-testid": "ob-engine-line" }, ASK_PICK) : env.projectHost || null) : null);
+      s.step === "project" && s.state === "active" && !s.plan_gate ? (env.ctx.isAdmin === false ? h("p", { class: "ob-muted", "data-testid": "ob-engine-line" }, ASK_PICK) : env.projectHost || null) : null,
+      // D#845 ON-20b: the install step's summary and merge, in a host the app keeps across redraws; it is there only while the pull request is open.
+      s.step === "install" && s.state === "active" && s.pr_state === "open" && s.setup_id ? env.installHost || null : null);
   });
   return h("section", { class: "ob-track", "data-testid": "ob-track-engine", "aria-label": "Engine setup" },
     first === 0 ? h("div", { class: "ob-prereq", "data-testid": "ob-prereq" }, h("h3", { class: "ob-sub" }, "Before you start"),
@@ -605,5 +607,127 @@ export function mountProjectPicker(host, env) {
     ];
   }
   start();
+  return { destroy() { dead = true; host.replaceChildren(); } };
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+// D#845 ON-20b: the install step's inline panel. The first half is pure (reading the summary, every refusal's sentence) and is unit-tested; the second draws it with h() only, so the
+// server's labels, paths and sentences are always text. The summary and the merge are ON-20a's two routes; the person's click is the only thing that merges (nothing here merges by itself).
+// It lives in this file, not a file of its own: the boot budget's request cap is full (136), and this file already counts as the one extra request.
+export const INSTALL_COPY = {
+  merge: "Merge and continue", copyLink: "Copy a link for someone who can merge", view: "View on GitHub",
+  changes: "What merging changes", undo: "How to undo it", undoText: "Remove the project, or revert the merge on GitHub",
+  member: "Only an owner or admin can merge this. Copy the link and send it to someone who can.",
+  differ: "The pull request no longer holds the files we prepared, so it was not merged. Open it on GitHub to see what changed, or remove the project and start the install again.",
+  blocked: "GitHub will not merge this yet; it may need a passing check or a review first. Finish those on GitHub, then try again.",
+  changed: "The pull request changed on GitHub, so the summary was read again. Look it over, then merge.",
+  merged: "Merged. This step finishes when GitHub confirms it.",
+  alreadyMerged: "This pull request is already merged. This step finishes when GitHub confirms it.",
+  loading: "Reading what the pull request changes…", loadFailed: "The summary couldn't be loaded. Try again.", mergeFailed: "The pull request couldn't be merged. Try again.",
+  gone: "This setup has no install pull request to look at right now.",
+  show: (n) => "Show every file (" + n + ")",
+};
+const COUNT = (v) => Number.isInteger(v) && v >= 0;
+const PATHS_SHOWN = 300;
+/** The install step's pull request from the engine track (open or closed; a merged one has nothing left to review), for `ctx.install.pr`. Null when the step does not carry a valid one. */
+export function installPr(steps) {
+  const s = Array.isArray(steps) ? steps.find((x) => x && x.step === "install") : null;
+  return s && Number.isInteger(s.pr_number) && s.pr_number > 0 && (s.pr_state === "open" || s.pr_state === "closed") ? { number: s.pr_number, state: s.pr_state } : null;
+}
+/** GET /api/v1/setups/:id/install/summary, or null when it is not that shape for this setup. The link is kept only when it is a github.com address. */
+export function readInstallSummary(body, setupId) {
+  if (!body || typeof body !== "object" || typeof body.setup_id !== "string" || body.setup_id.toLowerCase() !== String(setupId).toLowerCase()) return null;
+  const url = typeof body.pr_url === "string" && /^https:\/\/github\.com\/[^\s]+$/.test(body.pr_url) ? body.pr_url : "";
+  const cats = body.categories;
+  if (!url || !Number.isInteger(body.pr_number) || !Array.isArray(cats) || !Array.isArray(body.paths) || !body.totals || !COUNT(body.totals.files)) return null;
+  const categories = [];
+  for (const c of cats.slice(0, 12)) {
+    if (!c || typeof c.id !== "string" || typeof c.label !== "string" || c.label === "" || c.label.length > 300) return null;
+    if (![c.files, c.added_files, c.changed_files, c.additions, c.deletions].every(COUNT)) return null;
+    categories.push({ id: c.id, label: c.label, files: c.files, added: c.added_files, changed: c.changed_files, additions: c.additions, deletions: c.deletions });
+  }
+  const paths = body.paths.filter((x) => typeof x === "string" && x !== "" && x.length <= 300);
+  return { number: body.pr_number, url, merged: body.merged === true, total: body.totals.files, categories, paths: paths.slice(0, PATHS_SHOWN), morePaths: Math.max(0, paths.length - PATHS_SHOWN) };
+}
+const plural = (n, one, many) => n + " " + (n === 1 ? one : many);
+/** "3 files: 2 added, 1 changed (+40 -2 lines)". */
+export const categoryCounts = (c) => plural(c.files, "file", "files") + ": " + c.added + " added, " + c.changed + " changed (+" + c.additions + " -" + c.deletions + " lines)";
+/** What a refused call says. `code` is the server's closed code; `rebuild` means read the summary again. A sentence of the server's is shown only for `install_pr_blocked` (Ruling 96). */
+export function installRefusal(e, reading) {
+  const code = e && typeof e.code === "string" ? e.code : "";
+  const status = e && typeof e.status === "number" ? e.status : 0;
+  if (code === "install_pr_changed") return { code, text: INSTALL_COPY.changed, rebuild: true };
+  if (code === "install_pr_files_differ") return { code, text: INSTALL_COPY.differ };
+  if (code === "install_pr_blocked") return { code, text: typeof e.message === "string" && e.message.trim() !== "" && e.message.length <= 300 ? e.message.trim() : INSTALL_COPY.blocked };
+  if (status === 403) return { code, text: INSTALL_COPY.member };
+  if (status === 404 || code === "setup_phase") return { code, text: INSTALL_COPY.gone, reread: true };
+  return { code, text: reading ? INSTALL_COPY.loadFailed : INSTALL_COPY.mergeFailed };
+}
+
+/**
+ * Draws the install step's summary and the merge into `host`. `env`: { setupId, announce, isAdmin(), onChanged(), signal }. Stages: loading, ready, failed, merged.
+ * A member sees Merge disabled with the reason; the summary is open to every member, and so is the link to hand to someone who can merge.
+ */
+export function mountInstallPanel(host, env) {
+  const S = { stage: "loading", sum: null, err: null, note: "", busy: false };
+  let dead = false;
+  const path = "/api/v1/setups/" + env.setupId + "/install/";
+  const btn = (id, label, fn, o = {}) => h("button", { type: "button", class: "ob-btn" + (o.primary ? " ob-btn-primary" : ""), "data-testid": "ob-install-" + id, "data-focus": id, disabled: o.disabled, onClick: fn }, label);
+  function draw(focus) {
+    if (dead) return;
+    host.replaceChildren(h("div", { class: "ob-install", "data-testid": "ob-install", "data-stage": S.stage }, S.err ? h("p", { class: "ob-error", role: "alert", "data-testid": "ob-install-error" }, S.err.text) : "", S.note ? h("p", { class: "ob-muted", "data-testid": "ob-install-note" }, S.note) : "", view()));
+    const f = focus && host.querySelector('[data-focus="' + focus + '"]');
+    if (f) f.focus();
+  }
+  async function read(note) {
+    S.stage = "loading"; S.err = null; S.note = note || ""; draw();
+    try {
+      const sum = readInstallSummary(await api("GET", path + "summary", undefined, env.signal), env.setupId);
+      if (!sum) throw new Error("shape");
+      S.sum = sum; S.stage = sum.merged ? "merged" : "ready";
+      if (sum.merged) S.note = INSTALL_COPY.alreadyMerged;
+    } catch (e) {
+      if (e && e.name === "AbortError") return;
+      S.stage = "failed"; S.err = installRefusal(e, true);
+      if (S.err.reread) env.onChanged();
+    }
+    if (S.note) env.announce(S.note);
+    draw();
+  }
+  async function merge() {
+    if (S.busy || !env.isAdmin()) return;
+    S.busy = true; S.err = null; draw("merge");
+    try {
+      await api("POST", path + "merge", undefined, env.signal);
+      S.busy = false; S.stage = "merged"; S.note = INSTALL_COPY.merged;
+      env.announce(S.note); draw(); env.onChanged();
+      return;
+    } catch (e) {
+      if (e && e.name === "AbortError") return;
+      const r = installRefusal(e, false);
+      S.busy = false;
+      if (r.rebuild) { await read(r.text); return; }
+      S.err = r;
+      if (r.reread) env.onChanged();
+    }
+    draw("merge");
+  }
+  const link = () => h("a", { class: "ob-btn", href: S.sum.url, target: "_blank", rel: "noopener noreferrer", "data-testid": "ob-install-view" }, INSTALL_COPY.view);
+  function view() {
+    if (S.stage === "loading") return [h("p", { class: "ob-muted", "data-testid": "ob-install-loading" }, INSTALL_COPY.loading)];
+    if (S.stage === "failed") return [btn("retry", "Try again", () => read(), { primary: true })];
+    const sum = S.sum, admin = env.isAdmin(), open = S.stage === "ready";
+    return [
+      h("h4", { class: "ob-sub" }, INSTALL_COPY.changes),
+      h("ul", { class: "ob-issues", "aria-label": INSTALL_COPY.changes }, sum.categories.map((c) => h("li", { "data-testid": "ob-install-cat", "data-cat": c.id }, h("span", { "data-testid": "ob-install-cat-label" }, c.label), " ", h("span", { class: "ob-muted" }, categoryCounts(c))))),
+      h("details", { class: "ob-paths", "data-testid": "ob-install-paths" }, h("summary", null, INSTALL_COPY.show(sum.paths.length + sum.morePaths)),
+        h("ul", { class: "ob-issues" }, sum.paths.map((x) => h("li", null, h("code", { class: "ob-code" }, x))), sum.morePaths ? h("li", { class: "ob-muted" }, "and " + sum.morePaths + " more") : "")),
+      h("h4", { class: "ob-sub" }, INSTALL_COPY.undo), h("p", { class: "ob-muted", "data-testid": "ob-install-undo" }, INSTALL_COPY.undoText),
+      open && !admin ? h("p", { class: "ob-muted", "data-testid": "ob-install-member" }, INSTALL_COPY.member) : "",
+      h("div", { class: "ob-actions" }, open ? btn("merge", INSTALL_COPY.merge, merge, { primary: true, disabled: S.busy || !admin }) : "",
+        open ? btn("copy", INSTALL_COPY.copyLink, () => copyText(S.sum.url, env.announce)) : "", link()),
+    ];
+  }
+  read();
   return { destroy() { dead = true; host.replaceChildren(); } };
 }

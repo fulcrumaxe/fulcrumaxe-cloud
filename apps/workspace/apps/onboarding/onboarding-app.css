@@ -116,3 +116,12 @@
 .ob-operate { margin: 8px 0; }
 .ob-picker .ob-input { max-width: 100%; }
 .ob-picker .ob-btn { margin-right: 8px; }
+
+/* D#845 ON-20b: the install step's summary and merge. Paths wrap and the app's own region scrolls; the buttons wrap on a phone, and the GitHub link is a 44 px button too. */
+.ob-install { margin-top: 8px; min-width: 0; }
+.ob-install li { overflow-wrap: anywhere; }
+.ob-paths { margin: 6px 0; }
+.ob-paths summary { min-height: 44px; display: flex; align-items: center; cursor: pointer; }
+.ob-paths .ob-code { flex: none; display: block; }
+.ob-actions { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; }
+a.ob-btn { display: inline-flex; align-items: center; box-sizing: border-box; text-decoration: none; }

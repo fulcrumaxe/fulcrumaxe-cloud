@@ -1,0 +1,136 @@
+{
+  "started_at": "2026-09-20T08:00:00.000Z",
+  "steps": [
+    {
+      "step": "model_key",
+      "completed_at": null,
+      "skipped": false
+    },
+    {
+      "step": "readonly_app",
+      "completed_at": null,
+      "skipped": false
+    },
+    {
+      "step": "preview",
+      "completed_at": null,
+      "skipped": false
+    },
+    {
+      "step": "pay",
+      "completed_at": null,
+      "skipped": false
+    },
+    {
+      "step": "write_app",
+      "completed_at": null,
+      "skipped": false
+    },
+    {
+      "step": "first_pr",
+      "completed_at": null,
+      "skipped": false
+    }
+  ],
+  "tracks": [
+    {
+      "track": "pipeline",
+      "steps": [
+        {
+          "step": "model_key",
+          "completed_at": null,
+          "skipped": false
+        },
+        {
+          "step": "readonly_app",
+          "completed_at": null,
+          "skipped": false
+        },
+        {
+          "step": "preview",
+          "completed_at": null,
+          "skipped": false
+        },
+        {
+          "step": "pay",
+          "completed_at": null,
+          "skipped": false
+        },
+        {
+          "step": "write_app",
+          "completed_at": null,
+          "skipped": false
+        },
+        {
+          "step": "first_pr",
+          "completed_at": null,
+          "skipped": false
+        }
+      ],
+      "chosen_at": null
+    },
+    {
+      "track": "engine",
+      "steps": [
+        {
+          "step": "machine",
+          "state": "done",
+          "completed_at": "2026-11-20T10:00:00.000Z",
+          "tier": "microvm",
+          "failure": null
+        },
+        {
+          "step": "claude",
+          "state": "done",
+          "completed_at": "2026-11-20T10:00:00.000Z",
+          "tier": null,
+          "failure": null
+        },
+        {
+          "step": "github_app",
+          "state": "done",
+          "completed_at": "2026-11-20T10:00:00.000Z",
+          "tier": null,
+          "failure": null
+        },
+        {
+          "step": "project",
+          "state": "done",
+          "completed_at": "2026-11-20T10:00:00.000Z",
+          "tier": null,
+          "failure": null
+        },
+        {
+          "step": "plan",
+          "state": "done",
+          "completed_at": "2026-11-20T10:00:00.000Z",
+          "tier": null,
+          "failure": null
+        },
+        {
+          "step": "install",
+          "state": "active",
+          "completed_at": null,
+          "tier": null,
+          "failure": null,
+          "setup_id": "3c1c0b7e-5f0a-4c1e-9b1f-0a1b2c3d4e5f",
+          "pr_number": 12,
+          "pr_state": "open"
+        },
+        {
+          "step": "live",
+          "state": "pending",
+          "completed_at": null,
+          "tier": null,
+          "failure": null
+        }
+      ],
+      "chosen_at": "2026-09-20T08:30:00.000Z",
+      "setup": {
+        "id": "3c1c0b7e-5f0a-4c1e-9b1f-0a1b2c3d4e5f",
+        "phase": "await_merge",
+        "state": "ok"
+      }
+    }
+  ]
+}
