@@ -1888,6 +1888,11 @@ export interface Operations {
         install_state: "installed" | "not_installed";
         app_kind: ("team" | "team_readonly" | "sitekit") | (null);
         full_name: string | null;
+        removal: ({
+          state: "waiting_machine" | "removing" | "failed";
+          machine_name: string;
+          failure_code: string | null;
+        }) | (null);
       }>;
       next_cursor: string | null;
     };
@@ -1905,6 +1910,11 @@ export interface Operations {
       install_state: "installed" | "not_installed";
       app_kind: ("team" | "team_readonly" | "sitekit") | (null);
       full_name: string | null;
+      removal: ({
+        state: "waiting_machine" | "removing" | "failed";
+        machine_name: string;
+        failure_code: string | null;
+      }) | (null);
     };
   };
   getRepoSettings: {

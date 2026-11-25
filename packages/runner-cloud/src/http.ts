@@ -6,6 +6,7 @@ import type { CloudClose, ScopeRefusal } from "@fx/core/src/work-items/scopeRefu
 import type { EngineUsagePort } from "./ingestEngineEvents.js";
 import type { EngineCommandSigner } from "./engineCommands.js";
 import type { EngineDecidePorts } from "./engineDecide.js";
+import type { LocalOnlyGithub } from "./localOnlyGithub.js";
 import type { RunPullRequestPort } from "./runPullRequest.js";
 import type { RunnerSeenReader } from "./wakeSeen.js";
 
@@ -193,6 +194,8 @@ export interface RunnerCloudDeps {
    * Absent, or throwing, the suggestion is "unavailable".
    */
   readAllowanceFile?: (target: { repoId: string; owner: string; name: string }) => Promise<string | null>;
+  /** D#845 ON-16a1: the removal PR's client (apps/web: `openForEngineRemoval`, whose fence holds no DELETE). Absent: a ticked PR answers `github_unavailable`; the removal still happens. */
+  engineRemovalGithub?: ((target: { repoId: string; owner: string; name: string }) => Promise<LocalOnlyGithub>) | null;
 }
 
 /** What the survey start needs of the worker. Plain ids and strings in, plain data out; structurally the worker's `startSurveyRun`. */

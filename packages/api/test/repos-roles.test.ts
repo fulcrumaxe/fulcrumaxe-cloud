@@ -7,6 +7,7 @@ import { InvalidRoleSettingsInputError } from '@fx/core/src/role-settings/errors
 import { SESSION_COOKIE_NAME, signSession } from '@fx/core/src/auth/session.js';
 import { loadPlanData } from '@fx/plan-data';
 import { nextGhInstallationId } from '@fx/db/test/helpers/seed.js';
+import { insertRunner } from '@fx/db/test/helpers/runnerFixtures.js';
 import { generateToken } from '../src/tokens/format.js';
 import { hashToken } from '../src/tokens/resolve.js';
 import { handleApiRequest } from '../src/handler.js';
@@ -152,7 +153,9 @@ describe('D#31 API-8a: repos, settings and roles', () => {
     expect(body1.data.map((r) => r.id)).toEqual([c.repoId, b.repoId]);
     expect(body1.data[0]).toMatchObject({ install_state: 'not_installed', app_kind: null });
     expect(body1.data[1]).toMatchObject({ install_state: 'installed', app_kind: 'sitekit' });
-    expect(Object.keys(body1.data[0]!).sort()).toEqual(['app_kind', 'full_name', 'gh_repo_id', 'id', 'install_state', 'product']);
+    expect(Object.keys(body1.data[0]!).sort()).toEqual(['app_kind', 'full_name', 'gh_repo_id', 'id', 'install_state', 'product', 'removal']);
+    // D#845 ON-16a1: no removal is waiting for a machine.
+    expect(body1.data.map((r) => (r as unknown as { removal: unknown }).removal)).toEqual([null, null]);
     expect(body1.next_cursor).not.toBeNull();
 
     const page2 = await call(owner, 'GET', `/repos?limit=2&cursor=${body1.next_cursor}`);
@@ -164,6 +167,23 @@ describe('D#31 API-8a: repos, settings and roles', () => {
     const viaToken = await call(owner, 'GET', `/repos/${a.repoId}`, undefined, token);
     expect(viaToken.status).toBe(200);
     expect(((await viaToken.json()) as Item).id).toBe(a.repoId);
+  });
+
+  it('D#845 ON-16a1: removal says the machine still has to finish removing the repo, on the list and the single read, and only for the account that owns it', async () => {
+    const owner = await seedAccountWithMember(admin, { role: 'owner' });
+    const other = await seedAccountWithMember(admin, { role: 'owner' });
+    const repo = await seedRepo(owner.accountId, 'team');
+    const runnerId = await insertRunner(admin, owner.accountId, owner.userId);
+    await admin.query(`INSERT INTO runner_settings (runner_id, account_id, name) VALUES ($1, $2, 'Studio box')`, [runnerId, owner.accountId]);
+    await admin.query(`INSERT INTO machine_cleanups (account_id, repo_id, runner_id, reason, delete_sandbox, requested_by) VALUES ($1, $2, $3, 'remove', true, $4)`, [owner.accountId, repo.repoId, runnerId, owner.userId]);
+    const want = { state: 'waiting_machine', machine_name: 'Studio box', failure_code: null };
+    const list = (await (await call(owner, 'GET', '/repos')).json()) as { data: Array<Item & { removal: unknown }> };
+    expect(list.data.find((r) => r.id === repo.repoId)?.removal).toEqual(want);
+    expect(((await (await call(owner, 'GET', `/repos/${repo.repoId}`)).json()) as { removal: unknown }).removal).toEqual(want);
+    expect((await call(other, 'GET', `/repos/${repo.repoId}`)).status).toBe(404);
+    // Removing the machine closes the cleanup: the field reads null again.
+    await admin.query(`UPDATE runners SET revoked_at = now() WHERE id = $1`, [runnerId]);
+    expect(((await (await call(owner, 'GET', `/repos/${repo.repoId}`)).json()) as { removal: unknown }).removal).toBeNull();
   });
 
   it('criterion 1: full_name is owner/name once a sync wrote both, and null before one or when half is missing', async () => {

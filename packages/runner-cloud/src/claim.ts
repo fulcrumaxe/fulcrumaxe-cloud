@@ -1,10 +1,11 @@
-import { CLAIM_IDLE_RETRY_AFTER_SECONDS, CLAIM_MIN_INTERVAL_SECONDS, ClaimMessage, ClaimReply, ClaimRateLimitedReply, PLANE_MERGE_CAPABILITY, PLANE_MERGE_MAX_ATTEMPTS, type SignedMachineCommand, type SignedSandboxCommand } from "@fulcrumaxe/runner-protocol";
+import { CLAIM_IDLE_RETRY_AFTER_SECONDS, CLAIM_MIN_INTERVAL_SECONDS, machineJobOffered, ClaimMessage, ClaimReply, ClaimRateLimitedReply, PLANE_MERGE_CAPABILITY, PLANE_MERGE_MAX_ATTEMPTS, type SignedMachineCommand, type SignedSandboxCommand } from "@fulcrumaxe/runner-protocol";
 import { PAUSED_RETRY_AFTER_SECONDS } from "@fx/runner";
 import { allowRunnerWake } from "@fx/core/src/pendingWork.js";
 import { deployOrderWaiting } from "./deployOrder.js";
 import { exchangeMachineCommands } from "./machineLogin.js";
 import { exchangeSandboxCommands } from "./sandboxCommands.js";
-import { offeredMachineJobs } from "./machineJob.js";
+import { offerOf, offeredMachineJobs } from "./machineJob.js";
+import { issueDueCleanups } from "./machineCleanups.js";
 import { RunnerHttpError, asRunner, parseJsonBody, parseMessage, pgCode, requireLeases, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse } from "./http.js";
 import { verifyRunnerRequest, withRunnerSession } from "./verifyRunnerRequest.js";
 import { configuredWakeKey, wakeGrantFor, wakeSafetyRetryAfterSeconds } from "./wakeToken.js";
@@ -121,7 +122,12 @@ export async function claimRun(deps: RunnerCloudDeps, req: RunnerHttpRequest): P
       if (waited <= 0 && message.sandbox_unavailable === undefined && !heldByPerson) deployOrder = await deployOrderWaiting(client, runner);
       // D#845 ON-8a: whether a machine job waits for THIS runner and it may be offered it (not held, its latest hello's capability, protocol 22, its sandbox engine for a microVM job): `machineJobOffered`, the same rule the pickup applies.
       let machineJob = false;
-      if (waited <= 0 && message.sandbox_unavailable === undefined && !heldByPerson) machineJob = (await offeredMachineJobs(client, runner)).length > 0;
+      if (waited <= 0 && message.sandbox_unavailable === undefined && !heldByPerson) {
+        // D#845 ON-16a1: a project removal's stop and delete are issued here, by the machine's own claim, so an offline machine gets them on its first claim back. Only for a runner that may be offered a
+        // session stop; in savepoints, and it never fails the claim (machineCleanups.ts).
+        if (machineJobOffered("engine_session_stop", "any", await offerOf(client, runner))) await issueDueCleanups(client, deps, runner);
+        machineJob = (await offeredMachineJobs(client, runner)).length > 0;
+      }
       return { waited, pausedFor, heldByPerson, capabilities, mergeOrder, deployOrder, machineJob, sandboxCommands, machineCommands };
     }),
   ));
