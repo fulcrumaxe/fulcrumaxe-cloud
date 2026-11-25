@@ -253,6 +253,15 @@ export const SETUP_INSTALL_DOCUMENTS = Object.freeze({
     }
   }
 }`,
+  /** D#845 ON-20a (A30): the install pull request's state, its head commit and, per file, the path, change type and added and deleted line counts (counts only: no patch, no content). */
+  InstallPullRequest: `query InstallPullRequest($owner: String!, $name: String!, $number: Int!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      number state merged headRefOid mergedBy { __typename login }
+      files(first: 100, after: $cursor) { totalCount pageInfo { hasNextPage endCursor } nodes { path changeType additions deletions } }
+    }
+  }
+}`,
 });
 /**
  * D#845 ON-8f2b (A26): the engine's 11 labels, as the engine's own label bootstrap script creates them (a test reads that script against this table). The install step creates them in the project's
@@ -369,6 +378,8 @@ export const LOCAL_ONLY_ALLOWLIST: readonly LocalOnlyAllowlistEntry[] = Object.f
     { id: "A27", method: "POST", paths: ["/graphql"], query: [], body: "{ query: SeedTarget, SeedDiscussions or SeedCreateDiscussion, variables: that document's schema; a create body ends with the fx-seed marker }", only: "setupFinish" },
     { id: "A28", method: "GET", paths: ["/repos/{owner}/{repo}/issues"], query: ["labels", "state", "per_page"], body: "none; labels is required and is exactly team-log", only: "setupFinish" },
     { id: "A29", method: "POST", paths: ["/repos/{owner}/{repo}/issues"], query: [], body: '{ title, body ending with the fx-team-log marker, labels: ["team-log"] }', only: "setupFinish" },
+    // D#845 ON-20a: the install pull request's file stats, on the same opt-in client. A10 is held on a setupInstall client only when it is pinned to one pull request and one head (`installMerge`).
+    { id: "A30", method: "POST", paths: ["/graphql"], query: [], body: "{ query: InstallPullRequest, variables: exactly owner, name, number, optional cursor }", only: "setupInstall" },
   ].map((entry) => Object.freeze(entry) as LocalOnlyAllowlistEntry),
 );
 
@@ -485,6 +496,7 @@ const GATE1_STATUS_VARIABLES: Readonly<Record<keyof typeof GATE1_STATUS_DOCUMENT
 };
 const SETUP_INSTALL_VARIABLES: Readonly<Record<keyof typeof SETUP_INSTALL_DOCUMENTS, (v: Record<string, unknown>) => boolean>> = {
   CommitParents: (v) => hasExactKeys(v, ["owner", "name", "sha"]) && ownerOrName(v.owner) && ownerOrName(v.name) && typeof v.sha === "string" && SHA.test(v.sha),
+  InstallPullRequest: (v) => hasExactKeys(v, ["owner", "name", "number"], ["cursor"]) && ownerOrName(v.owner) && ownerOrName(v.name) && positiveInt(v.number) && optionalCursor(v),
 };
 const SETUP_FINISH_VARIABLES: Readonly<Record<keyof typeof SETUP_FINISH_DOCUMENTS, (v: Record<string, unknown>) => boolean>> = {
   SeedTarget: (v) => hasExactKeys(v, ["owner", "name"]) && ownerOrName(v.owner) && ownerOrName(v.name),
@@ -550,6 +562,8 @@ function bodyFits(entry: LocalOnlyAllowlistEntry, body: unknown, gate1Attest: bo
       return documentBodyFits(body, SETUP_FINISH_DOCUMENTS, SETUP_FINISH_VARIABLES);
     case "A29":
       return isPlainObject(body) && hasExactKeys(body, ["title", "body", "labels"]) && typeof body.title === "string" && seedTitleFits(body.title) && typeof body.body === "string" && seedBodyFits(body.body, TEAM_LOG_MARKER) && Array.isArray(body.labels) && body.labels.length === 1 && body.labels[0] === TEAM_LOG_LABEL;
+    case "A30":
+      return documentBodyFits(body, SETUP_INSTALL_DOCUMENTS, SETUP_INSTALL_VARIABLES, "InstallPullRequest");
     case "A26":
       return isPlainObject(body) && hasExactKeys(body, ["name", "color", "description"]) && SETUP_INSTALL_LABELS.some((row) => row.name === body.name && row.color === body.color && row.description === body.description);
     case "A22":
@@ -601,8 +615,20 @@ const QUERY_VALUES: Readonly<Record<string, (value: string) => boolean>> = {
   page: (v) => /^\d{1,3}$/.test(v) && Number(v) >= 1 && Number(v) <= 100,
 };
 
+/**
+ * D#845 ON-20a: the one repository, pull request and head commit an install merge may name. A client with this pin holds A10 and nothing else, and A10 only for exactly this repository, number and `sha`;
+ * a `setupInstall` client without it holds no A10 at all.
+ */
+export interface InstallMergePin {
+  owner: string;
+  name: string;
+  number: number;
+  sha: string;
+}
+
 /** The rule a call breaks, or null when it is on the allowlist. `not_allowlisted` for anything the list does not hold; `accept` for a media type other than JSON. */
-export function localOnlyViolation(req: Pick<GithubRequest, "method" | "path" | "query" | "headers" | "body">, exclude: readonly string[] = [], options: { gate1Attest?: boolean; gate1Status?: boolean; engineRemove?: boolean; setupInstall?: boolean; setupFinish?: boolean } = {}): string | null {
+export function localOnlyViolation(req: Pick<GithubRequest, "method" | "path" | "query" | "headers" | "body">, exclude: readonly string[] = [], options: { gate1Attest?: boolean; gate1Status?: boolean; engineRemove?: boolean; setupInstall?: boolean; setupFinish?: boolean; installMerge?: InstallMergePin } = {}): string | null {
+  const pin = options.installMerge;
   const engineRemove = options.engineRemove === true;
   const gate1Attest = options.gate1Attest === true;
   const gate1Status = options.gate1Status === true;
@@ -611,7 +637,7 @@ export function localOnlyViolation(req: Pick<GithubRequest, "method" | "path" | 
   if (typeof req.method !== "string" || typeof req.path !== "string") return NOT_ALLOWLISTED;
   const where = canonical(foldContinuationBranchPath(req.path));
   if (where === null) return NOT_ALLOWLISTED;
-  const entry = LOCAL_ONLY_ALLOWLIST.find((e) => !exclude.includes(e.id) && (engineRemove ? e.only === "engineRemove" || ENGINE_REMOVE_BASE_IDS.includes(e.id) : e.only !== "engineRemove" && (e.only === undefined || (e.only === "setupInstall" ? setupInstall : e.only === "setupFinish" ? setupFinish : gate1Attest || (gate1Status && e.alsoOn === "gate1Status")))) && e.method === req.method && e.paths.some((template) => templateMatches(template, where.segments)) && bodyFits(e, req.body, gate1Attest, engineRemove));
+  const entry = LOCAL_ONLY_ALLOWLIST.find((e) => !exclude.includes(e.id) && (pin !== undefined ? e.id === "A10" : !(setupInstall && e.id === "A10")) && (engineRemove ? e.only === "engineRemove" || ENGINE_REMOVE_BASE_IDS.includes(e.id) : e.only !== "engineRemove" && (e.only === undefined || (e.only === "setupInstall" ? setupInstall : e.only === "setupFinish" ? setupFinish : gate1Attest || (gate1Status && e.alsoOn === "gate1Status")))) && e.method === req.method && e.paths.some((template) => templateMatches(template, where.segments)) && bodyFits(e, req.body, gate1Attest, engineRemove) && (pin === undefined || e.id !== "A10" || (where.segments[1] === pin.owner.toLowerCase() && where.segments[2] === pin.name.toLowerCase() && where.segments[4] === String(pin.number) && isPlainObject(req.body) && req.body.sha === pin.sha)));
   if (!entry) return NOT_ALLOWLISTED;
 
   const given = Object.entries(req.query ?? {});
@@ -650,7 +676,9 @@ export interface LocalOnlyGithub extends GithubClient {
  * cloud cannot call merge on it at all and a runner or a person merges there. `gate1Attest` turns on the opt-in entries (A14 to A16, and A7's
  * `fx-gate1` shape) for this client only. `gate1Status` turns on A17 alone (a read), and nothing that writes.
  */
-export function localOnlyGithub(inner: GithubClient, options: { exclude?: readonly string[]; gate1Attest?: boolean; gate1Status?: boolean; engineRemove?: boolean; setupInstall?: boolean; setupFinish?: boolean } = {}): LocalOnlyGithub {
+export function localOnlyGithub(inner: GithubClient, options: { exclude?: readonly string[]; gate1Attest?: boolean; gate1Status?: boolean; engineRemove?: boolean; setupInstall?: boolean; setupFinish?: boolean; installMerge?: InstallMergePin } = {}): LocalOnlyGithub {
+  const installMerge = options.installMerge;
+  if (installMerge !== undefined && !(ownerOrName(installMerge.owner) && ownerOrName(installMerge.name) && Number.isSafeInteger(installMerge.number) && installMerge.number >= 1 && SHA.test(installMerge.sha))) throw new TypeError("localOnlyGithub: installMerge needs a repository, a pull request number and a commit id");
   const exclude = options.exclude ?? [];
   const gate1Attest = options.gate1Attest === true;
   const gate1Status = options.gate1Status === true;
@@ -658,7 +686,7 @@ export function localOnlyGithub(inner: GithubClient, options: { exclude?: readon
   const setupInstall = options.setupInstall === true;
   const setupFinish = options.setupFinish === true;
   const send = (req: GithubRequest): Promise<GithubResponse> => {
-    const rule = localOnlyViolation(req, exclude, { gate1Attest, gate1Status, engineRemove, setupInstall, setupFinish });
+    const rule = localOnlyViolation(req, exclude, { gate1Attest, gate1Status, engineRemove, setupInstall, setupFinish, ...(installMerge === undefined ? {} : { installMerge }) });
     if (rule !== null) return Promise.reject(new LocalOnlyGithubError(rule));
     const hasAccept = Object.keys(req.headers ?? {}).some((name) => name.toLowerCase() === "accept");
     return inner.request(hasAccept ? req : { ...req, headers: { ...req.headers, accept: JSON_ACCEPT } });

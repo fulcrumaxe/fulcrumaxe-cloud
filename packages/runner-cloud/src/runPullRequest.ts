@@ -2,7 +2,7 @@ import { COPY } from "@fulcrumaxe/runner-protocol";
 import { safeChildTitle } from "@fx/core/src/work-items/childTitle.js";
 import { cleanWorkItemTitle } from "@fx/core/src/work-items/title.js";
 import type { TenantQueryable } from "./acceptanceScope.js";
-import { LocalOnlyGithubError, SETUP_INSTALL_LABELS, TEAM_LOG_LABEL, localOnlyGithub, type GithubClient, type GithubGraphqlOperation, type GithubResponse, type LocalOnlyGithub } from "./localOnlyGithub.js";
+import { LocalOnlyGithubError, SETUP_INSTALL_LABELS, TEAM_LOG_LABEL, localOnlyGithub, type GithubClient, type GithubGraphqlOperation, type GithubResponse, type InstallMergePin, type LocalOnlyGithub } from "./localOnlyGithub.js";
 
 /**
  * D#6 R2b-3e (C21 section 5, C22 section 6): the GitHub port the `done` route will use for a `runner_local` repo. There is no
@@ -125,6 +125,27 @@ export interface SetupInstallPort extends RunPullRequestPort {
   commitParents(input: { repo: PullRequestRepo; sha: string }): Promise<string[] | null>;
   /** D#845 ON-8f2b (A26): makes the engine's labels in the repository, one call each; a label that already exists counts as made. It throws the first failure. */
   ensureLabels(input: { repo: PullRequestRepo }): Promise<void>;
+  /** D#845 ON-20a (A30): the install pull request as GitHub shows it now (state, head commit, per-file line counts), or null when there is none of that number. The install merge route is its only caller. */
+  installPullRequest(input: { repo: PullRequestRepo; number: number }): Promise<InstallPullRequest | null>;
+  /**
+   * D#845 ON-20a (A10): squash-merges pull request `number` at head `sha`, on a client pinned to exactly that number and sha (any other call is refused before it is sent). `merged`; `changed` when GitHub says
+   * the head moved (409); `blocked` when it will not merge yet (405: a required check or review, or a conflict). The install merge route is its ONLY caller: the install step, the watch and the reconcile never merge.
+   */
+  mergeInstall(input: { repo: PullRequestRepo; number: number; sha: string }): Promise<"merged" | "changed" | "blocked">;
+}
+
+/** The clients the install flow opens besides the pull request client: the one that creates labels, and the one that merges (the merge gate's token). */
+export type InstallPurpose = "setup_labels" | "setup_finish" | "setup_merge";
+export interface InstallPullRequest {
+  state: "OPEN" | "CLOSED" | "MERGED";
+  merged: boolean;
+  /** Merged, and by our own App's login (GraphQL names a bot without the `[bot]` REST adds): false for a merge by a person, and for a pull request not merged. */
+  mergedByApp: boolean;
+  headSha: string;
+  /** Every page of the file list, with GitHub's own total; `complete` only when the files read are exactly that total. */
+  files: Array<{ path: string; changeType: string; additions: number; deletions: number }>;
+  totalCount: number;
+  complete: boolean;
 }
 
 /** D#845 ON-13a4: what the finish phase reads about a repository before it seeds: its node id, whether Discussions are on, and the categories (names and ids only). */
@@ -307,7 +328,7 @@ export function createRunPullRequestPort(deps: {
    * client's token and path list hold no `issues` write and no `/labels`, so `ensureLabels` must NOT go through it (a fake that did not model the live path list hid exactly that).
    * `"setup_finish"` (D#845 ON-13a4) asks for the one that may make Discussions and the team-log issue (Discussions and Issues write, no contents).
    */
-  open(repo: PullRequestRepo, purpose?: "setup_labels" | "setup_finish"): Promise<GithubClient>;
+  open(repo: PullRequestRepo, purpose?: InstallPurpose): Promise<GithubClient>;
   /** Waits between looks at a pull request GitHub cannot show yet. Tests inject an instant one. */
   sleep?: (ms: number) => Promise<void>;
   /**
@@ -317,7 +338,7 @@ export function createRunPullRequestPort(deps: {
    */
   appLogin(repo: PullRequestRepo): Promise<string>;
 }): SetupFinishPort {
-  const client = async (repo: PullRequestRepo, options: { setupInstall?: boolean; setupFinish?: boolean; purpose?: "setup_labels" | "setup_finish" } = {}): Promise<LocalOnlyGithub> => {
+  const client = async (repo: PullRequestRepo, options: { setupInstall?: boolean; setupFinish?: boolean; purpose?: InstallPurpose; installMerge?: InstallMergePin } = {}): Promise<LocalOnlyGithub> => {
     let inner: GithubClient;
     try {
       inner = await (options.purpose === undefined ? deps.open(repo) : deps.open(repo, options.purpose));
@@ -368,6 +389,12 @@ export function createRunPullRequestPort(deps: {
     }
     if (typeof login !== "string" || login.length === 0) throw new RunPullRequestError("rejected");
     return stripBot(login);
+  }
+
+  /** Whether the actor GitHub names as a pull request's merger is our own App: a Bot whose login is the App's, compared without the `[bot]` suffix. A person, no actor or another App is false. */
+  async function mergedByOurApp(repo: PullRequestRepo, mergedBy: unknown): Promise<boolean> {
+    if (!isObject(mergedBy) || mergedBy.__typename !== "Bot" || typeof mergedBy.login !== "string") return false;
+    return stripBot(mergedBy.login) === (await ownSlug(repo));
   }
 
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
@@ -557,6 +584,53 @@ export function createRunPullRequestPort(deps: {
         return isObject(res.body) && isCount(res.body.number) && res.body.number >= 1 ? res.body.number : malformed();
       } finally {
         // The `setup_finish` token holds Discussions and Issues write: it is revoked as soon as the call ends, whatever its answer (FU-261).
+        await gh.close?.();
+      }
+    },
+
+    async installPullRequest({ repo, number }) {
+      const gh = await client(repo, { setupInstall: true });
+      const files: InstallPullRequest["files"] = [];
+      let head = null as Omit<InstallPullRequest, "files" | "complete"> | null;
+      let cursor: string | null = null;
+      for (let page = 0; page < MAX_FILE_PAGES; page++) {
+        let data: Record<string, unknown>;
+        try {
+          data = await query(gh, "InstallPullRequest", { owner: repo.owner, name: repo.name, number, ...(cursor === null ? {} : { cursor }) });
+        } catch (error) {
+          // GitHub answers a number it has no pull request for with NOT_FOUND: that is "there is none", not a failure
+          if (error instanceof RunPullRequestError && error.notYetVisible) return null;
+          throw error;
+        }
+        const pr = need(isObject(data.repository) && data.repository).pullRequest;
+        if (pr === null || pr === undefined) return null;
+        if (!isObject(pr) || pr.number !== number || (pr.state !== "OPEN" && pr.state !== "CLOSED" && pr.state !== "MERGED") || typeof pr.merged !== "boolean" || typeof pr.headRefOid !== "string" || !OID.test(pr.headRefOid)) return malformed();
+        const list = need(isObject(pr.files) && pr.files);
+        const info = need(isObject(list.pageInfo) && list.pageInfo);
+        if (!isCount(list.totalCount) || !Array.isArray(list.nodes) || list.nodes.length > 100 || typeof info.hasNextPage !== "boolean") return malformed();
+        // one head for every page: a pull request pushed to while it is read is not a list that means anything
+        if (head !== null && head.headSha !== pr.headRefOid) return malformed();
+        head = { state: pr.state, merged: pr.merged, mergedByApp: head?.mergedByApp ?? (pr.merged && (await mergedByOurApp(repo, pr.mergedBy))), headSha: pr.headRefOid, totalCount: list.totalCount };
+        for (const n of list.nodes as unknown[]) {
+          if (!isObject(n) || typeof n.path !== "string" || n.path.length === 0 || typeof n.changeType !== "string" || n.changeType.length === 0 || !isCount(n.additions) || !isCount(n.deletions)) return malformed();
+          files.push({ path: n.path, changeType: n.changeType, additions: n.additions, deletions: n.deletions });
+        }
+        if (!info.hasNextPage) return { ...head, files, complete: files.length === head.totalCount };
+        if (typeof info.endCursor !== "string" || info.endCursor === cursor) return malformed();
+        cursor = info.endCursor;
+      }
+      return head === null ? malformed() : { ...head, files, complete: false };
+    },
+
+    async mergeInstall({ repo, number, sha }) {
+      const gh = await client(repo, { purpose: "setup_merge", installMerge: { owner: repo.owner, name: repo.name, number, sha } });
+      try {
+        const res = await guarded(() => gh.request({ method: "PUT", path: `${repoPath(repo)}/pulls/${number}/merge`, body: { sha, merge_method: "squash" } }));
+        if (res.status === 409) return "changed";
+        if (res.status === 405) return "blocked";
+        checkStatus(res, [200]);
+        return isObject(res.body) && res.body.merged === true ? "merged" : malformed();
+      } finally {
         await gh.close?.();
       }
     },

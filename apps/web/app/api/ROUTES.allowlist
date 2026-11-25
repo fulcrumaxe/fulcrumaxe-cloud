@@ -106,5 +106,7 @@ v1/runs/[id]/handoff/route.ts
 v1/repos/[id]/plan-imports/route.ts
 v1/setups/[id]/draft/[action]/route.ts
 v1/setups/[id]/draft/route.ts
+v1/setups/[id]/install/merge/route.ts
 v1/setups/[id]/install/retry/route.ts
+v1/setups/[id]/install/summary/route.ts
 v1/setups/[id]/survey/retry/route.ts

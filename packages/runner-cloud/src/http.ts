@@ -7,7 +7,7 @@ import type { EngineUsagePort } from "./ingestEngineEvents.js";
 import type { EngineCommandSigner } from "./engineCommands.js";
 import type { EngineDecidePorts } from "./engineDecide.js";
 import type { LocalOnlyGithub } from "./localOnlyGithub.js";
-import type { RunPullRequestPort } from "./runPullRequest.js";
+import type { RunPullRequestPort, SetupInstallPort } from "./runPullRequest.js";
 import type { RunnerSeenReader } from "./wakeSeen.js";
 
 /** The framework-free request and response the runner handlers speak. apps/web adapts `Request` and `NextResponse` to these. */
@@ -114,6 +114,8 @@ export interface RunnerCloudDeps {
    * and nothing is written. A reviewer's `done` needs no GitHub call and works without it.
    */
   pullRequests?: RunPullRequestPort | null;
+  /** D#845 ON-20a: the install pull request's summary and merge read and write GitHub through this port (the run port plus the install step's calls). Null while it is not configured; the two routes then answer 503 `not_configured`. */
+  setupInstall?: SetupInstallPort | null;
   /** Engine bridge EB-4: prices the tokens an engine batch reports (the worker's `recordEngineUsage`). Absent: the tokens are kept and no figure is recorded. */
   engineUsage?: EngineUsagePort | null;
   /** D#6 PUBLIC-MERGE PR2b: the merge-order routes' gate, store and GitHub reads. Null while it is not configured; those routes then answer 503 `not_configured`. */

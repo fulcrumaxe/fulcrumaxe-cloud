@@ -178,6 +178,10 @@ export {
   type SetupFinishRow,
 } from "./setupFinish.js";
 export {
+  installMergeRun,
+  installSummaryRun,
+} from "./setupInstallMerge.js";
+export {
   claimSetupInstall,
   completeSetupInstall,
   installPathRefused,

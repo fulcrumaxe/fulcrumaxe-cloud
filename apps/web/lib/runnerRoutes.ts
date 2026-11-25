@@ -2,7 +2,7 @@ import type { NextRequest } from "next/server";
 import type { Pool } from "pg";
 import { NextResponse } from "next/server";
 import { MAX_BODY_BYTES, RunnerHttpError, errorResponse, readDeviceCodeKey, readDeviceGlobalLimit, readWakeKey, toResponse } from "@fx/runner-cloud";
-import type { FailRunnerLeases, PlaneMergePort, PlaneMergeStorePort, PlanePushHostedPort, RunnerCloudDeps, RunnerLeaseOps, RunnerHttpRequest, RunnerHttpResponse, RunPullRequestPort, SessionPrincipal } from "@fx/runner-cloud";
+import type { FailRunnerLeases, PlaneMergePort, PlaneMergeStorePort, PlanePushHostedPort, RunnerCloudDeps, RunnerLeaseOps, RunnerHttpRequest, RunnerHttpResponse, SessionPrincipal, SetupInstallPort } from "@fx/runner-cloud";
 import { createMachineLoginSealer } from "@fx/model-connection";
 import { PgRateLimitStore, type RateLimitStore } from "@fx/api/src/ratelimit/store.js";
 import { bucketKeyForAnonIp, clientIpFromRequest } from "@fx/api/src/ratelimit/limits.js";
@@ -56,7 +56,7 @@ const leases: RunnerLeaseOps = {
 
 /** The live GitHub side of an executor's `done` (D#6 R2b-3f). Built once; it opens a client per call, so nothing is read from the environment until a `done` needs one. */
 let installationAccount: ReturnType<typeof createInstallationAccountReader> | undefined;
-let pullRequests: RunPullRequestPort | undefined;
+let pullRequests: SetupInstallPort | undefined;
 /** D#598 P1f-2: the GitHub side of the public-push routes. Built on first use; a missing App answers the routes' fixed `not_configured`. */
 let planePush: PlanePushHostedPort | undefined;
 let setupPush: ReturnType<typeof createLiveSetupPushPort> | undefined;
@@ -148,6 +148,7 @@ export function runnerDeps(): RunnerCloudDeps {
     repoVisibility: (accountId, repoId) => liveVisibility().visibility({ accountId, repoId }),
     installationAccount: (installationAccount ??= createInstallationAccountReader()),
     pullRequests: (pullRequests ??= createAppRunPullRequestPort()),
+    setupInstall: (pullRequests ??= createAppRunPullRequestPort()),
     planePush: (planePush ??= createLivePlanePushPort()),
     setupPush: (setupPush ??= createLiveSetupPushPort()),
     planeMerge: (planeMerge ??= livePlaneMerge()),

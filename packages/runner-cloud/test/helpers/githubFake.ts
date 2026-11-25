@@ -39,7 +39,7 @@ export type FakeChangeType = "ADDED" | "DELETED" | "RENAMED" | "COPIED" | "MODIF
 export interface FakeBranch {
   oid: string;
   aheadBy: number;
-  files: Array<{ path: string; changeType: FakeChangeType }>;
+  files: Array<{ path: string; changeType: FakeChangeType; additions?: number; deletions?: number }>;
 }
 export interface FakePullRequest {
   number: number;
@@ -52,6 +52,10 @@ export interface FakePullRequest {
   body: string;
   /** Who opened it, as GitHub's `user`: the App's bot (`<slug>[bot]`, type `Bot`) for ours, a person's login (type `User`) otherwise. */
   author: { login: string; type: "Bot" | "User" };
+  /** D#845 ON-20a: merged by a person or by the A10 call (a merged pull request is closed). */
+  merged?: boolean;
+  /** Who merged it, as GraphQL names an actor: a bot WITHOUT the `[bot]` REST adds (`fulcrumaxe-runner` for our App), a person by login. Unset on a merged pull request: GraphQL answers null. */
+  mergedBy?: { login: string; type: "Bot" | "User" };
 }
 /** The login the fake gives pull requests opened through `POST /pulls`: our App, as GitHub names a bot. */
 export const FAKE_APP_LOGIN = "fulcrumaxe-runner[bot]";
@@ -74,6 +78,8 @@ export interface FakeRepo {
   /** Issues and pull requests the REST list shows (a pull request carries `pull_request`). Numbers are shared with Discussions, as on GitHub. */
   issues: Array<{ number: number; title: string; body: string; labels: string[]; state: "open" | "closed"; pull_request?: true; /** Who made it; ours (the App's bot) when absent. */ author?: { login: string; type: "Bot" | "User" } }>;
   nextNumber: number;
+  /** D#845 ON-20a: a branch protection that is not met (a required check or review): A10 answers 405 `Pull Request is not mergeable`, as GitHub does. */
+  mergeBlocked?: boolean;
 }
 
 const ok = (body: unknown, status = 200): GithubResponse => ({ status, body });
@@ -102,6 +108,8 @@ export class FakeGithub implements GithubClient {
   before: ((req: GithubRequest) => void) | null = null;
   /** Answers once instead of the real answer, for the call whose label matches (`A1 RunBranchState`, `A4`, ...). */
   inject: { label: RegExp; reply: GithubResponse | Error } | null = null;
+  /** Performs the call whose label matches, then throws a transport error instead of answering (once). */
+  loseReply: RegExp | null = null;
   /**
    * When true, `markPullRequestReadyForReview` is refused the way GitHub refuses it to the runner's pull-request token: HTTP 200, `data` null and one FORBIDDEN error
    * (D#6 C37). Off here (a token that may mark ready); the end-to-end harness turns it on because that is the token the product really uses on this path.
@@ -152,7 +160,13 @@ export class FakeGithub implements GithubClient {
       if (reply instanceof Error) throw reply;
       return reply;
     }
-    return handler();
+    const answer = handler();
+    // D#845 ON-20a: the call took effect at GitHub, and its answer never arrives (a timeout, a dropped connection)
+    if (this.loseReply?.test(label)) {
+      this.loseReply = null;
+      throw new Error("socket hang up");
+    }
+    return answer;
   }
 
   private deny(why: string): never {
@@ -194,6 +208,11 @@ export class FakeGithub implements GithubClient {
       noQuery([]);
       if (!keysAre(req.body, ["state"]) || (req.body as { state: unknown }).state !== "closed") this.deny("A5 body");
       return { label: "A5", handler: () => this.closePull(m![1]!, m![2]!, Number(m![3])) };
+    }
+    if (method === "PUT" && (m = /^\/repos\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/pulls\/(\d+)\/merge$/.exec(path))) {
+      noQuery([]);
+      if (!keysAre(req.body, ["sha", "merge_method"]) || (req.body as { merge_method: unknown }).merge_method !== "squash") this.deny("A10 body");
+      return { label: "A10", handler: () => this.mergePull(m![1]!, m![2]!, Number(m![3]), String((req.body as { sha: unknown }).sha)) };
     }
     if (method === "POST" && (m = /^\/repos\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/labels$/.exec(path))) {
       noQuery([]);
@@ -282,6 +301,20 @@ export class FakeGithub implements GithubClient {
     const pr: FakePullRequest = { number: this.nextPr++, nodeId: `PR_kwDOFake${this.nextPr}`, head: body.head, base: body.base, state: "open", draft: body.draft, title: body.title, body: body.body, author: { login: FAKE_APP_LOGIN, type: "Bot" } };
     repo.pulls.push(pr);
     return ok(this.pullJson(repo, pr), 201);
+  }
+
+  /** GitHub's merge endpoint: 404 for no such pull request; 405 `Pull Request is not mergeable` for one that is closed, already merged, a draft or blocked; 409 `Head branch was modified` when `sha` is not the head; else squash-merged (200, the pull request closed and merged). */
+  private mergePull(owner: string, name: string, number: number, sha: string): GithubResponse {
+    const repo = this.repoOf(owner, name);
+    const pr = repo?.pulls.find((p) => p.number === number);
+    if (!repo || !pr) return notFound();
+    if (!/^[0-9a-f]{40}$/.test(sha)) throw new StrictFakeError("A10: sha is a commit id");
+    if (pr.state !== "open" || pr.draft || repo.mergeBlocked === true) return { status: 405, body: { message: "Pull Request is not mergeable", documentation_url: "https://docs.github.com/rest/pulls/pulls#merge-a-pull-request" } };
+    if (repo.branches.get(pr.head)?.oid !== sha) return { status: 409, body: { message: "Head branch was modified. Review and try the merge again.", documentation_url: "https://docs.github.com/rest/pulls/pulls#merge-a-pull-request" } };
+    pr.state = "closed";
+    pr.merged = true;
+    pr.mergedBy = { login: FAKE_APP_LOGIN.replace(/\[bot\]$/, ""), type: "Bot" };
+    return ok({ sha: "f".repeat(40), merged: true, message: "Pull Request successfully merged" });
   }
 
   private closePull(owner: string, name: string, number: number): GithubResponse {
@@ -385,6 +418,22 @@ export class FakeGithub implements GithubClient {
     return ok({ data: { repository: { pullRequest: { files: { totalCount: files.length, pageInfo: { hasNextPage: end < files.length, endCursor: page.length ? Buffer.from(String(end)).toString("base64url") : null }, nodes: page } } } } });
   }
 
+  /** D#845 ON-20a: the install pull request's state, head and per-file line counts, 100 files to a page with an opaque cursor; an unknown number is a NOT_FOUND error with a null pull request. */
+  private gqlInstallPullRequest(v: Record<string, unknown>): GithubResponse {
+    const repo = this.repoOf(String(v.owner), String(v.name));
+    const pr = repo?.pulls.find((p) => p.number === v.number);
+    if (!repo || !pr) return ok({ data: { repository: repo ? { pullRequest: null } : null }, errors: [{ type: "NOT_FOUND", path: ["repository", "pullRequest"], message: "Could not resolve to a PullRequest with the number of 999." }] });
+    const branch = repo.branches.get(pr.head)!;
+    const start = typeof v.cursor === "string" ? Number(Buffer.from(v.cursor, "base64url").toString()) : 0;
+    if (!Number.isInteger(start) || start < 0) throw new StrictFakeError("InstallPullRequest: cursor is not one this fake issued");
+    const page = branch.files.slice(start, start + 100);
+    const end = start + page.length;
+    const nodes = page.map((f) => ({ path: f.path, changeType: f.changeType, additions: f.additions ?? 1, deletions: f.deletions ?? 0 }));
+    return ok({
+      data: { repository: { pullRequest: { number: pr.number, state: pr.merged === true ? "MERGED" : pr.state === "open" ? "OPEN" : "CLOSED", merged: pr.merged === true, headRefOid: branch.oid, mergedBy: pr.merged === true && pr.mergedBy ? { __typename: pr.mergedBy.type, login: pr.mergedBy.login } : null, files: { totalCount: branch.files.length, pageInfo: { hasNextPage: end < branch.files.length, endCursor: page.length ? Buffer.from(String(end)).toString("base64url") : null }, nodes } } } },
+    });
+  }
+
   private gqlMarkReady(v: Record<string, unknown>): GithubResponse {
     if (this.markReadyForbidden) return ok({ data: { markPullRequestReadyForReview: null }, errors: [{ type: "FORBIDDEN", path: ["markPullRequestReadyForReview"], locations: [{ line: 2, column: 3 }], message: "Resource not accessible by integration" }] });
     for (const repo of this.repos.values()) {
@@ -406,11 +455,13 @@ export class FakeGithub implements GithubClient {
  * A request outside the kind's list is rejected `path_refused` (as the live client does, before anything is sent) and counts in `denied`; one inside it is answered by the strict fake. The live lists are proven
  * against the real client in packages/github (setupLabels.test.ts) and apps/web (runnerPullRequest.test.ts); this keeps the port tests from passing on a path the live kind would refuse.
  */
-export type FakeInstallationKind = "runner_pr" | "setup_labels" | "setup_finish";
+export type FakeInstallationKind = "runner_pr" | "setup_labels" | "setup_finish" | "merge_gate";
 export function installationKindClient(fake: FakeGithub, kind: FakeInstallationKind): GithubClient {
   const repoRoot = /^\/repos\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+/;
   const allowed = (req: GithubRequest): boolean => {
     const rest = repoRoot.test(req.path) ? req.path.replace(repoRoot, "") : null;
+    // `merge_gate` (D#845 ON-20a, the install merge): its live path rule is any path under the repository, so here too (the strict fake then answers or refuses by its own table). Its token holds contents write.
+    if (kind === "merge_gate") return rest !== null;
     if (kind === "setup_labels") return req.method === "POST" && rest === "/labels" && req.query === undefined && keysAre(req.body, ["name", "color", "description"]);
     if (kind === "setup_finish") return (req.method === "POST" && req.path === "/graphql") || (rest === "/issues" && (req.method === "GET" || req.method === "POST"));
     if (req.method === "POST" && req.path === "/graphql") return true;
@@ -429,5 +480,6 @@ export function installationKindClient(fake: FakeGithub, kind: FakeInstallationK
     },
   };
 }
-/** What `createRunPullRequestPort` is given as `open`: the pull request kind, or `setup_labels` / `setup_finish` when the port asks for it. */
-export const openInstallationKinds = (fake: FakeGithub) => async (_repo: unknown, purpose?: "setup_labels" | "setup_finish"): Promise<GithubClient> => installationKindClient(fake, purpose ?? "runner_pr");
+/** What `createRunPullRequestPort` is given as `open`: the pull request kind, or `setup_labels` / `setup_finish` / `setup_merge` when the port asks for it (`setup_merge` is the merge gate's installation kind). */
+export const openInstallationKinds = (fake: FakeGithub) => async (_repo: unknown, purpose?: "setup_labels" | "setup_finish" | "setup_merge"): Promise<GithubClient> =>
+  installationKindClient(fake, purpose === "setup_merge" ? "merge_gate" : (purpose ?? "runner_pr"));
