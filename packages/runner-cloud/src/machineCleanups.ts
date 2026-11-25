@@ -86,7 +86,7 @@ export interface RepoRemoval { state: "waiting_machine" | "removing" | "failed";
 
 /**
  * Each repo's `removal`, from its newest cleanup: `waiting_machine` (open; machine offline by the plain `RUNNER_ONLINE_SECONDS` window, paused or draining), `removing` (open, online),
- * `failed` (given up, with the last failed final job's code), absent once closed. Named by the account on top of row security.
+ * `failed` (given up, with the last failed final job's code), absent once closed. Only a removal is shown: a move's request (MC-9b1) is the old machine's own cleanup of a project that is still there. Named by the account on top of row security.
  */
 export async function readRepoRemovals(client: Pick<PoolClient, "query">, accountId: string, repoIds: readonly string[], o: { now?: Date } = {}): Promise<Map<string, RepoRemoval>> {
   const out = new Map<string, RepoRemoval>();
@@ -98,7 +98,7 @@ export async function readRepoRemovals(client: Pick<PoolClient, "query">, accoun
        FROM machine_cleanup_states s
        JOIN runners rn ON rn.account_id = s.account_id AND rn.id = s.runner_id
        LEFT JOIN runner_settings st ON st.account_id = s.account_id AND st.runner_id = s.runner_id
-      WHERE s.account_id = $1 AND s.repo_id = ANY ($2::uuid[])
+      WHERE s.account_id = $1 AND s.repo_id = ANY ($2::uuid[]) AND s.reason = 'remove'
       ORDER BY s.repo_id, s.requested_at DESC, s.id DESC`,
     [accountId, repoIds, o.now ?? new Date(), RUNNER_ONLINE_SECONDS],
   );

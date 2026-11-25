@@ -1,8 +1,9 @@
-import { randomUUID } from "node:crypto";
+import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { seedF2, type F2Fixture } from "@fx/db/test/helpers/members.js";
 import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
-import { listMachines, moveProjectRoute, readMachineCapacity, toResponse } from "../src/index.js";
+import { signMachineJob, type MachineJob } from "@fulcrumaxe/runner-protocol";
+import { listMachines, moveProjectRoute, readMachineCapacity, toResponse, type RunnerCloudDeps, type RunPullRequestPort } from "../src/index.js";
 import { harness, type Harness } from "./helpers.js";
 
 /** [pg] D#845 MC-10a: the machine list and the move route on real Postgres. MC-9's tests hold the rules; these hold the list's shape, UUID and body validation (400), and each refusal's code. */
@@ -15,6 +16,8 @@ describe("the machine list and the move route [pg]", () => {
   async function repo(account: F2Fixture = f, name = `m${ghSeq}`): Promise<string> {
     const id = randomUUID();
     await h.admin.query(`INSERT INTO repos (id, account_id, gh_repo_id, product, gh_owner, gh_name, execution_mode) VALUES ($1, $2, $3, 'team', 'acme', $4, 'runner_local')`, [id, account.accountId, ++ghSeq, name]);
+    // The move starts the engine on the new machine, so the repo is operated (watch, operate and its own tick).
+    if (account === f) await h.admin.query(`INSERT INTO engine_bridge_repos (account_id, repo_id) VALUES ($1, $2)`, [account.accountId, id]);
     return id;
   }
   async function machine(o: { account?: F2Fixture; name?: string; engine?: "microvm" | "os_sandbox"; mem?: number; kvm?: "present" | "absent" } = {}): Promise<string> {
@@ -28,7 +31,11 @@ describe("the machine list and the move route [pg]", () => {
   }
   const place = (repoId: string, runnerId: string) => h.admin.query(`INSERT INTO project_placements (account_id, repo_id, runner_id, placed_by) VALUES ($1, $2, $3, 'person')`, [f.accountId, repoId, runnerId]);
   const list = async (user = f.m1, account = f.accountId) => toResponse(() => listMachines(h.deps(), { accountId: account, userId: user }));
-  const move = async (repoId: string, body: unknown, user = f.o1) => toResponse(() => moveProjectRoute(h.deps(), { accountId: f.accountId, userId: user }, repoId, body));
+  const jobKeys = generateKeyPairSync("ed25519");
+  const github = { defaultBranch: async () => "main", branchState: async () => ({ exists: true, headOid: "c".repeat(40), aheadBy: 0, defaultBranch: "main" }) } as unknown as RunPullRequestPort;
+  const depsFor = (): RunnerCloudDeps =>
+    h.deps({ pullRequests: github, engineCommandSigner: async () => ({ keyId: "k1", signMachineJob: (job: MachineJob) => signMachineJob(job, "k1", jobKeys.privateKey) }) as never });
+  const move = async (repoId: string, body: unknown, user = f.o1) => toResponse(() => moveProjectRoute(depsFor(), { accountId: f.accountId, userId: user }, repoId, body));
   const errorOf = (r: { status: number; body: unknown }) => `${r.status} ${(r.body as { error?: { code?: string } }).error?.code ?? ""}`;
   const placementOf = async (repoId: string) => (await h.admin.query<{ runner_id: string }>(`SELECT runner_id FROM project_placements WHERE repo_id = $1`, [repoId])).rows[0]?.runner_id;
 
@@ -36,6 +43,9 @@ describe("the machine list and the move route [pg]", () => {
     h = await harness();
     f = await seedF2(h.admin);
     other = await seedF2(h.admin);
+    // The account has an engine plan and operate on, which every start needs.
+    await h.admin.query(`UPDATE accounts SET engine_quantity = 20, stripe_subscription_status = 'active' WHERE id = $1`, [f.accountId]);
+    await h.admin.query(`INSERT INTO engine_bridge_settings (account_id, watch_enabled, operate_enabled) VALUES ($1, true, true)`, [f.accountId]);
   });
   afterAll(() => h.close());
 
@@ -75,7 +85,7 @@ describe("the machine list and the move route [pg]", () => {
     await place(r, a);
     const res = await move(r, { to_runner_id: b });
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ repo_id: r, from_runner_id: a, to_runner_id: b });
+    expect(res.body).toEqual({ repo_id: r, from_runner_id: a, to_runner_id: b, old_copy: "none" });
     expect(await placementOf(r)).toBe(b);
   });
 

@@ -50,7 +50,7 @@ export interface IssueHooks { afterGate?: () => Promise<void> }
 export interface SessionTarget { repoId: string; ghRepoId: number; owner: string | null; name: string | null; runnerId: string }
 
 /** A refusal by a definer (42501: not an owner or admin of an active account) is the person's 403. */
-async function asPerson<T>(run: () => Promise<T>): Promise<T> {
+export async function asPerson<T>(run: () => Promise<T>): Promise<T> {
   try {
     return await run();
   } catch (error) {
@@ -59,7 +59,7 @@ async function asPerson<T>(run: () => Promise<T>): Promise<T> {
   }
 }
 
-async function requireOwnerOrAdmin(client: PoolClient): Promise<void> {
+export async function requireOwnerOrAdmin(client: PoolClient): Promise<void> {
   const role = await requireMemberRole(client);
   if (role !== "owner" && role !== "admin") throw refuse(403, "forbidden", "only an owner or admin can run the engine");
 }
@@ -137,16 +137,16 @@ export async function pendingJob(client: PoolClient, accountId: string, repoId: 
   return row?.id ?? null;
 }
 
-async function signerOf(deps: RunnerCloudDeps): Promise<EngineCommandSigner & Required<Pick<EngineCommandSigner, "signMachineJob">>> {
+export async function signerOf(deps: RunnerCloudDeps): Promise<EngineCommandSigner & Required<Pick<EngineCommandSigner, "signMachineJob">>> {
   const signer = (await deps.engineCommandSigner?.()) ?? null;
   if (signer?.signMachineJob === undefined) throw refuse(503, "not_configured", "the cloud cannot issue an engine job now");
   return signer as EngineCommandSigner & Required<Pick<EngineCommandSigner, "signMachineJob">>;
 }
 
 /** Signs and inserts one session job (no setup) through the definer, which re-checks the person and the runner. */
-async function insertJob(client: PoolClient, deps: RunnerCloudDeps, signer: Awaited<ReturnType<typeof signerOf>>, t: SessionTarget, job: Pick<MachineJob, "kind" | "args">): Promise<string> {
+export async function insertJob(client: PoolClient, deps: RunnerCloudDeps, signer: Awaited<ReturnType<typeof signerOf>>, t: SessionTarget, job: Pick<MachineJob, "kind" | "args">, at?: Date): Promise<string> {
   const jobId = randomUUID();
-  const issued = (deps.now ?? (() => new Date()))();
+  const issued = at ?? (deps.now ?? (() => new Date()))();
   const expires = new Date(issued.getTime() + MACHINE_JOB_MAX_LIFE_S * 1000);
   const signed = signer.signMachineJob({
     v: 1, job_id: jobId, runner_id: t.runnerId, repo_gh_id: t.ghRepoId, requires_engine: "any", issued_at: issued.toISOString(), expires_at: expires.toISOString(), ...job,
