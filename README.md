@@ -221,6 +221,7 @@ packages/
                       firewalls, SSH keys, pricing, snapshots and servers from an image,
                       the probe that checks a customer's token, and the fake that
                       staging serves); used by the API's machine routes and the web app
+  interview/          project interview sessions: start, answer, edit, skip, abandon, rev-guarded writes, session bounds
   model-call/         server-side model calls over the account's own key
   model-connection/   bring-your-own-key connections: encryption, validation
   model-router/       Postgres-backed model routing, escalation, floors

@@ -77,6 +77,7 @@ export default defineWorkspace([
   "packages/gh-policy",
   "packages/github",
   "packages/hetzner",
+  "packages/interview",
   "packages/model-call",
   "packages/model-connection",
   "packages/model-router",

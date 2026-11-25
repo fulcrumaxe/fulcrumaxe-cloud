@@ -931,6 +931,31 @@ importers:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@24.19.0)(supports-color@10.2.2)
 
+  packages/interview:
+    dependencies:
+      '@fx/core':
+        specifier: workspace:*
+        version: link:../core
+      '@fx/db':
+        specifier: workspace:*
+        version: link:../db
+      pg:
+        specifier: ^8.13.1
+        version: 8.23.0
+    devDependencies:
+      '@types/node':
+        specifier: ^24.19.0
+        version: 24.19.0
+      '@types/pg':
+        specifier: ^8.11.10
+        version: 8.23.1
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@24.19.0)(supports-color@10.2.2)
+
   packages/model-call:
     dependencies:
       '@fx/model-connection':

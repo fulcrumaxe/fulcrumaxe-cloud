@@ -115,6 +115,7 @@ Every edge below is a real `dependencies` entry in the source project's `package
 | `packages/gh-policy` | `@fulcrumaxe/runner-protocol` |
 | `packages/github` | `@fulcrumaxe/runner-protocol`, `@fx/core`, `@fx/db`, `@fx/gh-policy`, `@fx/net-guard`, `@fx/runner`, `@fx/telemetry`, `@fx/trust` |
 | `packages/hetzner` | `@fx/net-guard` |
+| `packages/interview` | `@fx/core`, `@fx/db` |
 | `packages/model-call` | `@fx/model-connection`, `@fx/runtime` |
 | `packages/model-connection` | `@fx/core`, `@fx/db`, `@fx/telemetry` |
 | `packages/model-router` | `@fx/db`, `@fx/roles`, `@fx/runtime`, `@fx/spend` |
