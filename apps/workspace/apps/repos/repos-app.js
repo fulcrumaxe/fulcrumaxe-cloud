@@ -11,7 +11,7 @@ import { api, ApiFailure, createRetryGate, isRateLimited, retryWords, waitSecond
 import { on, onRefresh } from "../../core/cloud-live.js";
 import { autoMergeDisabled, lockNote } from "./repos-lock.js";
 import { createAllowancePanel } from "./repos-allowances.js";
-import { createAutoMergeControl, createDialControl, createModeControl, createPlanWritebackControl, createRunnersSection, queueView } from "./repos-runners.js";
+import { createAutoMergeControl, createDialControl, createModeControl, createPlanWritebackControl, createRemoveSheet, createRunnersSection, queueView, removalLine } from "./repos-runners.js";
 
 const REPOS_URL = "/api/v1/repos";
 const allowancesUrl = (id) => "/api/runners/repos/" + encodeURIComponent(id) + "/sandbox-allowances";
@@ -105,6 +105,10 @@ function mountRepos(host, installNote) {
   let autoMerge = null; // D#6 R2b: the local-review auto-merge control of the open repo
   let planWriteback = null; // D#598 P5c-a: the switch for merging plan updates automatically
   const runners = createRunnersSection({ signal: abort.signal, onData: () => (dial && dial.repaint(), allowances.repaint()) });
+  // D#845 ON-16a2: the Remove from fulcrumaxe sheet. It reads the repo as the list has it now, and the list is re-read once a removal was sent.
+  const removeSheet = createRemoveSheet({
+    signal: abort.signal, getRepo: (id) => st.repos.find((r) => r.id === id), onDone: () => loadRepos(), onClosed: () => focusTestId("repos-remove-open"),
+  });
   // dom-insert-ok: runners.el is the section element createRunnersSection built with h()
   root.append(runners.el);
   // D#600 CX-9b: the open repo's context rules and budget (apps/_lib/dom.js). The slot keeps its own state across the detail rebuild.
@@ -182,6 +186,7 @@ function mountRepos(host, installNote) {
         h("button", { type: "button", class: "repos-open", "aria-pressed": r.id === st.openId ? "true" : "false", "data-testid": "repos-open", onClick: () => selectRepo(r.id) },
           h("bdi", { class: "repos-name" }, r.full_name || r.product),
           h("span", { class: "repos-state", "data-testid": "repos-state" }, r.install_state === "installed" ? "Installed" : "Not installed")),
+        removalLine(r.removal), // dom-insert-ok: removalLine built this with h(); the machine's name is a text node in <bdi>
         r.app_kind === "team_readonly" ? line("Read-only. Install the write App to run work.", "repos-readonly", "repos-muted repos-readonly") : null)
     )));
   }
@@ -244,6 +249,8 @@ function mountRepos(host, installNote) {
       ...(autoMerge ? [autoMerge.el] : []),
       // dom-insert-ok: planWriteback.el is the element createPlanWritebackControl built with h(); it repaints itself
       ...(planWriteback ? [planWriteback.el] : []),
+      // D#845 ON-16a2: owners and admins open the sheet; nothing is sent until its confirm button is pressed
+      button("Remove from fulcrumaxe…", "repos-remove-open", () => removeSheet.open(repo), { disabled: !st.isAdmin || st.saving, "aria-describedby": st.isAdmin ? null : "repos-admin-only-detail" }),
       ...(st.isAdmin ? [] : [h("p", { id: "repos-admin-only-detail", class: "repos-muted", "data-testid": "repos-settings-admin-only" }, ADMIN_ONLY)]),
       ...(st.saveError ? [line(st.saveError, "repos-save-error", "repos-error", "alert")] : [])
     );
@@ -263,6 +270,7 @@ function mountRepos(host, installNote) {
     renderList();
     renderDetail();
     if (keep && !root.contains(document.activeElement)) focusTestId(keep);
+    removeSheet.repaint();
   }
 
   // ── data ─────────────────────────────────────────────────────────────
@@ -384,6 +392,7 @@ function mountRepos(host, installNote) {
       allowances.clear();
       if (ctx) ctx.destroy();
       runners.destroy();
+      removeSheet.destroy();
       gate.cancel();
       abort.abort();
       unsubscribe();

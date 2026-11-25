@@ -911,3 +911,254 @@ export function createPlanWritebackControl({ call = api, signal, repoId, canChan
   paint();
   return { el, load: () => ctl.load(), repaint: paint };
 }
+
+// ── D#845 ON-16a2: the Remove from fulcrumaxe sheet and the removal line on a repo's row (one file with the rest of the Repos app: a new file costs a boot request) ──
+// D#845 ON-16a2: the "Remove from fulcrumaxe" sheet of the Repos app, and the removal line on a repo's row.
+//
+// The sheet is a modal dialog opened from a repo's settings. It always says the engine is stopped (a fact, not a box) and has two boxes:
+// "Delete its sandbox and snapshots" (on by default) and "Open a PR removing the engine files" (off by default). Pressing the confirm button
+// sends exactly one POST /api/runners/repos/:id/remove { delete_sandbox, removal_pr }; nothing is sent before that. The GitHub repository is
+// never deleted, and the sheet says so.
+//
+// The row line comes from the `removal` field of GET /api/v1/repos: waiting_machine, removing or failed (null when there is none, or it is done).
+// Two halves, as in repos-runners.js: a controller with no DOM (unit-tested with a fake call()) and views built with h(). A refusal is shown
+// as a sentence of this file's own, chosen by status and code, never the server's message. Machine and repo names are drawn inside <bdi>.
+
+export const removeUrl = (repoId) => "/api/runners/repos/" + encodeURIComponent(repoId) + "/remove";
+export const TITLE = "Remove from fulcrumaxe";
+export const DELETE_LABEL = "Delete its sandbox and snapshots";
+export const PR_LABEL = "Open a PR removing the engine files";
+/** What a fresh sheet has ticked. */
+export const DEFAULT_TICKS = Object.freeze({ deleteSandbox: true, removalPr: false });
+export const STATES = ["waiting_machine", "removing", "failed"];
+
+const MACHINE_FALLBACK = "its machine";
+
+/** The removal of one repo as the row shows it, or null when it is none or not one of the three states. */
+export function removalView(removal) {
+  if (!removal || typeof removal !== "object" || !STATES.includes(removal.state)) return null;
+  const machine = typeof removal.machine_name === "string" && removal.machine_name.trim() !== "" ? removal.machine_name : MACHINE_FALLBACK;
+  const code = typeof removal.failure_code === "string" && removal.failure_code !== "" ? removal.failure_code : null;
+  return { state: removal.state, machine, code };
+}
+
+/** The sentence around the machine's name: [before, after]. The name goes between them, in <bdi>. */
+export function removalWords(view) {
+  if (view.state === "waiting_machine") return ["Waiting for ", " to come back"];
+  if (view.state === "removing") return ["Removing from ", "…"];
+  return ["Couldn't remove the engine's sandbox from ", (view.code ? " (" + view.code + ")" : "") + ". Remove the machine to clear it, or place the project on another machine."];
+}
+
+/** The same sentence as plain text (tests, and the aria text). */
+export function removalText(view) {
+  const [a, b] = removalWords(view);
+  return a + view.machine + b;
+}
+
+/** The row line, or null. The machine's name is in <bdi>. */
+export function removalLine(removal) {
+  const view = removalView(removal);
+  if (!view) return null;
+  const [a, b] = removalWords(view);
+  return h("p", { class: "repos-muted repos-removal", "data-testid": "repos-removal", "data-state": view.state, role: "status" }, a, h("bdi", { "data-testid": "repos-removal-machine" }, view.machine), b);
+}
+
+/** What the sheet says about a machine that is offline, or null when the machine is not being waited for. */
+export function waitingExplanation(removal) {
+  const view = removalView(removal);
+  return view && view.state === "waiting_machine" ? view : null;
+}
+
+// What the removal PR did, in this file's own words. The ON-16b codes are closed; an unknown one reads as the generic line.
+export const PR_CODE_SENTENCES = {
+  install_pr_not_merged: "No merged install PR was found, so there are no engine files to remove and no PR was opened.",
+  tree_truncated: "The repo is too large to list safely, so no removal PR was opened.",
+  removal_branch_conflict: "A branch for the removal PR already exists with other changes, so no PR was opened.",
+  github_unavailable: "GitHub didn't answer, so no removal PR was opened.",
+};
+export const PR_OTHER = "The removal PR couldn't be opened.";
+export const PR_NOTHING = "The engine left no files to remove, so no PR was needed.";
+
+/** Only an https://github.com address is ever linked. */
+export function githubUrl(raw) {
+  try {
+    const u = new URL(String(raw));
+    return u.protocol === "https:" && u.hostname === "github.com" ? u.href : "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * The PR line of the answer: { text, number, url } where `number` is set for a PR that was opened (or is already open), or null when no PR was asked for.
+ * "Opened PR #<n>" with its link, or the sentence for the code.
+ */
+export function prLine(pr) {
+  if (pr === null || pr === undefined) return null;
+  if (typeof pr !== "object") return { text: PR_OTHER, number: null, url: "" };
+  if (typeof pr.code === "string") return { text: PR_CODE_SENTENCES[pr.code] || PR_OTHER, number: null, url: "" };
+  if (pr.outcome === "nothing_to_remove") return { text: PR_NOTHING, number: null, url: "" };
+  if ((pr.outcome === "opened" || pr.outcome === "exists") && Number.isInteger(pr.number) && pr.number > 0) {
+    return { text: "Opened PR #" + pr.number, number: pr.number, url: githubUrl(pr.url) };
+  }
+  return { text: PR_OTHER, number: null, url: "" };
+}
+
+export const REFUSALS = {
+  forbidden: "Only owners and admins can remove a project.",
+  not_found: "That repo isn't there any more.",
+  setup_running: "Wait for the install to finish, or let it fail, then remove.",
+  placement_busy: "Another change to this machine is in progress. Try again.",
+  invalid_message: "That request wasn't valid. Close this and try again.",
+  other: "The project couldn't be removed. Try again.",
+};
+
+/** The sentence for a refused or failed removal: by code, then by status. */
+export function refusalSentence(e) {
+  const code = e && typeof e.code === "string" ? e.code : "";
+  if (Object.prototype.hasOwnProperty.call(REFUSALS, code) && code !== "other") return REFUSALS[code];
+  if (e && e.status === 403) return REFUSALS.forbidden;
+  if (e && e.status === 404) return REFUSALS.not_found;
+  return REFUSALS.other;
+}
+
+/** The answer's own summary, or null unless it has the shape the route sends. */
+export function readAnswer(b) {
+  if (!b || typeof b !== "object" || (b.machine_parts !== "queued" && b.machine_parts !== "none")) return null;
+  return { queued: b.machine_parts === "queued", already: b.already_removed === true, pr: prLine(b.pr === undefined ? null : b.pr) };
+}
+
+/** The sheet's controller: begin(repo), toggle, cancel, confirm. Exactly one POST per confirm; a double press is one request. */
+export function createRemoveFlow({ call = api, signal, onChange = () => {}, onDone = () => {} } = {}) {
+  let st = null; // { repoId, name, deleteSandbox, removalPr, phase: "ask" | "sending" | "done" | "error", error, answer }
+  const set = (next) => {
+    st = next;
+    onChange();
+  };
+  return {
+    get state() { return st; },
+    begin(repo) {
+      if (st && st.phase === "sending") return;
+      set({ repoId: repo.id, name: repo.full_name || repo.product, deleteSandbox: DEFAULT_TICKS.deleteSandbox, removalPr: DEFAULT_TICKS.removalPr, phase: "ask", error: "", answer: null });
+    },
+    toggle(key, value) {
+      if (!st || st.phase === "sending" || st.phase === "done" || (key !== "deleteSandbox" && key !== "removalPr")) return;
+      set({ ...st, [key]: value === true, phase: "ask", error: "" });
+    },
+    cancel() {
+      if (st && st.phase !== "sending") set(null);
+    },
+    async confirm() {
+      if (!st || st.phase === "sending" || st.phase === "done") return;
+      const asked = st;
+      set({ ...asked, phase: "sending", error: "" });
+      try {
+        const answer = readAnswer(await call("POST", removeUrl(asked.repoId), { delete_sandbox: asked.deleteSandbox, removal_pr: asked.removalPr }, signal));
+        if (!answer) {
+          set({ ...asked, phase: "error", error: REFUSALS.other });
+          onDone();
+          return;
+        }
+        set({ ...asked, phase: "done", error: "", answer });
+        onDone();
+      } catch (e) {
+        if (cancelled(e)) return;
+        set({ ...asked, phase: "error", error: refusalSentence(e) });
+        if (e && e.status === 404) onDone();
+      }
+    },
+  };
+}
+
+/**
+ * The sheet. `open(repo)` shows it; `repaint()` re-reads the repo's removal (the list reloaded); `destroy()` removes it.
+ * `getRepo(id)` returns the repo as the list has it now, or undefined. `onClosed()` is where focus goes back.
+ */
+export function createRemoveSheet({ call = api, signal, doc = document, getRepo, onDone = () => {}, onClosed = () => {} } = {}) {
+  let dlg = null;
+  let parts = null;
+  const flow = createRemoveFlow({ call, signal, onChange: () => paint(), onDone });
+
+  function close() {
+    if (!dlg) return;
+    dlg.close();
+    dlg.remove();
+    dlg = parts = null;
+    onClosed();
+  }
+
+  function box(testid, label, checked, key, disabled) {
+    const input = h("input", { type: "checkbox", checked, disabled, "data-testid": testid, onChange: () => flow.toggle(key, input.checked) });
+    return h("label", { class: "repos-toggle" }, input, h("span", null, h("strong", null, label)));
+  }
+
+  function paint() {
+    const d = flow.state;
+    if (!d) return close();
+    if (!dlg) {
+      parts = {
+        title: h("h2", { class: "repos-subtitle", id: "repos-remove-h" }, TITLE),
+        body: h("div", { id: "repos-remove-d" }),
+        err: h("p", { class: "repos-error", role: "alert", tabindex: "-1", "data-testid": "repos-remove-error" }),
+        yes: h("button", { type: "button", class: "repos-btn", "data-testid": "repos-remove-confirm", onClick: () => parts.yes.getAttribute("aria-disabled") !== "true" && flow.confirm() }, TITLE),
+        no: h("button", { type: "button", class: "repos-btn", "data-testid": "repos-remove-cancel", onClick: () => flow.cancel() }, "Cancel"),
+      };
+      dlg = h("dialog", { class: "repos-dialog", "data-testid": "repos-remove-dialog", "aria-labelledby": "repos-remove-h", "aria-describedby": "repos-remove-d", onCancel: (e) => (e.preventDefault(), flow.cancel()) },
+        h("div", { class: "repos-dialog-body" }, parts.title, parts.body, parts.err, h("div", { class: "repos-actions" }, parts.no, parts.yes)));
+      doc.body.appendChild(dlg);
+      dlg.showModal();
+      parts.no.focus();
+    }
+    const repo = getRepo(d.repoId);
+    const sending = d.phase === "sending";
+    const done = d.phase === "done";
+    const waiting = waitingExplanation(repo && repo.removal);
+    const nodes = [
+      h("p", null, h("bdi", { "data-testid": "repos-remove-name" }, d.name), " stops working with fulcrumaxe. The GitHub repo itself is never deleted."),
+    ];
+    if (!done) {
+      nodes.push(
+        h("p", { "data-testid": "repos-remove-stop" }, "Its engine is stopped on its machine."),
+        box("repos-remove-sandbox", DELETE_LABEL, d.deleteSandbox, "deleteSandbox", sending),
+        box("repos-remove-pr", PR_LABEL, d.removalPr, "removalPr", sending)
+      );
+      if (waiting) {
+        nodes.push(h("p", { class: "repos-muted", "data-testid": "repos-remove-waiting" }, h("bdi", null, waiting.machine), " will stop and clean up when it reconnects."));
+      }
+    } else {
+      const a = d.answer;
+      nodes.push(h("p", { "data-testid": "repos-remove-done" }, a.already ? "It was already removed." : "Removed."));
+      if (a.queued) nodes.push(h("p", { class: "repos-muted", "data-testid": "repos-remove-machine" }, "Its machine stops the engine and cleans up when it can. The repo's row shows how that is going."));
+      if (a.pr) {
+        nodes.push(h("p", { "data-testid": "repos-remove-pr-line", "data-outcome": a.pr.number ? "opened" : "none" },
+          a.pr.url ? [h("a", { href: a.pr.url, target: "_blank", rel: "noopener noreferrer", "data-testid": "repos-remove-pr-link" }, a.pr.text)] : a.pr.text));
+      }
+    }
+    parts.body.replaceChildren(...nodes);
+    parts.err.textContent = d.error;
+    parts.yes.hidden = done;
+    parts.yes.setAttribute("aria-disabled", sending ? "true" : "false");
+    parts.no.textContent = done || d.phase === "error" ? "Close" : "Cancel";
+    if (d.phase === "error") parts.err.focus();
+    if (done) parts.no.focus();
+  }
+
+  return {
+    flow,
+    open(repo) {
+      flow.begin(repo);
+    },
+    repaint() {
+      if (dlg && flow.state) paint();
+    },
+    get isOpen() { return dlg !== null; },
+    destroy() {
+      if (dlg) {
+        dlg.close();
+        dlg.remove();
+        dlg = parts = null;
+      }
+    },
+  };
+}
+
