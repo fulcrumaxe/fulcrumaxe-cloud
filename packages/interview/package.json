@@ -1,0 +1,28 @@
+{
+  "name": "@fx/interview",
+  "version": "0.1.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "description": "D#291 PI-3: the project interview's sessions -- start, answer, edit, skip, not-sure, clear, abandon, rev-guarded writes and the session bounds.",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "bash scripts/test-pg.sh",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fx/core": "workspace:*",
+    "@fx/db": "workspace:*",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.0",
+    "@types/pg": "^8.11.10",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

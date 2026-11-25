@@ -677,6 +677,10 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "draft_conflict",
   "plan_invalid",
   "plan_not_reviewed",
+  // Interview sessions service: the codes its error classes carry.
+  "stale_rev",
+  "session_not_active",
+  "interview_limit",
   // Envelope edits and the weekly auto-start envelope (D#483 S5-e2): the one new code the routes throw.
   "confirmation_required",
 ];
