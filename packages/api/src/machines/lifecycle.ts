@@ -150,18 +150,33 @@ export async function ensureCredential(ctx: ServerCtx, s: { id: string; credenti
   return active;
 }
 
-/** MC-12: a delete run that ended without deleting. A row the run had already set to `deleting` becomes `failed` with the closed code (the Servers tab shows Failed, and Delete finishes it); any other row is left alone. */
-export async function markDeleteFailed(ctx: ServerCtx, serverId: string, code: string): Promise<void> {
+/**
+ * MC-12: a delete that ended without deleting. A row set to `deleting` becomes `failed` with the closed code (the Servers tab shows Failed, and Delete finishes it); any other row is left alone.
+ * `markedAt` is the `status_at` text the caller's own mark returned: given, only that very mark is turned to `failed`, so a row that a run (or another request) has marked since is not
+ * touched. The queued run passes none, because it owns the row.
+ */
+export async function markDeleteFailed(ctx: ServerCtx, serverId: string, code: string, markedAt?: string): Promise<void> {
   const { accountId, userId } = ctx.principal;
-  await withTenant(ctx.pool, accountId, userId, (c) => c.query(
-    `UPDATE managed_servers SET status = 'failed', status_at = now(), failure_code = $3 WHERE account_id = $1 AND id = $2 AND status = 'deleting'`, [accountId, serverId, /^[a-z][a-z0-9_]{0,63}$/.test(code) ? code : "delete_failed"]));
+  const word = /^[a-z][a-z0-9_]{0,63}$/.test(code) ? code : "delete_failed";
+  await withTenant(ctx.pool, accountId, userId, (c) => markedAt === undefined
+    ? c.query(`UPDATE managed_servers SET status = 'failed', status_at = now(), failure_code = $3 WHERE account_id = $1 AND id = $2 AND status = 'deleting'`, [accountId, serverId, word])
+    : c.query(`UPDATE managed_servers SET status = 'failed', status_at = now(), failure_code = $3 WHERE account_id = $1 AND id = $2 AND status = 'deleting' AND status_at::text = $4`, [accountId, serverId, word, markedAt]));
 }
 
-export interface DeleteInput { removeProjects: boolean }
+/** The longest a delete run holds a server at `deleting` (a soft bound: see the comment in projectServer.ts). A plain Delete is refused inside it, and so is the token's removal. */
+export const DELETE_RUN_MAX_MINUTES = 30;
+
+export interface DeleteInput {
+  removeProjects: boolean;
+  /** Only the queued "Also delete server" run sets this: it owns a `deleting` row, so its tries are not refused by it. */
+  fromRun?: boolean;
+  /** Called with the `status_at` text of this call's own mark, when it made one. The route uses it to fail only that mark. */
+  onMarked?: (markedAt: string) => void;
+}
 export interface DeleteResult { id: string; status: "deleted"; already_deleted: boolean }
 interface DeleteRow {
   status: string; credential_id: string; provider_server_id: string | null; provider_firewall_id: string | null; runner_id: string | null; provisioning_token_id: string | null;
-  failure_code: string | null; idempotency_key: string | null;
+  failure_code: string | null; idempotency_key: string | null; run_owned: boolean;
 }
 
 /** Owner or admin (the route enforces it, and opening the token checks it again). Returns once the server and its firewall are gone from Hetzner and the row says so. */
@@ -170,9 +185,13 @@ export async function deleteManagedServer(ctx: ServerCtx, id: string, input: Del
   const { accountId, userId } = ctx.principal;
   const inTx = <T>(f: (c: import("pg").PoolClient) => Promise<T>): Promise<T> => withTenant(ctx.pool, accountId, userId, f);
   const row = await inTx(async (c) => (await c.query<DeleteRow>(
-    `SELECT status, credential_id, provider_server_id, provider_firewall_id, runner_id, provisioning_token_id, failure_code, idempotency_key FROM managed_servers WHERE account_id = $1 AND id = $2`, [accountId, id])).rows[0]);
+    `SELECT status, credential_id, provider_server_id, provider_firewall_id, runner_id, provisioning_token_id, failure_code, idempotency_key,
+            (status = 'deleting' AND status_at > now() - make_interval(mins => $3::int)) AS run_owned FROM managed_servers WHERE account_id = $1 AND id = $2`, [accountId, id, DELETE_RUN_MAX_MINUTES])).rows[0]);
   if (!row) throw new ApiError(404, "not_found", "no such server");
   if (row.status === "deleted") return { id, status: "deleted", already_deleted: true };
+  // A `deleting` row inside the run's window belongs to a delete that is going on (the queued run, or another request): a plain Delete leaves it alone, so it cannot fail or re-mark it. The run itself
+  // passes `fromRun`. An older row has no delete behind it (a killed run, a crashed request), and Delete finishes it.
+  if (row.run_owned && input.fromRun !== true) throw new ApiError(409, "server_deleting", "This server is already being deleted");
   // While the create is still running there is nothing to delete here, and a delete now would leave the server it is about to make without a row. A create that was killed
   // (a timeout, a crash, a deploy) leaves the row `creating` with no id and no lock held: then Delete goes on and finds the server by its label.
   if (row.status === "creating" && row.provider_server_id === null && (await createInFlight(ctx, row.idempotency_key))) throw new ApiError(409, "server_creating", "This server is still being created. Try again in a minute");
@@ -205,7 +224,13 @@ export async function deleteManagedServer(ctx: ServerCtx, id: string, input: Del
   }
   // A row that began as a create has a token; an orphan found by the sweep does not and has no `deleting` step. A sweep-returned orphan that kept its token does, and a "kept" mark
   // (only valid while orphaned or deleted) is cleared by the same update, so the CHECK keeps its meaning.
-  if (row.provisioning_token_id !== null) await inTx((c) => c.query(`UPDATE managed_servers SET status = 'deleting', status_at = now(), kept_at = NULL, kept_by = NULL WHERE account_id = $1 AND id = $2 AND status <> 'deleted'`, [accountId, id]));
+  // The mark is compare-and-set on the status read above: a run that began between the read and here makes this call answer 409 instead of taking its row over.
+  if (row.provisioning_token_id !== null) {
+    const marked = await inTx((c) => c.query<{ at: string }>(
+      `UPDATE managed_servers SET status = 'deleting', status_at = now(), kept_at = NULL, kept_by = NULL WHERE account_id = $1 AND id = $2 AND status = $3 RETURNING status_at::text AS at`, [accountId, id, row.status]));
+    if (marked.rowCount !== 1) throw new ApiError(409, "server_deleting", "This server changed while it was being deleted. Check the Servers tab, then try again");
+    input.onMarked?.(marked.rows[0]!.at);
+  }
 
   // 2. The runner and the token: both are made useless before the machine goes, so neither can be used from a copy of its secrets.
   // Each has its own try: a runner that is already gone answers 404, and the token must still be revoked.

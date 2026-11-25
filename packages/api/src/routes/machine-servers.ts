@@ -4,7 +4,7 @@ import { SESSION_LIMITS } from "../ratelimit/session.js";
 import { ApiError } from "../errors.js";
 import { createServer, getServer, listServers, quoteServer, type ServerCtx } from "../machines/servers.js";
 import { getCatalog } from "../machines/catalog.js";
-import { deleteManagedServer } from "../machines/lifecycle.js";
+import { deleteManagedServer, markDeleteFailed } from "../machines/lifecycle.js";
 import { deleteOrphan, keepOrphan, rebootManagedServer } from "../machines/actions.js";
 import { startProjectServerDelete } from "../machines/projectServer.js";
 import { mapError } from "./machine-credential.js";
@@ -218,16 +218,21 @@ export const machineServerRoutes: RouteEntry[] = [
     querySchema: deleteQuery,
     responseSchema: deleteResultSchema,
     extraResponses: {
-      "409": "Error `server_creating` (the create is still running; try again), `projects_placed`, `credential_changed` (no Hetzner token is connected), `server_not_in_token_project` (the connected token's Hetzner project does not hold this server) or a `hetzner_*` code. Nothing past the failed step was done; repeat the call to finish.",
+      "409": "Error `server_creating` (the create is still running; try again), `server_deleting` (a delete of this server is already running, or the server changed meanwhile; try again later), `projects_placed`, `credential_changed` (no Hetzner token is connected), `server_not_in_token_project` (the connected token's Hetzner project does not hold this server) or a `hetzner_*` code. Nothing past the failed step was done; repeat the call to finish.",
       "503": "Error `leases_not_failed`: the runner was revoked but its runs could not be failed yet; repeat the call. Or a `hetzner_*` code.",
     },
     async handler(ctx, input) {
       const id = (input.params as { id: string }).id;
       const q = input.query as z.infer<typeof deleteQuery>;
+      // The delete marks the row `deleting` before its later steps, and nothing else would write `failed` for a synchronous delete, so the token's removal would stay refused. Only the mark this
+      // request made is failed (by its own `status_at`): a row that a run or another request owns, or one this request refused before marking, is left alone.
+      let markedAt: string | undefined;
       try {
-        return await deleteManagedServer(serverCtx(ctx), id.toLowerCase(), { removeProjects: q.remove_projects === "true" });
+        return await deleteManagedServer(serverCtx(ctx), id.toLowerCase(), { removeProjects: q.remove_projects === "true", onMarked: (at) => { markedAt = at; } });
       } catch (err) {
-        throw mapError(err);
+        const mapped = mapError(err);
+        if (markedAt !== undefined) await markDeleteFailed(serverCtx(ctx), id.toLowerCase(), mapped instanceof ApiError ? mapped.code : "delete_failed", markedAt);
+        throw mapped;
       }
     },
   },

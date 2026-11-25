@@ -34,7 +34,7 @@ describe("machine server delete workflow", () => {
     expect(await machineServerDeleteWorkflow(ARGS)).toBe("deleted");
     expect(calls).toEqual(["remove", "delete"]);
     expect(removal).toHaveBeenCalledWith({ pool: { pool: true }, principal: { accountId: "a1", userId: "u1" } }, { deps: true }, ARGS);
-    expect(deletion).toHaveBeenCalledWith({ pool: { pool: true }, principal: { accountId: "a1", userId: "u1" } }, "s1", { removeProjects: false });
+    expect(deletion).toHaveBeenCalledWith({ pool: { pool: true }, principal: { accountId: "a1", userId: "u1" } }, "s1", { removeProjects: false, fromRun: true });
   });
 
   it("a refusal (a 4xx) ends the run without a retry and without deleting the server; the removal's own words are the reason", async () => {

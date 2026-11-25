@@ -63,6 +63,7 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "delete_failed",
   "credential_changed",
   "server_not_in_token_project",
+  "credential_in_use",
   "leases_not_failed",
   "registration_timeout",
   // D#845 MC-7b: reboot, keep and delete an orphan.

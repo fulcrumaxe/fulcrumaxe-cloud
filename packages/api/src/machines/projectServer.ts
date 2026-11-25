@@ -1,7 +1,7 @@
 import { RunnerHttpError, removeProjectCloudOnly, type RunnerCloudDeps } from "@fx/runner-cloud";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { ApiError } from "../errors.js";
-import { ensureCredential } from "./lifecycle.js";
+import { DELETE_RUN_MAX_MINUTES, ensureCredential, requireCredential } from "./lifecycle.js";
 import { machineServerDeps, type ServerCtx } from "./servers.js";
 
 /**
@@ -48,6 +48,8 @@ export async function startProjectServerDelete(ctx: ServerCtx, a: ProjectServerA
   const marked = await mark("deleting", state.status);
   if (marked.rowCount !== 1) throw new ApiError(409, "project_not_on_server", "That server changed while this was being checked. Close this and try again");
   try {
+    // The token may have been removed between the check above and the mark; from here on its removal is refused, so one more look closes the gap.
+    if (state.at_hetzner) await requireCredential(ctx, state.credential_id);
     await machineServerDeps.startServerDelete({ accountId, userId, ...a });
   } catch (e) {
     await mark(state.status, "deleting");
@@ -55,9 +57,35 @@ export async function startProjectServerDelete(ctx: ServerCtx, a: ProjectServerA
   }
 }
 
+/**
+ * `DELETE_RUN_MAX_MINUTES` (30) is how long a delete run is expected to hold a server at `deleting`. A soft window: a typical run ends well inside it, but a Hetzner that times out on every
+ * call can keep one going for longer (two steps of up to four tries, each try several timeouts). A run that goes over meets the token check on its next try, which refuses before anything is
+ * destroyed, so that check is the backstop and the window only a courtesy. The bound exists so a dead run (killed on its last try, which never marks the row) cannot hold the token for ever.
+ */
+export { DELETE_RUN_MAX_MINUTES };
+
+/**
+ * The token's removal is refused while a server of the account is being deleted with that token: that server's last step needs it, and with none connected it would keep billing with
+ * no way to delete it. Only a recent `deleting` row counts (see DELETE_RUN_MAX_MINUTES), and only one whose token is still `ok`: a token Hetzner no longer accepts cannot finish the
+ * delete, and removing it is the way to replace it. Checked at the removal; the delete's own start looks at the token again after it marks the server, so the two can both pass only
+ * inside the same few milliseconds.
+ */
+export async function refuseWhileDeleting(ctx: Pick<ServerCtx, "pool" | "principal">): Promise<void> {
+  const { accountId, userId } = ctx.principal;
+  const busy = await withTenant(ctx.pool, accountId, userId, async (c) => (await c.query(
+    `SELECT 1 FROM managed_servers s
+       JOIN machine_provider_credentials k ON k.account_id = s.account_id AND k.id = s.credential_id
+      WHERE s.account_id = $1 AND s.status = 'deleting' AND s.status_at > now() - make_interval(mins => $2::int)
+        AND k.status = 'ok' AND k.removed_at IS NULL LIMIT 1`, [accountId, DELETE_RUN_MAX_MINUTES])).rows.length > 0);
+  if (busy) throw new ApiError(409, "credential_in_use", "A server is being deleted with this Hetzner token. Wait for the delete to finish, then remove the token");
+}
+
 /** The run's first step. A repo that is already gone (an earlier try got that far) is fine; one that moved to another machine in the meantime is refused, never removed. */
 export async function removeProjectOfServer(ctx: ServerCtx, deps: RunnerCloudDeps, a: ProjectServerArgs): Promise<void> {
-  check(await projectServerState(ctx, a.serverId, a.repoId), true);
+  const state = await projectServerState(ctx, a.serverId, a.repoId);
+  check(state, true);
+  // The route checked this before the run began; a token removed since then ends the run here, before any project part is removed.
+  if (state.at_hetzner) await requireCredential(ctx, state.credential_id);
   try {
     await removeProjectCloudOnly(deps, ctx.principal, a.repoId, a.removalPr);
   } catch (e) {

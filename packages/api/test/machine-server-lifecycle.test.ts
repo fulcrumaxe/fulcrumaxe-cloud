@@ -13,7 +13,7 @@ import { generateToken } from '../src/tokens/format.js';
 import { hashToken } from '../src/tokens/resolve.js';
 import { getServer, listServers, machineServerDeps, type PriceTriple, type ServerCtx } from '../src/machines/servers.js';
 import { NOT_IN_TOKEN_PROJECT_MESSAGE, advanceServer, deleteManagedServer, ensureCredential, markDeleteFailed, sweepOrphans } from '../src/machines/lifecycle.js';
-import { projectServerState, removeProjectOfServer, startProjectServerDelete } from '../src/machines/projectServer.js';
+import { DELETE_RUN_MAX_MINUTES, projectServerState, removeProjectOfServer, startProjectServerDelete } from '../src/machines/projectServer.js';
 import { seedAccountWithMember, seedUser } from './helpers/seed.js';
 
 const BASE = 'http://localhost/api/v1/machine-servers';
@@ -262,7 +262,8 @@ describe('machine servers: lifecycle, orphans and delete', () => {
       expect((await admin.query(`SELECT revoked_at FROM runners WHERE id = $1`, [runnerId])).rows[0].revoked_at).not.toBeNull();
       expect((await admin.query(`SELECT revoked_at FROM runner_provisioning_tokens WHERE id = $1`, [(await row(id)).provisioning_token_id])).rows[0].revoked_at).not.toBeNull();
       expect(world.servers).toHaveLength(1);
-      expect((await row(id)).status).toBe('deleting');
+      // The plain Delete writes its own failure on the row, so nothing is left `deleting` with no run behind it.
+      expect(await row(id)).toMatchObject({ status: 'failed', failure_code: expect.stringMatching(/^[a-z][a-z0-9_]*$/) });
     });
 
     it('also removes the firewall of an adopted orphan, found by the label its server carries', async () => {
@@ -292,7 +293,7 @@ describe('machine servers: lifecycle, orphans and delete', () => {
       world.failNext.push({ status: 500, code: 'server_error', method: 'DELETE', path: '/firewalls/' + (await row(second)).provider_firewall_id });
       const failed = await call(who, 'DELETE', `/${second}`);
       expect(failed.status).toBe(503);
-      expect(await row(second)).toMatchObject({ status: 'deleting' });
+      expect(await row(second)).toMatchObject({ status: 'failed' });
       expect(world.servers).toEqual([]);
       expect((await call(who, 'DELETE', `/${second}`)).status).toBe(200);
       expect(world.firewalls).toEqual([]);
@@ -888,7 +889,7 @@ describe('machine servers: lifecycle, orphans and delete', () => {
         expect((await post(r.who, r.serverId, { repo_id: r.repoId, removal_pr: false })).status).toBe(202);
         expect(seen).toMatchObject([{ status: 'deleting', credential_id: now }]);
         expect((await rebound(r.who.accountId)).length).toBe(1);
-        await deleteManagedServer(ctxOf(r.who), r.serverId, { removeProjects: true });
+        await deleteManagedServer(ctxOf(r.who), r.serverId, { removeProjects: true, fromRun: true });
         expect(await row(r.serverId)).toMatchObject({ status: 'deleted', credential_id: now });
         expect(world.servers).toEqual([]);
         expect((await rebound(r.who.accountId)).length).toBe(1);
@@ -1016,6 +1017,152 @@ describe('machine servers: lifecycle, orphans and delete', () => {
         expect(await row(id)).toMatchObject({ status: 'deleted', credential_id: now });
         expect(await row(dup)).toMatchObject({ status: 'deleted', provider_server_id: null, credential_id: now });
         expect(world.servers).toEqual([]);
+      });
+    });
+
+    describe("the token cannot be removed while a server is being deleted", () => {
+      const CRED = 'http://localhost/api/v1/machine-credentials/hetzner';
+      async function removeToken(who: Who): Promise<Response> {
+        await admin.query("DELETE FROM rate_limit_windows WHERE bucket_key LIKE 'session%'");
+        const h = new Headers({ cookie: `${SESSION_COOKIE_NAME}=${await signSession(who)}` });
+        return handleApiRequest(new Request(CRED, { method: 'DELETE', headers: h }), appUserPool, platformOpsPool, ROUTES);
+      }
+      const connected = async (who: Who) => (await admin.query(`SELECT 1 FROM machine_provider_credentials WHERE account_id = $1 AND removed_at IS NULL`, [who.accountId])).rows.length;
+
+      it('refuses with 409 credential_in_use, keeps the token and the server row, and allows the removal once the delete has ended', async () => {
+        const r = await rig();
+        await admin.query(`UPDATE managed_servers SET status = 'deleting' WHERE id = $1`, [r.serverId]);
+        const res = await removeToken(r.who);
+        expect([res.status, await codeOf(res)]).toEqual([409, 'credential_in_use']);
+        expect(await connected(r.who)).toBe(1);
+        expect((await row(r.serverId)).status).toBe('deleting');
+        await markDeleteFailed(ctxOf(r.who), r.serverId, 'delete_failed');
+        expect((await removeToken(r.who)).status).toBe(204);
+        expect(await connected(r.who)).toBe(0);
+      });
+
+      it("is not blocked by another account's deleting server, and a server that is not deleting does not block", async () => {
+        const mine = await rig();
+        const theirs = await rig();
+        await admin.query(`UPDATE managed_servers SET status = 'deleting' WHERE id = $1`, [theirs.serverId]);
+        expect((await removeToken(mine.who)).status).toBe(204);
+        expect(await connected(theirs.who)).toBe(1);
+      });
+
+      it('a plain Delete that Hetzner refuses (a Read-only token, 403) leaves the row failed with its code, and the token can then be removed', async () => {
+        const who = await owner();
+        const id = await create(who, 'k-ro');
+        world.failNext.push({ status: 403, code: 'forbidden', method: 'DELETE', path: '/servers/' + (await row(id)).provider_server_id });
+        const res = await call(who, 'DELETE', `/${id}`);
+        expect([res.status, await codeOf(res)]).toEqual([409, 'hetzner_forbidden']);
+        expect(await row(id)).toMatchObject({ status: 'failed', failure_code: 'hetzner_forbidden' });
+        expect((await removeToken(who)).status).toBe(204);
+        expect(await connected(who)).toBe(0);
+      });
+
+      describe('a plain Delete never takes over or fails a delete that a run owns (D#845 MC-12 race)', () => {
+        const queued = async (r: Awaited<ReturnType<typeof rig>>) => {
+          machineServerDeps.startServerDelete = async () => undefined;
+          expect((await post(r.who, r.serverId, { repo_id: r.repoId, removal_pr: false })).status).toBe(202);
+        };
+        const statusAt = async (id: string) => (await admin.query<{ at: string }>(`SELECT status_at::text AS at FROM managed_servers WHERE id = $1`, [id])).rows[0]!.at;
+
+        it('after "Also delete server" a plain Delete (with or without remove_projects) is 409 server_deleting, the row stays deleting and untouched, and the token stays held', async () => {
+          const r = await rig();
+          await queued(r);
+          const at = await statusAt(r.serverId);
+          for (const q of ['', '?remove_projects=true']) {
+            const res = await call(r.who, 'DELETE', `/${r.serverId}${q}`);
+            expect([res.status, await codeOf(res)], q).toEqual([409, 'server_deleting']);
+            expect(await row(r.serverId), q).toMatchObject({ status: 'deleting', failure_code: null });
+            expect(await statusAt(r.serverId), q).toBe(at);
+          }
+          expect(deletes()).toEqual([]);
+          const held = await removeToken(r.who);
+          expect([held.status, await codeOf(held)]).toEqual([409, 'credential_in_use']);
+          expect(await connected(r.who)).toBe(1);
+        });
+
+        it('a second plain Delete while the first is still running is refused with 409 server_deleting and writes nothing', async () => {
+          const who = await owner();
+          const id = await create(who, 'k-twice');
+          await admin.query(`UPDATE managed_servers SET status = 'deleting', status_at = now() WHERE id = $1`, [id]);
+          const at = await statusAt(id);
+          const res = await call(who, 'DELETE', `/${id}`);
+          expect([res.status, await codeOf(res)]).toEqual([409, 'server_deleting']);
+          expect(await row(id)).toMatchObject({ status: 'deleting', failure_code: null });
+          expect(await statusAt(id)).toBe(at);
+          expect(deletes()).toEqual([]);
+        });
+
+        it('a delete with no run behind it (older than the window) is still finished by a plain Delete', async () => {
+          const who = await owner();
+          const id = await create(who, 'k-old');
+          await admin.query(`UPDATE managed_servers SET status = 'deleting', status_at = now() - make_interval(mins => $2::int + 1) WHERE id = $1`, [id, DELETE_RUN_MAX_MINUTES]);
+          expect((await call(who, 'DELETE', `/${id}`)).status).toBe(200);
+          expect((await row(id)).status).toBe('deleted');
+        });
+
+        it("the run's own call (fromRun) goes through on its deleting row, and a plain call on the same row is refused", async () => {
+          const who = await owner();
+          const id = await create(who, 'k-run');
+          await admin.query(`UPDATE managed_servers SET status = 'deleting', status_at = now() WHERE id = $1`, [id]);
+          await expect(deleteManagedServer(ctxOf(who), id, { removeProjects: false })).rejects.toMatchObject({ status: 409, code: 'server_deleting' });
+          expect(deletes()).toEqual([]);
+          await expect(deleteManagedServer(ctxOf(who), id, { removeProjects: false, fromRun: true })).resolves.toMatchObject({ status: 'deleted', already_deleted: false });
+          expect((await row(id)).status).toBe('deleted');
+        });
+
+        it('a run that starts between the read and the mark makes the plain Delete answer 409 server_deleting instead of taking the row, and its failure write leaves the run\'s row alone', async () => {
+          const r = await rig();
+          machineServerDeps.removeProjects = async (c, rid) => {
+            await admin.query(`DELETE FROM project_placements WHERE account_id = $1 AND runner_id = $2`, [c.principal.accountId, rid]);
+            await admin.query(`UPDATE managed_servers SET status = 'deleting', status_at = now() WHERE id = $1`, [r.serverId]);
+          };
+          const res = await call(r.who, 'DELETE', `/${r.serverId}?remove_projects=true`);
+          expect([res.status, await codeOf(res)]).toEqual([409, 'server_deleting']);
+          expect(await row(r.serverId)).toMatchObject({ status: 'deleting', failure_code: null });
+          expect(deletes()).toEqual([]);
+        });
+
+        it("a plain Delete's failure write fails only its own mark: a row marked again since is not flipped, the row it marked is", async () => {
+          const who = await owner();
+          const id = await create(who, 'k-own');
+          world.failNext.push({ status: 403, code: 'forbidden', method: 'DELETE', path: '/servers/' + (await row(id)).provider_server_id });
+          let mine: string | undefined;
+          await expect(deleteManagedServer(ctxOf(who), id, { removeProjects: false, onMarked: (at) => { mine = at; } })).rejects.toMatchObject({ code: 'hetzner_forbidden' });
+          expect(mine).toBe(await statusAt(id));
+          await admin.query(`UPDATE managed_servers SET status_at = status_at + interval '1 second' WHERE id = $1`, [id]); // someone else marked it again
+          await markDeleteFailed(ctxOf(who), id, 'hetzner_forbidden', mine);
+          expect(await row(id)).toMatchObject({ status: 'deleting', failure_code: null });
+          await markDeleteFailed(ctxOf(who), id, 'hetzner_forbidden', await statusAt(id));
+          expect(await row(id)).toMatchObject({ status: 'failed', failure_code: 'hetzner_forbidden' });
+        });
+
+      });
+
+      it("a delete that began a moment ago blocks the removal, one older than the run's longest does not", async () => {
+        const r = await rig();
+        await admin.query(`UPDATE managed_servers SET status = 'deleting', status_at = now() - make_interval(mins => $2::int - 1) WHERE id = $1`, [r.serverId, DELETE_RUN_MAX_MINUTES]);
+        expect(await codeOf(await removeToken(r.who))).toBe('credential_in_use');
+        await admin.query(`UPDATE managed_servers SET status_at = now() - make_interval(mins => $2::int + 1) WHERE id = $1`, [r.serverId, DELETE_RUN_MAX_MINUTES]);
+        expect((await removeToken(r.who)).status).toBe(204);
+        expect(await connected(r.who)).toBe(0);
+      });
+
+      it('a deleting server whose token is no longer accepted does not block replacing it', async () => {
+        const r = await rig();
+        await admin.query(`UPDATE managed_servers SET status = 'deleting', status_at = now() WHERE id = $1`, [r.serverId]);
+        await admin.query(`UPDATE machine_provider_credentials SET status = 'invalid' WHERE account_id = $1 AND removed_at IS NULL`, [r.who.accountId]);
+        expect((await removeToken(r.who)).status).toBe(204);
+      });
+
+      it("the run's first step refuses a token removed after the route's check, before it removes any part of the project", async () => {
+        const r = await rig();
+        await removeHetznerCredential({ pool: appUserPool, principal: r.who, kek: machineServerDeps.getKek() });
+        await expect(removeProjectOfServer(ctxOf(r.who), runnerDeps(), { serverId: r.serverId, repoId: r.repoId, removalPr: false })).rejects.toMatchObject({ status: 409, code: 'credential_changed' });
+        expect(await placements(r.who.accountId)).toBe(1);
+        expect(await removedAudit(r.who.accountId)).toEqual([]);
       });
     });
 

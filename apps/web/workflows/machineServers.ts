@@ -5,6 +5,7 @@ import { advanceServer, deleteManagedServer, markDeleteFailed, sweepOrphans } fr
 import { removeProjectOfServer } from "@fx/api/src/machines/projectServer.js";
 import { runnerDeps } from "../lib/runnerRoutes";
 import { wireMachineServerPorts } from "../lib/machineServerPorts";
+import { DELETE_STEP_RETRIES } from "../lib/machineDeleteRetries";
 
 /**
  * D#845 MC-7: the queued jobs of a Hetzner Cloud server. Arguments are plain ids.
@@ -32,10 +33,6 @@ export async function sweepOrphansStep(a: MachineSweepArgs): Promise<{ orphaned:
 }
 
 const ctxOf = (a: MachineDeleteArgs) => ({ pool: appUserPool(), principal: { accountId: a.accountId, userId: a.userId } });
-
-// Retries a delete step gets after its first try: the runtime's default of 3, written down so the last try can be told.
-// (`maxRetries` is not assigned on the steps: doing so breaks the build's workflow graph extraction.)
-const DELETE_STEP_RETRIES = 3;
 
 /**
  * A refusal (a 4xx other than a rate limit) answers the same on every try, so it ends the run; Hetzner or the database being down is tried again. A run that ends is written on the
@@ -66,7 +63,7 @@ export async function deleteServerStep(a: MachineDeleteArgs): Promise<string> {
   wireMachineServerPorts();
   try {
     // No project is left on the server by now; MC-7's delete does the rest (and still refuses `projects_placed` if one came back).
-    return (await deleteManagedServer(ctxOf(a), a.serverId, { removeProjects: false })).status;
+    return (await deleteManagedServer(ctxOf(a), a.serverId, { removeProjects: false, fromRun: true })).status;
   } catch (e) {
     return stopOnRefusal(a, e);
   }

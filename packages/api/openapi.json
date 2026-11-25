@@ -14744,6 +14744,7 @@
       "delete": {
         "operationId": "removeHetznerCredential",
         "summary": "Remove the stored Hetzner token (its servers stay)",
+        "description": "Refused with 409 `credential_in_use` while a server of the account is being deleted: wait for the delete to finish, then remove the token.",
         "security": [
           {
             "session": []
@@ -16182,7 +16183,7 @@
             }
           },
           "409": {
-            "description": "Error `server_creating` (the create is still running; try again), `projects_placed`, `credential_changed` (no Hetzner token is connected), `server_not_in_token_project` (the connected token's Hetzner project does not hold this server) or a `hetzner_*` code. Nothing past the failed step was done; repeat the call to finish.",
+            "description": "Error `server_creating` (the create is still running; try again), `server_deleting` (a delete of this server is already running, or the server changed meanwhile; try again later), `projects_placed`, `credential_changed` (no Hetzner token is connected), `server_not_in_token_project` (the connected token's Hetzner project does not hold this server) or a `hetzner_*` code. Nothing past the failed step was done; repeat the call to finish.",
             "content": {
               "application/json": {
                 "schema": {
