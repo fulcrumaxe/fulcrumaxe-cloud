@@ -14837,10 +14837,21 @@
       "get": {
         "operationId": "listHetznerServers",
         "summary": "The Hetzner Cloud servers of this account that have not been deleted, newest first",
-        "description": "Session only, owner or admin. Each entry has the same fields as one server (`runner_id`, `status_at`, `kept`, `last_seen_at`, and `placed_projects`, the projects placed on its runner, which only an owner or admin is sent). Reads the account's own rows only; it does not open the token and does not call Hetzner.",
+        "description": "Session only, owner or admin. Each entry has the same fields as one server (`runner_id`, `status_at`, `kept`, `last_seen_at`, and `placed_projects`, the projects placed on its runner, which only an owner or admin is sent). Reads the account's own rows only; it does not open the token and does not call Hetzner. With `repo_id`, only the server (not being deleted) whose runner holds that repo's placement: none, or one.",
         "security": [
           {
             "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "repo_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            }
           }
         ],
         "responses": {
@@ -16080,7 +16091,7 @@
       "delete": {
         "operationId": "deleteHetznerServer",
         "summary": "Delete a Hetzner Cloud server of this account: its runner and token are revoked, the server and then its firewall are deleted at Hetzner",
-        "description": "Session only, owner or admin. Safe to repeat: a repeat finishes what an earlier call left, and a server already deleted answers `already_deleted: true` without calling Hetzner. Refused with 409 `projects_placed` while projects are placed on the server's runner, unless `remove_projects=true` (then 409 `project_removal_unavailable` until project removal is available). A server or firewall Hetzner no longer has counts as deleted. A malformed id is 400 `invalid_request`; an id that is not this account's is 404.",
+        "description": "Session only, owner or admin. Safe to repeat: a repeat finishes what an earlier call left, and a server already deleted answers `already_deleted: true` without calling Hetzner. Refused with 409 `projects_placed` while projects are placed on the server's runner, unless `remove_projects=true`, which first removes them (their cloud parts only: the server's disk takes the sandbox and snapshots with it). A server or firewall Hetzner no longer has counts as deleted. A malformed id is 400 `invalid_request`; an id that is not this account's is 404.",
         "security": [
           {
             "session": []
@@ -16171,7 +16182,7 @@
             }
           },
           "409": {
-            "description": "Error `server_creating` (the create is still running; try again), `projects_placed`, `project_removal_unavailable`, `credential_changed` (the token that made the server is no longer the connected one) or a `hetzner_*` code. Nothing past the failed step was done; repeat the call to finish.",
+            "description": "Error `server_creating` (the create is still running; try again), `projects_placed`, `credential_changed` (no Hetzner token is connected), `server_not_in_token_project` (the connected token's Hetzner project does not hold this server) or a `hetzner_*` code. Nothing past the failed step was done; repeat the call to finish.",
             "content": {
               "application/json": {
                 "schema": {
@@ -16628,6 +16639,177 @@
           },
           "500": {
             "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machine-servers/{id}/delete-with-project": {
+      "post": {
+        "operationId": "deleteHetznerServerWithProject",
+        "summary": "Remove a project from fulcrumaxe and delete the Hetzner Cloud server it is placed on, in one queued run",
+        "description": "Session only, owner or admin. Checks and starts, then answers 202: one queued run removes the project's cloud parts (the machine's own parts are skipped: deleting the server deletes its disk, with the sandbox and snapshots), opens the removal PR when `removal_pr` is true, and then deletes the server as `DELETE /api/v1/machine-servers/{id}` does. The server reads `deleting` once the run reaches the delete; deleting it again finishes what a failed run left. A malformed id is 400 `invalid_request`; a server that is not this account's is 404.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "repo_id": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                  },
+                  "removal_pr": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "repo_id",
+                  "removal_pr"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Remove a project from fulcrumaxe and delete the Hetzner Cloud server it is placed on, in one queued run",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "repo_id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "status": {
+                      "type": "string",
+                      "const": "deleting"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "repo_id",
+                    "status"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error `project_not_on_server` (that project is not placed on this server), `server_deleting` (a delete is already running), `credential_changed` (no Hetzner token is connected), `server_not_in_token_project` (the connected token's Hetzner project does not hold this server) or `setup_running` (an install of the project is running). Nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error `not_configured`: the queued run cannot be started here. Nothing was done.",
             "content": {
               "application/json": {
                 "schema": {

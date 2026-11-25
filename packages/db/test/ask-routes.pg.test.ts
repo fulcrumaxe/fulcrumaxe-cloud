@@ -460,6 +460,7 @@ describe('ask_routes (0836)', () => {
       'server.unsealed',
       'machine.login_started',
       'machine.linked_notified',
+      'machine_server.credential_rebound',
     ];
 
     it('audit_write accepts every expected action', async () => {

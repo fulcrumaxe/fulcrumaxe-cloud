@@ -6,6 +6,7 @@ import { createServer, getServer, listServers, quoteServer, type ServerCtx } fro
 import { getCatalog } from "../machines/catalog.js";
 import { deleteManagedServer } from "../machines/lifecycle.js";
 import { deleteOrphan, keepOrphan, rebootManagedServer } from "../machines/actions.js";
+import { startProjectServerDelete } from "../machines/projectServer.js";
 import { mapError } from "./machine-credential.js";
 
 /**
@@ -33,6 +34,9 @@ const idParams = z.object({ id: z.string() });
 const deleteQuery = z.strictObject({ remove_projects: z.enum(["true", "false"]).optional() });
 export const rebootResultSchema = z.object({ id: z.string().uuid(), status: z.string(), rebooting: z.literal(true) });
 export const keepResultSchema = z.object({ id: z.string().uuid(), status: z.literal("orphaned"), kept: z.literal(true), already_kept: z.boolean() });
+const listQuery = z.strictObject({ repo_id: z.string().regex(UUID).optional() });
+const deleteWithProjectBody = z.strictObject({ repo_id: z.string().regex(UUID), removal_pr: z.boolean() });
+const deleteWithProjectResult = z.object({ id: z.string().uuid(), repo_id: z.string().uuid(), status: z.literal("deleting") });
 export const deleteResultSchema = z.object({ id: z.string().uuid(), status: z.literal("deleted"), already_deleted: z.boolean() });
 
 export const serverQuoteSchema = priceSchema.extend({
@@ -88,13 +92,17 @@ export const machineServerRoutes: RouteEntry[] = [
     path: "/api/v1/machine-servers",
     operationId: "listHetznerServers",
     summary: "The Hetzner Cloud servers of this account that have not been deleted, newest first",
-    description: "Session only, owner or admin. Each entry has the same fields as one server (`runner_id`, `status_at`, `kept`, `last_seen_at`, and `placed_projects`, the projects placed on its runner, which only an owner or admin is sent). Reads the account's own rows only; it does not open the token and does not call Hetzner.",
+    description:
+      "Session only, owner or admin. Each entry has the same fields as one server (`runner_id`, `status_at`, `kept`, `last_seen_at`, and `placed_projects`, the projects placed on its runner, which only an owner or admin is sent). Reads the account's own rows only; it does not open the token and does not call Hetzner. " +
+      "With `repo_id`, only the server (not being deleted) whose runner holds that repo's placement: none, or one.",
     idempotency: "never",
     rateClass: "read",
     minRole: "admin",
+    querySchema: listQuery,
     responseSchema: serverListSchema,
-    async handler(ctx) {
-      return { servers: await listServers(serverCtx(ctx)) };
+    async handler(ctx, input) {
+      const q = (input.query ?? {}) as z.infer<typeof listQuery>;
+      return { servers: await listServers(serverCtx(ctx), q.repo_id?.toLowerCase()) };
     },
   },
   {
@@ -200,7 +208,7 @@ export const machineServerRoutes: RouteEntry[] = [
     summary: "Delete a Hetzner Cloud server of this account: its runner and token are revoked, the server and then its firewall are deleted at Hetzner",
     description:
       "Session only, owner or admin. Safe to repeat: a repeat finishes what an earlier call left, and a server already deleted answers `already_deleted: true` without calling Hetzner. " +
-      "Refused with 409 `projects_placed` while projects are placed on the server's runner, unless `remove_projects=true` (then 409 `project_removal_unavailable` until project removal is available). " +
+      "Refused with 409 `projects_placed` while projects are placed on the server's runner, unless `remove_projects=true`, which first removes them (their cloud parts only: the server's disk takes the sandbox and snapshots with it). " +
       "A server or firewall Hetzner no longer has counts as deleted. A malformed id is 400 `invalid_request`; an id that is not this account's is 404.",
     minRole: "admin",
     idempotency: "never",
@@ -210,7 +218,7 @@ export const machineServerRoutes: RouteEntry[] = [
     querySchema: deleteQuery,
     responseSchema: deleteResultSchema,
     extraResponses: {
-      "409": "Error `server_creating` (the create is still running; try again), `projects_placed`, `project_removal_unavailable`, `credential_changed` (the token that made the server is no longer the connected one) or a `hetzner_*` code. Nothing past the failed step was done; repeat the call to finish.",
+      "409": "Error `server_creating` (the create is still running; try again), `projects_placed`, `credential_changed` (no Hetzner token is connected), `server_not_in_token_project` (the connected token's Hetzner project does not hold this server) or a `hetzner_*` code. Nothing past the failed step was done; repeat the call to finish.",
       "503": "Error `leases_not_failed`: the runner was revoked but its runs could not be failed yet; repeat the call. Or a `hetzner_*` code.",
     },
     async handler(ctx, input) {
@@ -292,6 +300,35 @@ export const machineServerRoutes: RouteEntry[] = [
       } catch (err) {
         throw mapError(err);
       }
+    },
+  },
+  {
+    method: "POST",
+    path: "/api/v1/machine-servers/{id}/delete-with-project",
+    operationId: "deleteHetznerServerWithProject",
+    summary: "Remove a project from fulcrumaxe and delete the Hetzner Cloud server it is placed on, in one queued run",
+    description:
+      "Session only, owner or admin. Checks and starts, then answers 202: one queued run removes the project's cloud parts (the machine's own parts are skipped: deleting the server deletes its disk, with the sandbox and snapshots), " +
+      "opens the removal PR when `removal_pr` is true, and then deletes the server as `DELETE /api/v1/machine-servers/{id}` does. The server reads `deleting` once the run reaches the delete; deleting it again finishes what a failed run left. " +
+      "A malformed id is 400 `invalid_request`; a server that is not this account's is 404.",
+    minRole: "admin",
+    idempotency: "never",
+    rateClass: "write",
+    sessionLimit: SESSION_LIMITS.machineServerDelete,
+    successStatus: 202,
+    paramsSchema: idParams,
+    bodySchema: deleteWithProjectBody,
+    responseSchema: deleteWithProjectResult,
+    extraResponses: {
+      "409": "Error `project_not_on_server` (that project is not placed on this server), `server_deleting` (a delete is already running), `credential_changed` (no Hetzner token is connected), `server_not_in_token_project` (the connected token's Hetzner project does not hold this server) or `setup_running` (an install of the project is running). Nothing was done.",
+      "503": "Error `not_configured`: the queued run cannot be started here. Nothing was done.",
+    },
+    async handler(ctx, input) {
+      const id = (input.params as { id: string }).id;
+      if (!UUID.test(id)) throw new ApiError(400, "invalid_request", "the server id is not valid");
+      const b = input.body as z.infer<typeof deleteWithProjectBody>;
+      await startProjectServerDelete(serverCtx(ctx), { serverId: id.toLowerCase(), repoId: b.repo_id.toLowerCase(), removalPr: b.removal_pr });
+      return { id: id.toLowerCase(), repo_id: b.repo_id.toLowerCase(), status: "deleting" as const };
     },
   },
 ];

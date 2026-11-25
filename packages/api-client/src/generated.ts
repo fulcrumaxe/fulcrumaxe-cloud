@@ -1682,7 +1682,9 @@ export interface Operations {
   };
   listHetznerServers: {
     path: undefined;
-    query: undefined;
+    query: {
+      repo_id?: string;
+    };
     body: undefined;
     response: {
       servers: Array<{
@@ -1895,6 +1897,21 @@ export interface Operations {
       id: string;
       status: "deleted";
       already_deleted: boolean;
+    };
+  };
+  deleteHetznerServerWithProject: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: {
+      repo_id: string;
+      removal_pr: boolean;
+    };
+    response: {
+      id: string;
+      repo_id: string;
+      status: "deleting";
     };
   };
   listRepos: {
@@ -7047,7 +7064,7 @@ export const operations = {
     tokenSelfOnly: false,
     idempotency: "never",
     pathParams: [],
-    queryParams: [],
+    queryParams: ["repo_id"],
     hasBody: false,
   },
   createHetznerServer: {
@@ -7137,6 +7154,17 @@ export const operations = {
     pathParams: ["id"],
     queryParams: [],
     hasBody: false,
+  },
+  deleteHetznerServerWithProject: {
+    method: "POST",
+    path: "/api/v1/machine-servers/{id}/delete-with-project",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: true,
   },
   listRepos: {
     method: "GET",

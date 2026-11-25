@@ -11,8 +11,9 @@ import { handleApiRequest } from '../src/handler.js';
 import { ROUTES } from '../src/routes/index.js';
 import { generateToken } from '../src/tokens/format.js';
 import { hashToken } from '../src/tokens/resolve.js';
-import { getServer, machineServerDeps, type PriceTriple, type ServerCtx } from '../src/machines/servers.js';
-import { advanceServer, sweepOrphans } from '../src/machines/lifecycle.js';
+import { getServer, listServers, machineServerDeps, type PriceTriple, type ServerCtx } from '../src/machines/servers.js';
+import { NOT_IN_TOKEN_PROJECT_MESSAGE, advanceServer, deleteManagedServer, ensureCredential, markDeleteFailed, sweepOrphans } from '../src/machines/lifecycle.js';
+import { projectServerState, removeProjectOfServer, startProjectServerDelete } from '../src/machines/projectServer.js';
 import { seedAccountWithMember, seedUser } from './helpers/seed.js';
 
 const BASE = 'http://localhost/api/v1/machine-servers';
@@ -60,7 +61,7 @@ describe('machine servers: lifecycle, orphans and delete', () => {
   afterEach(async () => {
     Object.assign(machineServerDeps, defaults);
     delete machineServerDeps.startStatusWorker;
-    delete machineServerDeps.removeProjects;
+    delete machineServerDeps.startServerDelete;
     await fake.close();
   });
 
@@ -301,6 +302,7 @@ describe('machine servers: lifecycle, orphans and delete', () => {
     it('refuses while a project is placed (409 projects_placed), and removal asked for with no removal wired is 409 project_removal_unavailable; nothing is revoked or deleted', async () => {
       const who = await owner();
       const id = await create(who, 'k4');
+      delete machineServerDeps.removeProjects;
       const runnerId = await link(who, id, true);
       await place(who, runnerId);
       const plain = await call(who, 'DELETE', `/${id}`);
@@ -585,6 +587,479 @@ describe('machine servers: lifecycle, orphans and delete', () => {
       const id = await create(a, 's7');
       expect(await advanceServer(ctxOf(b), id)).toMatchObject({ final: true });
       expect((await row(id)).status).toBe('creating');
+    });
+  });
+
+  /** D#845 MC-12: the removal behind MC-7's seam, and "Also delete server": the route that starts the run, and the run's two steps. */
+  describe('Also delete server (MC-12)', () => {
+    /** A repo placed on the runner, with the engine's sandbox listed (so a removal that did not skip the machine parts would queue a cleanup). */
+    async function placeWithSession(who: Who, runnerId: string): Promise<string> {
+      const repoId = randomUUID();
+      const gh = Math.floor(Math.random() * 2_000_000_000) + 1;
+      await admin.query(`INSERT INTO repos (id, account_id, gh_repo_id, product, gh_owner, gh_name) VALUES ($1, $2, $3, 'team', 'acme', 'widgets')`, [repoId, who.accountId, gh]);
+      await admin.query(`INSERT INTO project_placements (repo_id, account_id, runner_id, placed_by) VALUES ($1, $2, $3, 'person')`, [repoId, who.accountId, runnerId]);
+      await admin.query(`INSERT INTO runner_sandboxes (runner_id, slot, account_id, name, state, created_at, disk_bytes, snapshot_count) VALUES ($1, 0, $2, $3, 'stopped', now() - interval '1 hour', 1000, 1)`, [runnerId, who.accountId, `fx-engine-${gh}`]);
+      return repoId;
+    }
+    const placements = async (accountId: string) => (await admin.query(`SELECT repo_id FROM project_placements WHERE account_id = $1`, [accountId])).rows.length;
+    const cleanups = async (accountId: string) => (await admin.query(`SELECT 1 FROM machine_cleanups WHERE account_id = $1`, [accountId])).rows.length;
+    const jobs = async (accountId: string) => (await admin.query(`SELECT 1 FROM machine_jobs WHERE account_id = $1`, [accountId])).rows.length;
+    const removedAudit = async (accountId: string) => (await admin.query(`SELECT payload FROM audit_log WHERE account_id = $1 AND action = 'project.removed'`, [accountId])).rows.map((r) => r.payload as Record<string, unknown>);
+    async function rig(): Promise<{ who: Who; serverId: string; runnerId: string; repoId: string }> {
+      const who = await owner();
+      const serverId = await create(who, `m12-${randomUUID()}`);
+      const runnerId = await link(who, serverId, true);
+      return { who, serverId, runnerId, repoId: await placeWithSession(who, runnerId) };
+    }
+    /** An install job the machine holds (`issued`) for the repo, with the setup row it names. */
+    async function installJob(who: Who, runnerId: string, repoId: string): Promise<void> {
+      const setup = (await admin.query<{ id: string }>(`INSERT INTO project_setups (account_id, repo_id, runner_id, kind, phase, created_by) VALUES ($1, $2, $3, 'existing', 'done', $4) RETURNING id`, [who.accountId, repoId, runnerId, who.userId])).rows[0]!.id;
+      const jobId = randomUUID();
+      const at = new Date();
+      const expires = new Date(at.getTime() + 600_000);
+      await admin.query(
+        `INSERT INTO machine_jobs (id, account_id, runner_id, repo_id, setup_id, kind, job, state, issued_at, expires_at) VALUES ($1, $2, $3, $4, $5, 'project_setup', $6::jsonb, 'issued', $7, $8)`,
+        [jobId, who.accountId, runnerId, repoId, setup, JSON.stringify({ job: { job_id: jobId, kind: 'project_setup', runner_id: runnerId, setup_id: setup, issued_at: at.toISOString(), expires_at: expires.toISOString() } }), at, expires],
+      );
+    }
+    async function member(accountId: string): Promise<Who> {
+      const userId = randomUUID();
+      await seedUser(admin, userId);
+      await admin.query(`INSERT INTO account_members (account_id, user_id, role) VALUES ($1, $2, 'member')`, [accountId, userId]);
+      return { accountId, userId };
+    }
+    const post = (who: Who | null, serverId: string, body: unknown, headers: Record<string, string> = {}) => call(who, 'POST', `/${serverId}/delete-with-project`, body, headers);
+    const codeOf = async (res: Response): Promise<string> => ((await res.json()) as Reply).error.code;
+    const runnerDeps = (): never => ({ appUserPool, origin: 'https://cloud.example.test', failRunnerLeases: null }) as never;
+
+    it('the delete that asks to remove projects runs ON-16 with no machine parts: the placement goes, no cleanup or job is written even though the machine ran a session, and the server is deleted', async () => {
+      const r = await rig();
+      expect((await call(r.who, 'DELETE', `/${r.serverId}?remove_projects=true`)).status).toBe(200);
+      expect(await placements(r.who.accountId)).toBe(0);
+      expect([await cleanups(r.who.accountId), await jobs(r.who.accountId)]).toEqual([0, 0]);
+      expect(await removedAudit(r.who.accountId)).toEqual([expect.objectContaining({ repo_id: r.repoId, machine_parts: 'none' })]);
+      expect((await row(r.serverId)).status).toBe('deleted');
+      expect(deletes().length).toBeGreaterThan(0);
+    });
+
+    it('a member cannot use the seam: the removal refuses, nothing is removed and nothing is deleted', async () => {
+      const r = await rig();
+      const m = await member(r.who.accountId);
+      await expect(machineServerDeps.removeProjects!(ctxOf(m), r.runnerId)).rejects.toMatchObject({ status: 403, code: 'forbidden' });
+      expect(await placements(r.who.accountId)).toBe(1);
+      expect(deletes()).toEqual([]);
+    });
+
+    it('the route checks, starts the run with exactly the ids it was given, and removes and deletes nothing itself', async () => {
+      const r = await rig();
+      const started: unknown[] = [];
+      machineServerDeps.startServerDelete = async (a) => { started.push(a); };
+      const res = await post(r.who, r.serverId.toUpperCase(), { repo_id: r.repoId.toUpperCase(), removal_pr: true });
+      expect(res.status).toBe(202);
+      expect(await res.json()).toEqual({ id: r.serverId, repo_id: r.repoId, status: 'deleting' });
+      expect(started).toEqual([{ accountId: r.who.accountId, userId: r.who.userId, serverId: r.serverId, repoId: r.repoId, removalPr: true }]);
+      expect(await placements(r.who.accountId)).toBe(1);
+      expect(deletes()).toEqual([]);
+      expect((await row(r.serverId)).status).toBe('deleting'); // marked before the run starts, so the project cannot be placed on it again meanwhile
+    });
+
+    it('refuses before starting anything: 503 with no run to start, 409 for a project that is elsewhere or not placed, 409 while an install runs, and 400, 404 or 422 for bad input', async () => {
+      const r = await rig();
+      const body = { repo_id: r.repoId, removal_pr: false };
+      const noRun = await post(r.who, r.serverId, body);
+      expect([noRun.status, await codeOf(noRun)]).toEqual([503, 'not_configured']);
+      const started: unknown[] = [];
+      machineServerDeps.startServerDelete = async (a) => { started.push(a); };
+      const otherRunner = await link(r.who, await create(r.who, 'm12-b'), true);
+      const elsewhere = await placeWithSession(r.who, otherRunner);
+      const none = randomUUID();
+      await admin.query(`INSERT INTO repos (id, account_id, gh_repo_id, product, gh_owner, gh_name) VALUES ($1, $2, 41, 'team', 'acme', 'unplaced')`, [none, r.who.accountId]);
+      for (const repo of [elsewhere, none]) expect(await codeOf(await post(r.who, r.serverId, { repo_id: repo, removal_pr: false }))).toBe('project_not_on_server');
+      await installJob(r.who, r.runnerId, r.repoId);
+      expect(await codeOf(await post(r.who, r.serverId, body))).toBe('setup_running');
+      expect((await post(r.who, 'not-a-uuid', body)).status).toBe(400);
+      expect((await post(r.who, r.serverId, { repo_id: 'nope', removal_pr: false })).status).toBe(422);
+      expect((await post(r.who, r.serverId, { repo_id: r.repoId })).status).toBe(422);
+      expect((await post(r.who, r.serverId, { ...body, extra: 1 })).status).toBe(422);
+      expect((await post(r.who, randomUUID(), body)).status).toBe(404);
+      expect(started).toEqual([]);
+      expect(await placements(r.who.accountId)).toBe(2);
+    });
+
+    it('is owner or admin on a session only: no session is 401, a member and an API token get 403, and nothing starts', async () => {
+      const r = await rig();
+      machineServerDeps.startServerDelete = async () => { throw new Error('must not start'); };
+      const route = ROUTES.find((x) => x.method === 'POST' && x.path === '/api/v1/machine-servers/{id}/delete-with-project')!;
+      expect(route).toMatchObject({ minRole: 'admin', idempotency: 'never', successStatus: 202, sessionLimit: { name: 'machine-server-delete' } });
+      expect(route.principals).toBeUndefined();
+      const body = { repo_id: r.repoId, removal_pr: false };
+      expect((await post(null, r.serverId, body)).status).toBe(401);
+      expect((await post(await member(r.who.accountId), r.serverId, body)).status).toBe(403);
+      const plaintext = generateToken();
+      await insertApiToken(appUserPool, { accountId: r.who.accountId, createdBy: r.who.userId, tokenHash: hashToken(plaintext), displayHint: 'fxat_...test', scopes: ['read', 'work_items:write'], expiresAt: new Date(Date.now() + 86_400_000) });
+      expect((await post(null, r.serverId, body, { authorization: `Bearer ${plaintext}` })).status).toBe(403);
+      expect(await placements(r.who.accountId)).toBe(1);
+    });
+
+    it("another account's server is a 404 and its project is not named; a repo of another account is not on this server: nothing starts", async () => {
+      const r = await rig();
+      const foreign = await owner();
+      machineServerDeps.startServerDelete = async () => { throw new Error('must not start'); };
+      expect((await post(foreign, r.serverId, { repo_id: r.repoId, removal_pr: false })).status).toBe(404);
+      await expect(projectServerState(ctxOf(foreign), r.serverId, r.repoId)).rejects.toMatchObject({ status: 404 });
+      const fRepo = await placeWithSession(foreign, await link(foreign, await create(foreign, 'm12-f'), true));
+      expect(await codeOf(await post(r.who, r.serverId, { repo_id: fRepo, removal_pr: false }))).toBe('project_not_on_server');
+    });
+
+    it("an install running for another repo of the account does not hold this one back, and the check reads the install of this repo only", async () => {
+      const r = await rig();
+      const twinRunner = await link(r.who, await create(r.who, 'm12-i'), true);
+      const twinRepo = await placeWithSession(r.who, twinRunner);
+      await installJob(r.who, twinRunner, twinRepo);
+      const started: unknown[] = [];
+      machineServerDeps.startServerDelete = async (a) => { started.push(a); };
+      expect((await post(r.who, r.serverId, { repo_id: r.repoId, removal_pr: false })).status).toBe(202);
+      expect(started).toHaveLength(1);
+    });
+
+    it("through the RLS-bypassing client a foreign account id still reads nothing: no server, no placement, no list row, nothing started", async () => {
+      const r = await rig();
+      const foreign = await owner();
+      const bypass = { pool: adminPool, principal: foreign };
+      machineServerDeps.startServerDelete = async () => { throw new Error('must not start'); };
+      await expect(projectServerState(bypass, r.serverId, r.repoId)).rejects.toMatchObject({ status: 404 });
+      await expect(startProjectServerDelete(bypass, { serverId: r.serverId, repoId: r.repoId, removalPr: false })).rejects.toMatchObject({ status: 404 });
+      expect(await listServers(bypass, r.repoId)).toEqual([]);
+      expect((await listServers({ pool: adminPool, principal: r.who }, r.repoId)).map((s) => s.id)).toEqual([r.serverId]);
+      // The same account's own state through the same client reads as it should (the client sees the rows; the predicates are what narrow it).
+      expect(await projectServerState({ pool: adminPool, principal: r.who }, r.serverId, r.repoId)).toMatchObject({ here: true, elsewhere: false });
+    });
+
+    it("the first step removes the cloud parts and skips the machine's: no cleanup, no job, the audit row says none; run again it changes nothing, though the account has another project on another server", async () => {
+      const r = await rig();
+      await placeWithSession(r.who, await link(r.who, await create(r.who, 'm12-o'), true));
+      const a = { serverId: r.serverId, repoId: r.repoId, removalPr: false };
+      await removeProjectOfServer(ctxOf(r.who), runnerDeps(), a);
+      expect(await placements(r.who.accountId)).toBe(1);
+      expect([await cleanups(r.who.accountId), await jobs(r.who.accountId)]).toEqual([0, 0]);
+      expect(await removedAudit(r.who.accountId)).toEqual([expect.objectContaining({ repo_id: r.repoId, delete_sandbox: false, machine_parts: 'none' })]);
+      await removeProjectOfServer(ctxOf(r.who), runnerDeps(), a);
+      expect(await removedAudit(r.who.accountId)).toHaveLength(1);
+    });
+
+    it('the first step never removes a project that has moved to another machine: it refuses and leaves everything', async () => {
+      const r = await rig();
+      const other = await link(r.who, await create(r.who, 'm12-c'), true);
+      await admin.query(`UPDATE project_placements SET runner_id = $2 WHERE repo_id = $1`, [r.repoId, other]);
+      await expect(removeProjectOfServer(ctxOf(r.who), runnerDeps(), { serverId: r.serverId, repoId: r.repoId, removalPr: false })).rejects.toMatchObject({ status: 409, code: 'project_not_on_server' });
+      expect(await placements(r.who.accountId)).toBe(1);
+      expect(await removedAudit(r.who.accountId)).toEqual([]);
+    });
+
+    it("the run's two steps in order remove the project and then delete the server at Hetzner; a repeat of either finishes and does not repeat", async () => {
+      const r = await rig();
+      const a = { serverId: r.serverId, repoId: r.repoId, removalPr: false };
+      await removeProjectOfServer(ctxOf(r.who), runnerDeps(), a);
+      expect(deletes()).toEqual([]);
+      expect((await deleteManagedServer(ctxOf(r.who), r.serverId, { removeProjects: false })).already_deleted).toBe(false);
+      expect(world.servers).toEqual([]);
+      expect((await row(r.serverId)).status).toBe('deleted');
+      expect((await admin.query(`SELECT revoked_at FROM runners WHERE id = $1`, [r.runnerId])).rows[0].revoked_at).not.toBeNull();
+      expect((await deleteManagedServer(ctxOf(r.who), r.serverId, { removeProjects: false })).already_deleted).toBe(true);
+      expect(await removedAudit(r.who.accountId)).toHaveLength(1);
+    });
+
+    it('the list narrows to the server that holds the repo, hides one already being deleted, and reads nothing across accounts', async () => {
+      const r = await rig();
+      const twin = await create(r.who, 'm12-t');
+      const twinRepo = await placeWithSession(r.who, await link(r.who, twin, true));
+      expect((await listServers(ctxOf(r.who), r.repoId)).map((s) => s.id)).toEqual([r.serverId]);
+      expect((await listServers(ctxOf(r.who), twinRepo)).map((s) => s.id)).toEqual([twin]);
+      expect((await listServers(ctxOf(r.who))).map((s) => s.id).sort()).toEqual([r.serverId, twin].sort());
+      expect(await listServers(ctxOf(await owner()), r.repoId)).toEqual([]);
+      const viaRoute = await call(r.who, 'GET', `?repo_id=${r.repoId}`);
+      expect(((await viaRoute.json()) as { servers: { id: string }[] }).servers.map((s) => s.id)).toEqual([r.serverId]);
+      expect((await call(r.who, 'GET', '?repo_id=nope')).status).toBe(422);
+      await admin.query(`UPDATE managed_servers SET status = 'deleting' WHERE id = $1`, [r.serverId]);
+      expect(await listServers(ctxOf(r.who), r.repoId)).toEqual([]);
+    });
+
+    describe('a token that is not the one that made the server', () => {
+      const probe = () => createHetznerCredentialProbe({ maxRetries: 0, testTarget: { lookup: fake.lookup, port: fake.port, ca: fake.ca } });
+      /** `removed`: no token connected. `reconnected`: a token connected again afterwards (a different credential). */
+      async function change(who: Who, how: 'removed' | 'reconnected'): Promise<void> {
+        await removeHetznerCredential({ pool: appUserPool, principal: who, kek: machineServerDeps.getKek() });
+        if (how === 'reconnected') await connectHetznerCredential({ pool: appUserPool, principal: who, kek: machineServerDeps.getKek(), probe: probe() }, { token });
+        world.requests.length = 0;
+      }
+      /** Nothing was written and nothing was asked of Hetzner: the project is placed, the runner is live, the row is as it was. */
+      async function untouched(r: { who: Who; serverId: string; runnerId: string }): Promise<void> {
+        expect(await placements(r.who.accountId)).toBe(1);
+        expect((await admin.query(`SELECT revoked_at FROM runners WHERE id = $1`, [r.runnerId])).rows[0].revoked_at).toBeNull();
+        expect((await row(r.serverId)).status).toBe('creating');
+        expect((await admin.query(`SELECT 1 FROM managed_servers WHERE id = $1 AND provisioning_token_id IS NOT NULL`, [r.serverId])).rows).toHaveLength(1);
+        expect(await removedAudit(r.who.accountId)).toEqual([]);
+        expect(world.requests).toEqual([]);
+      }
+      for (const how of ['removed'] as const) {
+        it(`${how}: the plain delete that removes projects refuses with 409 credential_changed before removing the project or revoking anything`, async () => {
+          const r = await rig();
+          await change(r.who, how);
+          const res = await call(r.who, 'DELETE', `/${r.serverId}?remove_projects=true`);
+          expect([res.status, await codeOf(res)]).toEqual([409, 'credential_changed']);
+          await untouched(r);
+        });
+
+        it(`${how}: the route refuses with 409 credential_changed before it marks the server or starts the run`, async () => {
+          const r = await rig();
+          machineServerDeps.startServerDelete = async () => { throw new Error('must not start'); };
+          await change(r.who, how);
+          const res = await post(r.who, r.serverId, { repo_id: r.repoId, removal_pr: false });
+          expect([res.status, await codeOf(res)]).toEqual([409, 'credential_changed']);
+          await untouched(r);
+        });
+
+        it(`${how}: the run's second step refuses before it revokes the runner or the token, and the project is not removed by it`, async () => {
+          const r = await rig();
+          await change(r.who, how);
+          await expect(deleteManagedServer(ctxOf(r.who), r.serverId, { removeProjects: true })).rejects.toMatchObject({ status: 409, code: 'credential_changed' });
+          await untouched(r);
+        });
+      }
+    });
+
+    /** Ruling 99: a reconnect makes a new credential id, so Delete asks Hetzner through the CURRENT token and follows it only when both of our labels match. */
+    describe('a different token is connected: the server follows it only when it is in that token\'s Hetzner project', () => {
+      const probeOf = (f: StrictHetzner) => createHetznerCredentialProbe({ maxRetries: 0, testTarget: { lookup: f.lookup, port: f.port, ca: f.ca } });
+      const extra: StrictHetzner[] = [];
+      afterEach(async () => { for (const f of extra.splice(0)) await f.close(); });
+      const reconnect = async (who: Who): Promise<string> => {
+        await removeHetznerCredential({ pool: appUserPool, principal: who, kek: machineServerDeps.getKek() });
+        await connectHetznerCredential({ pool: appUserPool, principal: who, kek: machineServerDeps.getKek(), probe: probeOf(fake) }, { token });
+        world.requests.length = 0;
+        return credOf(who.accountId);
+      };
+      /** Another Hetzner project: its own world (no servers) and its own token, connected in place of the first. */
+      async function otherProject(who: Who): Promise<{ world: FakeWorld; cred: string }> {
+        const t2 = newToken();
+        const w2 = newWorld([t2]);
+        const f2 = await startStrictHetzner(w2);
+        extra.push(f2);
+        machineServerDeps.hetznerOptions = () => ({ maxRetries: 0, timeoutMs: 2000, sleep: async () => undefined, testTarget: { lookup: f2.lookup, port: f2.port, ca: f2.ca } });
+        await removeHetznerCredential({ pool: appUserPool, principal: who, kek: machineServerDeps.getKek() });
+        await connectHetznerCredential({ pool: appUserPool, principal: who, kek: machineServerDeps.getKek(), probe: probeOf(f2) }, { token: t2 });
+        w2.requests.length = 0;
+        world.requests.length = 0;
+        return { world: w2, cred: await credOf(who.accountId) };
+      }
+      const rebound = async (accountId: string) => (await admin.query(`SELECT payload FROM audit_log WHERE account_id = $1 AND action = 'machine_server.credential_rebound'`, [accountId])).rows.map((r) => r.payload as Record<string, unknown>);
+      /** Nothing changed: the row keeps its credential and status, no rebind is written, the runner is live and the project is placed. */
+      async function unchanged(r: { who: Who; serverId: string; runnerId: string }, oldCred: string): Promise<void> {
+        expect(await row(r.serverId)).toMatchObject({ credential_id: oldCred, status: 'creating' });
+        expect(await rebound(r.who.accountId)).toEqual([]);
+        expect(await placements(r.who.accountId)).toBe(1);
+        expect((await admin.query(`SELECT revoked_at FROM runners WHERE id = $1`, [r.runnerId])).rows[0].revoked_at).toBeNull();
+        expect(await removedAudit(r.who.accountId)).toEqual([]);
+        expect(deletes()).toEqual([]);
+        expect(world.servers).toHaveLength(1);
+      }
+      const labelsOf = (x: unknown): Record<string, string> => (x as { labels: Record<string, string> }).labels;
+      const credentialOf = async (serverId: string): Promise<string> => (await row(serverId)).credential_id as string;
+      const killedRow = (id: string) => admin.query(`UPDATE managed_servers SET provider_server_id = NULL, provider_firewall_id = NULL, public_ipv4 = NULL, create_action_id = NULL, created_at = now() - interval '2 hours', status_at = now() - interval '2 hours' WHERE id = $1`, [id]);
+
+      it('the same token connected again: the plain delete that removes projects works, the row follows the new credential, and one audit row says so', async () => {
+        const r = await rig();
+        const oldCred = await credentialOf(r.serverId);
+        const now = await reconnect(r.who);
+        expect(now).not.toBe(oldCred);
+        const res = await call(r.who, 'DELETE', `/${r.serverId}?remove_projects=true`);
+        expect([res.status, ((await res.json()) as Reply).status]).toEqual([200, 'deleted']);
+        expect(await row(r.serverId)).toMatchObject({ status: 'deleted', credential_id: now });
+        expect(world.servers).toEqual([]);
+        expect(world.firewalls).toEqual([]);
+        expect(await rebound(r.who.accountId)).toEqual([{ server_id: r.serverId, from_credential_id: oldCred, credential_id: now }]);
+      });
+
+      it('the route follows the token before it marks the server or answers 202, and the run then finds the current credential', async () => {
+        const r = await rig();
+        const now = await reconnect(r.who);
+        const seen: unknown[] = [];
+        machineServerDeps.startServerDelete = async () => { seen.push(await row(r.serverId)); };
+        expect((await post(r.who, r.serverId, { repo_id: r.repoId, removal_pr: false })).status).toBe(202);
+        expect(seen).toMatchObject([{ status: 'deleting', credential_id: now }]);
+        expect((await rebound(r.who.accountId)).length).toBe(1);
+        await deleteManagedServer(ctxOf(r.who), r.serverId, { removeProjects: true });
+        expect(await row(r.serverId)).toMatchObject({ status: 'deleted', credential_id: now });
+        expect(world.servers).toEqual([]);
+        expect((await rebound(r.who.accountId)).length).toBe(1);
+      });
+
+      it('a row with no Hetzner ids (a killed create) is found by the same labels, and follows the token', async () => {
+        const who = await owner();
+        const id = await create(who, 'rb-killed');
+        await killedRow(id);
+        const now = await reconnect(who);
+        expect((await call(who, 'DELETE', `/${id}`)).status).toBe(200);
+        expect(await row(id)).toMatchObject({ status: 'deleted', credential_id: now });
+        expect(world.servers).toEqual([]);
+        expect(world.firewalls).toEqual([]);
+        expect((await rebound(who.accountId)).length).toBe(1);
+      });
+
+      it('the token of another Hetzner project: all three paths refuse 409 server_not_in_token_project with the sentence, and nothing is changed or deleted anywhere', async () => {
+        const base = machineServerDeps.hetznerOptions;
+        for (const path of ['plain', 'route', 'run'] as const) {
+          machineServerDeps.hetznerOptions = base;
+          const r = await rig();
+          const oldCred = await credentialOf(r.serverId);
+          machineServerDeps.startServerDelete = async () => { throw new Error('must not start'); };
+          const other = await otherProject(r.who);
+          const outcome = path === 'plain' ? await call(r.who, 'DELETE', `/${r.serverId}?remove_projects=true`)
+            : path === 'route' ? await post(r.who, r.serverId, { repo_id: r.repoId, removal_pr: false }) : null;
+          if (outcome !== null) {
+            const body = (await outcome.json()) as { error: { code: string; message: string } };
+            expect([outcome.status, body.error.code, body.error.message]).toEqual([409, 'server_not_in_token_project', NOT_IN_TOKEN_PROJECT_MESSAGE]);
+          } else {
+            await expect(deleteManagedServer(ctxOf(r.who), r.serverId, { removeProjects: true })).rejects.toMatchObject({ status: 409, code: 'server_not_in_token_project', message: NOT_IN_TOKEN_PROJECT_MESSAGE });
+          }
+          await unchanged(r, oldCred);
+          expect(other.world.requests.filter((q) => q.method !== 'GET')).toEqual([]);
+          expect(other.world.servers).toEqual([]);
+          world.servers.length = 0;
+        }
+      });
+
+      it('a server at Hetzner that does not carry both of our labels is never followed or deleted: each label compared on its own, by id and by label lookup', async () => {
+        const cases: Array<[string, (w: FakeWorld) => void]> = [
+          ['the fx-server label names another row', (w) => { labelsOf(w.servers[0])['fx-server'] = randomUUID(); }],
+          ['the fx-server label is gone', (w) => { delete labelsOf(w.servers[0])['fx-server']; }],
+          ['the managed label is gone', (w) => { delete labelsOf(w.servers[0])['fx-managed']; }],
+          ['the managed label has another value', (w) => { labelsOf(w.servers[0])['fx-managed'] = '0'; }],
+          ['Hetzner no longer has the server', (w) => { w.servers.length = 0; }],
+        ];
+        for (const [why, mutate] of cases) {
+          const r = await rig();
+          const oldCred = await credentialOf(r.serverId);
+          await reconnect(r.who);
+          mutate(world);
+          const res = await call(r.who, 'DELETE', `/${r.serverId}`);
+          expect([why, res.status, await codeOf(res)]).toEqual([why, 409, 'server_not_in_token_project']);
+          expect(await row(r.serverId)).toMatchObject({ credential_id: oldCred, status: 'creating' });
+          expect(await rebound(r.who.accountId)).toEqual([]);
+          expect(deletes()).toEqual([]);
+          world.servers.length = 0;
+          world.firewalls.length = 0;
+        }
+        // A row with no ids is found by label: the server and the firewall carrying only part of our labels do not count.
+        const partial: Array<[string, (labels: Record<string, string>) => void]> = [
+          ['no managed label', (l) => { delete l['fx-managed']; }],
+          ['another managed value', (l) => { l['fx-managed'] = '0'; }],
+        ];
+        for (const [why, mutate] of partial) {
+          const who = await owner();
+          const id = await create(who, `rb-lbl-${why.length}`);
+          await killedRow(id);
+          const oldCred = await credentialOf(id);
+          await reconnect(who);
+          mutate(labelsOf(world.servers[0]));
+          mutate(labelsOf(world.firewalls[0]));
+          const res = await call(who, 'DELETE', `/${id}`);
+          expect([why, res.status, await codeOf(res)]).toEqual([why, 409, 'server_not_in_token_project']);
+          expect(await credentialOf(id)).toBe(oldCred);
+          expect(await rebound(who.accountId)).toEqual([]);
+          expect(deletes()).toEqual([]);
+          world.servers.length = 0;
+          world.firewalls.length = 0;
+        }
+      });
+
+      it('a row with no ids whose project holds only a firewall of ours follows the token: the firewall is the evidence', async () => {
+        const who = await owner();
+        const id = await create(who, 'rb-fw');
+        await killedRow(id);
+        const now = await reconnect(who);
+        world.servers.length = 0;
+        expect((await call(who, 'DELETE', `/${id}`)).status).toBe(200);
+        expect(await row(id)).toMatchObject({ status: 'deleted', credential_id: now });
+        expect(world.firewalls).toEqual([]);
+      });
+
+      it('the update names the old credential: a row that moved to another credential while Hetzner was asked is not touched, and no audit row is written', async () => {
+        const r = await rig();
+        const oldCred = await credentialOf(r.serverId);
+        await reconnect(r.who);
+        const moved = (await admin.query<{ id: string }>(`INSERT INTO machine_provider_credentials (account_id, provider, kek_version, token_hint, created_by, removed_at, removed_by) VALUES ($1, 'hetzner_cloud', 1, 'zz99', $2, now(), $2) RETURNING id`, [r.who.accountId, r.who.userId])).rows[0]!.id;
+        // The row moves while the call to Hetzner is being made (the lookup of the connection is the first thing that call does).
+        machineServerDeps.hetznerOptions = () => ({ maxRetries: 0, timeoutMs: 2000, sleep: async () => undefined, testTarget: { lookup: async () => { await admin.query(`UPDATE managed_servers SET credential_id = $2 WHERE id = $1`, [r.serverId, moved]); return fake.lookup(); }, port: fake.port, ca: fake.ca } });
+        await expect(ensureCredential(ctxOf(r.who), { id: r.serverId, credential_id: oldCred, provider_server_id: (await row(r.serverId)).provider_server_id })).rejects.toMatchObject({ status: 409, code: 'credential_changed' });
+        expect(await credentialOf(r.serverId)).toBe(moved);
+        expect(await rebound(r.who.accountId)).toEqual([]);
+      });
+
+      it("another account's row is never rebound, even through the RLS-bypassing client: the update names the account", async () => {
+        const r = await rig();
+        const oldCred = await credentialOf(r.serverId);
+        const foreign = await owner();
+        await expect(ensureCredential({ pool: adminPool, principal: foreign }, { id: r.serverId, credential_id: oldCred, provider_server_id: (await row(r.serverId)).provider_server_id })).rejects.toMatchObject({ status: 409, code: 'credential_changed' });
+        expect(await credentialOf(r.serverId)).toBe(oldCred);
+        expect(await rebound(r.who.accountId)).toEqual([]);
+        expect(await rebound(foreign.accountId)).toEqual([]);
+      });
+
+      it("an orphan row the new token's sweep already made for the same server is retired, so the row with the history takes the server and Delete works", async () => {
+        const who = await owner();
+        const id = await create(who, 'rb-dup');
+        const now = await reconnect(who);
+        expect(await sweepOrphans(ctxOf(who), now)).toMatchObject({ orphaned: 1 });
+        const dup = (await admin.query<{ id: string }>(`SELECT id FROM managed_servers WHERE account_id = $1 AND status = 'orphaned'`, [who.accountId])).rows[0]!.id;
+        expect((await call(who, 'DELETE', `/${id}`)).status).toBe(200);
+        expect(await row(id)).toMatchObject({ status: 'deleted', credential_id: now });
+        expect(await row(dup)).toMatchObject({ status: 'deleted', provider_server_id: null, credential_id: now });
+        expect(world.servers).toEqual([]);
+      });
+    });
+
+    it('the route marks the server deleting before the run starts: a second request is refused, the lookup hides it, and a run that cannot start puts the status back', async () => {
+      const r = await rig();
+      const seen: string[] = [];
+      machineServerDeps.startServerDelete = async () => { seen.push((await row(r.serverId)).status); };
+      expect((await post(r.who, r.serverId, { repo_id: r.repoId, removal_pr: false })).status).toBe(202);
+      expect(seen).toEqual(['deleting']);
+      expect(await codeOf(await post(r.who, r.serverId, { repo_id: r.repoId, removal_pr: false }))).toBe('server_deleting');
+      expect(await listServers(ctxOf(r.who), r.repoId)).toEqual([]);
+      const q = await rig();
+      machineServerDeps.startServerDelete = async () => { throw new Error('refused'); };
+      expect((await post(q.who, q.serverId, { repo_id: q.repoId, removal_pr: false })).status).toBe(500);
+      expect((await row(q.serverId)).status).toBe('creating');
+    });
+
+    it('a run that ends without deleting is written on the row: a deleting row becomes failed with the closed code, any other row is left alone, and a code that is not a word is delete_failed', async () => {
+      const r = await rig();
+      await markDeleteFailed(ctxOf(r.who), r.serverId, 'hetzner_unauthorized');
+      expect(await row(r.serverId)).toMatchObject({ status: 'creating', failure_code: null });
+      await admin.query(`UPDATE managed_servers SET status = 'deleting' WHERE id = $1`, [r.serverId]);
+      await markDeleteFailed(ctxOf(r.who), r.serverId, 'hetzner_unauthorized');
+      expect(await row(r.serverId)).toMatchObject({ status: 'failed', failure_code: 'hetzner_unauthorized' });
+      await admin.query(`UPDATE managed_servers SET status = 'deleting', failure_code = NULL WHERE id = $1`, [r.serverId]);
+      await markDeleteFailed(ctxOf(r.who), r.serverId, 'Not a word!');
+      expect(await row(r.serverId)).toMatchObject({ status: 'failed', failure_code: 'delete_failed' });
+      // Delete finishes what a failed run left (the runner is revoked and the server goes).
+      expect((await call(r.who, 'DELETE', `/${r.serverId}?remove_projects=true`)).status).toBe(200);
+      expect((await row(r.serverId)).status).toBe('deleted');
+      const other = await rig();
+      await admin.query(`UPDATE managed_servers SET status = 'deleting' WHERE id = $1`, [other.serverId]);
+      await markDeleteFailed(ctxOf(r.who), other.serverId, 'hetzner_unauthorized'); // another account's row: untouched
+      expect((await row(other.serverId)).status).toBe('deleting');
+    });
+
+    it('a server with no runner has no project to find, and the guard refuses a repo that is not on it', async () => {
+      const who = await owner();
+      const id = await create(who, 'm12-n');
+      const repoId = randomUUID();
+      await admin.query(`INSERT INTO repos (id, account_id, gh_repo_id, product, gh_owner, gh_name) VALUES ($1, $2, 42, 'team', 'acme', 'w')`, [repoId, who.accountId]);
+      expect(await listServers(ctxOf(who), repoId)).toEqual([]);
+      machineServerDeps.startServerDelete = async () => { throw new Error('must not start'); };
+      await expect(startProjectServerDelete(ctxOf(who), { serverId: id, repoId, removalPr: false })).rejects.toMatchObject({ status: 409, code: 'project_not_on_server' });
     });
   });
 });

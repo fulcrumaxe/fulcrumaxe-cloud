@@ -391,6 +391,7 @@ export {
   type RepoRemoval,
 } from "./machineCleanups.js";
 export {
+  removeProjectCloudOnly,
   removeProjectIn,
   removeProjectRoute,
   removeProjectsOnRunner,

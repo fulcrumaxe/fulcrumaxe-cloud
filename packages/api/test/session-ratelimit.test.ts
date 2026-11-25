@@ -354,6 +354,7 @@ describe('session rate limits', () => {
         rebootHetznerServer: 'machine-server-reboot',
         keepOrphanedServer: 'machine-server-keep',
         deleteOrphanedServer: 'machine-server-delete',
+        deleteHetznerServerWithProject: 'machine-server-delete',
         createPortalSession: 'stripe',
         createCheckoutSession: 'stripe',
         setEngineQuantity: 'stripe',
