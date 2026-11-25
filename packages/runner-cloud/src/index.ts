@@ -240,6 +240,11 @@ export {
   type StartedSurvey,
 } from "./surveyJobs.js";
 export {
+  clampRetryAfter,
+  engineLeaseFor,
+  runnersTakeEngineLease,
+} from "./engineLease.js";
+export {
   issueSystemStops,
   type SystemStopDeps,
   type SystemStopPass,

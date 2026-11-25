@@ -36,7 +36,7 @@ import { createLiveMicrovm, type LiveMicrovm, type LiveMicrovmParts } from "../v
 import { createSetupVmParts, createVmClaimGuard, createVmJobDeps, runEventHooks, type VmRunBlock } from "../daemon/vmJobDeps.js";
 import { createProjectSetupHandler, setupHandlerFor } from "../setup/projectSetup.js";
 import { createHostSetupVm, type HostGuestDeps } from "../setup/hostGuest.js";
-import { createEngineSessionHandlers } from "../engineSession/lifecycle.js";
+import { createEngineLeaseGuard, createEngineSessionHandlers, createSessionLock, lockSessionHandlers, sessionStopperOf } from "../engineSession/lifecycle.js";
 import { createStandardSessionParts, sessionHandlersFor } from "../engineSession/standardTier.js";
 import { createOperateMark } from "../engineSession/operateMark.js";
 import { createRepoLookup } from "../engineSession/repoLookup.js";
@@ -71,7 +71,7 @@ import { computeConflictAttestation } from "../daemon/conflictAttest.js";
 import { createPlaneBaseLedger, createPlanePushHook, type PlaneBaseLedger } from "../daemon/planePush.js";
 import { createPlanePushGithub } from "../daemon/planePushGithub.js";
 import { createPlaneMergeHandler } from "../daemon/planeMerge.js";
-import { CONFLICT_FACTS_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, HEARTBEAT_INVENTORY_HELLO_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, MACHINE_LOGIN_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, MEMORY_LIMIT_CAPABILITY, ORDERED_FACTS_CAPABILITY, OVERLAP_FACTS_CAPABILITY, PROJECT_SETUP_CAPABILITY, SANDBOX_COMMAND_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, type LimitedBy, type PreflightCode } from "@fulcrumaxe/runner-protocol";
+import { CONFLICT_FACTS_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, ENGINE_LEASE_HELLO_CAPABILITY, HEARTBEAT_INVENTORY_HELLO_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, MACHINE_LOGIN_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, MEMORY_LIMIT_CAPABILITY, ORDERED_FACTS_CAPABILITY, OVERLAP_FACTS_CAPABILITY, PROJECT_SETUP_CAPABILITY, SANDBOX_COMMAND_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, type LimitedBy, type PreflightCode } from "@fulcrumaxe/runner-protocol";
 import { createGitTransport, createPublicHeadsReader } from "@fulcrumaxe/runner-protocol/planePush";
 import { createNixShell, findNix, findTool, identityVia } from "../daemon/nixShell.js";
 import { createDepsInstaller } from "../daemon/depsInstall.js";
@@ -438,6 +438,9 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     let cloudPreflight = false;
     // D#587 FU-179: true once a hello reply listed `heartbeat_inventory`; only then does a heartbeat carry the sandbox inventory.
     let cloudHeartbeatInventory = false;
+    // D#845 ON-13c3: what the cloud's replies say about the engine session's lease, and the look that stops the session when a lease ran out and was not renewed. Armed (and advertised) once this machine has a stop path.
+    const leaseGuard = createEngineLeaseGuard({ now: () => clock.now(), log: (line) => ctx.out(line) });
+    let engineLeaseArmed = false;
     // D#845 ON-8c: the machine-job dispatcher is built once the client exists; the host load reads its count of setups in hand through this.
     let machineJobDispatcher: MachineJobDispatcher | undefined;
     // D#749 VERIFY-SIGNIN-EXPIRY: each ordinary claim says whether the saved verify sign-in is still good (dates only; nothing of the sign-in itself is read). Nothing is said while no verify address is set here.
@@ -451,7 +454,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     /** The live stack only when this run's engine is `microvm`: an `os_sandbox` runner reports no inventory and takes no signed VM command. */
     const vm = engine === "microvm" ? built : undefined;
     // One reporter serves the claim and the heartbeat, so the two share what was last sent. A host with no VM stack has none.
-    const inventoryReporter = vm !== undefined && readHostFacts(engine)?.sandbox_engine === "microvm" ? createInventoryReporter({ source: daemonInventorySource(vm.sdk), now: ctx.now }) : undefined;
+    const inventoryReporter = vm !== undefined && readHostFacts(engine)?.sandbox_engine === "microvm" ? createInventoryReporter({ source: daemonInventorySource(vm.sdk), now: ctx.now, every: () => leaseGuard.holding() }) : undefined;
     // D#845 MC-8b: the Claude sign-in link. The receiver and the runner it drives are built before the client, and reach it only through these two calls (made later, from a claim).
     const claudeLogin = createClaudeLoginRunner({
       host: host.claudeLogin,
@@ -476,7 +479,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       },
       log: (line) => ctx.out(line),
     });
-    const client = createRunnerClient({ machineCommands: createMachineCommandReceiver({ keyring, runnerId: registration.runner_id, now: ctx.now, login: claudeLogin, log: (line) => ctx.out(line), statePath: path.join(ctx.stateDir, "machine-commands-state.json"), uid: ctx.uid }), origin: registration.cloud_origin, key, now: ctx.now, fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass), protocolVersion: RUNNER_PROTOCOL_VERSION, sandboxCommands: createSandboxCommandReceiver({ keyring, runnerId: registration.runner_id, now: ctx.now, log: (line) => ctx.out(line), statePath: path.join(ctx.stateDir, "sandbox-commands-state.json"), uid: ctx.uid, ...(vm === undefined ? {} : { lifecycle: daemonSandboxLifecycle(vm.sdk) }) }), ...(inventoryReporter === undefined ? {} : { sandboxInventory: inventoryReporter, heartbeatInventory: () => cloudHeartbeatInventory }),
+    const client = createRunnerClient({ engineLease: leaseGuard, machineCommands: createMachineCommandReceiver({ keyring, runnerId: registration.runner_id, now: ctx.now, login: claudeLogin, log: (line) => ctx.out(line), statePath: path.join(ctx.stateDir, "machine-commands-state.json"), uid: ctx.uid }), origin: registration.cloud_origin, key, now: ctx.now, fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass), protocolVersion: RUNNER_PROTOCOL_VERSION, sandboxCommands: createSandboxCommandReceiver({ keyring, runnerId: registration.runner_id, now: ctx.now, log: (line) => ctx.out(line), statePath: path.join(ctx.stateDir, "sandbox-commands-state.json"), uid: ctx.uid, ...(vm === undefined ? {} : { lifecycle: daemonSandboxLifecycle(vm.sdk) }) }), ...(inventoryReporter === undefined ? {} : { sandboxInventory: inventoryReporter, heartbeatInventory: () => cloudHeartbeatInventory }),
       // D#845 ON-1b: the machine's load rides the claim, but only for a build that advertises `project_setup_v1` (none does yet, so today the claim body is unchanged). No setup runs here yet: the count is 0.
       ...((RUNNER_BUILD_CAPABILITIES as readonly string[]).includes(PROJECT_SETUP_CAPABILITY) ? { hostLoad: createHostLoadReporter({ probe: hooks.probe ?? realResourceProbe({ platform: host.platform, diskPaths: [workspaceRoot, path.dirname(mirrorsRoot)], vmStatText: () => vmStat }), setupsRunning: () => machineJobDispatcher?.setupsRunning() ?? 0, now: ctx.now }) } : {}), verifySignIn: () => readSignInState({ settings: () => loadSettings(stateDir).verify, home, now: () => ctx.now().getTime() }) });
     // macOS: a resumed workspace's ignored build output is purged in a child under sandbox-exec that can write below the workspace only (D#6 RESUME-CLEAN-MAC).
@@ -626,6 +629,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     const autoUpdate = updater === undefined ? undefined : createAutoUpdate({ updater, hasLease: () => jobs.any(), now: ctx.now });
     const detach = abortOnSignals(stopped, host.signals);
     let bridge: EngineBridge | undefined;
+    const leaseEnd = new AbortController();
+    let leaseLook: Promise<void> | undefined;
     // macOS only: libuv's free-memory figure counts free pages alone, so the latest `vm_stat` (run through the engine's process start) gives the usable memory.
     let vmStat: string | undefined;
     const refreshVmStat = async (): Promise<void> => {
@@ -733,7 +738,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
         return helloBody(facts);
       };
       // `kvm_fact_v1` is declared only by a runner that has a KVM reading to send (a plain present or absent), so a runner without one says what it always said.
-      const capabilityList = async () => [...RUNNER_BUILD_CAPABILITIES.filter((c) => c !== MACHINE_LOGIN_CAPABILITY || host.managedServer?.() === true), SANDBOX_COMMAND_CAPABILITY, ...(factsWithKvm?.kvm === undefined ? [] : [KVM_FACT_HELLO_CAPABILITY]), ...(preflightReporter === undefined ? [] : [PREFLIGHT_HELLO_CAPABILITY]), ...(inventoryReporter === undefined ? [] : [HEARTBEAT_INVENTORY_HELLO_CAPABILITY]), ...(await verifyLocal.capabilities())];
+      const capabilityList = async () => [...RUNNER_BUILD_CAPABILITIES.filter((c) => c !== MACHINE_LOGIN_CAPABILITY || host.managedServer?.() === true), SANDBOX_COMMAND_CAPABILITY, ...(factsWithKvm?.kvm === undefined ? [] : [KVM_FACT_HELLO_CAPABILITY]), ...(preflightReporter === undefined ? [] : [PREFLIGHT_HELLO_CAPABILITY]), ...(inventoryReporter === undefined ? [] : [HEARTBEAT_INVENTORY_HELLO_CAPABILITY]), ...(engineLeaseArmed ? [ENGINE_LEASE_HELLO_CAPABILITY] : []), ...(await verifyLocal.capabilities())];
       const helloBody = async (facts: typeof factsPlain) => ({ protocol_version: RUNNER_PROTOCOL_VERSION, binary_version: RUNNER_VERSION, model_auth_present: await modelAuth(), isolation: "host_sandbox" as const, ...(facts === undefined ? {} : { facts }), capabilities: await capabilityList() });
       const firstHello = await helloMessage();
       let advertised = JSON.stringify(firstHello.capabilities);
@@ -762,6 +767,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
         if (answer?.kind === "ok") cloudKvmFact = answer.kvmFact === true;
         if (answer?.kind === "ok") cloudPreflight = answer.preflight === true;
         if (answer?.kind === "ok") cloudHeartbeatInventory = answer.heartbeatInventory === true;
+        // D#845 ON-13c3 (Ruling 15, two-way): the lease is acted on only while the latest answered hello echoed `engine_lease`; an answer without the echo withdraws any lease held. An unanswered hello changes nothing.
+        if (answer?.kind === "ok") leaseGuard.echoed(answer.engineLease === true);
       };
       takeHello(hello);
       // A hello that was not answered (a 5xx, a network failure) is said again before a later claim, on the poll loop's own pace, until one is answered. The cloud may still list
@@ -828,7 +835,14 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
               return createEngineSessionHandlers({ vm: parts.vm, port: () => parts.port, state: parts.state, wipeToken: parts.wipeToken, minGuestMb: 1, get paths() { return parts.paths(); }, ...sessionCommon });
             })();
       const sessionHandlers = sessionHandlersFor({ microvm: microvmSessions, standard: standardSessions }, () => effectiveEngine(engine, loadSettings(stateDir).sandboxEngine));
-      const machineJobs = (machineJobDispatcher = createMachineJobDispatcher({ client, keyring, runnerId: registration.runner_id, now: ctx.now, handlers: { ...(setupHandler === undefined ? {} : { project_setup: setupHandler }), ...(sessionHandlers ?? {}) },sandboxEngine: () => effectiveEngine(engine, loadSettings(stateDir).sandboxEngine), signal: stopped.signal, log: (event) => ctx.out(`fx-runner: machine job ${event.event}`) }));
+      // D#845 ON-13c3: the same stop path a signed stop job takes, for the guard's own stop of a session whose lease ran out.
+      // Only a machine that reports its sandbox inventory (the microVM tier) can ever be renewed, so only it advertises `engine_lease_v1` and arms the guard; a standard-tier machine says nothing and is never self-stopped.
+      // The runner's own stop and the dispatcher's three handlers share one lock per session name, so the stop never overlaps a cloud stop, start or delete of the same session.
+      const sessionLock = createSessionLock();
+      const leaseOn = sessionHandlers !== undefined && inventoryReporter !== undefined;
+      leaseGuard.bind(leaseOn ? sessionStopperOf(sessionHandlers.engine_session_stop, sessionLock) : undefined);
+      engineLeaseArmed = leaseOn;
+      const machineJobs = (machineJobDispatcher = createMachineJobDispatcher({ client, keyring, runnerId: registration.runner_id, now: ctx.now, handlers: { ...(setupHandler === undefined ? {} : { project_setup: setupHandler }), ...(sessionHandlers === undefined ? {} : lockSessionHandlers(sessionHandlers, sessionLock)) },sandboxEngine: () => effectiveEngine(engine, loadSettings(stateDir).sandboxEngine), signal: stopped.signal, log: (event) => ctx.out(`fx-runner: machine job ${event.event}`) }));
       // D#842 EB-3c: the engine bridge runs beside the claim loop, never under it: it is started here, nothing below awaits it, and it ends only when `finally` stops it.
       if (host.engineBridge !== undefined) {
         const cloud = { origin: registration.cloud_origin, key, now: ctx.now, fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass) };
@@ -853,6 +867,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       }
       // D#587 3c-iii: the VMs an earlier process left are ended before the first claim; a failed pass holds claiming (`vm_reap_pending`) and each claim check tries once more.
       await vmGuard?.start();
+      leaseLook = leaseGuard.run(clock, AbortSignal.any([stopped.signal, leaseEnd.signal]));
       const end = await pollLoop({
         client,
         wake,
@@ -928,6 +943,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       return 0;
     } finally {
       await bridge?.stop();
+      leaseEnd.abort();
+      await leaseLook;
       if (vmStatTimer !== undefined) clearInterval(vmStatTimer);
       detach();
     }

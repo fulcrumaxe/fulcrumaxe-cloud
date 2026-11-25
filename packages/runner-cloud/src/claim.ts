@@ -1,6 +1,7 @@
 import { CLAIM_IDLE_RETRY_AFTER_SECONDS, CLAIM_MIN_INTERVAL_SECONDS, machineJobOffered, ClaimMessage, ClaimReply, ClaimRateLimitedReply, PLANE_MERGE_CAPABILITY, PLANE_MERGE_MAX_ATTEMPTS, type SignedMachineCommand, type SignedSandboxCommand } from "@fulcrumaxe/runner-protocol";
 import { PAUSED_RETRY_AFTER_SECONDS } from "@fx/runner";
 import { allowRunnerWake } from "@fx/core/src/pendingWork.js";
+import { clampRetryAfter, engineLeaseFor } from "./engineLease.js";
 import { deployOrderWaiting } from "./deployOrder.js";
 import { exchangeMachineCommands } from "./machineLogin.js";
 import { exchangeSandboxCommands } from "./sandboxCommands.js";
@@ -128,7 +129,9 @@ export async function claimRun(deps: RunnerCloudDeps, req: RunnerHttpRequest): P
         if (machineJobOffered("engine_session_stop", "any", await offerOf(client, runner))) await issueDueCleanups(client, deps, runner);
         machineJob = (await offeredMachineJobs(client, runner)).length > 0;
       }
-      return { waited, pausedFor, heldByPerson, capabilities, mergeOrder, deployOrder, machineJob, sandboxCommands, machineCommands };
+      // D#845 ON-13c3: the engine session lease, renewed from this claim's inventory and read back (only for a runner that listed `engine_lease_v1`, and only on a database that has it).
+      const engineLease = waited <= 0 ? await engineLeaseFor(client, runner.runnerId, message.sandboxes) : null;
+      return { waited, pausedFor, heldByPerson, capabilities, mergeOrder, deployOrder, machineJob, sandboxCommands, machineCommands, engineLease };
     }),
   ));
   const wait = gate.waited;
@@ -152,19 +155,22 @@ export async function claimRun(deps: RunnerCloudDeps, req: RunnerHttpRequest): P
     ...(gate.sandboxCommands.length > 0 ? { sandbox_commands: gate.sandboxCommands } : {}),
     // D#845 MC-8a: only a runner that listed `machine_login_v1` is ever handed any; absent when there are none.
     ...(gate.machineCommands.length > 0 ? { machine_commands: gate.machineCommands } : {}),
+    // D#845 ON-13c3: only while a lease is held, and only to a runner that listed `engine_lease_v1`.
+    ...(gate.engineLease === null ? {} : { engine_lease: gate.engineLease }),
   };
   // D#6 RUNNER-WAKE R3b: the allow record the wake check requires, written only for a runner this claim just verified in the database and granted.
   if (wakeGrant) await allowRunnerWake(runner, (deps.now?.() ?? new Date()).getTime());
 
   if (message.sandbox_unavailable !== undefined) {
-    return { status: 200, body: ClaimReply.parse({ retry_after: CLAIM_IDLE_RETRY_AFTER_SECONDS, ...wake }), headers: { "retry-after": String(CLAIM_IDLE_RETRY_AFTER_SECONDS) } };
+    const retryAfter = clampRetryAfter(CLAIM_IDLE_RETRY_AFTER_SECONDS, gate.engineLease);
+    return { status: 200, body: ClaimReply.parse({ retry_after: retryAfter, ...wake }), headers: { "retry-after": String(retryAfter) } };
   }
 
   // A runner whose plan has hit its usage limit is offered nothing until the reported reset: the answer is idle, and it tells the runner to ask again
   // when the pause ends (at most an hour from now, the longest an idle answer may say).
   // A runner a person paused or set to drain (D#605 FL-3) is told to ask again in 5 minutes; if a usage pause runs longer, that longer time stands.
   if (gate.pausedFor > 0 || gate.heldByPerson) {
-    const retryAfter = Math.min(Math.max(gate.pausedFor, gate.heldByPerson ? PAUSED_RETRY_AFTER_SECONDS : 0), CLAIM_PAUSED_RETRY_AFTER_MAX_SECONDS);
+    const retryAfter = clampRetryAfter(Math.min(Math.max(gate.pausedFor, gate.heldByPerson ? PAUSED_RETRY_AFTER_SECONDS : 0), CLAIM_PAUSED_RETRY_AFTER_MAX_SECONDS), gate.engineLease);
     return { status: 200, body: ClaimReply.parse({ retry_after: retryAfter, ...wake }), headers: { "retry-after": String(retryAfter) } };
   }
 
@@ -173,6 +179,7 @@ export async function claimRun(deps: RunnerCloudDeps, req: RunnerHttpRequest): P
   // D#6 RUNNER-WAKE R3b: a runner given a grant in THIS reply hears of new work from the wake check, so "nothing queued" sends it to the next
   // slot boundary instead of 60 s. Work that is queued but cannot be taken yet (a shorter answer) keeps its short answer, and a runner without
   // a grant (an older one, or no key configured) keeps 60 s.
-  const retryAfter = wakeGrant && result.retryAfter >= CLAIM_IDLE_RETRY_AFTER_SECONDS ? wakeSafetyRetryAfterSeconds(runner.runnerId, deps.now?.() ?? new Date()) : result.retryAfter;
+  // D#845 ON-13c3: while a lease is held the runner is asked back within the lease's reach, whatever the wake grant or the queue said.
+  const retryAfter = clampRetryAfter(wakeGrant && result.retryAfter >= CLAIM_IDLE_RETRY_AFTER_SECONDS ? wakeSafetyRetryAfterSeconds(runner.runnerId, deps.now?.() ?? new Date()) : result.retryAfter, gate.engineLease);
   return { status: 200, body: ClaimReply.parse({ retry_after: retryAfter, ...wake }), headers: { "retry-after": String(retryAfter) } };
 }
