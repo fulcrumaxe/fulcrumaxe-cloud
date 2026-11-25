@@ -1,8 +1,10 @@
-import { randomUUID } from "node:crypto";
+import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { seedF2, type F2Fixture } from "@fx/db/test/helpers/members.js";
-import { RunnerHttpError, draftRoute, type RunnerCloudDeps } from "../src/index.js";
-import { harness, type Harness } from "./helpers.js";
+import { RunnerHttpError, draftRoute, issueProjectSetup, type RunnerCloudDeps } from "../src/index.js";
+import { signMachineJob, type MachineJob } from "@fulcrumaxe/runner-protocol";
+import { HELLO_PATH, runnerHello } from "../src/index.js";
+import { harness, newKey, registerKey, respond, signed, type Harness } from "./helpers.js";
 
 const row = (key: string, over: Record<string, unknown> = {}) => ({ row_key: key, title: `Row ${key}`, summary: "s", size: "S", depends_on: [], keep: true, ...over });
 
@@ -142,6 +144,77 @@ describe("plan draft [pg]", () => {
     });
   });
 
+  describe("approve, review follow-ups", () => {
+    const jobKeys = generateKeyPairSync("ed25519");
+    /** A rig whose install can really be issued: a machine holding the placement, a release, the approver's login, a signer and a GitHub port. */
+    async function installRig(pullRequests?: unknown) {
+      const r = await rig();
+      await h.admin.query("UPDATE users SET github_login = 'boss-login' WHERE id = $1", [r.f.o1]);
+      const key = newKey();
+      const runnerId = await registerKey(h.admin, r.f.accountId, r.f.o1, key);
+      const hello = await respond(() => runnerHello(h.deps(), signed(key, HELLO_PATH, { protocol_version: 22, binary_version: "0.5.0", model_auth_present: true, isolation: "host_sandbox", capabilities: ["project_setup_v1"], facts: { os: "linux", arch: "x64", mem_gb_bucket: 16, cpus: 8, sandbox_engine: "os_sandbox" } })));
+      expect(hello.status).toBe(200);
+      await h.admin.query("INSERT INTO project_placements (repo_id, account_id, runner_id, placed_by) VALUES ($1, $2, $3, 'auto')", [r.repoId, r.f.accountId, runnerId]);
+      await h.admin.query("INSERT INTO engine_releases (version, commit_sha, tarball_sha256, min_runner_protocol, published_by, published_at) VALUES ($1, $2, $3, 22, 'test', now())", [`9.${Math.floor(Math.random() * 90000)}.0`, "c".repeat(40), "e".repeat(64)]);
+      const port = pullRequests ?? { defaultBranch: async () => "main", branchState: async () => ({ exists: true, headOid: "d".repeat(40), aheadBy: 0, defaultBranch: "main" }) };
+      const over: Partial<RunnerCloudDeps> = { pullRequests: port as never, engineCommandSigner: async () => ({ keyId: "job-key-1", signMachineJob: (job: MachineJob) => signMachineJob(job, "job-key-1", jobKeys.privateKey) }) as never };
+      return { r, over };
+    }
+    const jobs = async (r: Rig) => (await h.admin.query<{ attempt: number; state: string }>("SELECT attempt, state FROM machine_jobs WHERE setup_id = $1 ORDER BY attempt", [r.setupId])).rows;
+
+    it("two approves at once issue the install once: no second attempt, nothing superseded; the loser meets setup_phase", async () => {
+      const { r, over } = await installRig();
+      const settled = await Promise.allSettled([call(r, "POST", "approve", { version: 1 }, r.f.o1, r.setupId, over), call(r, "POST", "approve", { version: 1 }, r.f.a1, r.setupId, over)]);
+      // The loser either meets the moved phase in its own transaction (a 409) or reports it beside its approval; never a second install.
+      const won = settled.flatMap((x) => (x.status === "fulfilled" && (x.value.body as { install: unknown }).install !== null ? [x.value.body] : []));
+      expect(won).toHaveLength(1);
+      const loser = settled.find((x) => !(x.status === "fulfilled" && (x.value.body as { install: unknown }).install !== null))!;
+      expect(loser.status === "rejected" ? [(loser.reason as RunnerHttpError).status, (loser.reason as RunnerHttpError).code] : (loser.value.body as { install_error: { code: string } }).install_error.code).toEqual(loser.status === "rejected" ? [409, "setup_phase"] : "setup_phase");
+      const all = await jobs(r);
+      expect(all).toHaveLength(1);
+      expect(all[0]).toMatchObject({ attempt: 1 });
+      expect(all[0]!.state).not.toBe("superseded");
+      expect((await h.admin.query("SELECT phase, attempt FROM project_setups WHERE id = $1", [r.setupId])).rows[0]).toEqual({ phase: "install", attempt: 1 });
+    });
+
+    it("Approve's issue refuses once the install is out (409 setup_phase, one job kept); only the retry route's own call may issue again", async () => {
+      const { r, over } = await installRig();
+      expect((await call(r, "POST", "approve", { version: 1 }, r.f.o1, r.setupId, over)).body).toMatchObject({ install: { attempt: 1 } });
+      await refused(issueProjectSetup(r.deps(over), as(r), r.setupId, { fromApprove: true }), 409, "setup_phase");
+      expect(await jobs(r)).toEqual([{ attempt: 1, state: expect.not.stringMatching(/^superseded$/) }]);
+    });
+
+    it("a non-HTTP failure of the issuer after the commit is install_error beside the approval, not a 500, and leaks nothing of the error", async () => {
+      const { r, over } = await installRig({ defaultBranch: async () => { throw new Error("secret boom"); }, branchState: async () => ({}) });
+      const res = (await call(r, "POST", "approve", { version: 1 }, r.f.o1, r.setupId, over)).body as { approved: boolean; install: unknown; install_error: { code: string; message: string } };
+      expect([res.approved, res.install, res.install_error.code]).toEqual([true, null, "install_error"]);
+      expect(res.install_error.message).not.toContain("boom");
+      expect((await draftRow(r.draftId)).status).toBe("approved");
+    });
+
+    it("an approve UPDATE that lands on no row writes no audit row and answers 409 setup_phase", async () => {
+      const r = await rig({ plan: false });
+      const fn = `fx_t_skip_${r.draftId.replaceAll("-", "")}`;
+      await h.admin.query(`CREATE FUNCTION ${fn}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.id = '${r.draftId}' AND NEW.status = 'approved' THEN RETURN NULL; END IF; RETURN NEW; END $$`);
+      await h.admin.query(`CREATE TRIGGER ${fn} BEFORE UPDATE ON project_drafts FOR EACH ROW EXECUTE FUNCTION ${fn}()`);
+      try {
+        await refused(call(r, "POST", "approve", { version: 1 }), 409, "setup_phase");
+      } finally {
+        await h.admin.query(`DROP TRIGGER ${fn} ON project_drafts`);
+        await h.admin.query(`DROP FUNCTION ${fn}()`);
+      }
+      expect((await draftRow(r.draftId)).status).toBe("draft");
+      expect(await audits(r)).toEqual([]);
+    });
+
+    it("the PRD length counts code points like the column: 150000 astral characters (300000 UTF-16 units) approve", async () => {
+      const r = await rig({ plan: false, prd: "\u{1F600}".repeat(150_000) });
+      const res = (await call(r, "POST", "approve", { version: 1 })).body as { approved: boolean };
+      expect(res.approved).toBe(true);
+      expect((await draftRow(r.draftId)).status).toBe("approved");
+    });
+  });
+
   describe("discard, write my own and start over", () => {
     it("discard throws the open draft away (owner or admin); a blank draft replaces it, sets the setup to the plan step and numbers the next version", async () => {
       const r = await rig();
@@ -175,6 +248,12 @@ describe("plan draft [pg]", () => {
       const pub = await rig({ visibility: "public" });
       await refused(call(pub, "POST", "restart"), 409, "public_repo");
       expect((await draftRow(pub.draftId)).status).toBe("draft");
+      // A visibility that cannot be read is refused the same way, before any write.
+      const unknown = await rig();
+      const before = (await h.admin.query("SELECT updated_at FROM project_setups WHERE id = $1", [unknown.setupId])).rows[0].updated_at;
+      await refused(call(unknown, "POST", "restart", null, unknown.f.o1, unknown.setupId, { repoVisibility: async () => "unknown" }), 409, "repo_visibility_unknown");
+      expect((await draftRow(unknown.draftId)).status).toBe("draft");
+      expect((await h.admin.query("SELECT phase, updated_at FROM project_setups WHERE id = $1", [unknown.setupId])).rows[0]).toEqual({ phase: "plan", updated_at: before });
       const r = await rig();
       // No survey ports are configured, so the start itself refuses 503 not_configured.
       await refused(call(r, "POST", "restart"), 503, "not_configured");
