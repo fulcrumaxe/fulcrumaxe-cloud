@@ -67,6 +67,14 @@ describe("the PR line", () => {
     expect(githubUrl("javascript:alert(1)")).toBe("");
     expect(githubUrl("http://github.com/a")).toBe("");
   });
+  it("only the exact https://github.com origin is linked: no other port, no look-alike host", () => {
+    expect(githubUrl("https://github.com/a/b/pull/7")).toBe("https://github.com/a/b/pull/7");
+    for (const bad of ["https://github.com:8443/a", "https://github.com.evil.example/a", "https://www.github.com/a"]) expect(githubUrl(bad), bad).toBe("");
+  });
+  it("the no-install-PR sentence does not claim there are no engine files", () => {
+    expect(PR_CODE_SENTENCES.install_pr_not_merged).toBe("No merged install PR was found, so no PR was opened.");
+    expect(PR_CODE_SENTENCES.install_pr_not_merged).not.toMatch(/engine files/);
+  });
   it("each ON-16b code has its own sentence, and an unknown code the generic one", () => {
     for (const code of ["install_pr_not_merged", "tree_truncated", "removal_branch_conflict", "github_unavailable"]) {
       expect(prLine({ code })).toEqual({ text: PR_CODE_SENTENCES[code], number: null, url: "" });

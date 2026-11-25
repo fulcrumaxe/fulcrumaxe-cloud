@@ -971,7 +971,7 @@ export function waitingExplanation(removal) {
 
 // What the removal PR did, in this file's own words. The ON-16b codes are closed; an unknown one reads as the generic line.
 export const PR_CODE_SENTENCES = {
-  install_pr_not_merged: "No merged install PR was found, so there are no engine files to remove and no PR was opened.",
+  install_pr_not_merged: "No merged install PR was found, so no PR was opened.",
   tree_truncated: "The repo is too large to list safely, so no removal PR was opened.",
   removal_branch_conflict: "A branch for the removal PR already exists with other changes, so no PR was opened.",
   github_unavailable: "GitHub didn't answer, so no removal PR was opened.",
@@ -983,7 +983,7 @@ export const PR_NOTHING = "The engine left no files to remove, so no PR was need
 export function githubUrl(raw) {
   try {
     const u = new URL(String(raw));
-    return u.protocol === "https:" && u.hostname === "github.com" ? u.href : "";
+    return u.origin === "https://github.com" ? u.href : "";
   } catch {
     return "";
   }
