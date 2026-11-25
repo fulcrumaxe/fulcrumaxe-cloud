@@ -238,6 +238,7 @@ export {
 export {
   retrySurvey,
   startSurvey,
+  startSurveyRoute,
   type StartedSurvey,
 } from "./surveyJobs.js";
 export {

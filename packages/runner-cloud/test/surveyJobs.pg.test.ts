@@ -4,10 +4,11 @@ import { SURVEY_ROLE } from "@fulcrumaxe/runner-protocol";
 import { seedF2, type F2Fixture } from "@fx/db/test/helpers/members.js";
 import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
 import { RunPullRequestError } from "../src/runPullRequest.js";
-import { RunnerHttpError, requestHandoff, retrySurvey, startSurvey, type RunnerCloudDeps, type RunPullRequestPort, type SurveyRunPort } from "../src/index.js";
+import { RunnerHttpError, requestHandoff, retrySurvey, startSurvey, startSurveyRoute, type RunnerCloudDeps, type RunPullRequestPort, type SurveyRunPort } from "../src/index.js";
 import { harness, type Harness } from "./helpers.js";
 
 const HEAD = "d".repeat(40);
+const PUBLIC_CAPABLE = ["survey_v1", "survey_public_v1"];
 type StartInput = Parameters<SurveyRunPort["startSurveyRun"]>[0];
 type StartAnswer = Awaited<ReturnType<SurveyRunPort["startSurveyRun"]>>;
 
@@ -200,10 +201,9 @@ describe("startSurvey [pg]", () => {
       const r = await rig({ credential: "subscription", registrant: "o2" });
       await refused(r, 409, "survey_needs_machine_owner");
     });
-    // D#845 ON-10e1: a runner that lists survey_public_v1 and a start without the consent (ON-10e2's route passes it) still gets public_repo; unknown is never public, whatever the runner lists.
-    const PUBLIC_CAPABLE = ["survey_v1", "survey_public_v1"];
-    it("409 public_repo and repo_visibility_unknown", async () => {
-      await refused(await rig({ visibility: "public", caps: PUBLIC_CAPABLE }), 409, "public_repo");
+    // D#845 ON-10e1 and ON-10e2a: a runner that lists survey_public_v1 and a start without the consent is 409 public_survey_consent_required; unknown is never public, whatever the runner lists.
+    it("409 public_survey_consent_required and repo_visibility_unknown", async () => {
+      await refused(await rig({ visibility: "public", caps: PUBLIC_CAPABLE }), 409, "public_survey_consent_required");
       await refused(await rig({ visibility: "unknown", caps: PUBLIC_CAPABLE }), 409, "repo_visibility_unknown");
     });
     it("409 survey_needs_runner_update for a public repo on a machine without survey_public_v1 (none stored, or survey_v1 alone), naming the machine; a private repo needs neither", async () => {
@@ -218,11 +218,12 @@ describe("startSurvey [pg]", () => {
       await startSurvey(priv.deps(), as(priv), priv.setupId);
       expect(priv.calls).toHaveLength(1);
     });
-    it("a public repo on a machine that lists survey_public_v1 starts only when the caller says the person consented (the hook ON-10e2 fills); a person of another account is refused", async () => {
+    it("a public repo on a machine that lists survey_public_v1 starts only when the caller says the person consented; a person of another account is refused", async () => {
       const r = await rig({ visibility: "public", caps: PUBLIC_CAPABLE });
       const started = await startSurvey(r.deps(), as(r), r.setupId, { publicConsented: true });
       expect(started.setup_id).toBe(r.setupId);
       expect(r.calls).toHaveLength(1);
+      expect(r.calls[0]!.publicConsented).toBe(true);
       // Second account: a person of another account naming this account's public setup (placed on a capable machine) is told nothing and nothing starts.
       const stranger = await rig({ visibility: "public", caps: PUBLIC_CAPABLE });
       await refused(stranger, 403, "forbidden", { who: r.f.o1 });
@@ -322,8 +323,70 @@ describe("startSurvey [pg]", () => {
       expect((await refusal(retry(r, { who: stranger.f.o1 }))).status).toBe(403);
       expect((await refusal(retry(r, { setupId: other.setupId }))).status).toBe(404);
       expect((await refusal(retry(r, { setupId: "x" }))).status).toBe(404);
-      for (const body of [{}, [], "x", 0, { run_id: "x" }]) expect((await refusal(retry(r, { body }))).status).toBe(400);
+      for (const body of [[], "x", 0, { run_id: "x" }, { consent: "public_repo_v1", extra: 1 }]) expect((await refusal(retry(r, { body }))).status).toBe(400);
       expect(r.calls).toEqual([]);
+    });
+    it("a public repo's retry takes the consent from its body: none or a wrong value is 409 public_survey_consent_required with nothing written, the right value starts", async () => {
+      const r = await rig({ visibility: "public", caps: PUBLIC_CAPABLE, prior: true });
+      const before = await written(r);
+      for (const body of [undefined, {}, { consent: "yes" }, { consent: true }, { consent: null }]) expect((await refusal(retry(r, { body }))).code).toBe("public_survey_consent_required");
+      expect(await written(r)).toEqual(before);
+      expect(r.calls).toEqual([]);
+      await retry(r, { body: { consent: "public_repo_v1" } });
+      expect(r.calls).toHaveLength(1);
+      expect(r.calls[0]!.publicConsented).toBe(true);
+    });
+  });
+
+  describe("the start route (ON-10e2a)", () => {
+    const CONSENT = { consent: "public_repo_v1" };
+    const start = (r: Rig, over: { who?: string; body?: unknown; setupId?: string; deps?: RunnerCloudDeps } = {}) => startSurveyRoute(over.deps ?? r.deps(), as(r, over.who), over.setupId ?? r.setupId, over.body === undefined ? null : over.body);
+    it("a member is refused 403 even with the consent, and nothing is written or started", async () => {
+      const r = await rig({ visibility: "public", caps: PUBLIC_CAPABLE });
+      const before = await written(r);
+      expect((await refusal(start(r, { who: r.f.m1, body: CONSENT }))).status).toBe(403);
+      expect(await written(r)).toEqual(before);
+      expect(r.calls).toEqual([]);
+    });
+    it("a public repo without the consent (no body, an empty one, a wrong value) is 409 public_survey_consent_required and nothing is written", async () => {
+      const r = await rig({ visibility: "public", caps: PUBLIC_CAPABLE });
+      const before = await written(r);
+      for (const body of [undefined, {}, { consent: "private_repo_v1" }, { consent: 1 }]) expect((await refusal(start(r, { body }))).code).toBe("public_survey_consent_required");
+      expect(await written(r)).toEqual(before);
+      expect(r.calls).toEqual([]);
+      expect(r.deadlines).toEqual([]);
+    });
+    it("a public repo with the consent starts and hands the worker the consent flag; the answer is the setup and the run", async () => {
+      const r = await rig({ visibility: "public", caps: PUBLIC_CAPABLE });
+      const out = await start(r, { body: CONSENT });
+      expect(out).toMatchObject({ status: 200, body: { setup_id: r.setupId, run_id: "11111111-1111-4111-8111-111111111111" }, headers: { "cache-control": "no-store" } });
+      expect(r.calls).toHaveLength(1);
+      expect(r.calls[0]).toMatchObject({ publicConsented: true, headSha: HEAD, runnerId: r.runnerId });
+    });
+    it("a private repo ignores the consent, with or without it, and the worker is never told of one", async () => {
+      for (const body of [undefined, CONSENT]) {
+        const r = await rig({ visibility: "private" });
+        await start(r, { body });
+        expect(r.calls).toHaveLength(1);
+        expect("publicConsented" in r.calls[0]!).toBe(false);
+      }
+    });
+    it("the consent never lifts the other gates: an unknown visibility, an old runner and another account's setup are all refused", async () => {
+      const unknown = await rig({ visibility: "unknown", caps: PUBLIC_CAPABLE });
+      expect((await refusal(start(unknown, { body: CONSENT }))).code).toBe("repo_visibility_unknown");
+      const old = await rig({ visibility: "public", caps: ["survey_v1"] });
+      expect((await refusal(start(old, { body: CONSENT }))).code).toBe("survey_needs_runner_update");
+      const mine = await rig({ visibility: "public", caps: PUBLIC_CAPABLE });
+      const theirs = await rig({ visibility: "public", caps: PUBLIC_CAPABLE });
+      expect((await refusal(start(mine, { body: CONSENT, setupId: theirs.setupId }))).status).toBe(404);
+      expect((await refusal(start(mine, { body: CONSENT, who: theirs.f.o1 }))).status).toBe(403);
+      for (const r of [unknown, old, mine, theirs]) expect(r.calls).toEqual([]);
+    });
+    it("two clicks make one run: the loser of the worker's start answers survey_running; a body of another shape is 400", async () => {
+      const r = await rig({ visibility: "public", caps: PUBLIC_CAPABLE, answer: { ok: false, status: 409, code: "survey_running", runId: "33333333-3333-4333-8333-333333333333" } });
+      const error = await refusal(start(r, { body: CONSENT }));
+      expect([error.status, error.code, error.extra]).toEqual([409, "survey_running", { run_id: "33333333-3333-4333-8333-333333333333" }]);
+      for (const body of [[], "x", { consent: "public_repo_v1", extra: 1 }]) expect((await refusal(start(r, { body }))).status).toBe(400);
     });
   });
 

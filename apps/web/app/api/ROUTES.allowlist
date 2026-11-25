@@ -111,3 +111,4 @@ v1/setups/[id]/install/merge/route.ts
 v1/setups/[id]/install/retry/route.ts
 v1/setups/[id]/install/summary/route.ts
 v1/setups/[id]/survey/retry/route.ts
+v1/setups/[id]/survey/start/route.ts

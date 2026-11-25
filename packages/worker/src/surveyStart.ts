@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { SURVEY_DEADLINE_GRACE_MS, SURVEY_MAX_RUN_MS, SURVEY_ROLE } from "@fulcrumaxe/runner-protocol";
+import { writeEngineAudit } from "@fx/db/src/engineAudit.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { reportError } from "@fx/telemetry";
 import { NotFoundError } from "@fx/core/src/tenancy/errors.js";
@@ -42,6 +43,8 @@ export interface StartSurveyRunInput {
   priorRunId: string | null;
   /** `microvm` when the placed machine last reported that engine. */
   requiresEngine?: "microvm";
+  /** The person consented to surveying this public repo (D#845 ON-10e2a): the consent audit row is written in the run's create transaction. */
+  publicConsented?: true;
 }
 
 export type StartSurveyRunResult =
@@ -84,9 +87,11 @@ const code = (error: unknown): string | undefined => (typeof error === "object" 
 const notStarted = (reason: string): StartSurveyRunResult => ({ ok: false, status: 409, code: "survey_not_started", reason });
 
 /** The bind, run inside the run's create transaction. A throw rolls the whole create back (no run row, no job, no idempotency claim). */
-async function bind(client: PoolClient, userId: string, setupId: string, runId: string): Promise<void> {
+async function bind(client: PoolClient, userId: string, setupId: string, runId: string, consent: { headSha: string; runnerId: string } | null): Promise<void> {
   await client.query("SELECT set_config('app.user_id', $1, true)", [userId]);
   await client.query("SELECT survey_start_record($1::uuid, $2::uuid)", [setupId, runId]);
+  // D#845 ON-10e2a: the consent's audit row, after the bind and in this same transaction, so it commits with the run or not at all.
+  if (consent !== null) await writeEngineAudit(client, "project.public_survey_consented", { setup_id: setupId, run_id: runId, head_sha: consent.headSha, runner_id: consent.runnerId });
   await client.query("SELECT set_config('app.user_id', '', true)");
 }
 
@@ -161,7 +166,7 @@ export function createSurveyStart(deps: SurveyStartDeps): SurveyStartFacade {
           startMeta: { survey_runner_id: input.runnerId },
           ...(input.requiresEngine === undefined ? {} : { requiresEngine: input.requiresEngine }),
           idempotency: { key, requestHash: createHash("sha256").update(`${key}\n${input.headSha}\n${input.runnerId}`).digest("hex") },
-          inCreateTransaction: (client, runId) => bind(client, input.userId, input.setupId, runId),
+          inCreateTransaction: (client, runId) => bind(client, input.userId, input.setupId, runId, input.publicConsented === true ? { headSha: input.headSha, runnerId: input.runnerId } : null),
         });
         if ("reason" in started) return notStarted(started.reason);
         const accepted = await acceptQueuedRunnerRun(deps.pool, input.accountId, started);

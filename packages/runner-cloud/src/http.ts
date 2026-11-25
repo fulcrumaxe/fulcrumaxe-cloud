@@ -213,6 +213,8 @@ export interface SurveyRunPort {
     headSha: string;
     priorRunId: string | null;
     requiresEngine?: "microvm";
+    /** D#845 ON-10e2a: the person consented to surveying this public repo; the worker writes the consent audit row in the run's create transaction. */
+    publicConsented?: true;
   }): Promise<
     | { ok: true; runId: string }
     | { ok: false; status: 403; code: "forbidden" }

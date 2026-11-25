@@ -183,7 +183,8 @@ export async function placeProjectRoute(deps: RunnerCloudDeps, principal: Sessio
       return { setupId, runnerId, operate };
     });
     void markRunnerWork(accountId);
-    const survey = input.kind === "existing" ? await startSurveyAfterConfirm(deps, principal, done.setupId) : null;
+    // A public repo's survey never starts by itself: the person's explicit consent starts it (D#845 ON-10e2a).
+    const survey = input.kind !== "existing" ? null : seen === "public" ? { started: false as const, code: "public_survey_consent_required" } : await startSurveyAfterConfirm(deps, principal, done.setupId);
     return {
       status: 201,
       body: { setup_id: done.setupId, repo_id: repoId, runner_id: done.runnerId, kind: input.kind, phase: input.kind === "existing" ? "survey" : "plan", operate_enabled: done.operate, ...(survey === null ? {} : { survey }) },

@@ -569,6 +569,8 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "survey_prompt_input",
   // Project survey (D#845 ON-10e1): a public repo's survey on a runner that does not list survey_public_v1; the person updates fx-runner.
   "survey_needs_runner_update",
+  // Project survey (D#845 ON-10e2a): a public repo's survey needs the person's explicit consent; none was given.
+  "public_survey_consent_required",
   // Sandbox reaper (D#2 SANDBOX-REAPER-2b): the database mode setting could not be read, so the reap passes ran as off.
   "sandbox_reap_mode_unreadable",
   // Sandbox inventory failures (D#6): why a daily inventory pass ended without writing, by failure class instead of `other`.

@@ -14,12 +14,14 @@ export const ENGINE_AUDIT_ACTIONS = [
   'engine_decision.answered',
   'engine_halt.set',
   'engine_halt.cleared',
+  // D#845 ON-10e2a (migration 1098): the person's consent to survey a public repo, written in the run's create transaction.
+  'project.public_survey_consented',
 ] as const;
 
 export type EngineAuditAction = (typeof ENGINE_AUDIT_ACTIONS)[number];
 
 /** The only keys an engine audit payload may carry: ids and enums, never text a person or the engine wrote. */
-export const ENGINE_AUDIT_PAYLOAD_KEYS = ['repo_id', 'command_id', 'kind', 'outcome', 'refusal', 'decision_type', 'disposition', 'halt_epoch'] as const;
+export const ENGINE_AUDIT_PAYLOAD_KEYS = ['repo_id', 'command_id', 'kind', 'outcome', 'refusal', 'decision_type', 'disposition', 'halt_epoch', 'setup_id', 'run_id', 'head_sha', 'runner_id'] as const;
 
 export type EngineAuditPayload = Partial<Record<(typeof ENGINE_AUDIT_PAYLOAD_KEYS)[number], string | number | boolean | null>>;
 
