@@ -216,6 +216,15 @@ export {
   type StartedSurvey,
 } from "./surveyJobs.js";
 export {
+  issueSystemStops,
+  type SystemStopDeps,
+  type SystemStopPass,
+  type SystemStopReason,
+  type SystemStopReportError,
+  type SystemStopResult,
+  type SystemStopScope,
+} from "./engineSystemStops.js";
+export {
   memoryProposalsRun,
 } from "./memoryProposals.js";
 export {

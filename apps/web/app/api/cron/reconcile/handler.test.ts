@@ -77,6 +77,7 @@ describe("GET /api/cron/reconcile: the tick", () => {
       "sandbox_reap_idle",
       "sandbox_inventory",
       "machine_server_sweep",
+      "engine_session_stops",
       "setup_install_pr",
       "github_installations",
       "github_repos",
@@ -84,6 +85,32 @@ describe("GET /api/cron/reconcile: the tick", () => {
       "model_key_health",
       "model_credits_revalidate",
     ]);
+  });
+
+  it("builds the stop job over the injected pass: not_configured while none is wired, and the pass is handed the job's own time budget", async () => {
+    const run = async (deps: ReconcileHandlerDeps) => {
+      const runTickFn = vi.fn(async (_deps: TickDeps) => summary);
+      await reconcileHandler(requestWithAuth(`Bearer ${SECRET}`), deps, runTickFn);
+      return runTickFn.mock.calls[0]![0].jobs.find((job) => job.name === "engine_session_stops")!;
+    };
+    const ctx = (): JobContext => ({ pool: { query: vi.fn() } as never, cursor: null, signal: new AbortController().signal, calls: { limit: 0, used: 0, take: () => false }, msLeft: () => 4242, checkpoint: () => undefined });
+    expect(await (await run(fakeDeps())).run(ctx())).toEqual({ cursor: null, wrapped: false, code: "not_configured" });
+    const seen: number[] = [];
+    const pass = vi.fn(async (scope: { msLeft: () => number }) => {
+      seen.push(scope.msLeft());
+      return { not_configured: false, issued: 0, results: [] };
+    });
+    expect(await (await run(fakeDeps({ engineSystemStops: pass }))).run(ctx())).toEqual({ cursor: null, wrapped: true });
+    expect(seen).toEqual([4242]);
+  });
+
+  it("the default deps wire the stop pass, so a tick can run it", () => {
+    vi.stubEnv("DATABASE_URL_PLATFORM_OPS", "postgres://unused.invalid/none");
+    try {
+      expect(typeof defaultReconcileDeps().engineSystemStops).toBe("function");
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("passes the kill switch through: a switched-off run is still answered 200 with the disabled summary", async () => {

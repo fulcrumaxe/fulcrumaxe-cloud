@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
+import { setPendingHooks } from "@fx/core/src/pendingWork";
 import type { StripeWebhookDeps, WebhookResponse } from "@fx/billing";
 import { MAX_STRIPE_WEBHOOK_BODY_BYTES, defaultStripeWebhookDeps, stripeWebhookHandler } from "./handler";
 
@@ -93,6 +94,23 @@ describe("POST /api/stripe/webhook", () => {
       vi.stubEnv("DATABASE_URL_PLATFORM_OPS", "postgres://unused.invalid/none");
       expect(defaultStripeWebhookDeps().livemode).toBe(expected);
       vi.unstubAllEnvs();
+    });
+  });
+
+  describe("D#845 ON-13a5: the engine coverage hook", () => {
+    it("the default deps mark the reconcile tick, and write no job", async () => {
+      vi.stubEnv("STRIPE_SECRET_KEY", "sk_test_FAKE_TEST_ONLY");
+      vi.stubEnv("STRIPE_WEBHOOK_SECRET", "whsec_FAKE_TEST_ONLY");
+      vi.stubEnv("DATABASE_URL_PLATFORM_OPS", "postgres://unused.invalid/none");
+      const keys: string[] = [];
+      setPendingHooks({ store: { get: async () => null, set: async (key: string) => void keys.push(key), delete: async () => undefined } });
+      try {
+        await defaultStripeWebhookDeps().onEngineCoverageChanged!("a1");
+        expect(keys.filter((k) => k.includes("reconcile"))).toHaveLength(1);
+      } finally {
+        setPendingHooks(null);
+        vi.unstubAllEnvs();
+      }
     });
   });
 

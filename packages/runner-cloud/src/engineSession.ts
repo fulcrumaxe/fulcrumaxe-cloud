@@ -196,6 +196,9 @@ export async function issueEngineSessionStart(deps: RunnerCloudDeps, principal: 
     await requireOwnerOrAdmin(client);
     // One issuer per repo at a time, so two clicks issue one start.
     await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`engine_session:${accountId}:${repoId}`]);
+    // FU-229: the switches and the ticked set are held for this transaction (the account's bridge lock, shared; every writer of either takes it exclusively), so an untick or an off either committed before the gates
+    // below read it, or waits until this start has committed. It does not rely on the order in which that writer touches its rows; a start issued just before an untick is closed by the deliver check (migration 1077).
+    await client.query("SELECT pg_advisory_xact_lock_shared(hashtextextended('engine_bridge:' || NULLIF(current_setting('app.account_id', true), ''), 0))");
     const target = await loadSessionTarget(client, accountId, repoId);
     if (target.runnerId !== first.runnerId) throw refuse(409, "session_changed", "the project moved while the job was made; try again");
     await requireEngineCoverage(client, accountId, repoId);

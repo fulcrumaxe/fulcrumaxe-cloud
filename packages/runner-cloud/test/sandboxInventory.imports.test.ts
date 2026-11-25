@@ -31,6 +31,7 @@ const ALLOWED: Record<string, string> = {
   "packages/db/migrations/1040_runner_sandbox_inventory.sql": "creates the tables and the two definers; the only migration that may name them",
   "packages/runner-cloud/src/fleetSandboxes.ts": "display-only reader for the fleet page: the sandboxes, their last-seen time and the host limits; computes no permission from them",
   "packages/db/migrations/1068_engine_session_sandboxes.sql": "the engine_session_sandboxes view over the inventory: display and routing facts of an engine session, no permission read from it",
+  "packages/db/migrations/1077_engine_system_stops.sql": "the system-stop list reads the inventory to pick which sessions a plan end or an off stops (is the engine's sandbox up, has the machine reported since the last stop): the safe direction, no gate (coverage, operate, role) reads it",
   "packages/runner-cloud/src/engineSession.ts": "reads the inventory for two hints only: whether an engine's sandbox is listed (the signed start's `resume` flag, which the machine re-checks) and which engines are up (the set a stop is issued for, the safe direction); no gate (coverage, operate, role) reads it",
   "packages/fx-runner/src/vm/sandboxd/management.ts": "the daemon's own inventory and lifecycle views for the runner's sandbox reporter; reads the daemon's table, computes no permission from it",
 };

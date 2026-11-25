@@ -40,6 +40,10 @@ describe("machine job claim and setup progress [pg]", () => {
     const runnerId = await registerKey(h.admin, who.accountId, who.userId, key);
     const hello = await respond(() => runnerHello(h.deps(), signed(key, HELLO_PATH, helloBody({ protocol: o.protocol ?? 22, caps: o.caps ?? ["project_setup_v1"], engine: o.engine ?? "os_sandbox" }))));
     expect(hello.status, JSON.stringify(hello.body)).toBe(200);
+    // A start is delivered only while the plan covers it and the repo is operated (migration 1077), so these accounts hold a plan and operate on.
+    await h.admin.query("UPDATE accounts SET engine_quantity = 1, stripe_subscription_status = 'active' WHERE id = $1", [who.accountId]);
+    await h.admin.query("INSERT INTO engine_bridge_settings (account_id, watch_enabled, operate_enabled) VALUES ($1, true, true) ON CONFLICT (account_id) DO NOTHING", [who.accountId]);
+    await h.admin.query("INSERT INTO engine_bridge_repos (account_id, repo_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", [who.accountId, who.repoId]);
     const setupId = o.setupId ?? (await h.admin.query<{ id: string }>("INSERT INTO project_setups (account_id, repo_id, kind, created_by, phase) VALUES ($1, $2, 'existing', $3, 'install') RETURNING id", [who.accountId, who.repoId, who.userId])).rows[0]!.id;
     return { who, runnerId, key, setupId };
   }

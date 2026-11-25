@@ -25,6 +25,11 @@ export interface StripeWebhookDeps {
    * never calls it, and a throw never fails the webhook.
    */
   onSubscriptionActivated?: (activation: { accountId: string; subscriptionId: string }) => Promise<void>;
+  /**
+   * D#845 ON-13a5: called once, after the commit, when a signed event's write ended the subscription or left it in a standing that does not pay (canceled, unpaid, paused, incomplete). The engine sessions
+   * the plan covered are then due to stop; production marks the reconcile tick, whose stop pass lists them. A deduped or refused event never calls it, and a throw never fails the webhook.
+   */
+  onEngineCoverageChanged?: (accountId: string) => Promise<void>;
 }
 
 export interface WebhookResponse {

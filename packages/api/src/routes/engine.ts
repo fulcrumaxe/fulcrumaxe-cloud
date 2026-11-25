@@ -3,7 +3,7 @@ import type { PoolClient } from "pg";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { deleteEngineData, readEnginePanelAsOf, readEngineRepoFreshness, readEngineSettingsView, setEngineBridgeSettings, EngineOperateRefusal, type EnginePanel } from "@fx/db/src/engineBridge.js";
 import { readEngineUsage } from "@fx/core/src/engine/read.js";
-import { markRunnerWork } from "@fx/core/src/pendingWork.js";
+import { markRunnerWork, markWorkPending } from "@fx/core/src/pendingWork.js";
 import {
   CursorError,
   engineRepoEnabled,
@@ -305,6 +305,10 @@ export const engineRoutes: RouteEntry[] = [
       // turning a repo or the whole bridge off would stop the runner only at its next pull.
       const tickedChanged = body.repo_ids !== undefined && (wanted.size !== ticked.size || [...wanted].some((id) => !ticked.has(id)));
       if (watch !== before.watch_enabled || operate !== before.operate_enabled || tickedChanged) void markRunnerWork(accountId);
+      // D#845 ON-13a5: operate or watch going off, or a repo unticked, is a cause for the system stop pass to end that session. No stop is written in this request (the operate queue of ON-13c is the fast path);
+      // marking the reconcile tick makes the pass list it on the next tick.
+      const untickedRepo = body.repo_ids !== undefined && [...ticked].some((id) => !wanted.has(id));
+      if ((before.operate_enabled && !operate) || (before.watch_enabled && !watch) || untickedRepo) void markWorkPending("reconcile");
       return settingsView(ctx, true);
     },
   },

@@ -511,6 +511,8 @@ describe('audit_write / audit_write_system: append-only, unforgeable audit_log (
         '1074_managed_server_kept.sql',
         // 1076 (D#845 MC-11b) adds the IPv4 hourly price column to managed_servers, so it goes with them.
         '1076_managed_server_ipv4_hourly.sql',
+        // 1077 (D#845 ON-13a5) reads 1068's machine_jobs.stop_reason (1068 re-carries audit_write), so it goes with them.
+        '1077_engine_system_stops.sql',
       ];
       const AUDIT_WRITE_MIGRATIONS = allFiles.filter(
         (f) => BUILDS_ON_HELD_BACK.includes(f) || isAuditWriteMigration(readFileSync(path.join(DEFAULT_MIGRATIONS_DIR, f), 'utf8')),

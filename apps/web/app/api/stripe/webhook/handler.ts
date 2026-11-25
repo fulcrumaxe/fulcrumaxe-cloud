@@ -1,6 +1,7 @@
 import type { Pool } from "pg";
 import { NextRequest, NextResponse } from "next/server";
 import { createPool } from "@fx/db/src/pool";
+import { markWorkPending } from "@fx/core/src/pendingWork";
 import { queueActivationDiscovery } from "../../../../lib/discoveryWake";
 import {
   defaultStripeClient,
@@ -57,6 +58,8 @@ export function defaultStripeWebhookDeps(): StripeWebhookDeps {
     webhookSecret: stripeWebhookSecretFromEnv(),
     platformOpsPool: cachedPlatformOpsPool,
     livemode: stripeKeyIsLive(stripeSecretKeyFromEnv()),
+    // D#845 ON-13a5: a subscription that ended or stopped paying marks the reconcile tick, whose stop pass lists the account's sessions and ends them. No job is written here, and nothing waits on the answer.
+    onEngineCoverageChanged: () => markWorkPending("reconcile"),
     // D#483 S4-c (P6): an activation queues the account's install discovery. The queue is written in a tenant session, so it needs
     // the app_user URL the rest of the app already requires; without it the hook is absent and the webhook is unchanged.
     ...(process.env.DATABASE_URL_APP_USER

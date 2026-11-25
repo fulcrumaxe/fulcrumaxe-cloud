@@ -44,7 +44,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const DUPLICATE_CANCELABLE_STATUSES: ReadonlySet<string> = new Set(['active', 'trialing', 'past_due']);
 
 type Outcome =
-  | { ok: true; deduped: boolean; reason?: string; unknownPrice?: { priceId: string | null }; activated?: { accountId: string; subscriptionId: string }; live?: { accountId: string; subscriptionId: string } }
+  | { ok: true; deduped: boolean; reason?: string; unknownPrice?: { priceId: string | null }; activated?: { accountId: string; subscriptionId: string }; live?: { accountId: string; subscriptionId: string }; coverageChanged?: { accountId: string } }
   | { ok: false; reason: string; duplicate?: { accountId: string; survivorId: string; survivorCustomerId: string | null; duplicateCustomerId: string } };
 
 function idOf(value: string | { id: string } | null | undefined): string | null {
@@ -191,6 +191,14 @@ export async function syncSubscriptionEvent(event: Stripe.Event, deps: StripeWeb
       await deps.onSubscriptionActivated(outcome.activated);
     } catch (err) {
       reportError(err, { stage: "billing.on_activated", route: "/api/stripe/webhook" });
+    }
+  }
+  if (outcome.ok && outcome.coverageChanged && deps.onEngineCoverageChanged) {
+    // After commit, like the hook above: the sessions the plan covered stop on the next reconcile tick, and a failure here is picked up by that tick's own list.
+    try {
+      await deps.onEngineCoverageChanged(outcome.coverageChanged.accountId);
+    } catch (err) {
+      reportError(err, { stage: "billing.on_engine_coverage_changed", route: "/api/stripe/webhook" });
     }
   }
   if (!outcome.ok && outcome.duplicate) {
@@ -376,6 +384,8 @@ async function applySubscriptionInTx(
   const nowLive = LIVE_STATUSES.has(status);
   const activated = nowLive && !wasLive ? { accountId, subscriptionId: subscription.id } : undefined;
   const live = nowLive ? { accountId, subscriptionId: subscription.id } : undefined;
+  // D#845 ON-13a5: the write ended the subscription, or left it in a standing that does not pay (paused, incomplete): the account's engine sessions are no longer covered. A past due write is not one (the grace runs 7 days).
+  const coverageChanged = ENDED_STATUSES.has(status) || (!nowLive && status !== 'past_due') ? { accountId } : undefined;
 
   let unknownPrice: { priceId: string | null } | undefined;
   if (!resolution.known && !resolution.engineOnly) {
@@ -383,7 +393,7 @@ async function applySubscriptionInTx(
     await recordUnknownPrice(client, accountId, resolution.priceId, subscription.id);
   }
 
-  return { outcome: { ok: true, deduped: false, ...(unknownPrice ? { reason: 'unknown_price', unknownPrice } : {}), ...(activated ? { activated } : {}), ...(live ? { live } : {}) }, applied: true };
+  return { outcome: { ok: true, deduped: false, ...(unknownPrice ? { reason: 'unknown_price', unknownPrice } : {}), ...(activated ? { activated } : {}), ...(live ? { live } : {}), ...(coverageChanged ? { coverageChanged } : {}) }, applied: true };
 }
 
 async function recordUnknownPrice(
