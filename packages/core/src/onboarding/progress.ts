@@ -4,7 +4,7 @@ import { withTenant } from '../tenancy/withTenant.js';
 import type { RunActionCtx } from '../runActions/request.js';
 import { INSTALLATION_KPI_SELECT, WORK_ITEM_KPI_SELECT, toInstallationKpiRow, toWorkItemKpiRow } from '../stats/read.js';
 import { getPreview } from './preview.js';
-import { buildEngineSteps, claudeDoneAt, readChosenTracks, readEngineSources, type EngineStep, type MachineFactsReader, type Track } from './engineTrack.js';
+import { buildEngineSteps, claudeDoneAt, readChosenTracks, readEngineSources, type EngineSetup, type EngineStep, type MachineFactsReader, type Track } from './engineTrack.js';
 
 /** D#2 H17d: the onboarding progress read. Every time comes from a server row; the caller passes nothing but its context. */
 
@@ -26,7 +26,7 @@ export interface OnboardingProgress {
    */
   tracks: [
     { track: 'pipeline'; steps: OnboardingProgress['steps']; chosen_at: string | null },
-    { track: 'engine'; steps: EngineStep[]; chosen_at: string | null },
+    { track: 'engine'; steps: EngineStep[]; chosen_at: string | null; /** D#845 ON-11a1: the account's one live setup (phase not done or removed), else null. */ setup: EngineSetup | null },
   ];
 }
 
@@ -121,7 +121,7 @@ export async function getOnboarding(ctx: RunActionCtx, deps: OnboardingDeps = {}
     steps,
     tracks: [
       { track: 'pipeline', steps, chosen_at: chosenAt('pipeline') },
-      { track: 'engine', steps: buildEngineSteps(own.engine.sources), chosen_at: chosenAt('engine') },
+      { track: 'engine', steps: buildEngineSteps(own.engine.sources), chosen_at: chosenAt('engine'), setup: own.engine.sources.setup ?? null },
     ],
   };
 }

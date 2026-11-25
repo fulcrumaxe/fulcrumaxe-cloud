@@ -39,8 +39,19 @@ export interface EngineStep {
   failure: { code: string; at: string } | null;
 }
 
+/** D#845 ON-11a1: the one setup the engine track's screens work on: its id and where it is. Ids and closed values only. */
+export const SETUP_PHASES = ['survey', 'plan', 'install', 'await_merge', 'finish', 'done', 'removed'] as const;
+export const SETUP_STATES = ['started', 'ok', 'failed', 'skipped'] as const;
+export interface EngineSetup {
+  id: string;
+  phase: (typeof SETUP_PHASES)[number];
+  state: (typeof SETUP_STATES)[number];
+}
+
 /** What each step's source says: its time when true, null when false. */
 export interface EngineSources {
+  /** D#845 ON-11a1: the account's one live setup (phase not done or removed, the newest), else null. Absent only on a hand-built source. */
+  setup?: EngineSetup | null;
   done: Record<EngineStepKey, string | null>;
   tier: EngineStep['tier'];
   /** The most recently heard machine's KVM fact; null when it never said. */
@@ -127,10 +138,12 @@ export async function readEngineSources(
     const step = FAILURE_STEP_BY_PHASE[s.phase];
     if (step && !failures[step]) failures[step] = { code: s.failure_code, at: s.failure_at.toISOString() };
   }
+  // D#845 Ruling 102.1: the one live setup (any phase but done or removed, the newest), else null. After `done` the track's own step states carry the history.
+  const setup = (await client.query<EngineSetup>(`SELECT id, phase, state FROM project_setups WHERE account_id = $1 AND phase NOT IN ('done', 'removed') ORDER BY created_at DESC, id LIMIT 1`, [accountId])).rows[0] ?? null;
   const tier = rn[0]?.sandbox_engine === 'microvm' ? 'microvm' : rn[0]?.sandbox_engine === 'os_sandbox' ? 'standard' : null;
   const runners = rn.map((r) => ({ id: r.id, heardAt: r.last_seen_at.toISOString() }));
   const read: { sources: EngineSources; runners: { id: string; heardAt: string }[] } = {
-    sources: { ...(enginePlanOffered === undefined ? {} : { coverage: await readEngineCoverage(client, accountId, enginePlanOffered) }), done: { machine: iso(rn[0]?.last_seen_at), claude: null, github_app: githubAppAt, project, plan, install, live }, tier, kvm: rn[0]?.kvm === 'present' || rn[0]?.kvm === 'absent' ? rn[0].kvm : null, failures },
+    sources: { setup, ...(enginePlanOffered === undefined ? {} : { coverage: await readEngineCoverage(client, accountId, enginePlanOffered) }), done: { machine: iso(rn[0]?.last_seen_at), claude: null, github_app: githubAppAt, project, plan, install, live }, tier, kvm: rn[0]?.kvm === 'present' || rn[0]?.kvm === 'absent' ? rn[0].kvm : null, failures },
     runners,
   };
   read.sources.preflight = rn[0]?.preflight ?? null;

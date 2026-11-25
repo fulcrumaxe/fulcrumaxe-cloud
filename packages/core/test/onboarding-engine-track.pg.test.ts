@@ -233,6 +233,77 @@ describe('engine track (pg)', () => {
     expect((await engine(a)).find((s) => s.step === 'plan')).toMatchObject({ state: 'failed', failure: { code: 'survey_timeout' } });
   });
 
+  // D#845 ON-11a1: the engine track's `setup`, the one setup the screens work on.
+  describe('track setup', () => {
+    const trackSetup = async (a: Acct) => (await getOnboarding(ctx(a), { readMachineFacts: facts(a) })).tracks[1].setup;
+    const repo = async (a: Acct): Promise<string> => {
+      const id = randomUUID();
+      await admin.query(`INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product) SELECT $2, account_id, installation_id, $3, 'team' FROM repos WHERE id = $1`, [a.repoId, id, randomInt(1, 2_000_000_000)]);
+      return id;
+    };
+    const setupOn = async (a: Acct, repoId: string, phase: string, extra = ''): Promise<string> => {
+      const id = randomUUID();
+      await admin.query(`INSERT INTO project_setups (id, account_id, repo_id, kind, phase, created_by) VALUES ($1, $2, $3, 'existing', $4, $5)`, [id, a.accountId, repoId, phase, a.userId]);
+      if (extra) await admin.query(`UPDATE project_setups SET ${extra} WHERE id = $1`, [id]);
+      return id;
+    };
+
+    it('is null with no setup, and shows the live one with its phase and state', async () => {
+      const a = await account();
+      expect(await trackSetup(a)).toBeNull();
+      const s = await setupOn(a, a.repoId, 'plan', `state = 'ok'`);
+      expect(await trackSetup(a)).toEqual({ id: s, phase: 'plan', state: 'ok' });
+      await admin.query(`UPDATE project_setups SET phase = 'install', state = 'failed' WHERE id = $1`, [s]);
+      expect(await trackSetup(a)).toEqual({ id: s, phase: 'install', state: 'failed' });
+    });
+
+    it('a live setup in state skipped is returned as it is', async () => {
+      const a = await account();
+      const s = await setupOn(a, a.repoId, 'install', `state = 'skipped'`);
+      expect(await trackSetup(a)).toEqual({ id: s, phase: 'install', state: 'skipped' });
+    });
+
+    it('a removed setup and a done setup show nothing, whether or not the install merged; a live one shows beside them', async () => {
+      const a = await account();
+      const s = await setupOn(a, a.repoId, 'install');
+      await admin.query(`UPDATE project_setups SET phase = 'removed' WHERE id = $1`, [s]);
+      expect(await trackSetup(a)).toBeNull();
+      const r2 = await repo(a);
+      const done = await setupOn(a, r2, 'done');
+      expect(await trackSetup(a)).toBeNull();
+      await admin.query(`UPDATE project_setups SET install_pr_closed_number = 7, install_pr_closed_merged = false WHERE id = $1`, [done]);
+      expect(await trackSetup(a)).toBeNull();
+      await admin.query(`UPDATE project_setups SET install_pr_closed_merged = true WHERE id = $1`, [done]);
+      expect(await trackSetup(a)).toBeNull();
+      const live = await setupOn(a, a.repoId, 'survey');
+      expect(await trackSetup(a)).toEqual({ id: live, phase: 'survey', state: 'started' });
+    });
+
+    it('the newest wins among several live setups, and a newer done one does not hide an older live one', async () => {
+      const a = await account();
+      const r2 = await repo(a);
+      await setupOn(a, a.repoId, 'plan', `created_at = now() - interval '2 hours'`);
+      const newer = await setupOn(a, r2, 'install', `created_at = now() - interval '1 hour'`);
+      expect((await trackSetup(a))?.id).toBe(newer);
+      await setupOn(a, await repo(a), 'done', `created_at = now()`);
+      expect((await trackSetup(a))?.id).toBe(newer);
+    });
+
+    it("another account's setup never appears, through the session read and through the RLS-bypassing client", async () => {
+      const a = await account();
+      const b = await account();
+      await setupOn(b, b.repoId, 'plan');
+      const bDone = await account();
+      await setupOn(bDone, bDone.repoId, 'done');
+      expect(await trackSetup(a)).toBeNull();
+      // The admin client skips row security, so only the explicit account predicate keeps the foreign rows out: the live read carries it.
+      expect((await readEngineSources(admin, a.accountId, null)).sources.setup).toBeNull();
+      expect((await readEngineSources(admin, b.accountId, null)).sources.setup).toMatchObject({ phase: 'plan' });
+      await setupOn(a, a.repoId, 'done');
+      expect((await readEngineSources(admin, a.accountId, null)).sources.setup).toBeNull();
+    });
+  });
+
   it('chooseTrack: stores the choice, audits once, allows both tracks, and a repeat changes nothing', async () => {
     const a = await account();
     const first = await chooseTrack(ctx(a), 'engine');

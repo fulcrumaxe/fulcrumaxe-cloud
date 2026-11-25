@@ -122,7 +122,8 @@
           "failure": null
         }
       ],
-      "chosen_at": null
+      "chosen_at": null,
+      "setup": null
     }
   ]
 }
