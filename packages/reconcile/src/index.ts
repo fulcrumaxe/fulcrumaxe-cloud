@@ -6,6 +6,7 @@ export {
   lapBasisSeconds,
   jobsWithWork,
   setupInstallPending,
+  setupFinishPending,
   type WorkOptions,
   hasBrokenCredits,
   readCreditsBreak,
@@ -35,6 +36,7 @@ export { checkStalls, stallText, describeDuration, STALL_REPEAT_SECONDS, type Op
 export { RECONCILE_JOBS, buildReconcileJobs } from './jobs.js';
 export { createErrorEventsPrune, errorEventsPrune, ERROR_EVENTS_RETENTION_DAYS } from './jobs/errorEventsPrune.js';
 export { createEngineEventsPrune, engineEventsPrune, ENGINE_EVENTS_PRUNE_JOB } from './jobs/engineEventsPrune.js';
+export { createSetupFinishJob, SETUP_FINISH_JOB, type SetupFinishStep } from './jobs/setupFinish.js';
 export { createSetupInstallPrJob, SETUP_INSTALL_PR_JOB, type SetupInstallStep } from './jobs/setupInstallPr.js';
 export { createMachineServerSweep, MACHINE_SERVER_SWEEP_JOB, type MachineSweepStart } from './jobs/machineServerSweep.js';
 export { createEngineSessionStops, ENGINE_SESSION_STOPS_JOB, type EngineSessionStopsPass } from './jobs/engineSessionStops.js';

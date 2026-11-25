@@ -28,6 +28,8 @@ export function buildReconcileJobs(extra: {
   machine?: readonly ReconcileJob[];
   /** D#845 ON-8f2a: the install pull request step (it needs the GitHub port and the app database, so the route builds it). */
   setupInstall?: ReconcileJob;
+  /** D#845 ON-13a4: the finish phase (Discussions and the team-log issue; it needs the GitHub port and the app database, so the route builds it). */
+  setupFinish?: ReconcileJob;
 }): readonly ReconcileJob[] {
-  return [...RECONCILE_JOBS, ...(extra.sandbox ?? []), ...(extra.machine ?? []), ...(extra.setupInstall ? [extra.setupInstall] : []), extra.githubInstallations, extra.githubRepos, extra.stripeSubscriptions, extra.modelKeyHealth, extra.modelCreditsRevalidate];
+  return [...RECONCILE_JOBS, ...(extra.sandbox ?? []), ...(extra.machine ?? []), ...(extra.setupInstall ? [extra.setupInstall] : []), ...(extra.setupFinish ? [extra.setupFinish] : []), extra.githubInstallations, extra.githubRepos, extra.stripeSubscriptions, extra.modelKeyHealth, extra.modelCreditsRevalidate];
 }

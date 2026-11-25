@@ -101,6 +101,9 @@ describe("the local-only GitHub allowlist (D#6 R2b-3, body criterion 9, C22 sect
       { id: "A24", method: "POST", paths: ["/repos/{owner}/{repo}/git/refs"], query: [], body: "{ ref: refs/heads/fx/engine-remove-<major.minor.patch>, sha }", only: "engineRemove" },
       { id: "A25", method: "POST", paths: ["/graphql"], query: [], body: "{ query: CommitParents, variables: exactly owner, name, sha }", only: "setupInstall" },
       { id: "A26", method: "POST", paths: ["/repos/{owner}/{repo}/labels"], query: [], body: "{ name, color, description }: exactly one row of SETUP_INSTALL_LABELS", only: "setupInstall" },
+      { id: "A27", method: "POST", paths: ["/graphql"], query: [], body: "{ query: SeedTarget, SeedDiscussions or SeedCreateDiscussion, variables: that document's schema; a create body ends with the fx-seed marker }", only: "setupFinish" },
+      { id: "A28", method: "GET", paths: ["/repos/{owner}/{repo}/issues"], query: ["labels", "state", "per_page"], body: "none; labels is required and is exactly team-log", only: "setupFinish" },
+      { id: "A29", method: "POST", paths: ["/repos/{owner}/{repo}/issues"], query: [], body: '{ title, body ending with the fx-team-log marker, labels: ["team-log"] }', only: "setupFinish" },
     ]);
     expect(Object.isFrozen(LOCAL_ONLY_ALLOWLIST)).toBe(true);
   });

@@ -166,6 +166,18 @@ export {
   setupPushTokenRun,
 } from "./setupPush.js";
 export {
+  SEED_DEFAULT_CATEGORY,
+  claimSetupFinish,
+  completeSetupFinish,
+  pickSeedCategory,
+  seedDiscussionText,
+  teamLogText,
+  type SetupFinishClaim,
+  type SetupFinishDeps,
+  type SetupFinishOutcome,
+  type SetupFinishRow,
+} from "./setupFinish.js";
+export {
   claimSetupInstall,
   completeSetupInstall,
   installPathRefused,
@@ -245,6 +257,7 @@ export {
   GATE1_QUEUE_DOCUMENTS,
   GATE1_STATUS_DOCUMENTS,
   GITHUB_GRAPHQL_DOCUMENTS,
+  SETUP_FINISH_DOCUMENTS,
   SETUP_INSTALL_DOCUMENTS,
   LOCAL_ONLY_ALLOWLIST,
   LOCAL_ONLY_REVIEW_STATUS_CONTEXT,
@@ -443,6 +456,8 @@ export {
   type PullRequestText,
   type RunPullRequestPort,
   type RunPullRequestText,
+  type SeedTarget,
+  type SetupFinishPort,
   type SetupInstallPort,
 } from "./runPullRequest.js";
 export {

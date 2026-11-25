@@ -393,6 +393,36 @@ describe("installation_repositories deliveries mark the reconciler pending", () 
   });
 });
 
+// D#845 ON-13a4: a merged install pull request moves its setup to the finish phase; the reconciler is woken so the finish step runs on the next tick.
+describe("a merged install pull request marks the reconciler pending", () => {
+  const body = JSON.stringify({ action: "closed", installation: { id: 42 }, sender: { id: 7001 }, repository: { id: 5, name: "r", full_name: "o/r" } });
+  const reply = (applied: string, outcome?: string) => vi.fn(async (): Promise<HandleWebhookResult> => ({ handled: true, result: { applied, ...(outcome === undefined ? {} : { outcome }) } as never }));
+  afterEach(() => setPendingHooks(null));
+
+  function install() {
+    const written = new Map<string, number>();
+    const kept: Array<Promise<unknown>> = [];
+    setPendingHooks({
+      store: { get: async (k) => written.get(k) ?? null, set: async (k, v) => void written.set(k, v), delete: async (k) => void written.delete(k) },
+      keepAlive: (p) => void kept.push(p),
+    });
+    return { written, settled: () => Promise.all(kept) };
+  }
+
+  it("sets the marker when the delivery finished a setup, and for nothing else: not a close that failed or only recorded, not another applied kind", async () => {
+    const hit = install();
+    await githubWebhookHandler(requestWithBody(body, { event: "pull_request" }), fakeDeps(), reply("setup_install_pr_closed", "finished"));
+    await hit.settled();
+    expect(hit.written.has("pending:reconcile")).toBe(true);
+    for (const [applied, outcome] of [["setup_install_pr_closed", "failed"], ["setup_install_pr_closed", "recorded"], ["skipped", undefined]] as const) {
+      const miss = install();
+      await githubWebhookHandler(requestWithBody(body, { event: "pull_request" }), fakeDeps(), reply(applied, outcome));
+      await miss.settled();
+      expect(miss.written.size, `${applied} ${outcome}`).toBe(0);
+    }
+  });
+});
+
 describe("the intake allowlist source (D#31 AUTHOR-CHECK-WIRE)", () => {
   it("is the shared one: no list configured means the deps carry none, a configured list is passed through", () => {
     vi.stubEnv("DATABASE_URL_APP_USER", "postgres://u:p@127.0.0.1:1/none");
