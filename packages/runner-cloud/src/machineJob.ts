@@ -39,7 +39,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 
 /** What `machineJobOffered` needs of this runner: its stored protocol, the capabilities of its latest hello and the sandbox engine of its facts (absent when it sent none). */
-async function offerOf(client: PoolClient, runner: { accountId: string; runnerId: string }): Promise<RunnerOffer> {
+export async function offerOf(client: PoolClient, runner: { accountId: string; runnerId: string }): Promise<RunnerOffer> {
   const { rows } = await client.query<{ protocol_version: number | null; capabilities: string[] | null; sandbox_engine: string | null }>(
     `SELECT r.protocol_version, c.capabilities, f.sandbox_engine FROM runners r
        LEFT JOIN runner_capabilities c ON c.account_id = r.account_id AND c.runner_id = r.id

@@ -3,6 +3,7 @@ import { HOST_LOAD_MIN_INTERVAL_SECONDS } from "@fulcrumaxe/runner-protocol";
 import { RUNNER_ONLINE_SECONDS, runnerLiveSql } from "@fx/runner";
 import { assertMayAddReposToRunner, PlanHolderOnlyError } from "@fx/db/src/runnerPlanLoosen.js";
 import { RunnerHttpError, pgCode } from "./http.js";
+import { cleanupOpen } from "./machineCleanups.js";
 import { readMachineFactsIn } from "./machineFacts.js";
 import { requireMemberRole } from "./memberRole.js";
 
@@ -147,6 +148,11 @@ async function requireRepo(client: PoolClient, accountId: string, repoId: string
 const notEligible = (m: MachineCapacity): RunnerHttpError =>
   m.reason === "has_project" ? refuse(409, "machine_single_project", "this machine already runs a project") : refuse(409, "machine_not_eligible", "this machine cannot take a project right now");
 
+/** D#845 ON-16a1: not the same repo on a machine still removing it (its delete would wipe the new session; the sandbox name is per repo). No lock: the cleanup commits with the placement's delete. */
+async function refuseRemovalPending(client: PoolClient, accountId: string, repoId: string, machine: Pick<MachineCapacity, "runner_id" | "name">): Promise<void> {
+  if (await cleanupOpen(client, accountId, repoId, machine.runner_id)) throw refuse(409, "removal_pending", `${machine.name} still has to finish removing this project; it will when it comes back`);
+}
+
 /**
  * Inside a savepoint, so a lost race leaves the transaction usable: `true` when the row was written, `false` when the machine was taken. A repo that already has a placement is 409.
  * The unique index is the arbiter: a concurrent writer on the same machine waits for the first one to finish, then fails here or succeeds if the first rolled back.
@@ -176,6 +182,7 @@ export async function placeProject(client: PoolClient, a: Actor, input: { repoId
   const machine = (await readMachineCapacity(client, a.accountId, input)).find((m) => m.runner_id === input.runnerId);
   if (!machine) throw refuse(404, "not_found", "no such machine");
   if (!machine.eligible) throw notEligible(machine);
+  await refuseRemovalPending(client, a.accountId, input.repoId, machine);
   await input.engineCoverage?.(client, { accountId: a.accountId, repoId: input.repoId });
   if (!(await insertPlacement(client, a, input.repoId, input.runnerId, "person"))) throw refuse(409, "machine_single_project", "this machine already runs a project");
 }
@@ -187,7 +194,9 @@ export async function placeProject(client: PoolClient, a: Actor, input: { repoId
 export async function autoPlaceProject(client: PoolClient, a: Actor, input: { repoId: string; engineCoverage?: EngineCoverageCheck; now?: Date; wakeEnabled?: boolean }): Promise<string> {
   await requireOwnerOrAdmin(client);
   await requireRepo(client, a.accountId, input.repoId);
-  const order = placementOrder(await readMachineCapacity(client, a.accountId, input));
+  // A machine that still has to finish removing this repo is skipped (ON-16a1), as one that cannot take it.
+  const order: MachineCapacity[] = [];
+  for (const m of placementOrder(await readMachineCapacity(client, a.accountId, input))) if (!(await cleanupOpen(client, a.accountId, input.repoId, m.runner_id))) order.push(m);
   if (order.length === 0) throw refuse(409, "no_eligible_machine", "no machine can take a project right now");
   await input.engineCoverage?.(client, { accountId: a.accountId, repoId: input.repoId });
   for (const m of order) if (await insertPlacement(client, a, input.repoId, m.runner_id, "auto")) return m.runner_id;
@@ -221,6 +230,7 @@ export async function moveProject(client: PoolClient, a: Actor, input: { repoId:
   const to = (await readMachineCapacity(client, a.accountId, input)).find((m) => m.runner_id === input.toRunnerId);
   if (!to) throw refuse(404, "not_found", "no such machine");
   if (!to.eligible) throw notEligible(to);
+  await refuseRemovalPending(client, a.accountId, input.repoId, to);
   try {
     await assertMayAddReposToRunner(client, a.userId, input.toRunnerId, [input.repoId]);
   } catch (error) {

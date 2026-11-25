@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { INSTALLATION_APP_KINDS } from "@fx/core/src/repos/appKinds.js";
 import { assertRepoIdShape, getRepo, listRepos, type RepoDTO } from "@fx/core/src/repos/read.js";
+import { withTenant } from "@fx/db/src/withTenant.js";
+import { readRepoRemovals, type RepoRemoval } from "@fx/runner-cloud";
 import { getRepoGuardSettings, isRepoHumanMergeOnly, setRepoGuardSettings } from "@fx/core/src/role-settings/guardSettings.js";
 import type { RepoGuardSettings } from "@fx/core/src/role-settings/types.js";
 import type { RouteEntry } from "../registry.js";
@@ -16,6 +18,8 @@ export const repoResponseSchema = z.object({
   install_state: z.enum(["installed", "not_installed"]),
   app_kind: z.enum(INSTALLATION_APP_KINDS).nullable(),
   full_name: z.string().nullable(),
+  /** D#845 ON-16a1: a removal whose machine part is not finished, derived on each read (never stored); null once done or when there is none. */
+  removal: z.object({ state: z.enum(["waiting_machine", "removing", "failed"]), machine_name: z.string(), failure_code: z.string().nullable() }).nullable(),
 });
 
 const listReposResponseSchema = z.object({
@@ -53,8 +57,15 @@ const patchSettingsBodySchema = z
   .strict()
   .refine((b) => Object.keys(b).length > 0);
 
-function toRepoItem(repo: RepoDTO): z.infer<typeof repoResponseSchema> {
+/** The removal of each repo of the page, in one read (the same account, on top of row security). */
+async function removalsOf(ctx: { pool: Parameters<typeof withTenant>[0]; principal: { accountId: string; userId: string } }, repoIds: string[]): Promise<Map<string, RepoRemoval>> {
+  if (repoIds.length === 0) return new Map();
+  return withTenant(ctx.pool, ctx.principal.accountId, ctx.principal.userId, (client) => readRepoRemovals(client, ctx.principal.accountId, repoIds));
+}
+
+function toRepoItem(repo: RepoDTO, removal: RepoRemoval | null = null): z.infer<typeof repoResponseSchema> {
   return {
+    removal,
     id: repo.id,
     product: repo.product,
     gh_repo_id: repo.ghRepoId,
@@ -95,8 +106,9 @@ export const repoRoutes: RouteEntry[] = [
         { pool: ctx.pool, principal: ctx.principal },
         { limit, cursor: cursor ? { createdAt: cursor.created_at, id: cursor.id } : undefined },
       );
+      const removals = await removalsOf(ctx, result.data.map((r) => r.id));
       return {
-        data: result.data.map(toRepoItem),
+        data: result.data.map((r) => toRepoItem(r, removals.get(r.id) ?? null)),
         next_cursor: result.nextCursor ? encodeCursor(result.nextCursor.createdAt, result.nextCursor.id) : null,
       };
     },
@@ -114,7 +126,8 @@ export const repoRoutes: RouteEntry[] = [
     paramsSchema: repoIdParamsSchema,
     responseSchema: repoResponseSchema,
     async handler(ctx, input) {
-      return toRepoItem(await getRepo({ pool: ctx.pool, principal: ctx.principal }, input.params.id!));
+      const repo = await getRepo({ pool: ctx.pool, principal: ctx.principal }, input.params.id!);
+      return toRepoItem(repo, (await removalsOf(ctx, [repo.id])).get(repo.id) ?? null);
     },
   },
   {

@@ -12,6 +12,8 @@ import { createAppRepoVisibility } from "./github/repoVisibility";
 import { createInstallationAccountReader } from "./github/installationAccount";
 import { getWorker } from "./worker";
 import { createAppRunPullRequestPort } from "./github/runnerPullRequest";
+import { openInstallationHttp } from "./github/installationHttp";
+import { openForEngineRemoval } from "./github/localOnlyHttp";
 import { readPlanePushIdentity } from "@fx/core/src/repos/planePushIdentity.js";
 import { createLivePlanePushPort } from "./github/planePushHosted";
 import { createLiveSetupPushPort } from "./github/setupPush";
@@ -111,6 +113,10 @@ async function readAllowanceFile(target: { repoId: string; owner: string; name: 
   return source.file(".fulcrumaxe/runner-sandbox.json", (await source.head()).sha, ALLOWANCE_FILE_MAX_BYTES);
 }
 
+/** D#845 ON-16a1: the engine removal pull request's client: the repository's `merge_gate` installation client behind the `engineRemove` fence (no DELETE, no merge). */
+const engineRemovalGithub: NonNullable<RunnerCloudDeps["engineRemovalGithub"]> = async (target) =>
+  (await openForEngineRemoval(openInstallationHttp, target)) as unknown as Awaited<ReturnType<NonNullable<RunnerCloudDeps["engineRemovalGithub"]>>>;
+
 /** D#598 P1f-2b: the platform commit identity, read from the hosted settings on every call (a changed or removed setting applies to the next token). Null while either is missing or malformed. */
 function planePushIdentity(): { name: string; email: string } | null {
   const read = readPlanePushIdentity(process.env);
@@ -138,6 +144,7 @@ export function runnerDeps(): RunnerCloudDeps {
     setupPush: (setupPush ??= createLiveSetupPushPort()),
     planeMerge: (planeMerge ??= livePlaneMerge()),
     readAllowanceFile,
+    engineRemovalGithub,
     planePushIdentity,
     wakeKey,
     runnerSeen: runnerSeenFromCache(),

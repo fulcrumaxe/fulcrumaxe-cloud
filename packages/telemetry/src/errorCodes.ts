@@ -665,6 +665,9 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "not_asked",
   // Confirming a project (D#845 ON-7a): a deadlock between two changes to one machine (409, try again).
   "placement_busy",
+  // Removing a project (D#845 ON-16a1): an install or engine update is still out (409), and the same repo cannot go back on a machine that still has to finish removing it (409).
+  "setup_running",
+  "removal_pending",
   // Operate on a public repo waits for the decide rule for work from strangers (D#845 S-8): 409 from the settings write and the project confirm.
   "operate_public_pending",
   // Envelope edits and the weekly auto-start envelope (D#483 S5-e2): the one new code the routes throw.

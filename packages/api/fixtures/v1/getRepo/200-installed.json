@@ -4,5 +4,6 @@
   "gh_repo_id": 812345678,
   "install_state": "installed",
   "app_kind": "team",
-  "full_name": "acme/widgets"
+  "full_name": "acme/widgets",
+  "removal": null
 }

@@ -344,6 +344,20 @@ export {
   placeProjectRoute,
 } from "./projectConfirm.js";
 export {
+  cleanupOpen,
+  issueDueCleanups,
+  readRepoRemovals,
+  type RepoRemoval,
+} from "./machineCleanups.js";
+export {
+  removeProjectIn,
+  removeProjectRoute,
+  removeProjectsOnRunner,
+  type ProjectRemoval,
+  type RemovalHooks,
+  type RemovalPrReply,
+} from "./projectRemoval.js";
+export {
   readMachineFacts,
   readMachineFactsIn,
   type MachineFacts,

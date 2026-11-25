@@ -14,6 +14,7 @@ import { revokeAllHandler } from "../app/api/runners/revoke-all/handler";
 import { listRunnersHandler } from "../app/api/runners/handler";
 import { listMachinesHandler } from "../app/api/machines/handler";
 import { moveProjectHandler } from "../app/api/runners/repos/[id]/move/handler";
+import { removeProjectHandler } from "../app/api/runners/repos/[id]/remove/handler";
 import { listPickerReposHandler } from "../app/api/runners/repos/picker/handler";
 import { approveRunHandler } from "../app/api/runners/runs/[id]/approve/handler";
 import { executionModeHandler, getRepoModeHandler } from "../app/api/runners/repos/[id]/execution-mode/handler";
@@ -166,6 +167,9 @@ describe("a runner-signed request is not a session (every route outside api/runn
       () => listMachinesHandler(signedNext(`${ORIGIN}/api/machines`)),
       () => listMachinesHandler(signedNext(`${ORIGIN}/api/machines`, { authorization: "Bearer fxat_notarealtoken" })),
       () => moveProjectHandler(signedNext(`${ORIGIN}/api/runners/repos/x/move`, { authorization: "Bearer fxat_notarealtoken" }), "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e"),
+      // D#845 ON-16a1: removing a project is a session route, and an API token is no session either.
+      () => removeProjectHandler(signedNext(`${ORIGIN}/api/runners/repos/x/remove`), "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e"),
+      () => removeProjectHandler(signedNext(`${ORIGIN}/api/runners/repos/x/remove`, { authorization: "Bearer fxat_notarealtoken" }), "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e"),
       // D#845 ON-7a2: the project picker's read is a session route too.
       () => listPickerReposHandler(signedNext(`${ORIGIN}/api/runners/repos/picker`)),
       () => listPickerReposHandler(signedNext(`${ORIGIN}/api/runners/repos/picker`, { authorization: "Bearer fxat_notarealtoken" })),

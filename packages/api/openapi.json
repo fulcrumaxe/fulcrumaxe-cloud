@@ -16578,6 +16578,41 @@
                               "string",
                               "null"
                             ]
+                          },
+                          "removal": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "state": {
+                                    "type": "string",
+                                    "enum": [
+                                      "waiting_machine",
+                                      "removing",
+                                      "failed"
+                                    ]
+                                  },
+                                  "machine_name": {
+                                    "type": "string"
+                                  },
+                                  "failure_code": {
+                                    "type": [
+                                      "string",
+                                      "null"
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "state",
+                                  "machine_name",
+                                  "failure_code"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           }
                         },
                         "required": [
@@ -16586,7 +16621,8 @@
                           "gh_repo_id",
                           "install_state",
                           "app_kind",
-                          "full_name"
+                          "full_name",
+                          "removal"
                         ],
                         "additionalProperties": false
                       }
@@ -16752,6 +16788,41 @@
                         "string",
                         "null"
                       ]
+                    },
+                    "removal": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "state": {
+                              "type": "string",
+                              "enum": [
+                                "waiting_machine",
+                                "removing",
+                                "failed"
+                              ]
+                            },
+                            "machine_name": {
+                              "type": "string"
+                            },
+                            "failure_code": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "state",
+                            "machine_name",
+                            "failure_code"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     }
                   },
                   "required": [
@@ -16760,7 +16831,8 @@
                     "gh_repo_id",
                     "install_state",
                     "app_kind",
-                    "full_name"
+                    "full_name",
+                    "removal"
                   ],
                   "additionalProperties": false
                 }

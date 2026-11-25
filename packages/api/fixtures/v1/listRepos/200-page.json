@@ -6,7 +6,8 @@
       "gh_repo_id": 812345678,
       "install_state": "installed",
       "app_kind": "team",
-      "full_name": "acme/widgets"
+      "full_name": "acme/widgets",
+      "removal": null
     },
     {
       "id": "44444444-4444-4444-8444-444444444444",
@@ -14,7 +15,12 @@
       "gh_repo_id": 812345679,
       "install_state": "not_installed",
       "app_kind": null,
-      "full_name": null
+      "full_name": null,
+      "removal": {
+        "state": "waiting_machine",
+        "machine_name": "Studio box",
+        "failure_code": null
+      }
     }
   ],
   "next_cursor": null
