@@ -153,6 +153,8 @@ export async function api(method, path, body, signal, opts) {
       if (data && data.data && (data.data.cap === "repo" || data.data.cap === "account") && Number.isInteger(data.data.limit) && Number.isInteger(data.data.in_use)) failure.limit = { cap: data.data.cap, limit: data.data.limit, inUse: data.data.in_use };
       // A 409 envelope_below_first_run names the smallest limit that would be accepted (data.minimum_usd): a number, never text.
       if (data && data.data && Number.isFinite(data.data.minimum_usd) && data.data.minimum_usd >= 0) failure.minimumUsd = data.data.minimum_usd;
+      // A 409 plan_not_reviewed names how many items are still unread beside the error (data.missing): a whole number, never text.
+      if (data && Number.isInteger(data.missing) && data.missing >= 0) failure.missing = data.missing;
       throw failure;
     }
   } catch (e) {

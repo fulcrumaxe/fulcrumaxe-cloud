@@ -125,3 +125,11 @@
 .ob-paths .ob-code { flex: none; display: block; }
 .ob-actions { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; }
 a.ob-btn { display: inline-flex; align-items: center; box-sizing: border-box; text-decoration: none; }
+/* D#845 ON-11b: the plan review. A row is one bordered group of full-width fields; the PRD box and the rendered PRD wrap long lines, and nothing is wider than a phone. */
+.ob-plan { margin-top: 8px; min-width: 0; }
+.ob-plan .ob-btn { margin-right: 8px; }
+.ob-row { padding: 8px 10px; border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); }
+.ob-row legend { padding: 0 4px; }
+.ob-prd { max-height: 24rem; overflow: auto; padding: 6px 8px; border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); }
+.ob-prd-edit { min-height: 12rem; resize: vertical; overflow-wrap: anywhere; }
+.ob-plan textarea.ob-input { line-height: 1.4; }

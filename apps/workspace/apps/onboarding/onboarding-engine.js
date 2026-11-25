@@ -7,8 +7,9 @@
 //
 // Commands are fixed templates filled with the page's own origin. A Copy button copies exactly the text drawn beside it.
 // onboarding-app.js loads this file with import() when the engine track is on screen, so it is not a boot request (the boot budget is full).
-import { h, timeNode, usd } from "../_lib/dom.js";
+import { h, timeNode, usd, confirmAction } from "../_lib/dom.js";
 import { api } from "../_lib/api.js";
+import { MAX_MARKDOWN_BYTES, renderMarkdown } from "../_lib/markdown.js";
 
 export const LABELS = {
   machine: "Connect a machine", claude: "Sign in to Claude on the machine", github_app: "Install the GitHub App (write)", project: "Choose a project",
@@ -210,6 +211,8 @@ export function surveyDetail(row) {
   if (row.state === "failed" && (row.failure_code === "survey_failed" || row.failure_code === "survey_timeout") && typeof row.failure_reason === "string" && Object.hasOwn(SURVEY_REASONS, row.failure_reason)) return { detail: { reason: SURVEY_REASONS[row.failure_reason] } };
   return {};
 }
+/** D#845 ON-11a1: the plan step's stage from the engine track's `setup` ({ id, phase, state }): a survey that is running, or a plan waiting for review. Anything else is empty. */
+const stageOf = (setup) => (setup && setup.phase === "survey" && setup.state === "started" ? { stage: "surveying" } : setup && setup.phase === "plan" ? { stage: "draft" } : {});
 /**
  * One engine step's copy. `steps` is the engine track, `i` the step, `ctx` the view-model (every field optional):
  *   name, origin, isAdmin, offline, last_seen_min, price (the Engine plan's monthly price), planNote (a refused purchase's sentence, or the "Engine added" notice), planBusy
@@ -278,7 +281,7 @@ export function describeStep(steps, i, ctx = {}) {
       else if ((ctx.project || {}).no_eligible_machine) { v.lines.push("Every machine is full or offline"); v.actions.push(act("add_machine", "Add a machine", "runners")); }
       break;
     case "plan": {
-      const p = ctx.plan || {};
+      const p = ctx.plan || stageOf(ctx.setup);
       if (step.state === "done") v.lines.push("Your plan is approved");
       else if (p.stage === "surveying") { v.lines.push("Reading your code and docs…"); if (p.run_id) v.actions.push(act("open_run", "Open the run", "runs")); }
       else if (p.stage === "not_started") v.lines.push("The survey didn't start. Try again, or write your own plan.");
@@ -346,7 +349,9 @@ export function engineSection(steps, env) {
       // D#845 ON-7b: the picker lives in a host the app keeps across redraws; a member is told who can pick.
       s.step === "project" && s.state === "active" && !s.plan_gate ? (env.ctx.isAdmin === false ? h("p", { class: "ob-muted", "data-testid": "ob-engine-line" }, ASK_PICK) : env.projectHost || null) : null,
       // D#845 ON-20b: the install step's summary and merge, in a host the app keeps across redraws; it is there only while the pull request is open.
-      s.step === "install" && s.state === "active" && s.pr_state === "open" && s.setup_id ? env.installHost || null : null);
+      s.step === "install" && s.state === "active" && s.pr_state === "open" && s.setup_id ? env.installHost || null : null,
+      // D#845 ON-11b: the plan review lives in a host the app keeps across redraws, while the setup waits at the plan.
+      s.step === "plan" && (s.state === "active" || s.state === "done") && env.ctx.setup && env.ctx.setup.phase === "plan" ? env.planHost || null : null);
   });
   return h("section", { class: "ob-track", "data-testid": "ob-track-engine", "aria-label": "Engine setup" },
     first === 0 ? h("div", { class: "ob-prereq", "data-testid": "ob-prereq" }, h("h3", { class: "ob-sub" }, "Before you start"),
@@ -730,4 +735,251 @@ export function mountInstallPanel(host, env) {
   }
   read();
   return { destroy() { dead = true; host.replaceChildren(); } };
+}
+
+// D#845 ON-11b: the plan review. The first half is pure (reading the draft, the checks, every refusal's sentence) and is unit-tested; the second draws it with h() only, so the PRD, the row text and the keys are text, never markup.
+// The server decides everything (the version lock, the rules for Approve, the review mode); the checks here only say in words what it would refuse. Nothing is stored in the browser, and the ticks live on the page.
+export const PRD_LIMIT = 200000;
+const ROW_KEY_RE = /^[A-Z][A-Z0-9-]{0,15}$/;
+export const PUBLIC_BANNER = "Drafted from a public repo. Anyone can propose changes to its files, so read every item before you approve.";
+export const PLAN_MEMBER = "Only owners and admins can edit or approve the plan.";
+export const PLAN_CONFLICT = "This plan changed in another window";
+export const PLAN_NONE = "There is no plan to review. Write your own.";
+export const PLAN_NO_ROWS = "Keep at least one row";
+const PRD_RANGE = "The PRD must be between 1 and 200,000 characters.";
+const cp = (s) => [...s].length;
+const depList = (s) => s.split(/[\s,]+/).filter(Boolean);
+/** The draft read (GET /api/v1/setups/:id/draft) as the editor holds it, or null when it does not fit. Anything but a clear "standard" review mode is "public": fail closed. */
+export function readDraft(body) {
+  const d = body && body.draft, st = body && body.setup;
+  if (!d || !st || typeof st.phase !== "string" || !Number.isInteger(d.version) || d.version < 1 || (d.status !== "draft" && d.status !== "approved") || typeof d.prd_md !== "string" || !Array.isArray(d.roadmap)) return null;
+  const rows = [];
+  for (const r of d.roadmap) {
+    if (!r || typeof r.row_key !== "string" || typeof r.title !== "string" || typeof r.summary !== "string" || !["S", "M", "L"].includes(r.size) || !Array.isArray(r.depends_on) || !r.depends_on.every((k) => typeof k === "string") || typeof r.keep !== "boolean") return null;
+    rows.push({ key: r.row_key, title: r.title, summary: r.summary, size: r.size, deps: r.depends_on.join(", "), keep: r.keep });
+  }
+  return { version: d.version, status: d.status, phase: st.phase, prd: d.prd_md, rows, mode: body.review_mode === "standard" ? "standard" : "public" };
+}
+/** What would stop a save (`save`) or an Approve (`approve`), in words. The server judges again. */
+export function planProblems(prd, rows) {
+  const save = [], approve = [], keys = new Map(rows.map((r) => [r.key, r])), seen = new Set();
+  if (cp(prd) < 1 || cp(prd) > PRD_LIMIT) save.push(PRD_RANGE);
+  if (rows.length > 200) save.push("A plan holds at most 200 rows.");
+  for (const r of rows) {
+    const at = r.key || "A row with no key", deps = depList(r.deps);
+    if (!ROW_KEY_RE.test(r.key)) save.push(at + ": a key is capital letters, digits and dashes, starts with a letter and has up to 16 characters.");
+    else if (seen.has(r.key)) save.push("Two rows are called " + r.key + ".");
+    seen.add(r.key);
+    if (cp(r.title) < 1 || cp(r.title) > 120) save.push(at + ": the title needs 1 to 120 characters.");
+    if (cp(r.summary) > 500) save.push(at + ": the summary is limited to 500 characters.");
+    if (deps.length > 10) save.push(at + ": a row depends on at most 10 others.");
+    for (const d of deps) {
+      if (d === r.key || !keys.has(d)) save.push(at + " depends on " + d + (d === r.key ? ", which is itself." : ", which isn't a row in this plan."));
+      else if (r.keep && !keys.get(d).keep) approve.push(at + " is kept but depends on " + d + ", which you dropped.");
+    }
+  }
+  if (!rows.some((r) => r.keep)) approve.push(PLAN_NO_ROWS);
+  return { save, approve };
+}
+/** The roadmap as the server takes it. */
+export const toRoadmap = (rows) => rows.map((r) => ({ row_key: r.key, title: r.title, summary: r.summary, size: r.size, depends_on: depList(r.deps), keep: r.keep }));
+const PLAN_INVALID = { no_kept_rows: PLAN_NO_ROWS, prd_length: PRD_RANGE, dependency_dropped: "A kept row depends on a row you dropped. Keep that row too, or take the dependency out." };
+const PLAN_BY_ERROR = {
+  forbidden: PLAN_MEMBER, invalid_message: "The plan has a value that can't be kept. Check the PRD, the row keys, the titles and the sizes.", not_found: PLAN_NONE,
+  setup_phase: "This setup has moved on, so the plan can't be changed here. Reloading.", survey_running: "A survey is running now. Wait for it to finish.",
+  public_repo: "This repo is public, so the survey can't run again. Write your own plan instead.",
+  repo_visibility_unknown: "We couldn't tell whether this repo is private, so the survey can't run. Try again in a minute, or write your own plan.",
+};
+export const DRAFT_FAILED = "That didn't go through. Try again.";
+/** A refused plan call in words, by the server's closed code (never its message). `conflict` is the version lock; `reload` means the setup moved on and the page should read it again. */
+export function draftRefusal(e) {
+  const code = e && typeof e.code === "string" ? e.code : "";
+  if (code === "draft_conflict") return { text: PLAN_CONFLICT, conflict: true, reload: false };
+  if (code === "plan_invalid") return { text: Object.hasOwn(PLAN_INVALID, e.reason) ? PLAN_INVALID[e.reason] : "The plan can't be approved as it is.", conflict: false, reload: false };
+  if (code === "plan_not_reviewed") return { text: "Read every item before you approve." + (Number.isInteger(e.missing) && e.missing > 0 ? " " + e.missing + (e.missing === 1 ? " item is" : " items are") + " still to mark as read." : ""), conflict: false, reload: false };
+  if (Object.hasOwn(PLAN_BY_ERROR, code)) return { text: PLAN_BY_ERROR[code], conflict: false, reload: code === "setup_phase" };
+  const own = e && (e.status === 0 || e.kind === "server_error") && typeof e.message === "string" && e.message !== "";
+  return { text: own ? e.message : DRAFT_FAILED, conflict: false, reload: false };
+}
+const INSTALL_BY_ERROR = {
+  public_repo: PLAN_BY_ERROR.public_repo, repo_visibility_unknown: PLAN_BY_ERROR.repo_visibility_unknown, setup_phase: PLAN_BY_ERROR.setup_phase, forbidden: PLAN_MEMBER,
+  setup_not_placed: "The project isn't placed on a machine yet.", engine_release_unset: "No engine release is available for this machine yet.",
+  boss_login_missing: "Your GitHub login couldn't be read, so the install can't be signed. Reconnect GitHub, then start the install again.",
+  github_unavailable: "GitHub couldn't be reached. Start the install again in a minute.", github_refused: "GitHub refused the read. Check the GitHub App's access to this repo, then start the install again.",
+  not_configured: "The install can't be issued from here right now.",
+};
+const GATE_NAMES = { plan_required: "plan_required", engine_quantity: "engine_quantity", account_held: "account_held", engine_plan_unavailable: "unavailable" };
+/** What Approve's answer says beside the approval: the install started, or why it did not (the Engine plan's gate, or an install that could not be issued), in words. `lines` and the purchase `actions` are the project step's own. */
+export function approveWords(res, ctx = {}) {
+  const v = { lines: [], actions: [] };
+  if (res && res.install) v.lines.push("Approved. The install has started.");
+  else if (res && res.gate) {
+    v.lines.push("Approved. The install starts once the Engine plan covers this project.");
+    planGate(v, Object.hasOwn(GATE_NAMES, res.gate.code) ? GATE_NAMES[res.gate.code] : "unavailable", ctx);
+  } else v.lines.push("Approved. " + (res && res.install_error && Object.hasOwn(INSTALL_BY_ERROR, res.install_error.code) ? INSTALL_BY_ERROR[res.install_error.code] : "The install couldn't be started now.") + " Choose Start the install to try again.");
+  return v;
+}
+/** The PRD drawn through the public hardened renderer and nothing else (script tags, script-scheme links and raw HTML stay text). The renderer stops at 64 KiB, so a longer PRD says so; the whole text is kept. */
+export const prdView = (prd) => h("div", { class: "ob-prd", "data-testid": "ob-plan-prd-view" }, renderMarkdown(prd),
+  new TextEncoder().encode(prd).length > MAX_MARKDOWN_BYTES ? h("p", { class: "ob-muted", "data-testid": "ob-plan-cut" }, "The preview stops at 64 KiB. The whole text is kept.") : "");
+const hhmm = () => new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+/**
+ * Draws the plan review into `host`. `env`: { setupId, isAdmin, announce, signal, onChanged(), runAction(id), ctx() }. Stages: loading, failed, none (no draft), ready (a draft to edit, or an approved one to read).
+ * A member reads; an owner or admin edits, saves, approves, and throws the plan away or starts over. Ticks and edits live in this closure only.
+ */
+export function mountPlanReview(host, env) {
+  const url = "/api/v1/setups/" + encodeURIComponent(env.setupId) + "/draft";
+  const S = { stage: "loading", d: null, prd: "", rows: [], prdRead: false, dirty: false, preview: false, note: "", err: "", conflict: false, busy: "", words: null, footEl: null, prdBox: null };
+  let dead = false, seq = 0;
+  const admin = env.isAdmin();
+  const say = (t) => env.announce(t);
+  const editable = () => admin && S.d !== null && S.d.status === "draft";
+  const btn = (id, label, fn, o = {}) => h("button", { type: "button", class: "ob-btn" + (o.primary ? " ob-btn-primary" : ""), "data-testid": "ob-plan-" + id, "data-focus": id, disabled: !!o.disabled || !!S.busy, onClick: fn }, label);
+  const p = (t, id) => h("p", { class: "ob-muted", "data-testid": "ob-plan-" + id }, t);
+  const tick = (id, label, on, set) => h("label", { class: "ob-preset" }, h("input", { type: "checkbox", checked: on, disabled: !!S.busy, "data-testid": "ob-plan-" + id, onChange: (ev) => { set(ev.target.checked); foot(); } }), h("span", null, label));
+  const box = (label) => label.querySelector("input");
+  const touch = () => { S.dirty = true; S.note = ""; foot(); };
+  const rowEdited = (r) => { r.read = false; if (r.box) r.box.checked = false; touch(); };
+  const adopt = (d, mine) => {
+    S.d = d;
+    if (!mine) { S.prd = d.prd; S.rows = d.rows.map((r) => ({ ...r, read: false, box: null })); S.prdRead = false; S.dirty = false; }
+    S.conflict = false; S.err = "";
+  };
+  /** `quiet` is a re-read for a setup change: it changes nothing on screen unless the draft itself moved, so edits, ticks and notes survive the window being focused again. */
+  async function read(keep, quiet) {
+    const mark = ++seq;
+    let body = null;
+    try { body = await api("GET", url, undefined, env.signal); }
+    catch (e) {
+      if (e && e.name === "AbortError") return;
+      if (mark !== seq || dead || (quiet && !(e && e.status === 404))) return;
+      if (e && e.status === 404) { S.stage = "none"; S.d = null; } else S.stage = "failed";
+      draw();
+      return;
+    }
+    if (mark !== seq || dead) return;
+    const d = readDraft(body);
+    if (quiet && d && S.stage === "ready" && S.d && d.version === S.d.version && d.status === S.d.status && d.phase === S.d.phase) return;
+    if (!d) S.stage = "failed";
+    else {
+      const mine = keep && d.status === "draft" && d.phase === "plan";
+      S.stage = "ready"; adopt(d, mine);
+      if (mine) S.dirty = true;
+    }
+    draw();
+  }
+  /** One write: busy while it runs, its refusal in words, and the version lock handled in one place. */
+  async function act(fn, word) {
+    S.busy = word; S.err = ""; S.words = null; draw();
+    let out;
+    try { out = await fn(); }
+    catch (e) {
+      if (e && e.name === "AbortError") return undefined;
+      const r = draftRefusal(e);
+      S.err = r.text; S.conflict = r.conflict;
+      if (r.reload) env.onChanged();
+      say(r.text);
+    }
+    S.busy = "";
+    if (!dead) draw();
+    return out;
+  }
+  const post = (action, body) => api("POST", url + "/" + action, body, env.signal);
+  async function save() {
+    const out = await act(() => api("PUT", url, { version: S.d.version, prd_md: S.prd, roadmap: toRoadmap(S.rows) }, env.signal), "Saving…");
+    if (!out) return;
+    S.d.version = out.version; S.dirty = false; S.note = "Saved " + hhmm(); say(S.note); draw("save");
+  }
+  async function approve(again) {
+    const body = { version: S.d.version, ...(S.d.mode === "public" && !again ? { reviewed_row_keys: S.rows.map((r) => r.key), prd_reviewed: S.prdRead } : {}) };
+    const out = await act(() => post("approve", body), "Approving…");
+    if (!out) return;
+    const words = approveWords(out, env.ctx());
+    say(words.lines[0]);
+    env.onChanged();
+    await read(false);
+    S.words = words;
+    draw();
+  }
+  async function discard() {
+    if (!(await confirmAction("Discard this plan? Nothing is installed until you write another."))) return;
+    if (await act(() => post("discard"), "Working…")) { say("The plan was discarded."); env.onChanged(); await read(false); }
+  }
+  async function blank() {
+    if (S.d && !(await confirmAction("Replace this plan with an empty one that you write yourself?"))) return;
+    if (await act(() => post("blank"), "Working…")) { say("An empty plan is ready."); env.onChanged(); await read(false); }
+  }
+  async function restart() {
+    if (!(await confirmAction("Throw this plan away and run the survey again?"))) return;
+    if (await act(() => post("restart"), "Working…")) { say("The survey started again."); env.onChanged(); }
+  }
+  function prdSection() {
+    const count = h("span", { "data-testid": "ob-plan-count" });
+    const upd = () => { count.textContent = cp(S.prd).toLocaleString("en-US") + " of 200,000 characters"; };
+    upd();
+    const prdTick = editable() && S.d.mode === "public" ? tick("prd-read", "I've read the PRD", S.prdRead, (v) => { S.prdRead = v; }) : "";
+    if (prdTick) S.prdBox = box(prdTick);
+    const area = h("textarea", { class: "ob-input ob-prd-edit", rows: 12, value: S.prd, disabled: !!S.busy, "data-testid": "ob-plan-prd", onInput: (ev) => { S.prd = ev.target.value; upd(); S.prdRead = false; if (S.prdBox) S.prdBox.checked = false; touch(); } });
+    return h("section", { "aria-label": "Product requirements" }, h("h4", { class: "ob-sub" }, "PRD"),
+      editable() && !S.preview ? h("label", { class: "ob-label" }, "Product requirements (markdown)", area) : prdView(S.prd),
+      editable() ? h("div", null, count, " ", btn("preview", S.preview ? "Edit the PRD" : "Preview the PRD", () => { S.preview = !S.preview; draw("preview"); })) : "", prdTick);
+  }
+  function rowView(r, i) {
+    if (!editable()) return h("li", { class: "ob-row", "data-testid": "ob-plan-row" }, h("strong", null, r.key + ": " + r.title), " " + r.size + (r.keep ? "" : " · dropped"), r.deps ? h("p", { class: "ob-muted" }, "Depends on " + r.deps) : "", r.summary ? h("p", { class: "ob-muted" }, r.summary) : "");
+    const field = (label, name, area) => h("label", { class: "ob-label" }, label, h(area ? "textarea" : "input", { class: "ob-input", type: area ? null : "text", rows: area ? 2 : null, value: r[name], disabled: !!S.busy, "data-testid": "ob-plan-" + name, onInput: (ev) => { r[name] = ev.target.value; rowEdited(r); } }));
+    const size = h("label", { class: "ob-label" }, "Size", h("select", { class: "ob-input", disabled: !!S.busy, "data-testid": "ob-plan-size", onChange: (ev) => { r.size = ev.target.value; rowEdited(r); } }, ["S", "M", "L"].map((z) => h("option", { value: z, selected: r.size === z }, z))));
+    const keep = h("label", { class: "ob-preset" }, h("input", { type: "checkbox", checked: r.keep, disabled: !!S.busy, "data-testid": "ob-plan-keep", onChange: (ev) => { r.keep = ev.target.checked; rowEdited(r); } }), h("span", null, "Keep this row"));
+    const seen = S.d.mode === "public" ? tick("row-read", "Reviewed", r.read, (v) => { r.read = v; }) : "";
+    if (seen) r.box = box(seen);
+    return h("li", { class: "ob-row", "data-testid": "ob-plan-row" }, h("fieldset", { class: "ob-fieldset" }, h("legend", null, "Row " + (i + 1) + (r.key ? ": " + r.key : "")),
+      field("Key", "key"), field("Title", "title"), field("Summary", "summary", true), size, field("Depends on (row keys, separated by commas)", "deps"), keep, seen,
+      btn("remove", "Remove this row", () => { S.rows.splice(i, 1); S.dirty = true; S.note = ""; draw("add"); })));
+  }
+  function addRow() {
+    const used = new Set(S.rows.map((r) => r.key));
+    let n = 1;
+    while (used.has("R" + n)) n++;
+    S.rows.push({ key: "R" + n, title: "", summary: "", size: "M", deps: "", keep: true, read: false, box: null });
+    S.dirty = true; S.note = "";
+    draw("add");
+  }
+  function foot() {
+    if (dead || !S.footEl || !S.d) return;
+    const { save: bad, approve: stop } = planProblems(S.prd, S.rows);
+    const ticked = S.d.mode !== "public" || (S.prdRead && S.rows.every((r) => r.read));
+    const hint = S.dirty ? "Save your changes before you approve." : !ticked ? "Tick every item as read to approve." : "";
+    S.footEl.replaceChildren(
+      ...(editable() ? [bad.length + stop.length ? h("ul", { class: "ob-issues", "data-testid": "ob-plan-problems", "aria-label": "To fix" }, [...bad, ...stop].map((t) => h("li", null, t))) : "",
+        h("p", { class: "ob-muted", "data-testid": "ob-plan-status" }, S.busy || (S.dirty ? "Unsaved changes" : S.note)),
+        btn("save", "Save changes", save, { disabled: !S.dirty || bad.length > 0 || S.conflict }),
+        btn("approve", "Approve the plan", () => approve(false), { primary: true, disabled: S.dirty || bad.length + stop.length > 0 || !ticked || S.conflict }), hint ? p(hint, "hint") : ""] : []),
+      ...(S.d.status === "approved" && admin && S.d.phase === "plan" ? [btn("install", "Start the install", () => approve(true), { primary: true })] : []));
+  }
+  function draw(focus) {
+    if (dead) return;
+    const body = [];
+    if (S.err) body.push(h("p", { class: "ob-error", role: "alert", "data-testid": "ob-plan-error" }, S.err));
+    if (S.conflict) body.push(btn("theirs", "Load theirs", () => read(false), { primary: true }), btn("mine", "Keep mine", () => read(true)));
+    if (S.stage === "loading") body.push(p("Loading the plan…", "loading"));
+    else if (S.stage === "failed") body.push(p("The plan couldn't be loaded.", "load-failed"), btn("retry", "Try again", () => { S.stage = "loading"; draw(); read(false); }, { primary: true }));
+    else if (S.stage === "none") body.push(p(PLAN_NONE, "none"), ...(admin ? [btn("blank", "Write my own", blank, { primary: true })] : [p(PLAN_MEMBER, "member")]));
+    else {
+      S.footEl = h("div", { "data-testid": "ob-plan-foot" });
+      if (S.d.mode === "public") body.push(h("p", { class: "ob-error", "data-testid": "ob-plan-banner" }, PUBLIC_BANNER));
+      if (!admin) body.push(p(PLAN_MEMBER, "member"));
+      if (S.d.status === "approved") body.push(p("Approved. This plan is read-only.", "approved"));
+      if (S.words) body.push(...S.words.lines.map((t) => p(t, "result")), ...S.words.actions.filter((a) => a.run).map((a) => btn("buy-" + a.id, a.label, () => env.runAction(a.id), { primary: true })));
+      body.push(prdSection(), h("h4", { class: "ob-sub" }, "Roadmap"), S.rows.length ? h("ul", { class: "ob-issues", "aria-label": "Roadmap rows" }, S.rows.map(rowView)) : p("There are no rows yet.", "no-rows"),
+        editable() ? btn("add", "Add a row", addRow) : "", S.footEl);
+      if (editable()) body.push(btn("discard", "Discard this plan", discard), btn("blank", "Write my own", blank), btn("restart", "Start over", restart));
+    }
+    host.replaceChildren(h("div", { class: "ob-plan", "data-testid": "ob-plan", "data-stage": S.stage }, body));
+    if (S.stage === "ready") foot();
+    const f = focus && host.querySelector('[data-focus="' + focus + '"]');
+    if (f) f.focus();
+  }
+  draw();
+  read(false);
+  return { refresh() { if (!S.dirty && !S.busy) read(false, true); }, destroy() { dead = true; host.replaceChildren(); } };
 }
