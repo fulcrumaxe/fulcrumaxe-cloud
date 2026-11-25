@@ -130,6 +130,11 @@ export interface SandboxInput {
   denyReadRoots?: readonly string[];
   /** D#587 B-9b: on a cleared WSL2 machine, the Windows-side places denied for both reads and writes: the drive mount root `/mnt`, every 9p, drvfs or virtiofs mount, and `/run/WSL`. Absolute paths; added after every grant is checked, so no grant can reopen one. */
   wslDenyPaths?: readonly string[];
+  /**
+   * D#845 ON-10c: the project survey's workspace is read-only. The workspace is then denied for writes and left out of `allowWrite`, so the one place a command may write is the job's own temp directory
+   * (`tempDir`, 0700, the run's TMPDIR, removed with the sandbox).
+   */
+  readOnlyWorkspace?: boolean;
 }
 
 const HOST = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
@@ -304,8 +309,8 @@ export function sandboxSettings(input: SandboxInput): Record<string, unknown> {
     enableWeakerNetworkIsolation: false,
     filesystem: {
       disabled: false,
-      allowWrite: unique([workspace, tempDir, ...extraWrite, ...allowWrite, ...(store === undefined ? [] : [store])]),
-      denyWrite: unique([path.normalize(input.stateDir), path.normalize(input.binaryDir), ...(mirrorsRoot === undefined ? [] : [mirrorsRoot]), ...wslDeny]),
+      allowWrite: unique([...(input.readOnlyWorkspace === true ? [] : [workspace]), tempDir, ...extraWrite, ...allowWrite, ...(store === undefined ? [] : [store])]),
+      denyWrite: unique([...(input.readOnlyWorkspace === true ? [workspace] : []), path.normalize(input.stateDir), path.normalize(input.binaryDir), ...(mirrorsRoot === undefined ? [] : [mirrorsRoot]), ...wslDeny]),
       // The workspace, temp and package-store roots are denied like the mirrors root and the home directory: a cache directory outside the home
       // directory would leave them readable. This job's own workspace, temp directory and store are re-allowed below (a narrower allow wins).
       denyRead: unique([home, path.normalize(input.stateDir), path.normalize(input.binaryDir), path.normalize(input.workspaceRoot), path.normalize(input.tempRoot), ...(storeRoot === undefined ? [] : [storeRoot]), ...(mirrorsRoot === undefined ? [] : [mirrorsRoot]), ...(spillRoot === undefined ? [] : [spillRoot]), ...toolchainDeny, ...SHARED_TEMP_DIRS.flatMap((dir) => [dir, realOf(dir)]), ...denyReadRoots, ...wslDeny]),

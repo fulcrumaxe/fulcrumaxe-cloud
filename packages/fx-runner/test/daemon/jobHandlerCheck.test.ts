@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { CONFINED_READ_ROLES, type DoneCheck, type NormalizedEvent } from "@fulcrumaxe/runner-protocol";
+import { CONFINED_READ_ROLES, SURVEY_ROLE, type DoneCheck, type NormalizedEvent } from "@fulcrumaxe/runner-protocol";
 import { createRunnerClient, type Claimed } from "../../src/daemon/client.js";
 import type { CheckOutcome } from "../../src/daemon/checkStep.js";
 import { GitPathError } from "../../src/daemon/git.js";
@@ -683,16 +683,17 @@ describe("a job with a check and the Spec's file scope (D#6 SCOPE-IN-JOB)", () =
 });
 
 /** A confined read-only role cannot change a manifest, so the runner does not try to bring a lockfile up to date for it; its result still reaches the cloud. */
-const CONFINED = ["proposal-verifier", "discovery-analyst", "deploy-verifier"] as const;
+const CONFINED = ["proposal-verifier", "discovery-analyst", "deploy-verifier", "project-surveyor"] as const;
 it("the roles below are exactly the confined read-only roles", () => expect([...CONFINED].sort()).toEqual([...CONFINED_READ_ROLES].sort()));
 for (const ROLE of CONFINED) {
   describe(`a ${ROLE} job with a lockfile update wired`, () => {
-    const verifierJob = () => jobFor({ role: ROLE, task: jobFor().task, role_tools_sha256: roleToolsDigest(ROLE), review: { head_sha: HEAD } });
+    const verifierJob = () => jobFor({ role: ROLE, task: ROLE === SURVEY_ROLE ? { ...jobFor().task, kind: "survey" as const } : jobFor().task, role_tools_sha256: roleToolsDigest(ROLE), review: { head_sha: HEAD } });
 
     it("never runs the lockfile update, and its done carries the agent's envelope", async () => {
       const steps: string[] = [];
       const lockfile = { outcome: { kind: "refused", reason: "workspace_unsafe" } as unknown as LockSyncOutcome, inputs: [] as Array<{ base: string; registryHost: string | undefined }> };
-      const r = rig({ lockfile, steps });
+      // The survey's own end step lists the working copy, so its rig lists a clean one (the cases where it is not are in the describe below).
+      const r = rig({ lockfile, steps, ...(ROLE === SURVEY_ROLE ? { changed: { files: [] as string[] | null, calls: [] } } : {}) });
       const result = await r.handle(await r.claim(verifierJob()));
       expect(result.status).toBe("completed");
       expect(lockfile.inputs).toEqual([]);
@@ -703,6 +704,60 @@ for (const ROLE of CONFINED) {
     });
   });
 }
+
+/**
+ * D#845 ON-10c: a project survey's working copy must be exactly what it started as, once its agent is gone. Anything else (a commit, a changed or new file, a listing that cannot say, no way to list) ends the run
+ * `runner_setup` / `workspace_written` and its answer is never sent; a clean copy lets the answer through as for any confined role.
+ */
+describe("the project survey's workspace_written refusal (OS-sandbox tier)", () => {
+  const surveyJob = () => jobFor({ role: SURVEY_ROLE, task: { ...jobFor().task, kind: "survey" as const }, role_tools_sha256: roleToolsDigest(SURVEY_ROLE), review: { head_sha: HEAD } });
+  const ended = (): Array<Record<string, unknown>> => runEnded();
+
+  it("a clean copy lets the draft through: done carries it, nothing is reported as ended, and the agent was stopped before the listing", async () => {
+    const changed = { files: [] as string[] | null, calls: [] as Array<{ workspace: string; base: string }> };
+    const r = rig({ changed, recordStop: true, startBase: HEAD });
+    const result = await r.handle(await r.claim(surveyJob()));
+    expect(result.status).toBe("completed");
+    expect(changed.calls.map((c) => c.base)).toEqual([HEAD]);
+    expect(r.order.indexOf("agent_stopped")).toBeGreaterThan(r.order.indexOf("agent"));
+    expect(bodies("/done")).toHaveLength(1);
+    expect(ended()).toEqual([]);
+  });
+
+  it.each([
+    ["a new or changed file", { files: ["notes.md"] as string[] | null }],
+    ["a listing that cannot say (null)", { files: null as string[] | null }],
+    ["a listing that throws", { files: "throws" as unknown as string[] }],
+  ])("%s ends the run workspace_written, sends no done, and the agent's answer is dropped", async (_name, listing) => {
+    const r = rig({ changed: { ...listing, calls: [] }, startBase: HEAD });
+    const result = await r.handle(await r.claim(surveyJob()));
+    expect(result).toMatchObject({ status: "failed", reason: "workspace_written" });
+    expect(bodies("/done")).toHaveLength(0);
+    expect(ended()).toEqual([expect.objectContaining({ reason: "runner_setup", detail: "workspace_written" })]);
+  });
+
+  it("a commit the agent made (the tip moved off the start commit) ends it too, even when no file differs", async () => {
+    const r = rig({ changed: { files: [], calls: [] }, startBase: HEAD, tip: "e".repeat(40) });
+    const result = await r.handle(await r.claim(surveyJob()));
+    expect(result).toMatchObject({ status: "failed", reason: "workspace_written" });
+    expect(bodies("/done")).toHaveLength(0);
+  });
+
+  it("a runner with no way to list the working copy fails closed, never passes", async () => {
+    const r = rig({ startBase: HEAD });
+    const result = await r.handle(await r.claim(surveyJob()));
+    expect(result).toMatchObject({ status: "failed", reason: "workspace_written" });
+    expect(bodies("/done")).toHaveLength(0);
+  });
+
+  it("an agent that cannot be stopped ends the run agent_exit and nothing is read from the working copy", async () => {
+    const changed = { files: [] as string[] | null, calls: [] as Array<{ workspace: string; base: string }> };
+    const r = rig({ changed, lockfile: { outcome: { kind: "none" } as LockSyncOutcome, inputs: [], stopFails: true }, startBase: HEAD });
+    const result = await r.handle(await r.claim(surveyJob()));
+    expect(result).toMatchObject({ status: "failed", reason: "agent_exit" });
+    expect(changed.calls).toEqual([]);
+  });
+});
 
 it("an executor job still gets its lockfile update (the guard above names the confined read-only roles only)", async () => {
   const lockfile = { outcome: { kind: "none" } as LockSyncOutcome, inputs: [] as Array<{ base: string; registryHost: string | undefined }> };

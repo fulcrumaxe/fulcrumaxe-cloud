@@ -1,4 +1,4 @@
-import { SURVEY_ROLE } from "./projectDraft.js";
+import { MAX_PRD_BYTES, MAX_ROADMAP_ROWS, SURVEY_ROLE, readSurveyOutput } from "./projectDraft.js";
 import { DISCOVERY_ANALYST_ROLE, PROPOSAL_VERIFIER_ROLE } from "./verifierGuard.js";
 
 /**
@@ -88,13 +88,40 @@ const ANALYST_SCHEMA = {
   },
 } as const;
 
-const SURVEY_SCHEMA = { type: "object", additionalProperties: false, required: ["v", "prd_md", "roadmap"], properties: { v: { const: 1 }, prd_md: { type: "string" }, roadmap: { type: "array" } } } as const;
+// D#845 ON-10c: the survey's schema holds `ProjectDraft`'s own bounds, as far as JSON Schema can say them (it counts characters, not bytes, and cannot say "acyclic"); a test holds it to the draft over a corpus.
+const SURVEY_KEY = "^[A-Z][A-Z0-9-]{0,15}$";
+const SURVEY_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["v", "prd_md", "roadmap"],
+  properties: {
+    v: { const: 1 },
+    prd_md: { type: "string", minLength: 1 },
+    roadmap: {
+      type: "array",
+      minItems: 1,
+      maxItems: MAX_ROADMAP_ROWS,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["row_key", "title", "summary", "size", "depends_on"],
+        properties: {
+          row_key: { type: "string", pattern: SURVEY_KEY },
+          title: { type: "string", minLength: 1, maxLength: 120 },
+          summary: { type: "string", maxLength: 500 },
+          size: { type: "string", enum: ["S", "M", "L"] },
+          depends_on: { type: "array", maxItems: 10, items: { type: "string", pattern: SURVEY_KEY } },
+        },
+      },
+    },
+  },
+} as const;
 
 /** The JSON Schema the CLI is asked to enforce for this role's final answer, or undefined for a role with no fixed shape. */
 export function structuredSchemaFor(role: string): Record<string, unknown> | undefined {
   if (role === PROPOSAL_VERIFIER_ROLE) return VERIFIER_SCHEMA as unknown as Record<string, unknown>;
   if (role === DISCOVERY_ANALYST_ROLE) return ANALYST_SCHEMA as unknown as Record<string, unknown>;
-  // D#845 ON-10a: the top level of `ProjectDraft` only (it never rejects what the draft accepts); ON-10c replaces it with the full schema and its parity test over a corpus.
+  // D#845 ON-10c: the full schema of `ProjectDraft`, and a parity test over a corpus (it never rejects what the draft accepts).
   if (role === SURVEY_ROLE) return SURVEY_SCHEMA as unknown as Record<string, unknown>;
   return undefined;
 }
@@ -104,6 +131,8 @@ export const STRUCTURED_FAILURE_CODES = Object.freeze([
   "no_envelope", "not_an_object", "unknown_field",
   "bad_category", "bad_claims", "too_many_claims", "bad_claim", "bad_cite",
   "bad_candidates", "too_many_candidates", "bad_candidate", "bad_ref",
+  // D#845 ON-10c: the survey's own codes.
+  "bad_version", "bad_prd", "bad_roadmap", "too_many_rows", "bad_row", "bad_depends",
 ] as const);
 export type StructuredFailureCode = (typeof STRUCTURED_FAILURE_CODES)[number];
 
@@ -197,6 +226,45 @@ function analystFailures(envelope: unknown): StructuredFailureCode[] {
   return [...codes];
 }
 
+const SURVEY_KEY_RE = new RegExp(SURVEY_KEY);
+const SURVEY_ROW_KEYS = ["row_key", "title", "summary", "size", "depends_on"];
+
+/**
+ * D#845 ON-10c: the survey's closed codes. The decision is `readSurveyOutput`'s (the cloud's own read, redaction first, then `ProjectDraft`), so this never rejects what the cloud accepts. Only a refused answer is looked at
+ * again, part by part, to say which part: a value never leaves this function, only a code.
+ */
+function surveyFailures(output: unknown): StructuredFailureCode[] {
+  if (!isObject(output)) return ["not_an_object"];
+  if (readSurveyOutput(output).ok) return [];
+  if (hasOtherKeys(output, ["v", "prd_md", "roadmap"])) return ["unknown_field"];
+  const codes = new Set<StructuredFailureCode>();
+  if (own(output, "v") !== 1) codes.add("bad_version");
+  const prd = own(output, "prd_md");
+  if (typeof prd !== "string" || prd.length === 0 || Buffer.byteLength(prd, "utf8") > MAX_PRD_BYTES) codes.add("bad_prd");
+  const roadmap = own(output, "roadmap");
+  if (!Array.isArray(roadmap) || roadmap.length === 0) codes.add("bad_roadmap");
+  else if (roadmap.length > MAX_ROADMAP_ROWS) codes.add("too_many_rows");
+  else {
+    const keys = new Set<string>();
+    let rowsOk = true;
+    for (const row of roadmap as unknown[]) {
+      const key = isObject(row) ? own(row, "row_key") : undefined;
+      const deps = isObject(row) ? own(row, "depends_on") : undefined;
+      if (!isObject(row) || hasOtherKeys(row, SURVEY_ROW_KEYS) || typeof key !== "string" || !SURVEY_KEY_RE.test(key) || typeof own(row, "title") !== "string" || typeof own(row, "summary") !== "string" || !["S", "M", "L"].includes(own(row, "size") as string) || !Array.isArray(deps) || deps.length > 10 || !deps.every((d) => typeof d === "string" && SURVEY_KEY_RE.test(d))) {
+        codes.add("bad_row");
+        rowsOk = false;
+        continue;
+      }
+      if (keys.has(key)) codes.add("bad_depends");
+      keys.add(key);
+    }
+    if (rowsOk && (roadmap as Array<Record<string, unknown>>).some((row) => (own(row, "depends_on") as string[]).some((d) => d === own(row, "row_key") || !keys.has(d)))) codes.add("bad_depends");
+  }
+  // A refusal none of the checks above names (a cycle, a length the checks cannot see, a control character): the parts are named by what is left over.
+  if (codes.size === 0) codes.add(Array.isArray(roadmap) ? "bad_row" : "bad_roadmap");
+  return [...codes];
+}
+
 /**
  * Why a structured role's answer would be refused, as closed codes (empty: nothing to repair). A role with no fixed shape is never a failure.
  * `undefined` is "no envelope at all".
@@ -204,8 +272,7 @@ function analystFailures(envelope: unknown): StructuredFailureCode[] {
 export function structuredFailures(role: string, output: unknown): StructuredFailureCode[] {
   if (!STRUCTURED_OUTPUT_ROLES.includes(role)) return [];
   if (output === undefined) return ["no_envelope"];
-  // D#845 ON-10a: the survey's JSON Schema and field checks are ON-10c's; until then only the shape of the envelope is judged (never stricter than `ProjectDraft`, which the cloud decides with).
-  if (role === SURVEY_ROLE) return typeof output === "object" && output !== null && !Array.isArray(output) ? [] : ["not_an_object"];
+  if (role === SURVEY_ROLE) return surveyFailures(output);
   return role === PROPOSAL_VERIFIER_ROLE ? verifierFailures(output) : analystFailures(output);
 }
 

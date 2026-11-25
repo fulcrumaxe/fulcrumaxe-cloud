@@ -1,6 +1,6 @@
 import { closeSync, constants as fsConstants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { CONFINED_READ_ROLES, DEPLOY_VERIFIER_DENIED_BROWSER_TOOLS, DEPLOY_VERIFIER_ROLE, excludeDenyRules, isBrowserJobRole, verifierReadGuardHook, type BrowserMethod } from "@fulcrumaxe/runner-protocol";
+import { CONFINED_READ_ROLES, DEPLOY_VERIFIER_DENIED_BROWSER_TOOLS, DEPLOY_VERIFIER_ROLE, SURVEY_ROLE, excludeDenyRules, isBrowserJobRole, verifierReadGuardHook, type BrowserMethod } from "@fulcrumaxe/runner-protocol";
 import { roleToolsFor } from "../../job/roleTools.js";
 import type { ProtectedPaths } from "../../sandbox/sandboxSettings.js";
 import { anchored, checkCommandDenyRules, confineFileTools, denyRules, readRulesFor, workspaceProtectedEditRules } from "./filePermissions.js";
@@ -57,7 +57,9 @@ function verifierSettings(role: string, sandbox: Record<string, unknown>, worksp
       defaultMode: "dontAsk",
       allow: confineFileTools(roleToolsFor(role, browserMethod), workspace),
       // D#749 V2b: the browser role is denied the five extension tools it is never given (script execution in the signed-in page, request headers, file and image upload, form filling), as well as not being allowed them.
-      deny: [...VERIFIER_CHECKOUT_DENY.map((p) => `Read(${root}/${p})`), ...denyRules(protectedList), ...excludeRules(excludes), ...(isBrowserJobRole(role) ? DEPLOY_VERIFIER_DENIED_BROWSER_TOOLS : [])],
+      // D#845 ON-10c: the survey's list names `LS`, which the read guard's script does not parse (its hook matcher is Read, Glob and Grep), so a directory listing would be confined by the path rules alone.
+      // The tool is denied (deny outranks the list); Glob lists a tree under the guard.
+      deny: [...VERIFIER_CHECKOUT_DENY.map((p) => `Read(${root}/${p})`), ...denyRules(protectedList), ...excludeRules(excludes), ...(isBrowserJobRole(role) ? DEPLOY_VERIFIER_DENIED_BROWSER_TOOLS : []), ...(role === SURVEY_ROLE ? ["LS"] : [])],
       blockReadsOutsideWorkingDirectories: true,
     },
     sandbox,

@@ -916,7 +916,7 @@ export async function recordRunStatusMove(client: PoolClient, params: Pick<Write
  * D#845 ON-10b2 (Ruling 88 item 5): how a survey run's end lands on its setup. Null: nothing to write (the `done` branch wrote the draft, or already called `survey_fail` for an answer it refused). Otherwise the closed
  * code and reason `survey_fail` takes. The runner can never name either: they come from the status move alone. `workspace_written` is ON-10c's row.
  */
-export function surveyEndingFor(move: Pick<WriteRunStatusParams, "from" | "to" | "failureReason">): { code: "survey_failed" | "survey_timeout"; reason: SurveyFailureReason } | null {
+export function surveyEndingFor(move: Pick<WriteRunStatusParams, "from" | "to" | "failureReason">, runEndedDetail?: string | null): { code: "survey_failed" | "survey_timeout"; reason: SurveyFailureReason } | null {
   const failed = (reason: SurveyFailureReason) => ({ code: "survey_failed" as const, reason });
   switch (move.to) {
     case "succeeded":
@@ -932,10 +932,20 @@ export function surveyEndingFor(move: Pick<WriteRunStatusParams, "from" | "to" |
     case "failed":
       if (move.failureReason === "survey_output_invalid") return null;
       if (move.from === "pending") return failed("refused_at_admit");
+      // ON-10c: a runner that found the working copy changed ends the run `runner_setup` with this one detail (the status move itself carries only `runner_setup_failed`).
+      if (move.failureReason === "runner_setup_failed" && runEndedDetail === "workspace_written") return failed("workspace_written");
       return failed(move.failureReason === "runner_lost" ? "runner_lost" : "run_failed");
     default:
       return null;
   }
+}
+
+async function surveyRunEndDetail(client: PoolClient, params: Pick<WriteRunStatusParams, "accountId" | "runId">): Promise<string | null> {
+  const { rows } = await client.query<{ detail: string | null }>(
+    "SELECT payload->>'detail' AS detail FROM run_events WHERE run_id = $1::uuid AND account_id = $2::uuid AND kind = 'runner.event' AND payload->>'type' = 'run_ended' AND payload->>'reason' = 'runner_setup' ORDER BY seq DESC LIMIT 1",
+    [params.runId, params.accountId],
+  );
+  return rows[0]?.detail ?? null;
 }
 
 /**
@@ -947,7 +957,9 @@ async function onRunEnded(client: PoolClient, params: Pick<WriteRunStatusParams,
   const role = rows[0]?.role;
   if (role === VERIFY_TESTER_ROLE) wakeVerifyStage();
   if (role !== SURVEY_ROLE) return;
-  const ending = surveyEndingFor(params);
+  // The runner's closed detail is read only for the one move it can change (a stored `run_ended` of this run, written in the same transaction).
+  const detail = params.to === "failed" && params.from === "running" && params.failureReason === "runner_setup_failed" ? await surveyRunEndDetail(client, params) : null;
+  const ending = surveyEndingFor(params, detail);
   if (ending === null) return;
   await client.query("SAVEPOINT survey_fail_hook");
   try {

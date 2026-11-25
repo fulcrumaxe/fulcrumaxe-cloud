@@ -130,9 +130,9 @@ export class UnknownRoleError extends Error {
 export function toolsForRole(role: string): readonly string[] {
   // D#749 V2b: the deploy verifier is a confined read role (runner-protocol) but a runner job only: the sandbox has no list for it, as before.
   if (RUNNER_ONLY_ROLES.includes(role)) throw new UnknownRoleError(role);
-  if (CONFINED_READ_ROLES.has(role)) return VERIFIER_ALLOW;
-  // D#845 ON-10a: the survey reads the checkout and nothing else (no write tool, no Bash). ON-10c adds the confinement on the machine.
+  // D#845 ON-10a/ON-10c: the survey reads the checkout and nothing else (no write tool, no Bash). It is a confined role (the machine adds the read guard and a read-only workspace), and its list is its own, so this test comes first.
   if (role === SURVEY_ROLE) return SURVEY_TOOLS;
+  if (CONFINED_READ_ROLES.has(role)) return VERIFIER_ALLOW;
   if (typeof role !== "string" || !Object.hasOwn(TOOLS_BY_ROLE, role)) throw new UnknownRoleError(role);
   return TOOLS_BY_ROLE[role]!;
 }
@@ -145,7 +145,7 @@ export function toolsForRole(role: string): readonly string[] {
 export function runnerToolsForRole(role: string, browserMethod?: BrowserMethod): readonly string[] {
   // D#749 V2c-1: the deploy verifier's list depends on how it drives its browser (no method: the Chrome list).
   if (role === DEPLOY_VERIFIER_ROLE) return deployVerifierToolsFor(browserMethod);
-  return CONFINED_READ_ROLES.has(role) ? PROPOSAL_VERIFIER_RUNNER_TOOLS : toolsForRole(role);
+  return CONFINED_READ_ROLES.has(role) && role !== SURVEY_ROLE ? PROPOSAL_VERIFIER_RUNNER_TOOLS : toolsForRole(role);
 }
 
 /**

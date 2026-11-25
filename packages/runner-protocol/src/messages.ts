@@ -137,6 +137,8 @@ export const RUNNER_SETUP_DETAILS = [
   "vm_token_delivery_failed",
   "vm_workspace_failed",
   "vm_teardown_incomplete",
+  // D#845 ON-10c (additive under C8 section 6; the cloud deploys first): a project survey run left the working copy changed (a commit, an edit or a new file), so its answer was dropped. Only a survey run ends this way.
+  "workspace_written",
 ] as const;
 /**
  * D#599 HO-1 (additive under C8 section 6; the cloud deploys first): how a handed-off run ended its side of the move. `pushed`: the

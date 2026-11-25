@@ -1,11 +1,12 @@
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentHandle, LocalOnlyEvent, StartOptions } from "@fulcrumaxe/runner-protocol";
-import { structuredSchemaFor } from "@fulcrumaxe/runner-protocol";
+import { SURVEY_ROLE, structuredSchemaFor } from "@fulcrumaxe/runner-protocol";
+import { guestJobFiles } from "../../src/vm/sandboxd/guestJobFiles.js";
 import { roleToolsFor } from "../../src/job/roleTools.js";
 import { confineFileTools } from "../../src/engines/claude/filePermissions.js";
 import { claudeArgv } from "../../src/engines/claude/argv.js";
@@ -697,5 +698,84 @@ describe("RT-3 review fixes: the guest limit, the pid file and the pid sender", 
         child.kill("SIGKILL");
       }
     });
+  });
+});
+
+/**
+ * D#845 ON-10c: the project survey in the guest. Its one writable path is /tmp/fx-survey/<run_id>/ (0700, TMPDIR, made by the launch wrapper), its working copy is read-only, it holds the read guard and the
+ * read tools, its answer is held to the survey schema, and its network is the model host alone. Every other role keeps its own layout (the control).
+ */
+describe("the project survey in the guest (fake launch)", () => {
+  const TEMP = `/tmp/fx-survey/${RUN_ID}`;
+  const filesOf = (g: Guest): { settings: Record<string, unknown> & { sandbox: { filesystem: { allowWrite: string[]; denyWrite: string[]; allowRead: string[] }; network: Record<string, unknown> }; permissions: { allow: string[]; deny: string[] }; hooks?: { PreToolUse: Array<{ matcher: string }> } } } => ({
+    settings: JSON.parse(g.written.flat().find((f) => f.path.endsWith("settings.json"))!.content),
+  });
+
+  it("the block writes only in its own temp directory, denies writes to the working copy, and reaches the model host and nothing else", async () => {
+    const g = makeGuest();
+    const { handle } = await createGuestRuntime(g.config()).start(startOpts({ role: SURVEY_ROLE }));
+    await outcome(handle);
+    const { sandbox } = filesOf(g).settings;
+    expect(sandbox.filesystem.allowWrite).toEqual([TEMP]);
+    expect(sandbox.filesystem.denyWrite).toEqual([WORKDIR, GUEST_JOBS_DIR, "/opt/fx/bin"]);
+    expect(sandbox.filesystem.allowRead).toEqual([WORKDIR, TEMP]);
+    expect(sandbox.network).toEqual({ allowedDomains: ["api.anthropic.com"], strictAllowlist: true, allowLocalBinding: false });
+  });
+
+  it("holds the shared read guard and the read tools, with LS denied, and no write tool anywhere", async () => {
+    const g = makeGuest();
+    const { handle } = await createGuestRuntime(g.config()).start(startOpts({ role: SURVEY_ROLE }));
+    await outcome(handle);
+    const { settings } = filesOf(g);
+    expect(settings.hooks?.PreToolUse.map((h) => h.matcher)).toEqual(["Read|Glob|Grep"]);
+    expect(settings.permissions.allow).toEqual([`Read(/${WORKDIR})`, `Read(/${WORKDIR}/**)`]);
+    expect(settings.permissions.deny).toContain("LS");
+    for (const p of [".git", ".git/**", ".env*"]) expect(settings.permissions.deny).toContain(`Read(/${WORKDIR}/${p})`);
+    expect(JSON.stringify(settings.permissions.allow)).not.toMatch(/Bash|Edit|Write|WebFetch|mcp__/);
+  });
+
+  it("the launch carries its temp directory and sets it as TMPDIR; the CLI asks for the survey schema and the four read tools", async () => {
+    const g = makeGuest();
+    const { handle } = await createGuestRuntime(g.config()).start(startOpts({ role: SURVEY_ROLE }));
+    await outcome(handle);
+    const spec = cliSpec(g);
+    expect(spec.args?.[4]).toBe(TEMP);
+    expect(spec.env?.TMPDIR).toBe(TEMP);
+    expect(spec.env).toEqual({ ...guestEnvOf({}), TMPDIR: TEMP });
+    const args = spec.args ?? [];
+    expect(args[args.indexOf("--tools") + 1]).toBe("Read,Glob,Grep,LS");
+    expect(JSON.parse(args[args.indexOf("--json-schema") + 1]!)).toEqual(structuredSchemaFor(SURVEY_ROLE));
+  });
+
+  it("the wrapper makes that directory 0700, parents included, as the ordinary user's umask does", async () => {
+    const g = makeGuest();
+    const { handle } = await createGuestRuntime(g.config()).start(startOpts({ role: SURVEY_ROLE }));
+    await outcome(handle);
+    const args = [...(cliSpec(g).args ?? [])];
+    const base = mkdtempSync(path.join(tmpdir(), "fx-survey-wrap-"));
+    roots.push(base);
+    // the same wrapper, with the machine's /tmp swapped for a scratch directory and the agent for `true`
+    const local = path.join(base, "fx-survey", RUN_ID);
+    args.splice(3, 3, path.join(base, "pid"), local, "/usr/bin/env");
+    args.splice(6, args.length - 6, "true");
+    const ran = spawnSync("/bin/sh", args, { encoding: "utf8" });
+    expect(ran.status).toBe(0);
+    expect(statSync(local).mode & 0o777).toBe(0o700);
+    expect(statSync(path.dirname(local)).mode & 0o777).toBe(0o700);
+  });
+
+  it("an executor keeps its own layout: the working copy is writable, its temp directory is /tmp/fx-<run>, TMPDIR is the guest's /tmp", async () => {
+    const g = makeGuest();
+    const { handle } = await createGuestRuntime(g.config()).start(startOpts());
+    await outcome(handle);
+    const { sandbox } = filesOf(g).settings;
+    expect(sandbox.filesystem.allowWrite).toEqual([WORKDIR, `/tmp/fx-${RUN_ID}`]);
+    expect(cliSpec(g).env?.TMPDIR).toBe("/tmp");
+  });
+
+  it("a survey whose working copy sits in a shared temp directory is refused like any other role; its own temp directory is under /tmp/fx-survey", () => {
+    expect(() => guestJobFiles({ jobsDir: GUEST_JOBS_DIR, runId: RUN_ID, role: SURVEY_ROLE, workdir: "/tmp/work" })).toThrow(EngineRefusal);
+    const files = guestJobFiles({ jobsDir: GUEST_JOBS_DIR, runId: RUN_ID, role: SURVEY_ROLE, workdir: WORKDIR });
+    expect(files.tempDir).toBe(TEMP);
   });
 });

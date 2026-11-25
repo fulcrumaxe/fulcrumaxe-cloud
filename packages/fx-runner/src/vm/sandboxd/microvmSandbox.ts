@@ -19,7 +19,8 @@
  *    backstop, set as an absolute value: topping the live timer up for idle time never grows it.
  *  - `readCounters` answers nothing: the daemon measures no CPU time or egress bytes yet, and a figure is never made up.
  */
-import type { AgentHandle, AgentRuntime, NormalizedEvent } from "@fulcrumaxe/runner-protocol";
+import { SURVEY_ROLE, type AgentHandle, type AgentRuntime, type NormalizedEvent } from "@fulcrumaxe/runner-protocol";
+import { MODEL_HOST } from "../../sandbox/sandboxSettings.js";
 import { AgentRunFailed, failureOf, firstLineOf, startFailureOf } from "../../sandbox/agentOutcome.js";
 import {
   SandboxNotFoundError,
@@ -237,6 +238,8 @@ export function createMicrovmSandbox(config: MicrovmSandboxConfig): MicrovmSandb
     const entry = entries.get(name);
     if (entry === undefined) throw new SandboxNotFoundError(name);
     assertRules(opts.networkPolicy);
+    // D#845 ON-10c: the project survey reaches the model host and nothing else (GitHub stays out of its guest: no repository token, no clone, no push).
+    if (opts.role === SURVEY_ROLE && opts.networkPolicy.some((rule) => rule.host !== MODEL_HOST)) throw new MicrovmSandboxRefused("network_rule_forbidden");
     assertJob(opts);
     const workdir = opts.workdir;
     if (workdir === undefined || !workdir.startsWith("/")) throw new MicrovmSandboxRefused("bad_workdir");

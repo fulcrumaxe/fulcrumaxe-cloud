@@ -87,7 +87,7 @@ describe("the deploy verifier role and its capabilities (D#749 V2a)", () => {
   });
 
   it("is a member of the confined read roles (the read guard and the .git and .env denies), beside the two it was built on", () => {
-    expect([...CONFINED_READ_ROLES].sort()).toEqual(["deploy-verifier", "discovery-analyst", "proposal-verifier"]);
+    expect([...CONFINED_READ_ROLES].sort()).toEqual(["deploy-verifier", "discovery-analyst", "project-surveyor", "proposal-verifier"]);
   });
 });
 

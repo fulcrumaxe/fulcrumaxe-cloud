@@ -31,6 +31,8 @@ export interface GuestLayout {
   tempDir: string;
   /** Where the run's settings files are kept (denied to the tool). */
   jobsDir: string;
+  /** D#845 ON-10c: the project survey's working copy is read-only: denied for writes and not granted, so the run's own temp directory is the one place a command may write. */
+  readOnlyWorkdir?: boolean;
 }
 
 const PLAIN = /^\/(?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+$/;
@@ -77,8 +79,8 @@ export function guestSandboxSettings(layout: GuestLayout): Record<string, unknow
     enableWeakerNetworkIsolation: false,
     filesystem: {
       disabled: false,
-      allowWrite: [workdir, tempDir],
-      denyWrite: [jobsDir, GUEST_BIN_DIR],
+      allowWrite: layout.readOnlyWorkdir === true ? [tempDir] : [workdir, tempDir],
+      denyWrite: layout.readOnlyWorkdir === true ? [workdir, jobsDir, GUEST_BIN_DIR] : [jobsDir, GUEST_BIN_DIR],
       denyRead: [GUEST_HOME, jobsDir, GUEST_BIN_DIR, ...SHARED_TEMP_DIRS],
       allowRead: [workdir, tempDir],
     },

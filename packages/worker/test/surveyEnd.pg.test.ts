@@ -109,6 +109,38 @@ describe("survey endings and the deadline [pg]", () => {
       });
     }
 
+    // D#845 ON-10c: a runner that found the working copy changed ends the run `runner_setup` with the one detail `workspace_written`; the status move carries only `runner_setup_failed`, so the hook reads the stored event.
+    describe("the runner's workspace_written ending (ON-10c's row)", () => {
+      const ended = (runId: string, detail: string | null, seq = 5) =>
+        admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, $3, 'runner.event', $4::jsonb)", [A.accountId, runId, seq, JSON.stringify({ seq, type: "run_ended", reason: "runner_setup", ...(detail === null ? {} : { detail }) })]);
+
+      it("a run_ended runner_setup / workspace_written then running -> failed runner_setup_failed gives survey_failed / workspace_written, no draft, no envelope text", async () => {
+        const { runId, setupId } = await survey();
+        await claim(runId);
+        await ended(runId, "workspace_written");
+        expect(await move(runId, "running", "failed", "runner_setup_failed")).toEqual({ updated: true });
+        expect(await setupOf(setupId)).toMatchObject({ phase: "survey", state: "failed", failure_code: "survey_failed", failure_reason: "workspace_written" });
+        expect(await drafts(setupId)).toBe(0);
+        expect((await runOf(runId)).envelope).toBeNull();
+      });
+
+      it.each([["sandbox_unavailable"], ["workspace_failed"], [null]])("any other runner_setup detail (%s) stays run_failed: only this detail names the reason", async (detail) => {
+        const { runId, setupId } = await survey();
+        await claim(runId);
+        await ended(runId, detail);
+        await move(runId, "running", "failed", "runner_setup_failed");
+        expect(await setupOf(setupId)).toMatchObject({ state: "failed", failure_code: "survey_failed", failure_reason: "run_failed" });
+      });
+
+      it("the detail is read only for this one move: a cancel after the event is still cancelled", async () => {
+        const { runId, setupId } = await survey();
+        await claim(runId);
+        await ended(runId, "workspace_written");
+        await move(runId, "running", "cancelled");
+        expect(await setupOf(setupId)).toMatchObject({ failure_code: "survey_failed", failure_reason: "cancelled" });
+      });
+    });
+
     it("a repeat of the same ending is a no-op on the setup, and an ending of an older run does not touch a setup that moved on to a newer one", async () => {
       const { runId, setupId } = await survey();
       await move(runId, "pending", "cancelled");

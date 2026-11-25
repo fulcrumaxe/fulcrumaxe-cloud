@@ -11,6 +11,7 @@
  */
 
 import { DEPLOY_VERIFIER_ROLE } from "./deployVerifier.js";
+import { SURVEY_ROLE } from "./projectDraft.js";
 
 /** The role the platform runs to check a proposal's claims. Not in the role manifest. */
 export const PROPOSAL_VERIFIER_ROLE = "proposal-verifier";
@@ -23,8 +24,9 @@ export const DISCOVERY_ANALYST_ROLE = "discovery-analyst";
  * sandbox and a local runner both test membership here, never a comparison with one role's name.
  * D#749 V2b: the deploy verifier is a member as well: the browser tools bring a page's text (an outsider's) into its prompt, so it reads the checkout only behind the one
  * read guard and the `.git` and `.env*` denies. It is a runner job and nothing else (agentConfig.ts refuses it in the cloud's sandbox).
+ * D#845 ON-10c: the project surveyor is a member too: it reads a customer's whole repository, so it reads the checkout only, behind the same guard, and on the machine it also gets a read-only workspace (fx-runner's settings file).
  */
-export const CONFINED_READ_ROLES: ReadonlySet<string> = new Set([PROPOSAL_VERIFIER_ROLE, DISCOVERY_ANALYST_ROLE, DEPLOY_VERIFIER_ROLE]);
+export const CONFINED_READ_ROLES: ReadonlySet<string> = new Set([PROPOSAL_VERIFIER_ROLE, DISCOVERY_ANALYST_ROLE, DEPLOY_VERIFIER_ROLE, SURVEY_ROLE]);
 
 /**
  * The verifier's tools as a runner holds them, and as the cloud signs them for a runner job (`role_tools_sha256`): the bare names. The local

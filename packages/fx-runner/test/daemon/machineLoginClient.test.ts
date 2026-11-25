@@ -1,5 +1,5 @@
 import { generateKeyPairSync } from "node:crypto";
-import { MACHINE_COMMAND_PURPOSE, MACHINE_LOGIN_CAPABILITY, signMachineCommand, type HelloMessage, type MachineCommand } from "@fulcrumaxe/runner-protocol";
+import { MACHINE_COMMAND_PURPOSE, MACHINE_LOGIN_CAPABILITY, SURVEY_CAPABILITY, signMachineCommand, type HelloMessage, type MachineCommand } from "@fulcrumaxe/runner-protocol";
 import { describe, expect, it } from "vitest";
 import type { ClaudeLoginRunner } from "../../src/daemon/claudeLogin.js";
 import { createRunnerClient } from "../../src/daemon/client.js";
@@ -33,8 +33,8 @@ function cloud(reply: (seen: Seen) => { status: number; body: unknown }) {
 const idleLogin: ClaudeLoginRunner = { start: async () => ({ ok: true }), code: async () => ({ ok: false, refusal: "failed" }), logout: async () => ({ ok: true }), idle: async () => undefined };
 
 describe("hello: machine_login_v1 is dropped first", () => {
-  it("is in the build list, last, and an old cloud costs one retry that drops only it", async () => {
-    expect(RUNNER_BUILD_CAPABILITIES.at(-1)).toBe(MACHINE_LOGIN_CAPABILITY);
+  it("is in the build list, right ahead of survey_v1 (the newest), and an old cloud drops survey_v1 (the newer one) and then it", async () => {
+    expect(RUNNER_BUILD_CAPABILITIES.at(-2)).toBe(MACHINE_LOGIN_CAPABILITY);
     const sent: string[][] = [];
     const fetchFn = (async (_u: string, init: RequestInit) => {
       const caps = (JSON.parse(String(init.body)).capabilities ?? []) as string[];
@@ -44,9 +44,9 @@ describe("hello: machine_login_v1 is dropped first", () => {
     }) as unknown as typeof fetch;
     const client = createRunnerClient({ origin: "https://cloud.example.test", key: generateRunnerKey(), now: () => now, fetchFn });
     const hello: HelloMessage = { protocol_version: RUNNER_PROTOCOL_VERSION, binary_version: RUNNER_VERSION, model_auth_present: false, isolation: "host_sandbox", capabilities: [...RUNNER_BUILD_CAPABILITIES] };
-    expect(await client.hello(hello)).toEqual({ kind: "ok", dropped: [MACHINE_LOGIN_CAPABILITY] });
-    expect(sent).toHaveLength(2);
-    expect(sent[1]).toEqual(RUNNER_BUILD_CAPABILITIES.filter((c) => c !== MACHINE_LOGIN_CAPABILITY));
+    expect(await client.hello(hello)).toEqual({ kind: "ok", dropped: [SURVEY_CAPABILITY, MACHINE_LOGIN_CAPABILITY] });
+    expect(sent).toHaveLength(3);
+    expect(sent[2]).toEqual(RUNNER_BUILD_CAPABILITIES.filter((c) => c !== MACHINE_LOGIN_CAPABILITY && c !== SURVEY_CAPABILITY));
   });
 });
 

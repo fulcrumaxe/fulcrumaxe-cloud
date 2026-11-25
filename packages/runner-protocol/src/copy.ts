@@ -152,6 +152,8 @@ export const GIT_PATH_LINES = {
   review_sha_not_in_mirror: "The runner's copy of the repository does not have the commit to review on any branch, so the review did not start. If the pull request comes from a fork, it cannot be reviewed on your machine. Otherwise, review again.",
   context_spill_unwritable: "The runner could not save the longer text this run's prompt points to, so it did not start the agent with a reference to a file that is not there. Check the disk space and folder permissions on that machine, then Build again.",
   sandbox_unusable: "The sandbox on the runner machine could not start the agent's shell, so the run was stopped before the agent began. Update fx-runner and the Claude Code install on that machine, then Build again.",
+  // D#845 ON-10c: a project survey that changed the working copy.
+  workspace_written: "The survey changed files in the working copy, which it is never allowed to do, so it was stopped and nothing it wrote was kept. Try the survey again.",
   // D#587 B-5b-3b: a run in a microVM that ended without a result. Each says what happened and what to do; none holds a path, an id or text from the agent.
   vm_admission_refused: "The runner machine had no room to start a virtual machine for this run (its limits or free memory), so the run did not start. Free memory or raise the VM limits in the runner's settings, then Build again.",
   vm_boot_failed: "The runner could not start or reach the virtual machine for this run, so the run was stopped. Check that the VM helper is installed and ready on that machine (fx-runner doctor), then Build again.",
