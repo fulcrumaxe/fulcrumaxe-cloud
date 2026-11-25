@@ -121,7 +121,7 @@ describe('repo twins API', () => {
     twinRouteDeps.enabled = false;
     const owner = await account();
     const repo = await seedRepo(owner.accountId);
-    for (const [method, path, body] of [['POST', `/repos/${repo}/twin`, {}], ['GET', `/repos/${repo}/twin`, undefined], ['POST', `/twins/${randomUUID()}/pause`, undefined], ['DELETE', `/twins/${randomUUID()}`, undefined]] as const) {
+    for (const [method, path, body] of [['POST', `/repos/${repo}/twin`, {}], ['GET', `/repos/${repo}/twin`, undefined], ['POST', `/twins/${randomUUID()}/pause`, undefined], ['POST', `/twins/${randomUUID()}/resume`, undefined], ['DELETE', `/twins/${randomUUID()}`, undefined]] as const) {
       const res = await call(owner, method, path, body);
       expect(res.status).toBe(503);
       expect(((await res.json()) as { error: { code: string } }).error.code).toBe('not_configured');
@@ -256,5 +256,48 @@ describe('repo twins API', () => {
     expect((await call(owner, 'PUT', `/repos/${await seedRepo(owner.accountId, 'free')}/pairing`, body)).status).toBe(200);
     await call(owner, 'DELETE', `/twins/${id}`);
     expect((await call(owner, 'PUT', `/repos/${pub}/pairing`, body)).status).toBe(200);
+  });
+
+  it('a repo a pairing would name as its public repo (code_repo) cannot be paired while a live twin holds it, either side, and can once the twin is gone', async () => {
+    const owner = await account();
+    const pub = await seedRepo(owner.accountId, 'widgets');
+    const priv = await seedRepo(owner.accountId, 'widgets-private');
+    const id = await makeTwin(owner, pub, priv);
+    const third = await seedRepo(owner.accountId, 'third');
+    for (const code_repo of ['acme/widgets', 'ACME/Widgets-Private']) {
+      const res = await call(owner, 'PUT', `/repos/${third}/pairing`, { code_repo, overlay_globs: ['private/**'] });
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { error: { code: string } }).error.code).toBe('twin_exists');
+    }
+    expect((await admin.query('SELECT 1 FROM repo_pairing WHERE repo_id = $1', [third])).rows).toHaveLength(0);
+    // A name that is no repo of the account is nobody's twin, and neither is a repo of ANOTHER account with the twin's name.
+    expect((await call(owner, 'PUT', `/repos/${third}/pairing`, { code_repo: 'acme/unrelated', overlay_globs: ['private/**'] })).status).toBe(200);
+    const other = await account();
+    await seedRepo(other.accountId, 'widgets');
+    expect((await call(other, 'PUT', `/repos/${await seedRepo(other.accountId, 'mine')}/pairing`, { code_repo: 'acme/widgets', overlay_globs: ['private/**'] })).status).toBe(200);
+    await call(owner, 'DELETE', `/twins/${id}`);
+    expect((await call(owner, 'PUT', `/repos/${third}/pairing`, { code_repo: 'acme/widgets', overlay_globs: ['private/**'] })).status).toBe(200);
+  });
+
+  it('a pairing and a twin made at the same moment cannot both stand: the open twin create holds the repo, and the pairing waits and is refused', async () => {
+    const owner = await account();
+    const pub = await seedRepo(owner.accountId, 'widgets');
+    const priv = await seedRepo(owner.accountId, 'widgets-private');
+    const c = await appUserPool.connect();
+    try {
+      await c.query('BEGIN');
+      await c.query("SELECT set_config('app.account_id', $1, true), set_config('app.user_id', $2, true)", [owner.accountId, owner.userId]);
+      expect((await c.query<{ o_result: string }>('SELECT o_result FROM twin_record($1, $2, 56, $3)', [pub, priv, 'widgets-private'])).rows[0]!.o_result).toBe('ok');
+      const pairing = call(owner, 'PUT', `/repos/${pub}/pairing`, { code_repo: 'acme/widgets-public', overlay_globs: ['private/**'] });
+      expect(await Promise.race([pairing.then(() => 'answered'), new Promise((r) => setTimeout(() => r('waiting'), 500))])).toBe('waiting');
+      await c.query('COMMIT');
+      const res = await pairing;
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { error: { code: string } }).error.code).toBe('twin_exists');
+    } finally {
+      c.release();
+    }
+    expect((await admin.query('SELECT 1 FROM repo_pairing WHERE repo_id = $1', [pub])).rows).toHaveLength(0);
+    expect((await admin.query('SELECT 1 FROM repo_twins WHERE public_repo_id = $1', [pub])).rows).toHaveLength(1);
   });
 });

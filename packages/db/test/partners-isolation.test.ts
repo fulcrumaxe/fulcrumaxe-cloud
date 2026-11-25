@@ -222,7 +222,7 @@ describe('X-user-id amendment', () => {
     const offenders: string[] = [];
     for (const row of rows) {
       const expr = `${row.qual ?? ''} ${row.withcheck ?? ''}`;
-      // Eighteen policies are exempt, by table and name: runner_approval_definer_select (0757), runner_mode_switch_definer_select (0759),
+      // Nineteen policies are exempt, by table and name: runner_approval_definer_select (0757), runner_mode_switch_definer_select (0759),
       // runner_consent_definer_select (0767), runner_allowance_definer_select (0770), work_item_correction_definer_select (0780) work_item_placement_definer_select (0781), run_handoff_definer_select (0787), runner_settings_definer_select (0783) and runner_concurrency_definer_select (0784) runner_repos_definer_select (0790) and memory_definer_select (0793) repo_context_settings_definer_select (0796) and runner_routing_definer_select (0798) and repo_pairing_audit_definer_select (0799) and plan_remover_definer_select (0832) and action_rules_auditor_definer_select (0847) and context_rules_definer_select (0871) and engine_bridge_definer_select (1027) and repo_twins_owner_use (1097) on account_members. Their row is the membership itself, so it cannot join the table to itself.
       // Any other policy on that table is still checked.
       const isMembershipRowPolicy =

@@ -191,6 +191,39 @@ describe("startSurvey [pg]", () => {
     it("409 setup_phase when the setup is past the survey step", async () => {
       for (const phase of ["plan", "install", "done"]) await refused(await rig({ phase }), 409, "setup_phase");
     });
+    describe("a private twin is surveyed only when it is ready (ON-27a)", () => {
+      const twinOf = async (r: Rig, side: "private" | "public", state: string): Promise<void> => {
+        const other = randomUUID();
+        await h.admin.query("INSERT INTO repos (id, account_id, gh_repo_id, product, gh_owner, gh_name) VALUES ($1, $2, $3, 'team', 'acme', 'other')", [other, r.f.accountId, Math.floor(Math.random() * 1e12)]);
+        const [pub, priv] = side === "private" ? [other, r.repoId] : [r.repoId, other];
+        await h.admin.query(
+          `INSERT INTO repo_twins (account_id, public_repo_id, private_repo_id, private_name, state, removed_at) VALUES ($1, $2, $3, 'x-private', $4, CASE WHEN $4 = 'removed' THEN now() END)`,
+          [r.f.accountId, pub, priv, state],
+        );
+      };
+      it("409 twin_not_ready in every state but ready, writing nothing and never reaching the worker", async () => {
+        for (const state of ["creating", "not_connected", "seeding", "paused", "conflict", "refused", "failed"]) {
+          const r = await rig();
+          await twinOf(r, "private", state);
+          await refused(r, 409, "twin_not_ready");
+        }
+      });
+      it("starts when the twin is ready, and for a removed twin, and for the PUBLIC side of a twin that is not ready", async () => {
+        for (const [side, state] of [["private", "ready"], ["private", "removed"], ["public", "seeding"]] as const) {
+          const r = await rig();
+          await twinOf(r, side, state);
+          await expect(startSurvey(r.deps(), as(r), r.setupId)).resolves.toMatchObject({ setup_id: r.setupId });
+          expect(r.calls).toHaveLength(1);
+        }
+      });
+      it("retry is the same start: a twin that is not ready is refused there too", async () => {
+        const r = await rig({ prior: true });
+        await twinOf(r, "private", "seeding");
+        const error = await refusal(retrySurvey(r.deps(), as(r), r.setupId, null));
+        expect([error.status, error.code]).toEqual([409, "twin_not_ready"]);
+        expect(r.calls).toEqual([]);
+      });
+    });
     it("409 setup_not_placed when the repo has no machine, and when its machine was revoked", async () => {
       await refused(await rig({ place: false }), 409, "setup_not_placed");
       const r = await rig();

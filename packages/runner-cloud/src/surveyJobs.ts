@@ -44,6 +44,9 @@ async function firstLook(client: PoolClient, accountId: string, setupId: string)
   const setup = (await client.query<{ repo_id: string; phase: string; survey_run_id: string | null }>("SELECT repo_id, phase, survey_run_id FROM project_setups WHERE account_id = $1 AND id = $2", [accountId, setupId])).rows[0];
   if (!setup) throw refuse(404, "not_found", "no such setup");
   if (setup.phase !== "survey") throw refuse(409, "setup_phase", "the setup is not at the survey step");
+  // A private twin (ON-27a) is surveyed only once it is ready: before that its repo is empty or still being copied.
+  const twin = (await client.query<{ state: string }>("SELECT state FROM repo_twins WHERE account_id = $1 AND private_repo_id = $2 AND state <> 'removed'", [accountId, setup.repo_id])).rows[0];
+  if (twin && twin.state !== "ready") throw refuse(409, "twin_not_ready", "the private twin is not ready for a survey yet");
   const placed = (
     await client.query<{ runner_id: string; credential_mode: string; registered_by: string; sandbox_engine: string | null; gh_owner: string | null; gh_name: string | null; capabilities: string[] | null; machine: string | null }>(
       `SELECT pp.runner_id, rn.credential_mode, rn.registered_by, f.sandbox_engine, r.gh_owner, r.gh_name, cap.capabilities, st.name AS machine

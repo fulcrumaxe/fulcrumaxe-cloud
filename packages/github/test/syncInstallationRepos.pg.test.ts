@@ -148,6 +148,54 @@ describe('syncInstallationRepos (D#2 H17b-1)', () => {
     expect((await admin.query(`SELECT 1 FROM role_settings WHERE repo_id = $1`, [repos[0]!.id])).rowCount).toBe(ROLE_MANIFEST.length);
   });
 
+  it("a private twin waiting for the App (not_connected) moves to seeding in the sync that first lists its repo, in its own account only (ON-27a)", async () => {
+    const acc = await account();
+    const other = await account();
+    const inst = await install(acc);
+    const otherInst = await install(other);
+    const pubGh = 9_100_001;
+    const privGh = 9_100_002;
+    const { rows: pub } = await admin.query<{ id: string }>(
+      `INSERT INTO repos (account_id, installation_id, gh_repo_id, product, gh_owner, gh_name) VALUES ($1, $2, $3, 'team', 'acme', 'widgets') RETURNING id`,
+      [acc, inst.id, pubGh],
+    );
+    const { rows: twin } = await admin.query<{ id: string }>(
+      `INSERT INTO repo_twins (account_id, public_repo_id, private_name, private_gh_repo_id, state) VALUES ($1, $2, 'widgets-private', $3, 'not_connected') RETURNING id`,
+      [acc, pub[0]!.id, privGh],
+    );
+    const read = async () => (await admin.query<{ state: string; private_repo_id: string | null }>('SELECT state, private_repo_id FROM repo_twins WHERE id = $1', [twin[0]!.id])).rows[0]!;
+    // Another account's installation lists a repo with the same GitHub id: the twin is not theirs to connect.
+    await syncInstallationRepos(harness([{ id: privGh, name: 'widgets-private' }]).deps, otherInst.id);
+    expect(await read()).toEqual({ state: 'not_connected', private_repo_id: null });
+    // The twin's own account lists the public repo only: still waiting.
+    await syncInstallationRepos(harness([{ id: pubGh, name: 'widgets' }]).deps, inst.id);
+    expect(await read()).toEqual({ state: 'not_connected', private_repo_id: null });
+    // Then the App is given the private repo too.
+    await syncInstallationRepos(harness([{ id: pubGh, name: 'widgets' }, { id: privGh, name: 'widgets-private' }]).deps, inst.id);
+    const { rows: priv } = await admin.query<{ id: string }>('SELECT id FROM repos WHERE account_id = $1 AND gh_repo_id = $2', [acc, privGh]);
+    expect(await read()).toEqual({ state: 'seeding', private_repo_id: priv[0]!.id });
+    expect((await admin.query(`SELECT payload FROM audit_log WHERE account_id = $1 AND action = 'twin.connected'`, [acc])).rows).toHaveLength(1);
+    // Syncing again changes nothing and writes no second row.
+    await syncInstallationRepos(harness([{ id: pubGh, name: 'widgets' }, { id: privGh, name: 'widgets-private' }]).deps, inst.id);
+    expect((await admin.query(`SELECT 1 FROM audit_log WHERE account_id = $1 AND action = 'twin.connected'`, [acc])).rows).toHaveLength(1);
+  });
+
+  it("an error in the twin step never rolls back the repo sync: the repos are written, the sync is reported done, and a fixed notice is logged (ON-27a)", async () => {
+    const acc = await account();
+    const inst = await install(acc);
+    // The twin step cannot run at all (app_user may not execute it): the savepoint absorbs that.
+    await admin.query('REVOKE EXECUTE ON FUNCTION twin_connect_seen() FROM app_user');
+    try {
+      const h = harness([{ id: 9_200_001, name: 'kept-one' }, { id: 9_200_002, name: 'kept-two' }]);
+      const r = await syncInstallationRepos(h.deps, inst.id);
+      expect(r).toMatchObject({ status: 'synced', inserted: 2 });
+      expect((await admin.query('SELECT gh_name FROM repos WHERE account_id = $1 ORDER BY gh_name', [acc])).rows.map((x) => x.gh_name)).toEqual(['kept-one', 'kept-two']);
+      expect(h.warn).toHaveBeenCalledWith(expect.stringContaining('twin connect step failed'));
+    } finally {
+      await admin.query('GRANT EXECUTE ON FUNCTION twin_connect_seen() TO app_user');
+    }
+  });
+
   it('mints per kind: run for team, preview_read for team_readonly, sitekit_read for sitekit (all metadata read only, installation-wide)', async () => {
     const acc = await account();
     const ro = await install(acc, 'team_readonly');

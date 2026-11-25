@@ -188,8 +188,8 @@ export async function setRepoPairing(ctx: RepoPairingCtx, repoId: string, input:
   return withTenant(ctx.pool, accountId, userId, async (client) => {
     await requireAdmin(client, accountId, userId);
     const own = await ownFullName(client, repoId);
-    // ON-27a: one repo never has two publishers. Either repo of a live twin is refused (TwinExistsError, a 409 in the route).
-    await assertNoLiveTwin(client, accountId, repoId);
+    // ON-27a: one repo never has two publishers. Either repo of a live twin, as the repo or as its code_repo, is refused (TwinExistsError, a 409 in the route).
+    await assertNoLiveTwin(client, accountId, repoId, input.codeRepo);
     if (own !== null && own.toLowerCase() === input.codeRepo.toLowerCase()) {
       invalid('the paired public repo must be a different repo from this one', 'code_repo');
     }

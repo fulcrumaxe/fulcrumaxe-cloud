@@ -47,7 +47,7 @@ export class TwinStateError extends Error {
   }
 }
 
-/** A live twin holds this repo, so it cannot be paired (D#598): one repo never has two publishers. */
+/** A live twin holds this repo (or the public repo it would be paired with), so it cannot be paired (D#598): one repo never has two publishers. */
 export class TwinExistsError extends Error {
   constructor() {
     super('twin: the repo belongs to a live private twin');
@@ -92,11 +92,18 @@ export async function getRepoTwin(ctx: RepoTwinCtx, publicRepoId: string): Promi
   });
 }
 
-/** Throws TwinExistsError when a live twin holds `repoId` as either of its repos. Runs in the caller's transaction, so the pairing write and this check commit together. */
-export async function assertNoLiveTwin(client: PoolClient, accountId: string, repoId: string): Promise<void> {
+/**
+ * Throws TwinExistsError when a live twin holds `repoId`, or the repo `codeRepo` names (`owner/name`, in this account), as either of its repos. It first takes the one lock on those
+ * repo rows (FOR UPDATE, in id order, the same lock `twin_record` takes), so a pairing and a twin made at the same moment cannot both pass. Runs in the caller's transaction, so the pairing write and this check commit together.
+ */
+export async function assertNoLiveTwin(client: PoolClient, accountId: string, repoId: string, codeRepo: string): Promise<void> {
+  const locked = await client.query<{ id: string }>(
+    `SELECT id FROM repos WHERE account_id = $1 AND (id = $2 OR lower(gh_owner || '/' || gh_name) = lower($3)) ORDER BY id FOR UPDATE`,
+    [accountId, repoId, codeRepo],
+  );
   const { rows } = await client.query(
-    `SELECT 1 FROM repo_twins WHERE account_id = $1 AND state <> 'removed' AND (public_repo_id = $2 OR private_repo_id = $2)`,
-    [accountId, repoId],
+    `SELECT 1 FROM repo_twins WHERE account_id = $1 AND state <> 'removed' AND (public_repo_id = ANY($2::uuid[]) OR private_repo_id = ANY($2::uuid[]))`,
+    [accountId, locked.rows.map((r) => r.id)],
   );
   if (rows.length > 0) throw new TwinExistsError();
 }
