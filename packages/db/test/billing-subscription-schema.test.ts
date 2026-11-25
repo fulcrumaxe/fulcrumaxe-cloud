@@ -18,9 +18,9 @@ import { throwawayDbs, type ThrowawayDbs } from './helpers/throwaway-db.js';
  * changes that test's rows and nothing else in this file.
  */
 const MIGRATION = '0660_subscription_sync.sql';
-// 1077 (D#845 ON-13a5) grants a column read of subscription_ended_at, so it runs after 0660 too.
+// 1077 (D#845 ON-13a5) grants a column read of subscription_ended_at, so it runs after 0660 too; 1092 (D#845 ON-13c3) executes 1077's predicates, so it goes with it.
 // Applied after 0660 and reading its columns (0692 backfills from them), so the upgrade database leaves it out too.
-const AFTER_MIGRATION = ['0692_onboarding_progress_marks.sql', '0720_trigger_functions_not_owned_by_platform_ops.sql', '1077_engine_system_stops.sql'];
+const AFTER_MIGRATION = ['0692_onboarding_progress_marks.sql', '0720_trigger_functions_not_owned_by_platform_ops.sql', '1077_engine_system_stops.sql', '1092_engine_session_lease.sql'];
 
 describe('accounts subscription schema (D#69 migration 0660)', () => {
   let adminPool: Pool;

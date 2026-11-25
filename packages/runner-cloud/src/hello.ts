@@ -1,5 +1,6 @@
-import { HEARTBEAT_INVENTORY_CAPABILITY, HEARTBEAT_INVENTORY_HELLO_CAPABILITY, SANDBOX_INVENTORY_MIN_PROTOCOL, HelloMessage, HelloReply, KVM_FACT_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, PREFLIGHT_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, WATCH_MIN_PROTOCOL, WATCH_MODE_CAPABILITY, WATCH_MODE_HELLO_CAPABILITY } from "@fulcrumaxe/runner-protocol";
+import { ENGINE_LEASE_CAPABILITY, ENGINE_LEASE_HELLO_CAPABILITY, MACHINE_ONBOARDING_MIN_PROTOCOL, HEARTBEAT_INVENTORY_CAPABILITY, HEARTBEAT_INVENTORY_HELLO_CAPABILITY, SANDBOX_INVENTORY_MIN_PROTOCOL, HelloMessage, HelloReply, KVM_FACT_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, PREFLIGHT_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, WATCH_MIN_PROTOCOL, WATCH_MODE_CAPABILITY, WATCH_MODE_HELLO_CAPABILITY } from "@fulcrumaxe/runner-protocol";
 import { allowRunnerWake } from "@fx/core/src/pendingWork.js";
+import { runnersTakeEngineLease } from "./engineLease.js";
 import { configuredWakeKey, wakeGrantFor } from "./wakeToken.js";
 import { CURRENT_PROTOCOL_VERSION, MIN_SUPPORTED_PROTOCOL_VERSION, RunnerHttpError, parseJsonBody, parseMessage, pgCode, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse } from "./http.js";
 import { verifyRunnerRequest, withRunnerSession } from "./verifyRunnerRequest.js";
@@ -70,7 +71,9 @@ export async function runnerHello(deps: RunnerCloudDeps, req: RunnerHttpRequest)
   const preflight = (message.capabilities ?? []).includes(PREFLIGHT_HELLO_CAPABILITY) && takesPreflight;
   // D#587 FU-179: said only to a runner that DECLARED `heartbeat_inventory_v1` on this hello at protocol 21 or later, and only when the inventory definer (migration 1040) exists. The runner then puts `sandboxes` on its heartbeats.
   const heartbeatInventory = message.protocol_version >= SANDBOX_INVENTORY_MIN_PROTOCOL && (message.capabilities ?? []).includes(HEARTBEAT_INVENTORY_HELLO_CAPABILITY) && (await runnersTakeInventory(deps));
-  const replyCapabilities = [...(watchMode ? [WATCH_MODE_CAPABILITY] : []), ...(kvmFact ? [KVM_FACT_CAPABILITY] : []), ...(preflight ? [PREFLIGHT_CAPABILITY] : []), ...(heartbeatInventory ? [HEARTBEAT_INVENTORY_CAPABILITY] : [])];
+  // D#845 ON-13c3: said only to a runner that DECLARED `engine_lease_v1` on this hello at protocol 22 or later, and only when migration 1092's function exists. The claim and heartbeat replies then carry `engine_lease`.
+  const engineLease = message.protocol_version >= MACHINE_ONBOARDING_MIN_PROTOCOL && (message.capabilities ?? []).includes(ENGINE_LEASE_HELLO_CAPABILITY) && (await runnersTakeEngineLease(deps));
+  const replyCapabilities = [...(watchMode ? [WATCH_MODE_CAPABILITY] : []), ...(kvmFact ? [KVM_FACT_CAPABILITY] : []), ...(preflight ? [PREFLIGHT_CAPABILITY] : []), ...(heartbeatInventory ? [HEARTBEAT_INVENTORY_CAPABILITY] : []), ...(engineLease ? [ENGINE_LEASE_CAPABILITY] : [])];
   return { status: 200, body: HelloReply.parse({ protocol_version: current, ...(wake ? { wake } : {}), ...(replyCapabilities.length > 0 ? { capabilities: replyCapabilities } : {}) }) };
 }
 

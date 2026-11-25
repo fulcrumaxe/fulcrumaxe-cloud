@@ -19,6 +19,11 @@ export const COVERED: Record<string, string> = {
   merge_order: ENVELOPE,
   deploy_order: ENVELOPE,
   machine_job: ENVELOPE,
+  // D#845 ON-13c3: the engine session lease, three short fixed fields
+  engine_lease: CONTAINER,
+  "engine_lease.repo_gh_id": ENVELOPE,
+  "engine_lease.operate_epoch": ENVELOPE,
+  "engine_lease.until": ENVELOPE,
   // D#587 B-7b: at most five signed sandbox commands (about 700 bytes each, every field short and fixed in shape)
   sandbox_commands: CONTAINER,
   "sandbox_commands.command": CONTAINER,

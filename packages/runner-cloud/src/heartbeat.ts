@@ -3,6 +3,7 @@ import { reportError } from "@fx/telemetry";
 import { handoffDeadlineFor } from "./handoff.js";
 import { asRunner, parseJsonBody, parseMessage, requireLeases, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse } from "./http.js";
 import { refuseBadInventory } from "./claim.js";
+import { engineLeaseFor } from "./engineLease.js";
 import { verifyRunnerRequest, withRunnerSession } from "./verifyRunnerRequest.js";
 
 export const HEARTBEAT_PATH = "/api/runner/heartbeat";
@@ -47,5 +48,10 @@ export async function heartbeatRun(deps: RunnerCloudDeps, req: RunnerHttpRequest
       },
     );
   }
-  return { status: 200, body: HeartbeatReply.parse({ continue: true, lease_expires_at: result.leaseExpiresAt.toISOString(), ...handoff, ...(recorded ? { sandboxes_recorded: true as const } : {}) }) };
+  // D#845 ON-13c3: the engine session lease, renewed from this inventory (when it was stored) and read back. Never allowed to fail the heartbeat: a runner that hears no lease stops its session only after the lease and a minute.
+  const lease = await asRunner(() => withRunnerSession(deps.appUserPool, runner, (client) => engineLeaseFor(client, runner.runnerId, recorded ? message.sandboxes : undefined))).catch((error: unknown) => {
+    reportError(error, { stage: "runner.heartbeat_engine_lease", route: HEARTBEAT_PATH });
+    return null;
+  });
+  return { status: 200, body: HeartbeatReply.parse({ continue: true, lease_expires_at: result.leaseExpiresAt.toISOString(), ...handoff, ...(recorded ? { sandboxes_recorded: true as const } : {}), ...(lease === null ? {} : { engine_lease: lease }) }) };
 }

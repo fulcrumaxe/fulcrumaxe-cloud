@@ -1200,7 +1200,7 @@ check_invoker_member_role_shape() {
 }
 
 # D#7 AAP-d1 (0837): the SECURITY DEFINER functions owned by one role, each executable by one named invoker role and nobody else.
-# Called as check_invoker_exception_shape <db> <role> <invoker> <quoted, comma-separated exact function names>. Prints the oids, comma
+# Called as check_invoker_exception_shape <db> <role> <invoker[,invoker...]> <quoted, comma-separated exact function names>. Prints the oids, comma
 # separated, when every definer the role owns is one of the named functions, pinned to search_path=pg_catalog, public, pg_temp (the one other
 # setting allowed beside it is TimeZone=UTC, 0995; any other setting or zone fails), with an
 # explicit ACL whose only grantees besides the owner are the invoker (no PUBLIC, no grant option); SHAPE_FAIL:<count> when any is not;
@@ -1211,8 +1211,8 @@ check_invoker_exception_shape() {
   row="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -F'|' -c "
     SELECT coalesce(string_agg(oid::text, ', ') FILTER (WHERE ok), ''), count(*) FILTER (WHERE NOT ok) FROM (
       SELECT p.oid, (p.proconfig IN (ARRAY['search_path=pg_catalog, public, pg_temp'], ARRAY['search_path=pg_catalog, public, pg_temp', 'TimeZone=UTC']) AND p.proacl IS NOT NULL
-        AND EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee = '$invoker'::regrole)
-        AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner AND (a.grantee <> '$invoker'::regrole OR a.is_grantable))) AS ok
+        AND NOT EXISTS (SELECT 1 FROM unnest(string_to_array('$invoker', ',')) i WHERE NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE pg_get_userbyid(a.grantee) = i))
+        AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner AND (pg_get_userbyid(a.grantee) <> ALL (string_to_array('$invoker', ',')) OR a.is_grantable))) AS ok
       FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.prosecdef AND p.proname IN ($names) AND pg_get_userbyid(p.proowner) = '$role') x;" 2>&1)" || rc=$?
   if [ "$rc" -ne 0 ] || [ "$(awk -F'|' '{print NF; exit}' <<<"$row")" != "2" ]; then
     echo "SHAPE_FAIL:psql failed for check '$role-function-shape' on $dbname (exit $rc): $row"

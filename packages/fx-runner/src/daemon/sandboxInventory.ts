@@ -35,7 +35,7 @@ export interface InventoryReporter {
   next(): Promise<PendingInventory | undefined>;
 }
 
-export function createInventoryReporter(config: { source: InventorySource; now: () => Date; maxQuietSeconds?: number }): InventoryReporter {
+export function createInventoryReporter(config: { source: InventorySource; now: () => Date; maxQuietSeconds?: number; /** D#845 ON-13c3: true while the runner holds an engine session lease. Every ordinary claim and every heartbeat that can carry the block then carries it (no quiet window), because the cloud renews a lease only from a block that lists the running session. */ every?: () => boolean }): InventoryReporter {
   const quietMs = (config.maxQuietSeconds ?? SANDBOX_INVENTORY_MAX_QUIET_SECONDS) * 1000;
   let sentHash: string | undefined;
   let sentAtMs = 0;
@@ -52,7 +52,7 @@ export function createInventoryReporter(config: { source: InventorySource; now: 
       if (!parsed.success) return undefined;
       const hash = inventoryFingerprint(parsed.data);
       const nowMs = config.now().getTime();
-      if (hash === sentHash && nowMs - sentAtMs < quietMs) return undefined;
+      if (hash === sentHash && nowMs - sentAtMs < quietMs && config.every?.() !== true) return undefined;
       return {
         rows: parsed.data,
         commit() {

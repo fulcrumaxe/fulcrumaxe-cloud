@@ -76,8 +76,18 @@ const sandboxCommands = SignedSandboxCommands.optional();
 /** D#845 MC-8a: signed machine commands (the Claude sign-in link) for this runner, at most five, sent only to a runner whose latest hello listed `machine_login_v1` at protocol 22 or later. Absent when there are none. */
 const machineCommands = SignedMachineCommands.optional();
 
+/**
+ * D#845 ON-13c3: the lease of the engine session this runner holds (`repo_gh_id`, the operate epoch it was renewed under, and the UTC instant it ends). Sent only to a runner whose latest hello listed `engine_lease_v1` and only
+ * when this cloud has the lease table, and only while a lease is held; absent otherwise. Unsigned on purpose: it can only extend a session a signed start already allowed, and a runner that hears none stops on its own.
+ * While one is held the cloud answers an idle claim with a `retry_after` of at most `ENGINE_LEASE_RETRY_AFTER_MAX_SECONDS`, so the runner hears the next renewal well inside the lease.
+ */
+export const EngineLease = z.object({ repo_gh_id: safeInt.min(1), operate_epoch: safeInt.min(0), until: utcTimestamp }).strict();
+export type EngineLease = z.infer<typeof EngineLease>;
+export const ENGINE_LEASE_RETRY_AFTER_MAX_SECONDS = 300;
+const engineLease = EngineLease.optional();
+
 /** Nothing for this runner to do right now. */
-export const ClaimIdleReply = z.object({ retry_after: retryAfter(3600), wake, merge_order: mergeOrder, deploy_order: deployOrder, machine_job: machineJob, sandbox_commands: sandboxCommands, machine_commands: machineCommands }).strict();
+export const ClaimIdleReply = z.object({ retry_after: retryAfter(3600), wake, merge_order: mergeOrder, deploy_order: deployOrder, machine_job: machineJob, sandbox_commands: sandboxCommands, machine_commands: machineCommands, engine_lease: engineLease }).strict();
 export type ClaimIdleReply = z.infer<typeof ClaimIdleReply>;
 
 /**
@@ -85,7 +95,7 @@ export type ClaimIdleReply = z.infer<typeof ClaimIdleReply>;
  * later write with it. `run_id` repeats the signed job's own so a runner can key on it before it opens the job.
  */
 export const ClaimedReply = z
-  .object({ signed_job: SignedJobSchema, run_id: z.string().uuid(), lease_generation: safeInt.min(1), wake, merge_order: mergeOrder, deploy_order: deployOrder, machine_job: machineJob, sandbox_commands: sandboxCommands, machine_commands: machineCommands })
+  .object({ signed_job: SignedJobSchema, run_id: z.string().uuid(), lease_generation: safeInt.min(1), wake, merge_order: mergeOrder, deploy_order: deployOrder, machine_job: machineJob, sandbox_commands: sandboxCommands, machine_commands: machineCommands, engine_lease: engineLease })
   .strict()
   .refine((reply) => reply.signed_job.job.run_id === reply.run_id, { message: "run_id must be the signed job's run" });
 export type ClaimedReply = z.infer<typeof ClaimedReply>;
@@ -104,7 +114,9 @@ export const KVM_FACT_CAPABILITY = "kvm_fact" as const;
 export const PREFLIGHT_CAPABILITY = "preflight" as const;
 /** D#587 FU-179: this cloud takes `sandboxes` on a heartbeat. Said only to a runner that declared `heartbeat_inventory_v1` at protocol 21 or later. */
 export const HEARTBEAT_INVENTORY_CAPABILITY = "heartbeat_inventory" as const;
-export const HELLO_REPLY_CAPABILITIES = [WATCH_MODE_CAPABILITY, KVM_FACT_CAPABILITY, PREFLIGHT_CAPABILITY, HEARTBEAT_INVENTORY_CAPABILITY] as const;
+/** D#845 ON-13c3: this cloud keeps the engine session lease (migration 1092) and sends `engine_lease`. Said only to a runner that declared `engine_lease_v1` at protocol 22 or later. */
+export const ENGINE_LEASE_CAPABILITY = "engine_lease" as const;
+export const HELLO_REPLY_CAPABILITIES = [WATCH_MODE_CAPABILITY, KVM_FACT_CAPABILITY, PREFLIGHT_CAPABILITY, HEARTBEAT_INVENTORY_CAPABILITY, ENGINE_LEASE_CAPABILITY] as const;
 
 /** 200 from hello: the protocol version this cloud speaks, the wake grant for a runner that asked for one, and the capabilities of this cloud. */
 export const HelloReply = z.object({ protocol_version: safeInt.min(1), wake, capabilities: z.array(z.enum(HELLO_REPLY_CAPABILITIES)).max(HELLO_REPLY_CAPABILITIES.length).refine((list) => new Set(list).size === list.length, { message: "a capability appears once" }).optional() }).strict();
@@ -129,7 +141,7 @@ export type HandoffSignal = z.infer<typeof HandoffSignal>;
  * reply from a cloud older than D#599 parses unchanged. The schema stays strict, so a runner built before `handoff` existed refuses a
  * reply that carries it; the cloud therefore sends it only to a run whose runner can read it (D#599 HO-2a).
  */
-export const HeartbeatReply = z.object({ continue: z.literal(true), lease_expires_at: utcTimestamp, handoff: HandoffSignal.optional(), sandboxes_recorded: z.literal(true).optional() }).strict();
+export const HeartbeatReply = z.object({ continue: z.literal(true), lease_expires_at: utcTimestamp, handoff: HandoffSignal.optional(), sandboxes_recorded: z.literal(true).optional(), engine_lease: engineLease }).strict();
 export type HeartbeatReply = z.infer<typeof HeartbeatReply>;
 
 /** 200 from events: `accepted` rows were newly written, `duplicates` were dropped by the database guard. */

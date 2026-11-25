@@ -240,3 +240,136 @@ export function createEngineSessionHandlers(deps: EngineSessionDeps): { engine_s
 
   return { engine_session_start: start, engine_session_stop: stop, engine_session_delete: del };
 }
+
+/** How long past its `until` a lease may go unrenewed before the runner stops its own session, and how often the guard looks. */
+export const LEASE_GRACE_MS = 60_000;
+export const LEASE_CHECK_MS = 30_000;
+
+/** The id the runner's own stop carries: it names no job of the cloud's, and the stop reports to no one. */
+const SELF_STOP_JOB_ID = "00000000-0000-4000-8000-000000000000";
+
+/** The runner's own stop of a session: true when the stop job's steps all ended well (a session that was not up counts: nothing is left running). `still` is asked once the session's turn comes; false skips the stop (it counts as ended well). */
+export type SessionStopper = (repoGhId: number, still?: () => boolean) => Promise<boolean>;
+
+/** Runs the work of one session name after the work already queued for it: a stop and a start (or two stops) of the same `fx-engine-<gh>` never overlap, and two names never wait on each other. */
+export type SessionLock = <T>(repoGhId: number, work: () => Promise<T>) => Promise<T>;
+
+export function createSessionLock(): SessionLock {
+  const tails = new Map<number, Promise<unknown>>();
+  return (repoGhId, work) => {
+    const before = tails.get(repoGhId) ?? Promise.resolve();
+    const turn = before.then(work, work);
+    const tail = turn.then(() => undefined, () => undefined); // fx-swallow-ok: the tail only orders the next turn; the caller of this turn gets its real result or error through its own promise
+    tails.set(repoGhId, tail);
+    void tail.then(() => {
+      if (tails.get(repoGhId) === tail) tails.delete(repoGhId);
+    });
+    return turn;
+  };
+}
+
+type SessionHandlerSet = { engine_session_start: MachineJobHandler<"engine_session_start">; engine_session_stop: MachineJobHandler<"engine_session_stop">; engine_session_delete: MachineJobHandler<"engine_session_delete"> };
+
+/** The dispatcher's three handlers, each taking its session's turn on the shared lock (the same one the runner's own stop takes). */
+export function lockSessionHandlers(handlers: SessionHandlerSet, lock: SessionLock): SessionHandlerSet {
+  return {
+    engine_session_start: (context) => lock(context.job.repo_gh_id, () => handlers.engine_session_start(context)),
+    engine_session_stop: (context) => lock(context.job.repo_gh_id, () => handlers.engine_session_stop(context)),
+    engine_session_delete: (context) => lock(context.job.repo_gh_id, () => handlers.engine_session_delete(context)),
+  };
+}
+
+/**
+ * D#845 ON-13c3: the stop the runner issues to itself, through the very handler a signed stop job runs, so the stop, the snapshot and the token wipe are one path. The job is unsigned and local, and carries operate epoch 0: it can
+ * never raise the operate mark (a stop is never refused for staleness), and its reason is the closest closed word, `operate_off`; the runner's own reason, `lease_expired`, is the one it logs.
+ * With a `lock` it takes the session's turn, so it never overlaps a cloud stop, start or delete of the same session (the unlocked handler goes here, the locked ones to the dispatcher).
+ */
+export function sessionStopperOf(stop: MachineJobHandler<"engine_session_stop">, lock?: SessionLock): SessionStopper {
+  const once = async (repoGhId: number): Promise<boolean> => {
+    let ok = true;
+    const reporter: SessionReporter = {
+      closed: false,
+      report: async (step) => {
+        if (step.state === "failed") ok = false;
+        return "recorded";
+      },
+    };
+    const job = { v: 1, kind: "engine_session_stop", job_id: SELF_STOP_JOB_ID, repo_gh_id: repoGhId, args: { reason: "operate_off", operate_epoch: 0 } } as unknown as MachineJobOf<"engine_session_stop">;
+    await stop({ job, reporter, signal: new AbortController().signal });
+    return ok;
+  };
+  return (repoGhId, still) => {
+    const turn = async (): Promise<boolean> => (still !== undefined && !still() ? true : once(repoGhId));
+    return lock === undefined ? turn() : lock(repoGhId, turn);
+  };
+}
+
+export interface EngineLeaseGuard {
+  /** What the latest answered hello said: true when it echoed `engine_lease` (Ruling 15, the two-way handshake). Leases are taken and acted on only then; an answer without the echo clears every lease held. */
+  echoed(on: boolean): void;
+  /** True while a lease is held that has not been stopped for: the inventory then goes on every claim and heartbeat, so each one renews. */
+  holding(): boolean;
+  /** What a claim or heartbeat reply carried. Ignored unless the latest answered hello echoed, so a cloud that never does never stops a session here. */
+  receive(lease: { repo_gh_id: number; operate_epoch: number; until: string }): void;
+  /** Gives the guard the stop path; with none it stops nothing. */
+  bind(stop: SessionStopper | undefined): void;
+  /** Stops every session whose lease ended more than `LEASE_GRACE_MS` ago. A stop that did not end well is tried again on the next look. */
+  check(): Promise<void>;
+  /** Looks every `LEASE_CHECK_MS` until `signal` aborts. */
+  run(clock: { now(): Date; sleep(ms: number, signal: AbortSignal): Promise<void> }, signal: AbortSignal): Promise<void>;
+}
+
+export function createEngineLeaseGuard(deps: { now: () => Date; log: (line: string) => void }): EngineLeaseGuard {
+  const until = new Map<number, number>();
+  /** The `until` of a lease already stopped for: a later reply that still says it (the cloud answers a lease until its own clock ends it) is not waited for again. */
+  const stoppedFor = new Map<number, number>();
+  let stop: SessionStopper | undefined;
+  let busy = false;
+  let echo = false;
+  const guard: EngineLeaseGuard = {
+    echoed(on) {
+      echo = on;
+      if (!on) {
+        until.clear();
+        stoppedFor.clear();
+      }
+    },
+    holding: () => echo && until.size > 0,
+    receive(lease) {
+      if (!echo) return;
+      const end = Date.parse(lease.until);
+      if (!Number.isFinite(end) || end <= (stoppedFor.get(lease.repo_gh_id) ?? 0)) return;
+      until.set(lease.repo_gh_id, Math.max(until.get(lease.repo_gh_id) ?? 0, end));
+    },
+    bind(next) {
+      stop = next;
+    },
+    async check() {
+      if (busy || stop === undefined || !echo) return;
+      busy = true;
+      try {
+        for (const [repo, end] of [...until]) {
+          const due = (): boolean => echo && until.get(repo) === end && deps.now().getTime() > end + LEASE_GRACE_MS;
+          if (!due()) continue;
+          deps.log(`fx-runner: engine lease for repository ${repo} ended and was not renewed; stopping its session (lease_expired)`);
+          // `due` is asked again when the session's turn comes: a renewal, or a hello that withdrew the lease, that arrived while a cloud job held the session cancels the stop
+          if (await stop(repo, due).catch(() => false)) { // fx-swallow-ok: a stop that threw ended nothing, so the lease stays and the next look tries again
+            if (until.get(repo) === end) {
+              until.delete(repo);
+              stoppedFor.set(repo, end);
+            }
+          }
+        }
+      } finally {
+        busy = false;
+      }
+    },
+    async run(clock, signal) {
+      while (!signal.aborted) {
+        await clock.sleep(LEASE_CHECK_MS, signal);
+        if (!signal.aborted) await guard.check();
+      }
+    },
+  };
+  return guard;
+}

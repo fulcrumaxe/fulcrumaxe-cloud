@@ -7,7 +7,7 @@ import {
   CURRENT_PROTOCOL_VERSION, MACHINE_LOGIN_CAPABILITY, MACHINE_ONBOARDING_MIN_PROTOCOL, MachineLoginCode, MachineLoginReport, machineLoginCodePath, machineLoginReportPath, SANDBOX_COMMAND_CAPABILITY, SANDBOX_INVENTORY_MIN_PROTOCOL, VERIFY_SIGN_IN_MIN_PROTOCOL, type VerifySignInState,
   CLAIM_PATH, ClaimMessage, ClaimRateLimitedReply, type ConflictAttestation, HelloMessage, HelloReply, ClaimReply, WAKE_CAPABILITY, type WakeGrant, DoneMessage, DoneReply, DoneRetryReply, EventsMessage, EventsReply, HeartbeatMessage,
   GitTicketMessage, GitTicketReply, GIT_TICKET_PATH, HeartbeatReply, SeqNotIncreasingReply, StopReply,
-  CONFLICT_FACTS_CAPABILITY, DISCOVERY_ANALYST_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, SURVEY_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, HEARTBEAT_INVENTORY_HELLO_CAPABILITY, WATCH_MODE_HELLO_CAPABILITY, ORDERED_FACTS_CAPABILITY, OVERLAP_FACTS_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, MEMORY_PROPOSALS_PATH, MemoryProposalsMessage, MemoryProposalsReply, MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, PLANE_MERGE_CLAIM_PATH, PLANE_MERGE_REPORT_PATH, PLANE_MERGE_VERIFY_PATH, PlaneMergeClaimMessage, PlaneMergeClaimReply, PlaneMergeReportMessage, PlaneMergeReportReply, PlaneMergeRetryReply, PlaneMergeVerifyMessage, PlaneMergeVerifyReply,
+  CONFLICT_FACTS_CAPABILITY, DISCOVERY_ANALYST_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, SURVEY_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, HEARTBEAT_INVENTORY_HELLO_CAPABILITY, ENGINE_LEASE_HELLO_CAPABILITY, ENGINE_LEASE_CAPABILITY, type EngineLease, WATCH_MODE_HELLO_CAPABILITY, ORDERED_FACTS_CAPABILITY, OVERLAP_FACTS_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, MEMORY_PROPOSALS_PATH, MemoryProposalsMessage, MemoryProposalsReply, MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, PLANE_MERGE_CLAIM_PATH, PLANE_MERGE_REPORT_PATH, PLANE_MERGE_VERIFY_PATH, PlaneMergeClaimMessage, PlaneMergeClaimReply, PlaneMergeReportMessage, PlaneMergeReportReply, PlaneMergeRetryReply, PlaneMergeVerifyMessage, PlaneMergeVerifyReply,
   BROWSER_CHROME_CAPABILITY, BROWSER_PLAYWRIGHT_CAPABILITY, DEPLOY_ORDER_CAPABILITY, DEPLOY_ORDER_CLAIM_PATH, DEPLOY_ORDER_REPORT_PATH, DeployOrderClaimMessage, DeployOrderClaimReply, DeployOrderReportMessage, DeployOrderReportReply,
   PLANE_PUSH_PAIRING_PATH, PLANE_PUSH_REPORT_PATH, PLANE_PUSH_TOKEN_PATH, PlanePushPairingMessage, PlanePushPairingReply, PlanePushReportMessage, PlanePushReportReply, PlanePushTokenMessage, PlanePushTokenReply, type ClaimCapacity, type ContextLedgerWire, type DoneCheck, type LocalOnlyEvent, type SandboxUnavailableReason, type SignedJob, type StopReason,
   MACHINE_JOB_CLAIM_PATH, MachineJobClaimMessage, MachineJobClaimReply, MAX_PLAN_BYTES, SessionJobProgressBody, SetupProgressBody, SetupProgressReply, SetupPushTokenMessage, SetupPushTokenReply, machineJobProgressPath, setupPlanPath, setupProgressPath, setupPushTokenPath, type SignedMachineJob,
@@ -125,7 +125,7 @@ export interface DoneInput {
 
 export interface RunnerClient {
   /** D#605 FL-2: says what this build and machine are. Best effort: the caller keeps going on any answer, and a cloud that predates `facts` answers 400. */
-  hello(message: HelloMessage): Promise<{ kind: "ok"; wake?: WakeGrant; /** Capabilities an older cloud refused and the hello went again without; absent when none was dropped. */ dropped?: string[]; /** True when the cloud's hello reply lists the `watch_mode` capability (its ingest takes the slim status and the detail session); absent otherwise. Never a protocol number: clouds at 23 and 24 exist that cannot. */ watchMode?: true; /** True when the cloud's hello reply lists `kvm_fact`: this cloud stores `facts.kvm`, so the runner may send it on its next hello. */ kvmFact?: true; /** True when the cloud's hello reply lists `preflight` (D#845 ON-21b): this cloud stores `facts.preflight`, so the runner may send the codes on its next hello. */ preflight?: true; /** True when the cloud's hello reply lists `heartbeat_inventory`: this cloud takes `sandboxes` on a heartbeat. */ heartbeatInventory?: true } | CallError>;
+  hello(message: HelloMessage): Promise<{ kind: "ok"; wake?: WakeGrant; /** Capabilities an older cloud refused and the hello went again without; absent when none was dropped. */ dropped?: string[]; /** True when the cloud's hello reply lists the `watch_mode` capability (its ingest takes the slim status and the detail session); absent otherwise. Never a protocol number: clouds at 23 and 24 exist that cannot. */ watchMode?: true; /** True when the cloud's hello reply lists `kvm_fact`: this cloud stores `facts.kvm`, so the runner may send it on its next hello. */ kvmFact?: true; /** True when the cloud's hello reply lists `preflight` (D#845 ON-21b): this cloud stores `facts.preflight`, so the runner may send the codes on its next hello. */ preflight?: true; /** True when the cloud's hello reply lists `heartbeat_inventory`: this cloud takes `sandboxes` on a heartbeat. */ heartbeatInventory?: true; /** True when the cloud's hello reply lists `engine_lease` (D#845 ON-13c3): it echoes the runner's `engine_lease_v1`, so it sends leases on claim and heartbeat replies. */ engineLease?: true } | CallError>;
   /** D#6 RUNNER-WAKE: the no-database wake check, with the token of the grant held. Never a claim: it hands out nothing. */
   wake(token: string): Promise<WakeResult>;
   /**
@@ -199,6 +199,11 @@ export interface RunnerClientConfig {
    * "last sent" state). A runner holding a run sends no claim, so this is how a VM that exists while the job runs reaches the cloud. It counts as sent once the cloud answered `sandboxes_recorded`.
    */
   heartbeatInventory?: () => boolean;
+  /**
+   * D#845 ON-13c3: receives the `engine_lease` a claim or heartbeat reply carries. The cloud sends one only to a runner whose hello listed `engine_lease_v1` (a cloud that refused the capability is never heard from), so a
+   * reply without one changes nothing and a runner on such a cloud never waits for a lease.
+   */
+  engineLease?: { receive(lease: EngineLease): void };
   protocolVersion?: number;
 }
 
@@ -239,7 +244,8 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
       // D#842 EB-3c: `engine_bridge_v1` was the newest build capability, so it goes first after those three (which are only advertised while their settings and probe pass): a cloud without it keeps every other capability and the bridge stays off.
       // D#483 S5-j2e-RUNNER: `overlap_facts_v1` is the newest build capability, so it goes first after the three browser/deploy ones: a cloud without it keeps every other capability.
       // D#845 MC-8b: `machine_login_v1` is the newest build capability of all, so it goes first after the three browser and deploy ones (which are only advertised while their settings and probe pass): a cloud without it keeps every other capability, and the runner then answers every sign-in command as unsupported.
-      for (const drop of [HEARTBEAT_INVENTORY_HELLO_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, SANDBOX_COMMAND_CAPABILITY, BROWSER_PLAYWRIGHT_CAPABILITY, BROWSER_CHROME_CAPABILITY, DEPLOY_ORDER_CAPABILITY, SURVEY_CAPABILITY, MACHINE_LOGIN_CAPABILITY, WATCH_MODE_HELLO_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, OVERLAP_FACTS_CAPABILITY, MEM_PROPOSAL_CAPABILITY, TIP_PUBLISH_CAPABILITY, ORDERED_FACTS_CAPABILITY, CONFLICT_FACTS_CAPABILITY, DISCOVERY_ANALYST_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, WAKE_CAPABILITY] as const) {
+      // D#845 ON-13c3: `engine_lease_v1` is the newest of all, so it goes first: an old cloud refuses the hello only because of it, the one retry costs that capability alone, and the runner never waits for a lease.
+      for (const drop of [ENGINE_LEASE_HELLO_CAPABILITY, HEARTBEAT_INVENTORY_HELLO_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, SANDBOX_COMMAND_CAPABILITY, BROWSER_PLAYWRIGHT_CAPABILITY, BROWSER_CHROME_CAPABILITY, DEPLOY_ORDER_CAPABILITY, SURVEY_CAPABILITY, MACHINE_LOGIN_CAPABILITY, WATCH_MODE_HELLO_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, OVERLAP_FACTS_CAPABILITY, MEM_PROPOSAL_CAPABILITY, TIP_PUBLISH_CAPABILITY, ORDERED_FACTS_CAPABILITY, CONFLICT_FACTS_CAPABILITY, DISCOVERY_ANALYST_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, WAKE_CAPABILITY] as const) {
         if (!refused(reply) || !(parsed.capabilities ?? []).includes(drop)) continue;
         dropped = [...dropped, drop];
         reply = await send(HELLO_PATH, { ...parsed, capabilities: (parsed.capabilities ?? []).filter((c) => !dropped.includes(c)) });
@@ -254,7 +260,8 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
       const kvm = body.success && Array.isArray(capabilities) && capabilities.includes("kvm_fact") && !dropped.includes(KVM_FACT_HELLO_CAPABILITY) ? { kvmFact: true as const } : {};
       const preflight = body.success && Array.isArray(capabilities) && capabilities.includes("preflight") && !dropped.includes(PREFLIGHT_HELLO_CAPABILITY) ? { preflight: true as const } : {};
       const beat = body.success && Array.isArray(capabilities) && capabilities.includes("heartbeat_inventory") && !dropped.includes(HEARTBEAT_INVENTORY_HELLO_CAPABILITY) ? { heartbeatInventory: true as const } : {};
-      return body.success && body.data.wake !== undefined ? { kind: "ok", wake: body.data.wake, ...watch, ...kvm, ...preflight, ...beat, ...left } : { kind: "ok", ...watch, ...kvm, ...preflight, ...beat, ...left };
+      const lease = body.success && Array.isArray(capabilities) && capabilities.includes(ENGINE_LEASE_CAPABILITY) && !dropped.includes(ENGINE_LEASE_HELLO_CAPABILITY) ? { engineLease: true as const } : {};
+      return body.success && body.data.wake !== undefined ? { kind: "ok", wake: body.data.wake, ...watch, ...kvm, ...preflight, ...beat, ...lease, ...left } : { kind: "ok", ...watch, ...kvm, ...preflight, ...beat, ...lease, ...left };
     },
 
     async wake(token) {
@@ -291,6 +298,7 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
         if (!parsed.success) return fail(reply, "invalid_reply");
         if (commands !== undefined && parsed.data.sandbox_commands !== undefined) commands.receive(parsed.data.sandbox_commands);
         if (machine !== undefined && parsed.data.machine_commands !== undefined) machine.receive(parsed.data.machine_commands);
+        if (parsed.data.engine_lease !== undefined) config.engineLease?.receive(parsed.data.engine_lease);
         // A status poll takes no job: a reply with one is refused here, so no code path past this point can run it.
         if (sandboxUnavailable !== undefined && "signed_job" in parsed.data) return fail(reply, "invalid_reply");
         // The reply schema also refuses a claim whose `run_id` differs from the signed job's own.
@@ -312,6 +320,7 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
       if (reply?.status === 200) {
         const parsed = HeartbeatReply.safeParse(reply.body);
         if (parsed.success && parsed.data.sandboxes_recorded === true) inventory?.commit();
+        if (parsed.success && parsed.data.engine_lease !== undefined) config.engineLease?.receive(parsed.data.engine_lease);
         return parsed.success ? { kind: "ok", leaseExpiresAt: parsed.data.lease_expires_at, ...(parsed.data.handoff === undefined ? {} : { handoff: { deadline: parsed.data.handoff.deadline } }) } : fail(reply, "invalid_reply");
       }
       if (reply?.status === 409) {

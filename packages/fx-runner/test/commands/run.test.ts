@@ -1864,6 +1864,10 @@ describe("D#587 B-5b-3a: the microVM engine in the composed daemon", () => {
     expect(sentHello().facts).toMatchObject({ sandbox_engine: "os_sandbox" });
     expect(Object.keys(claimBodies()[0]!)).toEqual(["capacity"]);
     expect(sentHello().capabilities ?? []).not.toContain("heartbeat_inventory_v1");
+    // D#845 ON-13c3: a machine that reports no sandbox inventory can never be renewed, so no hello it sends ever lists `engine_lease_v1` (and it is never self-stopped)
+    const hellos = cloud.seen.filter((s) => s.path === "/api/runner/hello").map((s) => HelloMessage.parse(s.body));
+    expect(hellos.length).toBeGreaterThan(0);
+    for (const hello of hellos) expect(hello.capabilities ?? []).not.toContain("engine_lease_v1");
     expect((await stop(run)).code).toBe(0);
   }, 60_000);
 
