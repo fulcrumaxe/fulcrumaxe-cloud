@@ -83,3 +83,10 @@
 .runners-steps { margin: 4px 0 8px; padding-left: 20px; }
 .runners-create .runners-fieldset { max-height: none; }
 .runners-create .runners-choice span { overflow-wrap: anywhere; }
+
+/* D#845 MC-10b2: a server card's sign-in panel, hosted projects and sheet fields. They wrap, so a phone shows one column. */
+.runners-signin { margin: 8px 0; padding: 8px; border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); }
+.runners-signin p { margin: 2px 0 6px; overflow-wrap: anywhere; }
+.runners-signin .runners-link { display: inline-block; min-height: 24px; margin-bottom: 6px; }
+.runners-row .runners-tokens { margin: 6px 0; }
+.runners-row .runners-tokens bdi { overflow-wrap: anywhere; }

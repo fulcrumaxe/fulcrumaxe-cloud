@@ -99,12 +99,16 @@ interface Hz {
   created: Array<{ body: { quoted?: { monthly_gross?: string } }; key: string | undefined }>;
   removes: number;
   quotes: string[];
+  /** D#845 MC-10b2: every server action, sign-in step and move the app sent; the refusals the next ones get (one each); what a runner's sign-in read answers. */
+  acts: Array<{ method: string; path: string; body: unknown }>;
+  actRefusals: Answer[];
+  login: Record<string, unknown>;
 }
 const json = (route: Route, status: number, body: unknown) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 
 const hzDefaults = (): Hz => ({
   credential: fx("getHetznerCredential", "200-none.json"), credentialFail: 0, servers: (fx("listHetznerServers", "200-list.json").servers as unknown[]).slice(1), serversFail: false, catalogFail: false, quoteFail: false, quoteDelay: 0, createDelay: 0, listReads: 0, quotePatch: {},
-  connect: null, creates: [], removeFail: 0, connects: [], created: [], removes: 0, quotes: [],
+  connect: null, creates: [], removeFail: 0, connects: [], created: [], removes: 0, quotes: [], acts: [], actRefusals: [], login: {},
 });
 const refusal = (route: Route, status: number, code: string, retryAfter?: number) =>
   route.fulfill({ status, contentType: "application/json", headers: retryAfter ? { "Retry-After": String(retryAfter) } : {}, body: JSON.stringify({ error: { code, message: SERVER_TEXT, request_id: "r" } }) });
@@ -168,6 +172,18 @@ async function setup(page: Page, tweak: Omit<Partial<Mock>, "hz"> & { hz?: Parti
       hz.quotes.push(`${q.get("server_type")} ${q.get("location")}`);
       if (hz.quoteDelay) await new Promise((r) => setTimeout(r, hz.quoteDelay));
       return hz.quoteFail ? refusal(route, 503, "price_unavailable") : json(route, 200, { ...fx("quoteHetznerServer", "200-cx32-fsn1.json"), server_type: q.get("server_type"), location: q.get("location"), ...hz.quotePatch });
+    }
+    // D#845 MC-10b2: the server actions, the Claude sign-in and move. Each is recorded; the next queued refusal answers it instead.
+    const sa = p.match(/^\/api\/v1\/machine-servers\/([^/]+)(?:\/(reboot|keep|delete-orphan))?$/);
+    const ra = p.match(/^\/api\/runners\/([^/]+)\/(claude-login|claude-login\/code|claude-logout)$/);
+    if (ra && req.method() === "GET") return json(route, 200, hz.login[ra[1]!] ?? { request: null });
+    if ((sa && req.method() !== "GET") || ra || /^\/api\/runners\/repos\/[^/]+\/move$/.test(p)) {
+      hz.acts.push({ method: req.method(), path: p + new URL(req.url()).search, body: req.postData() ? JSON.parse(req.postData()!) : undefined });
+      const no = hz.actRefusals.shift();
+      if (no) return refusal(route, no.status, no.code, no.retryAfter);
+      if (sa) hz.servers = hz.servers.map((s) => ((s as { id: string }).id !== sa[1] ? s : sa[2] === "keep" ? { ...(s as object), kept: true } : sa[2] === "reboot" ? s : { ...(s as object), status: "deleting" }));
+      if (ra && ra[2] !== "claude-logout") hz.login[ra[1]!] = { request: { request_id: "66666666-6666-4666-8666-666666666666", status: ra[2] === "claude-login" ? "pending" : "code_ready", expires_at: "2099-01-01T00:00:00.000Z", auth_url: null, failure_code: null } };
+      return json(route, 200, {});
     }
     if (p === "/api/runners") {
       mock.gets++;
@@ -1290,6 +1306,369 @@ test.describe("D#845 MC-10b1: a member on the Servers tab", () => {
     await press(t(page, "runners-servers-fleet-retry"));
     await expect(t(page, "runners-servers-empty")).toBeVisible();
     expect(asked.length).toBeGreaterThan(0);
+    await clean(page, errors);
+  });
+});
+
+// ── D#845 MC-10b2: Servers part 2, the elapsed-time states, the server actions, the Claude sign-in and move ──
+const BASE_SERVERS = fx("listHetznerServers", "200-list.json").servers as Record<string, unknown>[];
+const RUN = "3c9a1f52-6d84-4e07-b2a1-8f5d0c7e9a13"; // the runner of the fixture's ready server
+const RUN2 = "55555555-aaaa-4aaa-8aaa-555555555552";
+const RUN3 = "55555555-aaaa-4aaa-8aaa-555555555553";
+const RUN4 = "55555555-aaaa-4aaa-8aaa-555555555554";
+const LINK = "https://claude.com/cai/oauth/authorize?code=true&client_id=abc&scope=user%3Ainference";
+const farFuture = "2099-01-01T00:00:00.000Z";
+const ago = (n: number) => new Date(Date.now() - n * 60000).toISOString();
+const sv = (n: number, over: Record<string, unknown> = {}) => ({ ...BASE_SERVERS[1], id: `aaaaaaaa-0000-4000-8000-00000000000${n}`, name: `fx-s${n}`, runner_id: null, claude_signed_in: null, last_seen_at: null, placed_projects: [], price: BASE_SERVERS[0]!.price, ...over });
+const mach = (id: string, name: string, over: Record<string, unknown> = {}) => ({ id, name, tier: "microvm", kvm: "present", live: true, claude: true, running: null, ...over });
+const request = (status: string, over: Record<string, unknown> = {}) => ({ request: { request_id: "66666666-6666-4666-8666-666666666666", status, expires_at: farFuture, auth_url: null, failure_code: null, ...over } });
+const row = (page: Page, i: number) => t(page, "runners-server").nth(i);
+const refresh = (page: Page) => press(t(page, "runners-servers-refresh"));
+const yes = (page: Page) => dlgOf(page).locator('[data-testid="runners-confirm-yes"]');
+const DELETE_DISK = "This deletes the server and its firewall at Hetzner, and everything on its disk. It can't be undone.";
+
+test.describe("D#845 MC-10b2: the elapsed-time states", () => {
+  test("a step past 5, 10, 25 and 35 minutes (creating, booting, installing, registering) says 'Taking longer than usual' and offers Delete and retry; one just under does not", async ({ page }) => {
+    const states: Array<[string, number, boolean]> = [["creating", 3, false], ["creating", 6, true], ["booting", 9, false], ["booting", 11, true], ["installing", 24, false], ["installing", 26, true], ["registering", 34, false], ["registering", 36, true]];
+    const { mock, errors } = await setup(page, { hz: { credential: CONNECTED, servers: states.map(([status, m], i) => sv(i + 1, { status, status_at: ago(m) })) } });
+    await openServers(page);
+    for (const [i, [status, m, slow]] of states.entries()) {
+      const r = row(page, i);
+      await expect(r.locator('[data-testid="runners-server-status"]')).toHaveText({ creating: "Creating", booting: "Starting up", installing: "Installing", registering: "Registering" }[status]!);
+      await expect(r.locator('[data-testid="runners-server-line"]').first()).toHaveText(m === 3 ? /^This step started [23] min ago$/ : new RegExp(`^This step started ${m} min ago$`));
+      await expect(r.locator('[data-testid="runners-server-line"]')).toHaveCount(slow ? 2 : 1);
+      if (slow) await expect(r.locator('[data-testid="runners-server-line"]').nth(1)).toHaveText("Taking longer than usual");
+      await expect(r.locator('[data-testid="runners-srv-retry"]')).toHaveCount(slow ? 1 : 0);
+      await expect(r.locator('[data-testid="runners-srv-reboot"]')).toHaveCount(0); // a server still being made is not rebooted
+    }
+    // Delete and retry: the name is typed first, nothing is sent until it matches, and the list then says how to try again.
+    await press(row(page, 1).locator('[data-testid="runners-srv-retry"]'));
+    const dlg = dlgOf(page);
+    await expect(dlg.locator("h2")).toHaveText("Delete and retry fx-s2?");
+    await expect(dlg).toContainText(DELETE_DISK + " It stops costing €5.1051 a month.");
+    await expect(yes(page)).toHaveText("Delete and retry");
+    await expect(yes(page)).toHaveAttribute("aria-disabled", "true");
+    await expect(dlg.locator('[data-testid="runners-del-why"]')).toHaveText("Type the server's name to confirm.");
+    await yes(page).dispatchEvent("click"); // a disabled button sends nothing
+    expect(mock.hz.acts).toEqual([]);
+    const typed = dlg.locator('[data-testid="runners-del-name"]');
+    await expect(typed).toHaveAttribute("autocomplete", "off");
+    await typed.fill("fx-s");
+    await expect(yes(page)).toHaveAttribute("aria-disabled", "true");
+    await typed.fill("fx-s2");
+    await expect(yes(page)).toHaveAttribute("aria-disabled", "false");
+    await press(yes(page));
+    await expect(dlg).toHaveCount(0);
+    expect(mock.hz.acts).toEqual([{ method: "DELETE", path: "/api/v1/machine-servers/aaaaaaaa-0000-4000-8000-000000000002", body: undefined }]);
+    await expect(row(page, 1).locator('[data-testid="runners-server-note"]')).toHaveText("Deleted. Press Create server to try again.");
+    await expect(row(page, 1).locator('[data-testid="runners-server-status"]')).toHaveText("Deleting…");
+    await expect(t(page, "runners-srv-create")).toBeFocused();
+    await clean(page, errors);
+  });
+
+  test("a ready server whose machine is offline says Offline and when it was last seen, and offers Reboot; a live one says neither", async ({ page }) => {
+    const { errors } = await setup(page, {
+      machines: [mach(RUN, "fx-s1", { live: false }), mach(RUN2, "fx-s2")],
+      hz: { credential: CONNECTED, servers: [sv(1, { runner_id: RUN, last_seen_at: ago(9) }), sv(2, { runner_id: RUN2, last_seen_at: ago(0) }), sv(3, { runner_id: null, status: "ready" })] },
+    });
+    await openServers(page);
+    await expect(row(page, 0).locator('[data-testid="runners-server-status"]')).toHaveText("Offline");
+    await expect(row(page, 0).locator('[data-testid="runners-server-line"]')).toHaveText("Last seen 9 min ago");
+    await expect(row(page, 0).locator('[data-testid="runners-srv-reboot"]')).toBeVisible();
+    await expect(row(page, 1).locator('[data-testid="runners-server-status"]')).toHaveText("Ready");
+    await expect(row(page, 1).locator('[data-testid="runners-server-line"]')).toHaveCount(0);
+    await expect(row(page, 1).locator('[data-testid="runners-srv-reboot"]')).toBeVisible();
+    await expect(row(page, 2).locator('[data-testid="runners-server-line"]')).toHaveCount(0); // no runner is linked, so liveness is not known and nothing is claimed
+    await clean(page, errors);
+  });
+});
+
+test.describe("D#845 MC-10b2: reboot, delete, keep and delete-orphan", () => {
+  test("Reboot says what it does, a refusal is a sentence and keeps the sheet, Cancel sends nothing, and focus returns", async ({ page }) => {
+    const { mock, errors } = await setup(page, { machines: [mach(RUN, "fx-s1")], hz: { credential: CONNECTED, servers: [sv(1, { runner_id: RUN, last_seen_at: ago(0) })] } });
+    await openServers(page);
+    const reboot = row(page, 0).locator('[data-testid="runners-srv-reboot"]');
+    await press(reboot);
+    const dlg = dlgOf(page);
+    await expect(dlg.locator("h2")).toHaveText("Reboot fx-s1?");
+    await expect(dlg).toContainText("Hetzner restarts this server now. Work running on it stops and starts again when it is back, usually within a few minutes. Nothing is deleted and the price doesn't change.");
+    await press(dlg.locator('[data-testid="runners-confirm-cancel"]'));
+    await expect(dlg).toHaveCount(0);
+    await expect(reboot).toBeFocused();
+    expect(mock.hz.acts).toEqual([]);
+    await press(reboot);
+    mock.hz.actRefusals = [{ status: 409, code: "server_not_rebootable" }, { status: 409, code: "hetzner_locked" }];
+    await press(yes(page));
+    await expect(dlg.locator('[data-testid="runners-confirm-error"]')).toHaveText("This server can't be restarted in its current state");
+    await press(yes(page));
+    await expect(dlg.locator('[data-testid="runners-confirm-error"]')).toHaveText("Hetzner reports the item is busy. Try again in a minute");
+    await press(yes(page));
+    await expect(dlg).toHaveCount(0);
+    expect(mock.hz.acts.map((a) => `${a.method} ${a.path}`)).toEqual(Array(3).fill("POST /api/v1/machine-servers/aaaaaaaa-0000-4000-8000-000000000001/reboot"));
+    await expect(row(page, 0).locator('[data-testid="runners-server-note"]')).toHaveText("Reboot sent to Hetzner.");
+    await expect(reboot).toBeFocused();
+    await clean(page, errors);
+  });
+
+  test("a server with projects lists them, needs the box ticked, and sends remove_projects; one with none says 'No projects' and its price", async ({ page }) => {
+    const placed = [{ repo_id: REPO_WEB, name: "acme/web" }, { repo_id: REPO_API, name: "acme/api" }];
+    const { mock, errors } = await setup(page, { machines: [mach(RUN, "fx-s1"), mach(RUN2, "fx-s2")], hz: { credential: CONNECTED, servers: [sv(1, { runner_id: RUN, last_seen_at: ago(0), placed_projects: placed }), sv(2, { runner_id: RUN2, last_seen_at: ago(0) })] } });
+    await openServers(page);
+    await expect(row(page, 0).locator('[data-testid="runners-srv-projects"] li bdi')).toHaveText(["acme/web", "acme/api"]);
+    await expect(row(page, 1).locator('[data-testid="runners-srv-noprojects"]')).toHaveText("No projects · €5.1051 a month");
+    await press(row(page, 0).locator('[data-testid="runners-srv-delete"]'));
+    const dlg = dlgOf(page);
+    await expect(dlg.locator("h2")).toHaveText("Delete fx-s1?");
+    await expect(dlg.locator('[data-testid="runners-del-projects-list"] li')).toHaveText(["acme/web", "acme/api"]);
+    await expect(dlg).toContainText("It stops costing €5.1051 a month.");
+    await dlg.locator('[data-testid="runners-del-name"]').fill("fx-s1");
+    await expect(yes(page)).toHaveAttribute("aria-disabled", "true"); // the name matches but its projects are neither moved nor ticked
+    await expect(dlg.locator('[data-testid="runners-del-why"]')).toHaveText("Tick the box to remove its projects with it, or move them to another machine first.");
+    await press(dlg.locator('[data-testid="runners-del-projects"]'));
+    await expect(yes(page)).toHaveAttribute("aria-disabled", "false");
+    mock.hz.actRefusals = [{ status: 409, code: "project_removal_unavailable" }];
+    await press(yes(page));
+    await expect(dlg.locator('[data-testid="runners-confirm-error"]')).toHaveText("Removing projects together with a server isn't available yet. Move them to another machine first");
+    await press(yes(page));
+    await expect(dlg).toHaveCount(0);
+    expect(mock.hz.acts.map((a) => `${a.method} ${a.path}`)).toEqual(Array(2).fill("DELETE /api/v1/machine-servers/aaaaaaaa-0000-4000-8000-000000000001?remove_projects=true"));
+    // The server with none: no list, no box, and the plain delete (no query).
+    await press(row(page, 1).locator('[data-testid="runners-srv-delete"]'));
+    await expect(dlg.locator('[data-testid="runners-del-projects"]')).toHaveCount(0);
+    await dlg.locator('[data-testid="runners-del-name"]').fill("fx-s2");
+    await press(yes(page));
+    await expect(dlg).toHaveCount(0);
+    expect(mock.hz.acts.at(-1)).toEqual({ method: "DELETE", path: "/api/v1/machine-servers/aaaaaaaa-0000-4000-8000-000000000002", body: undefined });
+    await clean(page, errors);
+  });
+
+  test("a failed server offers Delete; an orphan offers Keep it and Delete it in Hetzner, and Keep it is shown as done from `kept`", async ({ page }) => {
+    const { mock, errors } = await setup(page, { hz: { credential: CONNECTED, servers: [sv(1, { status: "failed", failure_code: "delete_failed" }), sv(2, { status: "orphaned", price: null, name: "fx-orphan" })] } });
+    await openServers(page);
+    await expect(row(page, 0).locator('[data-testid="runners-srv-delete"]')).toHaveText("Delete server");
+    await expect(row(page, 0).locator('[data-testid="runners-srv-reboot"]')).toHaveCount(0);
+    await expect(row(page, 1).locator('[data-testid="runners-server-status"]')).toHaveText("A server we created that isn't linked any more");
+    await expect(row(page, 1).locator("button")).toHaveText(["Keep it", "Delete it in Hetzner"]);
+    await press(row(page, 1).locator('[data-testid="runners-srv-keep"]'));
+    await expect(row(page, 1).locator('[data-testid="runners-server-line"]')).toHaveText("You chose to keep it. We leave it alone.");
+    await expect(row(page, 1).locator('[data-testid="runners-srv-keep"]')).toHaveCount(0);
+    await expect(row(page, 1).locator('[data-testid="runners-srv-delete-orphan"]')).toBeFocused();
+    expect(mock.hz.acts).toEqual([{ method: "POST", path: "/api/v1/machine-servers/aaaaaaaa-0000-4000-8000-000000000002/keep", body: undefined }]);
+    await page.reload(); // kept is read from the cloud, so it is still shown after a reload
+    await waitForDesktop(page);
+    await openServers(page);
+    await expect(row(page, 1).locator('[data-testid="runners-server-line"]')).toHaveText("You chose to keep it. We leave it alone.");
+    await press(row(page, 1).locator('[data-testid="runners-srv-delete-orphan"]'));
+    const dlg = dlgOf(page);
+    await expect(dlg).toContainText("This deletes the server and its firewall at Hetzner, and everything on its disk. It can't be undone.");
+    await expect(dlg).not.toContainText("stops costing"); // an orphan was never priced
+    await dlg.locator('[data-testid="runners-del-name"]').fill("fx-orphan");
+    mock.hz.actRefusals = [{ status: 409, code: "credential_changed" }];
+    await press(yes(page));
+    await expect(dlg.locator('[data-testid="runners-confirm-error"]')).toHaveText("The Hetzner token that made this server isn't the connected one. Connect that token, then try again");
+    await press(yes(page));
+    await expect(dlg).toHaveCount(0);
+    expect(mock.hz.acts.at(-1)).toEqual({ method: "POST", path: "/api/v1/machine-servers/aaaaaaaa-0000-4000-8000-000000000002/delete-orphan", body: undefined });
+    await clean(page, errors);
+  });
+
+  test("a failed keep says so in a sentence and leaves the card as it was", async ({ page }) => {
+    const { mock, errors } = await setup(page, { hz: { credential: CONNECTED, servers: [sv(1, { status: "orphaned", price: null })] } });
+    await openServers(page);
+    mock.hz.actRefusals = [{ status: 409, code: "not_an_orphan" }];
+    await press(row(page, 0).locator('[data-testid="runners-srv-keep"]'));
+    await expect(row(page, 0).locator('[data-testid="runners-server-note"]')).toHaveText("This server isn't an orphan any more. Refresh the list");
+    await expect(row(page, 0).locator('[data-testid="runners-srv-keep"]')).toBeVisible();
+    await clean(page, errors);
+  });
+});
+
+test.describe("D#845 MC-10b2: the Claude sign-in", () => {
+  test("a server with no runner yet says it has not connected; one with a runner signs in on that runner's id, step by step, and the code is cleared once sent", async ({ page }) => {
+    const { mock, errors } = await setup(page, { hz: { credential: CONNECTED, servers: [sv(1, { status: "needs_claude_login", name: "fx-s1" })] } });
+    await openServers(page);
+    await expect(t(page, "runners-signin-wait")).toHaveText("fx-s1 has not connected yet. Sign-in opens once it has.");
+    await expect(t(page, "runners-signin-start")).toHaveCount(0);
+    mock.hz.servers = [sv(1, { status: "needs_claude_login", runner_id: RUN, name: "A name that is not the runner's" })];
+    await refresh(page);
+    await expect(t(page, "runners-signin-start")).toHaveText("Sign in to Claude on A name that is not the runner's");
+    await press(t(page, "runners-signin-start"));
+    await expect(t(page, "runners-signin-status")).toHaveText("Starting the sign-in on A name that is not the runner's…");
+    expect(mock.hz.acts).toEqual([{ method: "POST", path: `/api/runners/${RUN}/claude-login`, body: undefined }]); // the runner's id, never a name
+    mock.hz.login[RUN] = request("awaiting_code", { auth_url: LINK });
+    await refresh(page);
+    const open = t(page, "runners-signin-open");
+    await expect(open).toHaveText("Open Claude sign-in");
+    await expect(open).toHaveAttribute("href", LINK);
+    await expect(open).toHaveAttribute("target", "_blank");
+    await expect(open).toHaveAttribute("rel", /noopener/);
+    const code = t(page, "runners-signin-code");
+    await expect(code).toHaveAttribute("autocomplete", "off");
+    await expect(code).not.toHaveAttribute("type", "password");
+    await code.fill("abc-123_XYZ");
+    await refresh(page); // a read in the middle of typing keeps what was typed
+    await expect(code).toHaveValue("abc-123_XYZ");
+    await press(t(page, "runners-signin-send"));
+    await expect(t(page, "runners-signin-status")).toHaveText("Code sent. Waiting for A name that is not the runner's…");
+    expect(mock.hz.acts.at(-1)).toEqual({ method: "POST", path: `/api/runners/${RUN}/claude-login/code`, body: { code: "abc-123_XYZ" } });
+    expect(await page.evaluate(() => document.body.innerText + [...document.querySelectorAll("input")].map((i) => i.value).join(" "))).not.toContain("abc-123_XYZ");
+    await clean(page, errors);
+  });
+
+  test("a refused code, an expired link and any other failure each say so in one sentence with Start again; a hostile link is never offered", async ({ page }) => {
+    const { mock, errors } = await setup(page, { hz: { credential: CONNECTED, servers: [sv(1, { status: "needs_claude_login", runner_id: RUN })] } });
+    await openServers(page);
+    for (const [reply, words] of [
+      [request("failed", { failure_code: "invalid_code" }), "Claude didn't accept that code. Start again"],
+      [request("expired"), "That sign-in link expired. Start again"],
+      [request("failed", { failure_code: "no_link" }), "The sign-in didn't finish. Start again"],
+    ] as const) {
+      mock.hz.login[RUN] = reply;
+      await refresh(page);
+      await expect(t(page, "runners-signin-words")).toHaveText(words);
+      await expect(t(page, "runners-signin-start")).toHaveText("Start again");
+    }
+    const before = mock.hz.acts.length;
+    await press(t(page, "runners-signin-start"));
+    await expect(t(page, "runners-signin-status")).toHaveText(/^Starting the sign-in on /);
+    expect(mock.hz.acts).toHaveLength(before + 1);
+    mock.hz.login[RUN] = request("awaiting_code", { auth_url: "javascript:alert(1)" });
+    await refresh(page);
+    await expect(t(page, "runners-signin-nolink")).toHaveText("Waiting for the link…");
+    await expect(page.locator(`${WIN} a[href^="javascript"]`)).toHaveCount(0);
+    mock.hz.actRefusals = [{ status: 409, code: "no_login_waiting" }];
+    await t(page, "runners-signin-code").fill("zzz");
+    await press(t(page, "runners-signin-send"));
+    await expect(t(page, "runners-signin-error")).toHaveText("No sign-in is waiting for a code. Start again");
+    mock.hz.login[RUN] = request("failed", { failure_code: "invalid_code", expires_at: "2000-01-01T00:00:00.000Z" }); // older than the server's state: history, not shown again
+    await refresh(page);
+    await expect(t(page, "runners-signin-words")).toHaveCount(0);
+    await expect(t(page, "runners-signin-start")).toHaveText(/^Sign in to Claude on /);
+    await clean(page, errors);
+  });
+
+  test("a signed-in server offers Sign out of Claude behind a sheet that says what follows, and sends it on the runner's id", async ({ page }) => {
+    const { mock, errors } = await setup(page, { machines: [mach(RUN, "fx-s1")], hz: { credential: CONNECTED, servers: [sv(1, { runner_id: RUN, claude_signed_in: true, last_seen_at: ago(0) })] } });
+    await openServers(page);
+    await expect(t(page, "runners-signin")).toHaveCount(0);
+    await press(t(page, "runners-srv-signout"));
+    const dlg = dlgOf(page);
+    await expect(dlg.locator("h2")).toHaveText("Sign fx-s1 out of Claude?");
+    await expect(dlg).toContainText("Claude is signed out on this server when it next checks in. Work that needs Claude waits until you sign in again.");
+    await press(yes(page));
+    await expect(dlg).toHaveCount(0);
+    expect(mock.hz.acts).toEqual([{ method: "POST", path: `/api/runners/${RUN}/claude-logout`, body: undefined }]);
+    await expect(t(page, "runners-server-note")).toHaveText("Sign-out sent. This updates when the server next reports.");
+    mock.hz.servers = [sv(1, { runner_id: RUN, claude_signed_in: false, last_seen_at: ago(0) })]; // the machine's next report: the panel is back
+    await refresh(page);
+    await expect(t(page, "runners-signin-start")).toHaveText("Sign in to Claude on fx-s1");
+    // The server's last sign-in request is still the newest one and finished as done: it is history, so Start is offered, in this session and after a reload.
+    mock.hz.login[RUN] = request("done");
+    await refresh(page);
+    await expect(t(page, "runners-signin-start")).toHaveText("Sign in to Claude on fx-s1");
+    await expect(t(page, "runners-signin-status")).toHaveCount(0);
+    await page.reload();
+    await waitForDesktop(page);
+    await openServers(page);
+    await expect(t(page, "runners-signin-start")).toHaveText("Sign in to Claude on fx-s1");
+    await expect(t(page, "runners-signin-status")).toHaveCount(0);
+    await press(t(page, "runners-signin-start")); // and signing in again works
+    await expect(t(page, "runners-signin-status")).toHaveText("Starting the sign-in on fx-s1…");
+    mock.hz.login[RUN] = request("done");
+    mock.hz.servers = [sv(1, { runner_id: RUN, claude_signed_in: true, last_seen_at: ago(0) })];
+    await refresh(page);
+    await expect(t(page, "runners-signin")).toHaveCount(0);
+    await expect(t(page, "runners-srv-signout")).toBeVisible();
+    await clean(page, errors);
+  });
+});
+
+test.describe("D#845 MC-10b2: move to another machine", () => {
+  const placed = [{ repo_id: REPO_WEB, name: "acme/web" }];
+  test("lists only online machines with room, says what happens, sends { to_runner_id }, and a refusal is a sentence", async ({ page }) => {
+    const { mock, errors } = await setup(page, {
+      machines: [mach(RUN, "fx-s1"), mach(RUN2, "Laptop"), mach(RUN3, "Old box", { live: false }), mach(RUN4, "Busy one", { tier: "standard", running: { repo_id: REPO_API, name: "acme/api" } })],
+      hz: { credential: CONNECTED, servers: [sv(1, { runner_id: RUN, last_seen_at: ago(0), placed_projects: placed })] },
+    });
+    await openServers(page);
+    const move = t(page, "runners-srv-move");
+    await expect(move).toHaveText("Move to another machine");
+    await press(move);
+    const dlg = dlgOf(page);
+    await expect(dlg.locator("h2")).toHaveText("Move acme/web to another machine?");
+    await expect(dlg).toContainText("acme/web stops running on fx-s1 and starts on the machine you choose. Its team memory is not carried along; it starts fresh there.");
+    await expect(dlg.locator('[data-testid="runners-move-to"] option')).toHaveText(["Laptop"]);
+    mock.hz.actRefusals = [{ status: 409, code: "machine_single_project" }];
+    await press(yes(page));
+    await expect(dlg.locator('[data-testid="runners-confirm-error"]')).toHaveText("That machine uses Standard isolation and already hosts a project");
+    await press(yes(page));
+    await expect(dlg).toHaveCount(0);
+    expect(mock.hz.acts.at(-1)).toEqual({ method: "POST", path: `/api/runners/repos/${REPO_WEB}/move`, body: { to_runner_id: RUN2 } });
+    await expect(t(page, "runners-server-note")).toHaveText("acme/web was moved.");
+    await clean(page, errors);
+  });
+
+  test("with no other machine to take it, the sheet says so and Move project is off", async ({ page }) => {
+    const { mock, errors } = await setup(page, { machines: [mach(RUN, "fx-s1")], hz: { credential: CONNECTED, servers: [sv(1, { runner_id: RUN, last_seen_at: ago(0), placed_projects: placed })] } });
+    await openServers(page);
+    await press(t(page, "runners-srv-move"));
+    await expect(dlgOf(page).locator('[data-testid="runners-move-none"]')).toHaveText("No other machine is online with room for it. Add a machine first.");
+    await expect(yes(page)).toHaveAttribute("aria-disabled", "true");
+    await yes(page).dispatchEvent("click");
+    expect(mock.hz.acts).toEqual([]);
+    await clean(page, errors);
+  });
+});
+
+test.describe("D#845 MC-10b2: text only, members, and the whole tab under axe", () => {
+  test("names and project names are rendered as text, never as markup", async ({ page }) => {
+    const { errors } = await setup(page, { machines: [mach(RUN, "x")], hz: { credential: CONNECTED, servers: [sv(1, { runner_id: RUN, name: "<img src=x onerror=alert(1)>", last_seen_at: ago(0), placed_projects: [{ repo_id: REPO_WEB, name: "<b>bold</b>" }] })] } });
+    await openServers(page);
+    await expect(page.locator(`${WIN} [data-testid="runners-server-name"] bdi`)).toHaveText("<img src=x onerror=alert(1)>");
+    await expect(page.locator(`${WIN} [data-testid="runners-srv-projects"] bdi`)).toHaveText("<b>bold</b>");
+    await expect(page.locator(`${WIN} .runners-row img, ${WIN} .runners-row b`)).toHaveCount(0);
+    await press(t(page, "runners-srv-move"));
+    await expect(dlgOf(page).locator("h2")).toHaveText("Move <b>bold</b> to another machine?");
+    await expect(dlgOf(page).locator("b, img")).toHaveCount(0);
+    await clean(page, errors);
+  });
+
+  test("a member sees no server action and sends no sign-in or move request", async ({ page }) => {
+    const asked: string[] = [];
+    page.on("request", (r) => /\/api\/runners\/[^/]+\/claude-|\/move$/.test(r.url()) && asked.push(r.url()));
+    const { errors } = await setup(page, { role: "member", isAdmin: false, hz: { credential: CONNECTED, servers: [sv(1, { status: "needs_claude_login", runner_id: RUN })] } });
+    await openServers(page);
+    await expect(t(page, "runners-servers-forbidden")).toHaveText("Only owners and admins can see servers.");
+    await expect(page.locator(`${WIN} [data-testid^="runners-srv-"][data-testid$="reboot"], ${WIN} [data-testid="runners-signin"]`)).toHaveCount(0);
+    expect(asked).toEqual([]);
+    await clean(page, errors);
+  });
+
+  test("every state at once passes axe under two themes, with the sheets open, fits the window, and shows no id or null", async ({ page }) => {
+    const { errors } = await setup(page, {
+      machines: [mach(RUN, "fx-s1", { live: false }), mach(RUN2, "Laptop")],
+      hz: {
+        credential: CONNECTED,
+        servers: [
+          sv(1, { runner_id: RUN, last_seen_at: ago(9), placed_projects: [{ repo_id: REPO_WEB, name: "acme/web" }] }), sv(2, { status: "needs_claude_login", runner_id: RUN3 }), sv(3, { status: "creating", status_at: ago(2) }), sv(4, { status: "booting", status_at: ago(12) }),
+          sv(5, { status: "failed", failure_code: "delete_failed" }), sv(6, { status: "orphaned", price: null }), sv(7, { status: "orphaned", price: null, kept: true }), sv(8, { status: "deleting" }), sv(9, { status: "needs_claude_login" }),
+        ],
+      },
+    });
+    await openServers(page);
+    for (const theme of ["classic-crt", "nord"]) {
+      await applyTheme(page, theme);
+      expect(await axeSeriousOrCritical(page, WIN), theme).toEqual([]);
+      for (const [from, sheetName] of [[row(page, 0).locator('[data-testid="runners-srv-delete"]'), "delete"], [row(page, 0).locator('[data-testid="runners-srv-move"]'), "move"], [row(page, 0).locator('[data-testid="runners-srv-reboot"]'), "reboot"]] as const) {
+        await press(from);
+        expect(await axeSeriousOrCritical(page, "dialog[open]"), `${sheetName} ${theme}`).toEqual([]);
+        expect(await dlgOf(page).evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+        await page.keyboard.press("Escape");
+        await expect(dlgOf(page)).toHaveCount(0);
+        await expect(from).toBeFocused();
+      }
+    }
+    expect(await page.locator(`${WIN} .runners-app`).evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
     await clean(page, errors);
   });
 });

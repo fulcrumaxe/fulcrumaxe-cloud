@@ -4,7 +4,7 @@
 // for each they are not), the account line, and the data "Register this machine again" starts from. The cloud decides all of it; this file
 // only words it. A refusal is shown as a sentence chosen by status and code here, never the server's message. Nothing here puts null or
 // undefined on a screen: every text function returns a string.
-import { api, createRetryGate, waitSeconds } from "../_lib/api.js";
+import { api, createRetryGate, retryWords, waitSeconds } from "../_lib/api.js";
 
 export const RUNNERS_URL = "/api/runners";
 export const TOKENS_URL = "/api/runners/provisioning-tokens";
@@ -681,7 +681,7 @@ export function readServer(s) {
   const str = (v) => (typeof v === "string" ? v : "");
   return { id: s.id, name: str(s.name).trim() || "Unnamed server", status: Object.hasOwn(SERVER_WORDS, s.status) ? SERVER_WORDS[s.status] : "Status not reported", size: str(s.server_type), location: str(s.location), created: str(s.created_at) };
 }
-export const readServers = (b) => (b && Array.isArray(b.servers) ? b.servers.map(readServer).filter(Boolean) : null);
+export const readServers = (b) => (b && Array.isArray(b.servers) ? b.servers.map((s) => { const r = readServer(s); return r && { ...r, ...readServerMore(s) }; }).filter(Boolean) : null); // readServerMore: D#845 MC-10b2, below
 
 /** The catalog: the locations, every type with where it is offered, and the cloud's own Small and Medium picks for the location asked for. */
 export function readCatalog(b) {
@@ -956,5 +956,178 @@ export function createCreator({ call = api, signal, onChange = () => {}, uuid = 
       const a = attempt;
       return { ...st, sending: !!(a && a.inflight), locked: a !== null, reused: !!(a && a.reused), error: a && (a.unknown || a.reused) ? a.note || UNKNOWN_OUTCOME : st.error };
     },
+  };
+}
+
+// ── D#845 MC-10b2: the server actions, the Claude sign-in panel, move, and the elapsed-time states ───────────────────────────────────────────────────────────────
+// Every sentence is chosen here by status and closed code; nothing the server wrote is shown. An id that is not a UUID is dropped, and every id in a path is encoded.
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** Minutes in one step after which it is "Taking longer than usual", counted from `status_at`: creating, booting, installing, registering. */
+export const STUCK_MINS = { creating: 5, booting: 10, installing: 25, registering: 35 };
+export const ONLY_ADMINS_ACT = "Only owners and admins can do this.";
+export const SLOW_WORDS = "Taking longer than usual";
+export const notConnectedYet = (name) => name + " has not connected yet. Sign-in opens once it has.";
+export const CODE_REFUSED = "Claude didn't accept that code. Start again";
+export const LINK_EXPIRED = "That sign-in link expired. Start again";
+export const SIGNIN_FAILED = "The sign-in didn't finish. Start again";
+export const REBOOT_SENTENCE = "Hetzner restarts this server now. Work running on it stops and starts again when it is back, usually within a few minutes. Nothing is deleted and the price doesn't change.";
+export const LOGOUT_SENTENCE = "Claude is signed out on this server when it next checks in. Work that needs Claude waits until you sign in again.";
+const COSTS = (cost) => (cost ? " It stops costing " + cost + "." : "");
+export const deleteSentence = (cost) => "This deletes the server and its firewall at Hetzner, and everything on its disk. It can't be undone." + COSTS(cost);
+export const orphanSentence = (cost) => "This deletes the server and its firewall at Hetzner, and everything on its disk. It can't be undone." + COSTS(cost);
+/** The monthly cost of a server (the server and its IPv4), or "" when the cloud has no price for it (an orphan was never priced). */
+const costOf = (p) => (p && typeof p === "object" && /^[A-Z]{3}$/.test(p.currency) && [p.monthly_gross, p.ipv4_monthly_gross].every((v) => typeof v === "string" && MONEY.test(v)) ? totalText(p) : "");
+/** What a server row adds to readServer: its closed state, its runner, its times, and (owners and admins only) the projects placed on it. `placed` is null when the cloud sent none. */
+export function readServerMore(s) {
+  const t = (v) => (typeof v === "string" ? v : "");
+  const known = Array.isArray(s.placed_projects);
+  const placed = known ? s.placed_projects.filter((p) => p && typeof p.repo_id === "string" && UUID.test(p.repo_id)).map((p) => ({ id: p.repo_id, name: t(p.name).trim() || "Unnamed project" })) : [];
+  return { state: Object.hasOwn(SERVER_WORDS, s.status) ? s.status : "", runnerId: typeof s.runner_id === "string" && UUID.test(s.runner_id) ? s.runner_id : "", statusAt: t(s.status_at), lastSeen: t(s.last_seen_at), kept: s.kept === true, claudeIn: s.claude_signed_in === true ? "yes" : s.claude_signed_in === false ? "no" : "", placed, placedKnown: known, cost: costOf(s.price) };
+}
+const minutesSince = (iso, nowMs) => {
+  const t = Date.parse(iso);
+  return Number.isFinite(t) ? Math.max(0, Math.floor((nowMs - t) / 60000)) : null;
+};
+export const isStuck = (s, nowMs) => Object.hasOwn(STUCK_MINS, s.state) && (minutesSince(s.statusAt, nowMs) ?? -1) >= STUCK_MINS[s.state];
+/** The lines under a server's name: where it is in its step, or when it was last heard from. `offline` is true only when the runner's own liveness (the machine list) says it is not live. */
+export function serverLines(s, offline, nowMs) {
+  const ago = (iso) => agoText(iso, nowMs);
+  if (Object.hasOwn(STUCK_MINS, s.state)) return [ago(s.statusAt) ? "This step started " + ago(s.statusAt) : "", isStuck(s, nowMs) ? SLOW_WORDS : ""].filter(Boolean);
+  if (s.state === "ready" && offline) return [ago(s.lastSeen) ? "Last seen " + ago(s.lastSeen) : "Not heard from yet"];
+  return s.state === "orphaned" && s.kept ? ["You chose to keep it. We leave it alone."] : [];
+}
+const ACTION_LABELS = { keep: "Keep it", "delete-orphan": "Delete it in Hetzner", retry: "Delete and retry", delete: "Delete server", reboot: "Reboot" };
+/** The buttons a server row offers, in order: [{ id, label, why }]. `why` is non-empty (and the button is disabled) for anyone but an owner or admin. */
+export function serverActions(s, { stuck, isAdmin }) {
+  const ids = s.state === "orphaned" ? [s.kept ? "" : "keep", "delete-orphan"] : stuck ? ["retry"] : s.state === "failed" ? ["delete"] : ["ready", "needs_claude_login"].includes(s.state) ? ["reboot", "delete"] : [];
+  return ids.filter(Boolean).map((id) => ({ id, label: ACTION_LABELS[id], why: isAdmin ? "" : ONLY_ADMINS_ACT }));
+}
+
+const ACTION_BY_CODE = {
+  server_not_rebootable: "This server can't be restarted in its current state",
+  server_gone: "Hetzner no longer has this server. Refresh the list",
+  not_an_orphan: "This server isn't an orphan any more. Refresh the list",
+  credential_invalid: HETZNER_REFUSED + ". Remove it and add a new one",
+  hetzner_unauthorized: HETZNER_REFUSED + ". Remove it and add a new one",
+  hetzner_forbidden: "The Hetzner token can't do that. It needs Read & Write access",
+  hetzner_locked: "Hetzner reports the item is busy. Try again in a minute",
+  credential_changed: "The Hetzner token that made this server isn't the connected one. Connect that token, then try again",
+  server_creating: "This server is still being created. Try again in a minute",
+  projects_placed: "Projects are placed on this server. Move them first, or tick the box to remove them with it",
+  project_removal_unavailable: "Removing projects together with a server isn't available yet. Move them to another machine first",
+  leases_not_failed: "Work on this server hasn't stopped yet. Try again in a minute",
+  not_connected: "Hetzner isn't connected. Connect it first",
+  not_configured: SERVERS_UNAVAILABLE,
+  machine_kek_unset: SERVERS_UNAVAILABLE,
+  not_managed_server: "We can only sign in to Claude for servers we made. Sign in in this machine's own terminal",
+  not_supported: "This server's runner can't sign in to Claude from here yet. Update it first",
+  runner_revoked: "This server's runner was removed",
+  no_login_waiting: "No sign-in is waiting for a code. Start again",
+  invalid_message: "That doesn't look like the code from the sign-in page. Check that you copied all of it",
+  project_not_placed: "That project isn't placed on a machine any more. Refresh the list",
+  machine_not_eligible: "That machine can't take this project right now",
+  machine_single_project: "That machine uses Standard isolation and already hosts a project",
+  placement_busy: "Another change to that machine is in progress. Try again in a moment",
+};
+/** The sentence for a refused server action, sign-in step or move: by closed code, then by status, never the server's words. */
+export function actionSentence(e) {
+  const status = statusOf(e);
+  if (status === 429) return SLOW_DOWN + " " + retryWords(waitSeconds(e));
+  if (e && Object.hasOwn(ACTION_BY_CODE, e.code)) return ACTION_BY_CODE[e.code];
+  return status === 403 ? ONLY_ADMINS_ACT : status === 404 ? "That isn't on your account any more. Refresh the list" : e && typeof e.code === "string" && e.code.startsWith("hetzner_") ? HETZNER_DOWN : "That didn't work. Try again.";
+}
+const serverUrl = (id, tail) => SERVERS_URL + "/" + enc(id) + (tail || "");
+const loginUrl = (runnerId, tail) => RUNNERS_URL + "/" + enc(runnerId) + "/claude-" + tail;
+/** One action on a server: "reboot", "keep", "delete-orphan" or "delete" (`removeProjects` goes with the last only). Resolves to "" when done, else the sentence to show. */
+export async function serverAct(kind, id, { call = api, signal, removeProjects = false } = {}) {
+  const [method, url] = kind === "delete" ? ["DELETE", serverUrl(id, removeProjects ? "?remove_projects=true" : "")] : ["POST", serverUrl(id, "/" + kind)];
+  try {
+    await call(method, url, undefined, signal);
+    return "";
+  } catch (e) {
+    return cancelled(e) ? "" : actionSentence(e);
+  }
+}
+/** Moves a project to another machine. Resolves to "" when done, else the sentence. (No state is carried along: that is a later row.) */
+export async function moveProject(repoId, toRunnerId, { call = api, signal } = {}) {
+  try {
+    await call("POST", RUNNERS_URL + "/repos/" + enc(repoId) + "/move", { to_runner_id: toRunnerId }, signal);
+    return "";
+  } catch (e) {
+    return cancelled(e) ? "" : actionSentence(e);
+  }
+}
+/** The machines a project may move to: online, not the one it is on, and not a Standard machine that already runs a project. */
+export const moveTargets = (machines, fromRunnerId) => machines.filter((m) => m.live && m.id !== fromRunnerId && !(m.tier === "standard" && m.running !== null));
+
+/** The sign-in link is shown only when it is the one kind of address the cloud itself accepts from a machine (a test pins this to the protocol's pattern). */
+export const CLAUDE_AUTH_URL = /^https:\/\/(claude\.com|claude\.ai|console\.anthropic\.com)\/cai\/oauth\/authorize\?[A-Za-z0-9/_\-.?=&%+]{1,2000}$/;
+const LIVE_LOGIN = ["pending", "awaiting_code", "code_ready"];
+const NO_LOGIN = { status: "idle", authUrl: "", words: "" };
+/**
+ * The newest sign-in request of a server's runner, as the panel shows it. A failure older than the server's current state is not shown again. A request that is `done` is shown only
+ * when this page `watched` it (it saw the request live, or already done): a first read that finds `done` is history, as after a sign-out, when the old request is still the newest.
+ */
+export function readLogin(b, statusAt, watched = false) {
+  const r = b && b.request;
+  if (!r || typeof r !== "object" || ![...LIVE_LOGIN, "done", "failed", "expired"].includes(r.status)) return NO_LOGIN;
+  if (r.status === "done" && !watched) return NO_LOGIN;
+  if (!LIVE_LOGIN.includes(r.status) && Date.parse(r.expires_at) <= Date.parse(statusAt)) return NO_LOGIN; // an outcome older than the server's current state is history
+  const words = r.status === "expired" || r.failure_code === "timeout" ? LINK_EXPIRED : r.failure_code === "invalid_code" ? CODE_REFUSED : r.status === "failed" ? SIGNIN_FAILED : "";
+  return { status: r.status, authUrl: r.status === "awaiting_code" && typeof r.auth_url === "string" && CLAUDE_AUTH_URL.test(r.auth_url) ? r.auth_url : "", words };
+}
+/**
+ * The Claude sign-in of each server, keyed by the server's own runner id and never by a name. While a request is live it is read again every few seconds. The code is sent once
+ * and not kept here. A refused step is a sentence in `error`; the panel starts again from its button.
+ */
+export function createSignIn({ call = api, signal, onChange = () => {}, every = 3000, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
+  const by = new Map();
+  const since = new Map(); // the server's state time each runner's request is read against
+  let timer = null;
+  const get = (id) => by.get(id) || { ...NO_LOGIN, error: "", busy: false };
+  const put = (id, patch) => {
+    const was = get(id);
+    const next = { ...was, ...patch };
+    by.set(id, next);
+    if (Object.keys(next).some((k) => next[k] !== was[k])) onChange(); // a read that finds nothing new repaints nothing, so a code being typed is never replaced
+  };
+  const arm = () => {
+    if (timer !== null || ![...by.values()].some((v) => LIVE_LOGIN.includes(v.status))) return;
+    timer = setTimer(async () => {
+      timer = null;
+      for (const [id, v] of [...by]) if (LIVE_LOGIN.includes(v.status)) await load(id);
+      arm();
+    }, every);
+  };
+  async function load(id, statusAt = since.get(id) || "") {
+    since.set(id, statusAt);
+    try {
+      const was = get(id).status;
+      put(id, { ...readLogin(await call("GET", loginUrl(id, "login"), undefined, signal), statusAt, LIVE_LOGIN.includes(was) || was === "done"), error: "" });
+    } catch (e) {
+      if (!cancelled(e)) put(id, { error: actionSentence(e) });
+    }
+    arm();
+  }
+  async function step(id, tail, body) {
+    if (get(id).busy) return false;
+    put(id, { busy: true, error: "" });
+    try {
+      await call("POST", loginUrl(id, tail), body, signal);
+    } catch (e) {
+      put(id, { busy: false, ...(cancelled(e) ? {} : { error: actionSentence(e) }) });
+      return false;
+    }
+    put(id, { busy: false });
+    return true;
+  }
+  return {
+    get, load,
+    /** The server list shows this runner signed in, so what this page saw of its request is spent: a later sign-out starts clean. Repaints nothing. */
+    forget(id) { by.delete(id); since.delete(id); },
+    async start(id) { if (await step(id, "login")) await load(id); },
+    async sendCode(id, code) { if (await step(id, "login/code", { code })) await load(id); },
+    logout: (id) => step(id, "logout"),
+    stop() { if (timer !== null) clearTimer(timer); timer = null; },
   };
 }
