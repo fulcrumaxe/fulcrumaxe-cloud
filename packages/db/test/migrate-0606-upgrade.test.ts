@@ -15,10 +15,11 @@ import { throwawayDbs, type ThrowawayDbs } from './helpers/throwaway-db.js';
  * database migrated at every file EXCEPT 0606, seeded with pre-0606 data,
  * then the real migrations directory picks up exactly 0606.
  */
+// 1077 (D#845 ON-13a5) grants column reads of the 0606 and 0660 markers (past_due_since, platform_hold_at, subscription_ended_at), so it runs after both.
 // 0660 replaces objects 0606 creates (compute_account_status and its trigger
 // function), so it cannot run before 0606: the "pre" database leaves it out
 // too, and the upgrade step applies 0606 and then 0660.
-const AFTER_0606 = ['0660_subscription_sync.sql', '0692_onboarding_progress_marks.sql', '0720_trigger_functions_not_owned_by_platform_ops.sql'];
+const AFTER_0606 = ['0660_subscription_sync.sql', '0692_onboarding_progress_marks.sql', '0720_trigger_functions_not_owned_by_platform_ops.sql', '1077_engine_system_stops.sql'];
 const UPGRADE_APPLIED = ['0606_derived_account_status.sql', ...AFTER_0606];
 
 describe('migrate: the 0606 upgrade path (D#69 fail-closed backfill)', () => {

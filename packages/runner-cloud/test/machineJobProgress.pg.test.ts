@@ -35,6 +35,10 @@ describe("session job progress route [pg]", () => {
       })),
     );
     expect(hello.status, JSON.stringify(hello.body)).toBe(200);
+    // A start is delivered only while the plan covers it and the repo is operated (migration 1077), so these accounts hold a plan and operate on.
+    await h.admin.query("UPDATE accounts SET engine_quantity = 1, stripe_subscription_status = 'active' WHERE id = $1", [who.accountId]);
+    await h.admin.query("INSERT INTO engine_bridge_settings (account_id, watch_enabled, operate_enabled) VALUES ($1, true, true) ON CONFLICT (account_id) DO NOTHING", [who.accountId]);
+    await h.admin.query("INSERT INTO engine_bridge_repos (account_id, repo_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", [who.accountId, who.repoId]);
     return { who, runnerId, key };
   }
   const issue = (r: Rig, kind: MachineJobKind, setupId: string | null = null) =>

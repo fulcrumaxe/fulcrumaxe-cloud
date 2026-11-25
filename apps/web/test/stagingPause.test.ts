@@ -5,6 +5,7 @@ import {
   PAUSED_BACKSTOP_MS,
   isStagingPaused,
   markWorkPending,
+  MARKER_HORIZON_MS,
   runGatedTick,
   setPendingHooks,
   type GatedOutcome,
@@ -197,12 +198,13 @@ describe("the reconcile cron keeps the 15-minute jobs on their cadence while the
   const SECRET = ["test", "cron", "secret", "y".repeat(32)].join("-");
   const NOW = 1_800_000_000_000 + 7 * MIN;
   /** A fake platform_ops pool over the two reads reconcileNextDueAt makes. */
-  function fakePool(opts: { creditsBroken: boolean; creditsAgeSeconds?: number; dueAt: Record<string, number> }) {
+  function fakePool(opts: { creditsBroken: boolean; creditsAgeSeconds?: number; dueAt: Record<string, number>; graceEndsAt?: number | null }) {
     const queries: string[] = [];
     return {
       queries,
       query: vi.fn(async (sql: string, params?: unknown[]) => {
         queries.push(sql);
+        if (sql.includes("engine_system_stop_next_due")) return { rows: [{ due: opts.graceEndsAt ?? null }] };
         if (sql.includes("FROM model_connections")) return { rows: [{ broken: opts.creditsBroken, age: opts.creditsBroken ? (opts.creditsAgeSeconds ?? 0) : null }] };
         const names = (params?.[0] ?? []) as string[];
         return { rows: names.map((n) => ({ name: n, due: opts.dueAt[n]! })) };
@@ -257,6 +259,23 @@ describe("the reconcile cron keeps the 15-minute jobs on their cadence while the
     expect(await reconcileNextDueAt(pool as never, summaryWith("disabled"), NOW)).toBeNull();
   });
 
+  it("D#845 ON-13a5: the earliest payment grace end of an account with a live engine is a due time of its own, never in the past, and the earlier of it and the 15-minute jobs' wins", async () => {
+    const idle = { creditsBroken: false, dueAt: {} };
+    expect(await reconcileNextDueAt(fakePool({ ...idle, graceEndsAt: NOW + 3 * HOUR }) as never, summaryWith("ok"), NOW)).toBe(NOW + 3 * HOUR);
+    expect(await reconcileNextDueAt(fakePool({ ...idle, graceEndsAt: NOW - 5 * MIN }) as never, summaryWith("ok"), NOW)).toBe(NOW);
+    expect(await reconcileNextDueAt(fakePool({ ...idle, graceEndsAt: null }) as never, summaryWith("ok"), NOW)).toBeNull();
+    const credits = { creditsBroken: true, dueAt: { model_credits_revalidate: NOW + 14 * MIN } };
+    expect(await reconcileNextDueAt(fakePool({ ...credits, graceEndsAt: NOW + 3 * HOUR }) as never, summaryWith("ok"), NOW)).toBe(NOW + 14 * MIN);
+    expect(await reconcileNextDueAt(fakePool({ ...credits, graceEndsAt: NOW + 5 * MIN }) as never, summaryWith("ok"), NOW)).toBe(NOW + 5 * MIN);
+  });
+
+  it("D#845 ON-13a5: a grace end further off than the marker horizon is clamped to it, so a later tick reads it again", async () => {
+    const far = NOW + 30 * 24 * HOUR;
+    const due = await reconcileNextDueAt(fakePool({ creditsBroken: false, dueAt: {}, graceEndsAt: far }) as never, summaryWith("ok"), NOW);
+    expect(due).toBe(NOW + MARKER_HORIZON_MS);
+    expect(due!).toBeLessThan(far);
+  });
+
   it("a failed next-due read fails toward the work: the gate looks again in 15 minutes, and the failure is reported", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(clock.value);
@@ -290,7 +309,7 @@ describe("the reconcile cron keeps the 15-minute jobs on their cadence while the
     try {
       let broken = true;
       const dueAt = () => clock.value + 14 * MIN; // the credits job was due 15 minutes (less its slack) after its last pass
-      const pool = { query: vi.fn(async (sql: string) => (sql.includes("FROM model_connections") ? { rows: [{ broken, age: broken ? 0 : null }] } : { rows: [{ name: "model_credits_revalidate", due: dueAt() }] })) };
+      const pool = { query: vi.fn(async (sql: string) => (sql.includes("engine_system_stop_next_due") ? { rows: [] } : sql.includes("FROM model_connections") ? { rows: [{ broken, age: broken ? 0 : null }] } : { rows: [{ name: "model_credits_revalidate", due: dueAt() }] })) };
       const runTickFn = vi.fn(async (): Promise<TickSummary> => ({ enabled: true, results: [{ job: "model_credits_revalidate", result: "ok" }] }));
       const call = () =>
         reconcileHandler(new NextRequest("https://example.test/api/cron/reconcile", { method: "GET", headers: { authorization: `Bearer ${SECRET}` } }), { cronSecret: SECRET, enabled: true, platformOpsPool: pool as never, reportError: () => undefined }, runTickFn);

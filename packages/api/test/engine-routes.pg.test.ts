@@ -17,8 +17,12 @@ import { engineRoutes as engineReadRoutes, engineSettingsDeps } from '../src/rou
 import { seedAccountWithMember, seedUser } from './helpers/seed.js';
 
 const woken: string[] = [];
+const marked: string[] = [];
 vi.mock('@fx/core/src/pendingWork.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@fx/core/src/pendingWork.js')>()),
+  markWorkPending: vi.fn(async (name: string) => {
+    marked.push(name);
+  }),
   markRunnerWork: vi.fn(async (accountId: string) => {
     woken.push(accountId);
   }),
@@ -540,6 +544,38 @@ describe('engine read routes and settings [pg]', () => {
     } finally {
       engineSettingsDeps.getVisibility = null;
     }
+  });
+
+  it('settings (D#845 ON-13a5): operate or watch going off, or a repo unticked, marks the reconcile tick and writes no job in the request; turning things on, ticking and a no-op do not mark it', async () => {
+    engineSettingsDeps.getVisibility = () => async () => 'private';
+    await q(`UPDATE engine_bridge_settings SET watch_enabled = true, operate_enabled = false WHERE account_id = $1`, [A.accountId]);
+    await q(`DELETE FROM engine_bridge_repos WHERE account_id = $1 AND repo_id <> $2`, [A.accountId, A.repoId]);
+    const second = randomUUID();
+    await q(`INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product, gh_owner, gh_name, execution_mode) SELECT $1, account_id, installation_id, 9202, 'team', 'acme', 'stop2', 'runner_local' FROM repos WHERE id = $2`, [second, A.repoId]);
+    const jobs = async () => Number((await q(`SELECT count(*) AS n FROM machine_jobs WHERE account_id = $1`, [A.accountId])).rows[0].n);
+    const put = async (body: unknown) => {
+      marked.length = 0;
+      const before = await jobs();
+      const res = await call(owner(), 'PUT', '/engine/settings', body);
+      expect(res.status).toBe(200);
+      expect(await jobs(), 'no stop is written inside the request').toBe(before);
+      return [...marked];
+    };
+    expect(await put({ operate_enabled: true })).toEqual([]);
+    expect(await put({ repo_ids: [A.repoId, second] })).toEqual([]);
+    expect(await put({ operate_enabled: true })).toEqual([]);
+    expect(await put({ repo_ids: [A.repoId] })).toEqual(['reconcile']);
+    expect(await put({ repo_ids: [A.repoId] })).toEqual([]);
+    expect(await put({ operate_enabled: false })).toEqual(['reconcile']);
+    expect(await put({ operate_enabled: false })).toEqual([]);
+    expect(await put({ watch_enabled: false })).toEqual(['reconcile']);
+    expect(await put({ watch_enabled: true })).toEqual([]);
+    // A refusal marks nothing.
+    marked.length = 0;
+    expect((await call(member, 'PUT', '/engine/settings', { watch_enabled: false })).status).toBe(403);
+    expect((await call(owner(), 'PUT', '/engine/settings', { repo_ids: [randomUUID()] })).status).toBe(404);
+    expect(marked).toEqual([]);
+    await q(`UPDATE engine_bridge_settings SET watch_enabled = false, operate_enabled = false WHERE account_id = $1`, [A.accountId]);
   });
 
   it('settings: a change to watch, operate or the ticked set wakes the account\'s runners once it has committed; a no-op, a refusal and a read do not', async () => {

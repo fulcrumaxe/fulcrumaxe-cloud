@@ -37,6 +37,7 @@ export { createErrorEventsPrune, errorEventsPrune, ERROR_EVENTS_RETENTION_DAYS }
 export { createEngineEventsPrune, engineEventsPrune, ENGINE_EVENTS_PRUNE_JOB } from './jobs/engineEventsPrune.js';
 export { createSetupInstallPrJob, SETUP_INSTALL_PR_JOB, type SetupInstallStep } from './jobs/setupInstallPr.js';
 export { createMachineServerSweep, MACHINE_SERVER_SWEEP_JOB, type MachineSweepStart } from './jobs/machineServerSweep.js';
+export { createEngineSessionStops, ENGINE_SESSION_STOPS_JOB, type EngineSessionStopsPass } from './jobs/engineSessionStops.js';
 export { createMachinePrune, machinePrune, MACHINE_PRUNE_JOB } from './jobs/machinePrune.js';
 export { createOnboardingPrune, onboardingPrune, ONBOARDING_PRUNE_JOB } from './jobs/onboardingPrune.js';
 export { createMemorySweep, memorySweep, MEMORY_SWEEP_JOB, MEMORY_SWEEPS, type MemorySweep } from './jobs/memorySweep.js';

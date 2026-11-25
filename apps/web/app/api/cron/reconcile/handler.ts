@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { isStagingPaused, runGatedTick } from "@fx/core/src/pendingWork";
+import { isStagingPaused, MARKER_HORIZON_MS, runGatedTick } from "@fx/core/src/pendingWork";
+import { issueSystemStops } from "@fx/runner-cloud";
 import { createPool } from "@fx/db/src/pool";
 import { queueActivationDiscovery } from "../../../../lib/discoveryWake";
 import { createErrorReporter, reportError } from "@fx/telemetry";
@@ -23,8 +24,10 @@ import {
   RECONCILE_ROUTE,
   runTick,
   sandboxInventoryJob,
+  createEngineSessionStops,
   createMachineServerSweep,
   createSetupInstallPrJob,
+  type EngineSessionStopsPass,
   type SetupInstallStep,
   setupInstallPending,
   type MachineSweepStart,
@@ -58,6 +61,23 @@ const FAST_JOB_RETRY_MS = 15 * 60_000;
  * The due time is the job's `next_due_at`, never earlier than now. Reads two small rows with the pool the tick already holds.
  */
 export async function reconcileNextDueAt(pool: Pick<TickDeps["pool"], "query">, summary: TickSummary, now: number = Date.now()): Promise<number | null> {
+  const fast = await fastJobsNextDueAt(pool, summary, now);
+  const grace = await engineGraceNextDueAt(pool, now);
+  return fast === null ? grace : grace === null ? fast : Math.min(fast, grace);
+}
+
+/**
+ * D#845 ON-13a5: the earliest end of a payment grace (7 days after `past_due_since`) of an account with a live engine, so the gate connects at that tick and the stop pass ends its sessions: coverage reads the clock, and
+ * nothing happens at the moment the grace runs out, so without this the sessions would stop only at the next backstop. Never earlier than now, and clamped to the marker horizon (a later tick reads it again when it is further off).
+ */
+async function engineGraceNextDueAt(pool: Pick<TickDeps["pool"], "query">, now: number): Promise<number | null> {
+  const { rows } = await pool.query<{ due?: number | null }>("SELECT (EXTRACT(EPOCH FROM engine_system_stop_next_due()) * 1000)::float8 AS due");
+  const due = rows[0]?.due;
+  if (typeof due !== "number" || !Number.isFinite(due)) return null;
+  return Math.min(Math.max(due, now), now + MARKER_HORIZON_MS);
+}
+
+async function fastJobsNextDueAt(pool: Pick<TickDeps["pool"], "query">, summary: TickSummary, now: number): Promise<number | null> {
   const pending: string[] = [];
   const terminal = summary.results.find((r) => r.job === TERMINAL_JOB)?.result;
   if (terminal === "budget" || terminal === "not_due") pending.push(TERMINAL_JOB);
@@ -107,6 +127,11 @@ export interface ReconcileHandlerDeps {
   startMachineSweep?: ((a: MachineSweepStart) => Promise<unknown>) | undefined;
   /** D#845 ON-8f2a: the GitHub port of the install pull request step, built when a setup is due. Absent: the app port. */
   setupInstallPort?: (() => SetupInstallPort) | undefined;
+  /**
+   * D#845 ON-13a5: one pass of the system stop issuer (a session whose operate switch is off, whose repo is unticked or whose engine plan ended). Absent (a test double): the job reports not_configured. defaultReconcileDeps
+   * supplies it over the platform_ops pool and the worker's job signer, which answers null while that key is not configured.
+   */
+  engineSystemStops?: ((scope: { msLeft: () => number }) => Promise<EngineSessionStopsPass>) | undefined;
   /** The raw FX_SANDBOX_REAP_MODE: unset is dry_run, off | dry_run | on are themselves, anything else is off (and reported). */
   sandboxReapMode?: string | undefined;
   /**
@@ -259,6 +284,8 @@ export function defaultReconcileDeps(): ReconcileHandlerDeps {
     reportError,
     sandboxReapMode: process.env.FX_SANDBOX_REAP_MODE,
     startMachineSweep,
+    engineSystemStops: (scope) =>
+      issueSystemStops({ pool: cachedPlatformOpsPool!, engineCommandSigner: async () => (await getWorker())?.engineCommandSigner ?? null, reportError }, scope),
     getWorker,
     readSandboxReapDbMode: () => readSandboxReapDbMode(cachedPlatformOpsPool!),
     capacityPass: async () => (await getWorker())?.capacityClaimPass(),
@@ -319,7 +346,7 @@ export async function reconcileHandler(
         stripeSubscriptions: stripeSubscriptionsJobFromEnv(deps.platformOpsPool, deps.reportError),
         modelKeyHealth: modelKeyHealthJobFromEnv(deps.platformOpsPool, deps.reportError),
         modelCreditsRevalidate: modelCreditsRevalidateJobFromEnv(deps.platformOpsPool, deps.reportError),
-        machine: [createMachineServerSweep(deps.startMachineSweep ?? null)],
+        machine: [createMachineServerSweep(deps.startMachineSweep ?? null), createEngineSessionStops(deps.engineSystemStops ?? null)],
         setupInstall: createSetupInstallPrJob(setupInstallStep(deps)),
         sandbox: [...sandboxReapJobs(worker, sandboxDeps), sandboxInventoryJob(worker, sandboxDeps)],
       }),

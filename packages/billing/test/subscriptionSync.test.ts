@@ -692,4 +692,54 @@ describe('D#69 B2 subscription sync (real Postgres, fake Stripe, no network)', (
       expect(reports.classes.map((c) => c.stage)).toContain('billing.on_activated');
     });
   });
+
+  describe('D#845 ON-13a5: the engine coverage hook', () => {
+    const seen = (): { calls: string[]; d: StripeWebhookDeps } => {
+      const calls: string[] = [];
+      return { calls, d: { ...deps, onEngineCoverageChanged: async (accountId) => void calls.push(accountId) } };
+    };
+
+    it('a subscription that ended calls the hook once, after the commit, with the account; a replay calls it no second time', async () => {
+      const a = await seed();
+      const { calls, d } = seen();
+      fetches(a, { status: 'active' });
+      await deliver(subEvent('updated', a), d);
+      expect(calls).toEqual([]);
+      fetches(a, { status: 'canceled' });
+      const ended = subEvent('deleted', a);
+      expect((await deliver(ended, d)).body).toMatchObject({ handled: true });
+      expect(calls).toEqual([a.accountId]);
+      expect((await row(a.accountId)).subscription_ended_at).not.toBeNull();
+      expect((await deliver(ended, d)).body).toMatchObject({ handled: true, deduped: true });
+      expect(calls).toHaveLength(1);
+    });
+
+    it('a status that does not pay (paused, incomplete, unpaid) calls it; active, trialing and a past due one (the grace) do not', async () => {
+      for (const [status, expected] of [['paused', 1], ['incomplete', 1], ['unpaid', 1], ['active', 0], ['trialing', 0], ['past_due', 0]] as const) {
+        const a = await seed();
+        const { calls, d } = seen();
+        fetches(a, { status });
+        await deliver(subEvent('updated', a), d);
+        expect(calls.length, status).toBe(expected);
+      }
+    });
+
+    it('a refusal (an unknown customer) and a stale fetch call nothing', async () => {
+      const { calls, d } = seen();
+      const ghost = { accountId: randomUUID(), cus: 'cus_nobody', sub: 'sub_nobody' } as Acct;
+      fetches(ghost, { status: 'canceled' });
+      expect((await deliver(subEvent('deleted', ghost), d)).body).toMatchObject({ handled: false });
+      expect(calls).toEqual([]);
+    });
+
+    it('a hook that throws does not fail the webhook, the event stays recorded, and the failure is reported', async () => {
+      const a = await seed();
+      fetches(a, { status: 'canceled' });
+      const reports = captureReports();
+      const res = await deliver(subEvent('deleted', a), { ...deps, onEngineCoverageChanged: async () => { throw new Error('marker store down'); } });
+      expect(res).toMatchObject({ status: 200, body: { handled: true } });
+      expect(await ledger(a.accountId)).toBe(1);
+      expect(reports.classes.map((c) => c.stage)).toContain('billing.on_engine_coverage_changed');
+    });
+  });
 });
