@@ -47,12 +47,13 @@ describe("startSurvey [pg]", () => {
     ends: EndInput[];
     deps: (over?: Partial<RunnerCloudDeps>) => RunnerCloudDeps;
   }
-  async function rig(o: { credential?: "subscription" | "api_key"; registrant?: "o1" | "o2"; engine?: "os_sandbox" | "microvm" | null; place?: boolean; phase?: string; answer?: StartAnswer; visibility?: "private" | "public" | "unknown"; github?: RunPullRequestPort | null; port?: boolean; prior?: boolean; deadline?: "throws" | "missing"; priorStatus?: string; state?: string } = {}): Promise<Rig> {
+  async function rig(o: { credential?: "subscription" | "api_key"; registrant?: "o1" | "o2"; engine?: "os_sandbox" | "microvm" | null; place?: boolean; phase?: string; answer?: StartAnswer; visibility?: "private" | "public" | "unknown"; github?: RunPullRequestPort | null; port?: boolean; prior?: boolean; deadline?: "throws" | "missing"; priorStatus?: string; state?: string; caps?: string[] } = {}): Promise<Rig> {
     const f = await seedF2(h.admin);
     const repoId = randomUUID();
     await h.admin.query("INSERT INTO repos (id, account_id, gh_repo_id, product, gh_owner, gh_name, execution_mode) VALUES ($1, $2, $3, 'team', 'acme', 'widgets', 'runner_local')", [repoId, f.accountId, Math.floor(Math.random() * 1e12)]);
     const runnerId = await insertRunner(h.admin, f.accountId, f[o.registrant ?? "o1"], { credentialMode: o.credential ?? "api_key" });
     if (o.engine !== null) await h.admin.query("INSERT INTO runner_facts (runner_id, account_id, os, arch, mem_gb_bucket, cpus, sandbox_engine) VALUES ($1, $2, 'linux', 'x64', 16, 8, $3)", [runnerId, f.accountId, o.engine ?? "os_sandbox"]);
+    if (o.caps !== undefined) await h.admin.query("INSERT INTO runner_capabilities (runner_id, account_id, capabilities) VALUES ($1, $2, $3::text[])", [runnerId, f.accountId, o.caps]);
     if (o.place !== false) await h.admin.query("INSERT INTO project_placements (repo_id, account_id, runner_id, placed_by) VALUES ($1, $2, $3, 'person')", [repoId, f.accountId, runnerId]);
     const setupId = randomUUID();
     await h.admin.query("INSERT INTO project_setups (id, account_id, repo_id, kind, phase, created_by) VALUES ($1, $2, $3, 'existing', $4, $5)", [setupId, f.accountId, repoId, o.phase ?? "survey", f.o1]);
@@ -199,9 +200,32 @@ describe("startSurvey [pg]", () => {
       const r = await rig({ credential: "subscription", registrant: "o2" });
       await refused(r, 409, "survey_needs_machine_owner");
     });
+    // D#845 ON-10e1: a runner that lists survey_public_v1 and a start without the consent (ON-10e2's route passes it) still gets public_repo; unknown is never public, whatever the runner lists.
+    const PUBLIC_CAPABLE = ["survey_v1", "survey_public_v1"];
     it("409 public_repo and repo_visibility_unknown", async () => {
-      await refused(await rig({ visibility: "public" }), 409, "public_repo");
-      await refused(await rig({ visibility: "unknown" }), 409, "repo_visibility_unknown");
+      await refused(await rig({ visibility: "public", caps: PUBLIC_CAPABLE }), 409, "public_repo");
+      await refused(await rig({ visibility: "unknown", caps: PUBLIC_CAPABLE }), 409, "repo_visibility_unknown");
+    });
+    it("409 survey_needs_runner_update for a public repo on a machine without survey_public_v1 (none stored, or survey_v1 alone), naming the machine; a private repo needs neither", async () => {
+      for (const caps of [undefined, ["survey_v1"]]) {
+        const r = await rig({ visibility: "public", ...(caps ? { caps } : {}) });
+        await h.admin.query("INSERT INTO runner_settings (runner_id, account_id, name) VALUES ($1, $2, 'Studio Mac') ON CONFLICT (runner_id) DO UPDATE SET name = EXCLUDED.name", [r.runnerId, r.f.accountId]);
+        expect((await refused(r, 409, "survey_needs_runner_update")).message).toBe("Update fx-runner on Studio Mac to survey a public repo");
+      }
+      const unknown = await rig({ visibility: "unknown" });
+      await refused(unknown, 409, "repo_visibility_unknown");
+      const priv = await rig({ visibility: "private" });
+      await startSurvey(priv.deps(), as(priv), priv.setupId);
+      expect(priv.calls).toHaveLength(1);
+    });
+    it("a public repo on a machine that lists survey_public_v1 starts only when the caller says the person consented (the hook ON-10e2 fills); a person of another account is refused", async () => {
+      const r = await rig({ visibility: "public", caps: PUBLIC_CAPABLE });
+      const started = await startSurvey(r.deps(), as(r), r.setupId, { publicConsented: true });
+      expect(started.setup_id).toBe(r.setupId);
+      expect(r.calls).toHaveLength(1);
+      // Second account: a person of another account naming this account's public setup (placed on a capable machine) is told nothing and nothing starts.
+      const stranger = await rig({ visibility: "public", caps: PUBLIC_CAPABLE });
+      await refused(stranger, 403, "forbidden", { who: r.f.o1 });
     });
     it("409 default_branch_empty, 503 github_unavailable and 502 github_refused", async () => {
       await refused(await rig({ github: github({ head: null }) }), 409, "default_branch_empty");

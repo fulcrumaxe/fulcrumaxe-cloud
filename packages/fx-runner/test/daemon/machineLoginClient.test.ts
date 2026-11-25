@@ -6,6 +6,8 @@ import { createRunnerClient } from "../../src/daemon/client.js";
 import { createMachineCommandReceiver } from "../../src/daemon/machineCommands.js";
 import { generateRunnerKey } from "../../src/keys.js";
 import { RUNNER_BUILD_CAPABILITIES, RUNNER_PROTOCOL_VERSION, RUNNER_VERSION } from "../../src/version.js";
+// D#845 ON-10e1: `survey_public_v1` is the newest capability of all and is dropped before everything on the ladder (pinned in surveyPublic.test.ts); these tests pin the ladder behind it.
+const BUILD_BEHIND_PUBLIC = RUNNER_BUILD_CAPABILITIES.filter((c) => c !== "survey_public_v1");
 
 const REQ = "11111111-1111-4111-8111-111111111111";
 const RUNNER = "0b9b3a52-6c1e-4c53-9d5f-1f3f2a6f7a10";
@@ -34,7 +36,7 @@ const idleLogin: ClaudeLoginRunner = { start: async () => ({ ok: true }), code: 
 
 describe("hello: machine_login_v1 is dropped first", () => {
   it("is in the build list, right ahead of survey_v1 (the newest), and an old cloud drops survey_v1 (the newer one) and then it", async () => {
-    expect(RUNNER_BUILD_CAPABILITIES.at(-2)).toBe(MACHINE_LOGIN_CAPABILITY);
+    expect(BUILD_BEHIND_PUBLIC.at(-2)).toBe(MACHINE_LOGIN_CAPABILITY);
     const sent: string[][] = [];
     const fetchFn = (async (_u: string, init: RequestInit) => {
       const caps = (JSON.parse(String(init.body)).capabilities ?? []) as string[];
@@ -43,10 +45,10 @@ describe("hello: machine_login_v1 is dropped first", () => {
       return new Response(JSON.stringify(refuse ? { error: { code: "invalid_message", message: "x" } } : {}), { status: refuse ? 400 : 200, headers: { "content-type": "application/json" } });
     }) as unknown as typeof fetch;
     const client = createRunnerClient({ origin: "https://cloud.example.test", key: generateRunnerKey(), now: () => now, fetchFn });
-    const hello: HelloMessage = { protocol_version: RUNNER_PROTOCOL_VERSION, binary_version: RUNNER_VERSION, model_auth_present: false, isolation: "host_sandbox", capabilities: [...RUNNER_BUILD_CAPABILITIES] };
+    const hello: HelloMessage = { protocol_version: RUNNER_PROTOCOL_VERSION, binary_version: RUNNER_VERSION, model_auth_present: false, isolation: "host_sandbox", capabilities: [...BUILD_BEHIND_PUBLIC] };
     expect(await client.hello(hello)).toEqual({ kind: "ok", dropped: [SURVEY_CAPABILITY, MACHINE_LOGIN_CAPABILITY] });
     expect(sent).toHaveLength(3);
-    expect(sent[2]).toEqual(RUNNER_BUILD_CAPABILITIES.filter((c) => c !== MACHINE_LOGIN_CAPABILITY && c !== SURVEY_CAPABILITY));
+    expect(sent[2]).toEqual(BUILD_BEHIND_PUBLIC.filter((c) => c !== MACHINE_LOGIN_CAPABILITY && c !== SURVEY_CAPABILITY));
   });
 });
 

@@ -49,8 +49,8 @@ describe("the survey start with its deadline [pg]", () => {
     return { ...refs, setupId };
   }
 
-  /** `issuerSees` is what the job issuer reads for the repo at issue time (the person's own read said private): `public` makes the issuer refuse AFTER the bind. */
-  function deps(starts: string[], fail: boolean, issuerSees: "private" | "public" = "private"): RunnerCloudDeps {
+  /** `issuerSees` is what the job issuer reads for the repo at issue time (the person's own read said private): `unknown` makes the issuer refuse AFTER the bind (D#845 ON-10e1: `public` no longer does, the survey may name a public repo). */
+  function deps(starts: string[], fail: boolean, issuerSees: "private" | "unknown" = "private"): RunnerCloudDeps {
     const visibility = createFakeVisibility("private");
     const issuer = createJobIssuer({ pool: writerPool, signer: createJobSigner({ keyId: "job-key-1", privateKey }), visibility: createFakeVisibility(issuerSees), context: createPgJobContext(writerPool) });
     const sandbox = new SandboxTarget(createSandboxTargetHarness(writerPool).deps);
@@ -87,7 +87,7 @@ describe("the survey start with its deadline [pg]", () => {
   it("an issuer refusal AFTER the bind (setup started, run pending then failed) ends the setup survey_failed / refused_at_admit, with no deadline Workflow started", async () => {
     const w = await world();
     const starts: string[] = [];
-    const error = await startSurvey(deps(starts, false, "public"), { accountId: w.accountId, userId: w.userId }, w.setupId).then(
+    const error = await startSurvey(deps(starts, false, "unknown"), { accountId: w.accountId, userId: w.userId }, w.setupId).then(
       () => null,
       (e: unknown) => e as RunnerHttpError,
     );

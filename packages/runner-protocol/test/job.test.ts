@@ -100,10 +100,13 @@ describe("job schema", () => {
     for (const bad of [undefined, {}, "", 0]) expect(JobSchema.safeParse(sampleJob({ spec: bad })).success, String(bad)).toBe(false);
   });
 
-  it("repo.private is the literal true: a job for a public repo does not parse", () => {
+  it("repo.private is a boolean, and a signed job for a public repo parses only as a survey job (D#845 ON-10e1)", () => {
     const repo = (isPrivate: unknown) => ({ id: "3c1e5a7b-2d4f-4a6c-8e0b-1a2b3c4d5e6f", owner: "acme", name: "widgets", private: isPrivate });
     expect(JobSchema.safeParse(sampleJob({ repo: repo(true) })).success).toBe(true);
-    for (const bad of [false, "true", 1, null, undefined]) expect(JobSchema.safeParse(sampleJob({ repo: repo(bad) })).success, String(bad)).toBe(false);
+    for (const bad of ["true", 1, null, undefined]) expect(JobSchema.safeParse(sampleJob({ repo: repo(bad) })).success, String(bad)).toBe(false);
+    const signed = (over: Record<string, unknown>) => SignedJobSchema.safeParse({ job: sampleJob(over), signature: "A".repeat(86) }).success;
+    expect(signed({ repo: repo(false) })).toBe(false);
+    for (const role of RUNNER_ELIGIBLE_ROLES) expect(signed({ role, repo: repo(false) }), role).toBe(false);
   });
 
   it("task.kind is closed, and task and role_card are required", () => {

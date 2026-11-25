@@ -466,12 +466,12 @@ describe("confirming a project [pg]", () => {
       expect(await q(`SELECT runner_id FROM project_placements WHERE account_id = $1`, [w.a.accountId])).toEqual([{ runner_id: w.m1 }]);
     });
 
-    it("a public repo is confirmed and its survey is not started (public_repo); an unexpected error is the code internal with nothing of it in the body", async () => {
+    it("a public repo is confirmed and its survey is not started (a machine without survey_public_v1 is told to update, D#845 ON-10e1); an unexpected error is the code internal with nothing of it in the body", async () => {
       const pub = await world();
       const s = surveyDeps();
       const res = await confirm(pub, pub.r1, { runner_id: pub.m1 }, { deps: { ...s.deps, ...vis("public") } });
       expect(res.status).toBe(201);
-      expect(res.body).toMatchObject({ survey: { started: false, code: "public_repo" } });
+      expect(res.body).toMatchObject({ survey: { started: false, code: "survey_needs_runner_update" } });
       expect(s.starts).toEqual([]);
       const w = await world();
       const bad = await confirm(w, w.r1, { runner_id: w.m1 }, { deps: surveyDeps({ answer: "throws" }).deps });

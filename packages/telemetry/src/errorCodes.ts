@@ -563,6 +563,8 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "sandbox_reaping",
   // Project survey (D#845 ON-10b1): the survey prompt refused an owner, name or commit that is not a GitHub identifier.
   "survey_prompt_input",
+  // Project survey (D#845 ON-10e1): a public repo's survey on a runner that does not list survey_public_v1; the person updates fx-runner.
+  "survey_needs_runner_update",
   // Sandbox reaper (D#2 SANDBOX-REAPER-2b): the database mode setting could not be read, so the reap passes ran as off.
   "sandbox_reap_mode_unreadable",
   // Sandbox inventory failures (D#6): why a daily inventory pass ended without writing, by failure class instead of `other`.

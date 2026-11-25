@@ -21,6 +21,7 @@ import {
   ITEM_PR_BRANCH,
   REVIEW_JOB_ROLES,
   SURVEY_ROLE,
+  publicRepoAllowed,
   jobCarriesPinnedCommit,
   CONFINED_READ_ROLES,
   RUNNER_ELIGIBLE_ROLES,
@@ -414,8 +415,9 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
 
       // Asked again here: admit read it earlier, and a repo can be made public in between. Anything but "private" stops.
       const seen = await deps.visibility.visibility({ accountId: run.accountId, repoId: run.repoId }).catch(() => "unknown" as const);
-      if (seen === "public") throw new JobIssueError("public_repo");
-      if (seen !== "private") throw new JobIssueError("repo_visibility_unknown");
+      // D#845 ON-10e1: the survey alone may name a public repo; the signed `repo.private` stays truthful.
+      if (seen === "public" && !publicRepoAllowed(role, taskKind(role, input.continues !== undefined))) throw new JobIssueError("public_repo");
+      if (seen !== "private" && seen !== "public") throw new JobIssueError("repo_visibility_unknown");
 
       // D#6 R4d-4 (C33 section 1.2): a review job names the commit to review, from the run's stored head (`agent_runs.head_sha`), never parsed out
       // of the prompt. A review with no valid head, or whose prompt names a different commit, is refused and nothing is recorded.
@@ -561,7 +563,7 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
         schema_version: 1,
         job_id: newId(),
         run_id: run.id,
-        repo: { id: run.repoId, owner: context.repo.owner, name: context.repo.name, private: true },
+        repo: { id: run.repoId, owner: context.repo.owner, name: context.repo.name, private: seen === "private" },
         role: role as Job["role"],
         mode: input.jobMode === "verified" ? "verified" : "local",
         spec: context.spec,
