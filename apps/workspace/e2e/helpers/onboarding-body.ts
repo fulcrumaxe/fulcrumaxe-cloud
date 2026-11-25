@@ -28,11 +28,11 @@ export const pipelineChosen = <B extends OnboardingBody>(body: B): B => withChos
 export const pipelineOnly = <B extends OnboardingBody>(body: B): B => withChosen(body, { pipeline: CHOSEN, engine: null });
 
 /** The engine track with each named step in the given state (the first step not named is pending), the way ON-5 derives them. */
-export function engineTrack(states: Record<string, string>, extra: { tier?: string | null; code?: string; kvm?: "present" | "absent"; helper_missing?: true } = {}): Step[] {
+export function engineTrack(states: Record<string, string>, extra: { tier?: string | null; code?: string; kvm?: "present" | "absent"; helper_missing?: true; install?: { setup_id: string; pr_number: number; pr_state: string } } = {}): Step[] {
   const T = "2026-11-20T10:00:00.000Z";
   return ["machine", "claude", "github_app", "project", "plan", "install", "live"].map((step) => {
     const state = states[step] || "pending";
-    return { step, state, completed_at: state === "done" ? T : null, tier: step === "machine" ? extra.tier ?? null : null, ...(step === "machine" && extra.kvm ? { kvm: extra.kvm } : {}), ...(step === "machine" && extra.helper_missing ? { helper_missing: true } : {}), failure: state === "failed" ? { code: extra.code ?? "survey_failed", at: T } : null };
+    return { step, state, completed_at: state === "done" ? T : null, tier: step === "machine" ? extra.tier ?? null : null, ...(step === "machine" && extra.kvm ? { kvm: extra.kvm } : {}), ...(step === "machine" && extra.helper_missing ? { helper_missing: true } : {}), ...(step === "install" && extra.install ? extra.install : {}), failure: state === "failed" ? { code: extra.code ?? "survey_failed", at: T } : null };
   });
 }
 

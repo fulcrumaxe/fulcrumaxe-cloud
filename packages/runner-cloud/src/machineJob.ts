@@ -16,6 +16,7 @@ import type { PoolClient } from "pg";
 import { emitSetupChanged } from "@fx/core/src/onboarding/engineTrack.js";
 import { markWorkPending } from "@fx/core/src/pendingWork.js";
 import { RunnerHttpError, asRunner, parseJsonBody, parseMessage, pgCode, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse } from "./http.js";
+import { definersForJob } from "./engineUpdateDefiners.js";
 import { reissueRacedSetup } from "./setupReissue.js";
 import { verifyRunnerRequest, withRunnerSession } from "./verifyRunnerRequest.js";
 
@@ -88,13 +89,14 @@ export async function setupProgressRun(deps: RunnerCloudDeps, req: RunnerHttpReq
   const result = await asRunner(async () => {
     try {
       return await withRunnerSession(deps.appUserPool, runner, async (client) => {
-        const { rows } = await client.query<{ o_result: string; o_repo_id: string | null }>("SELECT o_result, o_repo_id FROM setup_progress_record($1::uuid, $2::uuid, $3, $4, $5, $6, $7)", [
+        const definers = await definersForJob(client, runner.accountId, setupId.toLowerCase(), body.job_id);
+        const { rows } = await client.query<{ o_result: string; o_repo_id: string | null }>(definers.progress, [
           setupId.toLowerCase(), body.job_id, body.seq, body.sub_step, body.state, body.failure_code ?? null, body.failure_reason ?? null,
         ]);
         const row = rows[0];
         if (row?.o_result === "ok" && body.head_sha !== undefined) {
           // in the report's own transaction: a head that cannot be recorded undoes the report
-          const stored = (await client.query<{ ok: boolean }>("SELECT setup_head_record($1::uuid, $2::uuid, $3) AS ok", [setupId.toLowerCase(), body.job_id, body.head_sha])).rows[0]?.ok;
+          const stored = (await client.query<{ ok: boolean }>(definers.head, [setupId.toLowerCase(), body.job_id, body.head_sha])).rows[0]?.ok;
           if (stored !== true) throw new HeadNotRecorded();
         }
         if (row?.o_result === "ok" && row.o_repo_id) await emitSetupChanged(client, { accountId: runner.accountId, setupId: setupId.toLowerCase(), repoId: row.o_repo_id });

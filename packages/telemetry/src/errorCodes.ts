@@ -58,7 +58,12 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "projects_placed",
   "server_creating",
   "project_removal_unavailable",
+  "project_not_on_server",
+  "server_deleting",
+  "delete_failed",
   "credential_changed",
+  "server_not_in_token_project",
+  "credential_in_use",
   "leases_not_failed",
   "registration_timeout",
   // D#845 MC-7b: reboot, keep and delete an orphan.
@@ -85,6 +90,10 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "billing_not_configured",
   "checkout_in_progress",
   "code_repo_not_public",
+  "twin_exists",
+  "pairing_exists",
+  "twin_state",
+  "twin_repo_not_public",
   "code_repo_renamed",
   "content_changed",
   "cross_site_refused",
@@ -558,6 +567,10 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "sandbox_reaping",
   // Project survey (D#845 ON-10b1): the survey prompt refused an owner, name or commit that is not a GitHub identifier.
   "survey_prompt_input",
+  // Project survey (D#845 ON-10e1): a public repo's survey on a runner that does not list survey_public_v1; the person updates fx-runner.
+  "survey_needs_runner_update",
+  // Project survey (D#845 ON-10e2a): a public repo's survey needs the person's explicit consent; none was given.
+  "public_survey_consent_required",
   // Sandbox reaper (D#2 SANDBOX-REAPER-2b): the database mode setting could not be read, so the reap passes ran as off.
   "sandbox_reap_mode_unreadable",
   // Sandbox inventory failures (D#6): why a daily inventory pass ended without writing, by failure class instead of `other`.

@@ -1682,7 +1682,9 @@ export interface Operations {
   };
   listHetznerServers: {
     path: undefined;
-    query: undefined;
+    query: {
+      repo_id?: string;
+    };
     body: undefined;
     response: {
       servers: Array<{
@@ -1897,6 +1899,21 @@ export interface Operations {
       already_deleted: boolean;
     };
   };
+  deleteHetznerServerWithProject: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: {
+      repo_id: string;
+      removal_pr: boolean;
+    };
+    response: {
+      id: string;
+      repo_id: string;
+      status: "deleting";
+    };
+  };
   listRepos: {
     path: undefined;
     query: {
@@ -2035,6 +2052,108 @@ export interface Operations {
         app_installed: boolean;
       }>;
       truncated: boolean;
+    };
+  };
+  getRepoTwin: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      twin: ({
+        id: string;
+        public_repo_id: string;
+        private_repo_id: string | null;
+        private_name: string;
+        state: "creating" | "not_connected" | "seeding" | "ready" | "paused" | "conflict" | "refused" | "failed" | "removed";
+        overlay_globs: Array<string>;
+        published_private_sha: string | null;
+        synced_public_sha: string | null;
+        publish_pr: (number) | (null);
+        sync_pr: (number) | (null);
+        failure_code: string | null;
+        created_at: string;
+        updated_at: string;
+      }) | (null);
+    };
+  };
+  createRepoTwinIntent: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: {
+      name?: string;
+    };
+    response: {
+      authorize_url: string;
+    };
+  };
+  pauseRepoTwin: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      id: string;
+      public_repo_id: string;
+      private_repo_id: string | null;
+      private_name: string;
+      state: "creating" | "not_connected" | "seeding" | "ready" | "paused" | "conflict" | "refused" | "failed" | "removed";
+      overlay_globs: Array<string>;
+      published_private_sha: string | null;
+      synced_public_sha: string | null;
+      publish_pr: (number) | (null);
+      sync_pr: (number) | (null);
+      failure_code: string | null;
+      created_at: string;
+      updated_at: string;
+    };
+  };
+  resumeRepoTwin: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      id: string;
+      public_repo_id: string;
+      private_repo_id: string | null;
+      private_name: string;
+      state: "creating" | "not_connected" | "seeding" | "ready" | "paused" | "conflict" | "refused" | "failed" | "removed";
+      overlay_globs: Array<string>;
+      published_private_sha: string | null;
+      synced_public_sha: string | null;
+      publish_pr: (number) | (null);
+      sync_pr: (number) | (null);
+      failure_code: string | null;
+      created_at: string;
+      updated_at: string;
+    };
+  };
+  removeRepoTwin: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      id: string;
+      public_repo_id: string;
+      private_repo_id: string | null;
+      private_name: string;
+      state: "creating" | "not_connected" | "seeding" | "ready" | "paused" | "conflict" | "refused" | "failed" | "removed";
+      overlay_globs: Array<string>;
+      published_private_sha: string | null;
+      synced_public_sha: string | null;
+      publish_pr: (number) | (null);
+      sync_pr: (number) | (null);
+      failure_code: string | null;
+      created_at: string;
+      updated_at: string;
     };
   };
   listRoles: {
@@ -3935,6 +4054,9 @@ export interface Operations {
             code: "kvm_absent" | "kvm_no_access" | "kvm_no_vt" | "cgroup_v1" | "cgroup_no_delegate" | "linger_off" | "net_ipv6_only" | "dns_failed" | "clock_skew" | "disk_low" | "vm_memory_low" | "net_blocked:cloud" | "net_blocked:github" | "net_blocked:model_api" | "net_blocked:registry_npm" | "net_blocked:registry_pypi" | "unchecked:kvm_device" | "unchecked:kvm_access" | "unchecked:kvm_vt" | "unchecked:cgroup_v2" | "unchecked:cgroup_delegate" | "unchecked:linger" | "unchecked:net_cloud" | "unchecked:net_github" | "unchecked:net_model_api" | "unchecked:net_registry_npm" | "unchecked:net_registry_pypi" | "unchecked:net_ipv4" | "unchecked:dns" | "unchecked:clock" | "unchecked:disk" | "unchecked:memory";
             fix: string;
           }>;
+          setup_id?: string;
+          pr_number?: number;
+          pr_state?: "open" | "merged" | "closed";
           failure: ({
             code: string;
             at: string;
@@ -7044,7 +7166,7 @@ export const operations = {
     tokenSelfOnly: false,
     idempotency: "never",
     pathParams: [],
-    queryParams: [],
+    queryParams: ["repo_id"],
     hasBody: false,
   },
   createHetznerServer: {
@@ -7135,6 +7257,17 @@ export const operations = {
     queryParams: [],
     hasBody: false,
   },
+  deleteHetznerServerWithProject: {
+    method: "POST",
+    path: "/api/v1/machine-servers/{id}/delete-with-project",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: true,
+  },
   listRepos: {
     method: "GET",
     path: "/api/v1/repos",
@@ -7215,6 +7348,61 @@ export const operations = {
   listPairingCandidates: {
     method: "GET",
     path: "/api/v1/repos/{id}/pairing/candidates",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  getRepoTwin: {
+    method: "GET",
+    path: "/api/v1/repos/{id}/twin",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  createRepoTwinIntent: {
+    method: "POST",
+    path: "/api/v1/repos/{id}/twin",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: true,
+  },
+  pauseRepoTwin: {
+    method: "POST",
+    path: "/api/v1/twins/{id}/pause",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  resumeRepoTwin: {
+    method: "POST",
+    path: "/api/v1/twins/{id}/resume",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  removeRepoTwin: {
+    method: "DELETE",
+    path: "/api/v1/twins/{id}",
     tokenAccess: false,
     scope: null,
     tokenSelfOnly: false,

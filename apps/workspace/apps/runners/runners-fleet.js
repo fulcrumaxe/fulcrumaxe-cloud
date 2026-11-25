@@ -605,6 +605,21 @@ export const SERVER_WORDS = {
   offline: "Offline", deleting: "Deleting…", failed: "Failed", orphaned: "A server we created that isn't linked any more",
 };
 
+/** One plain sentence for the code a failed server carries (a delete that stopped, or a create that did). A code not listed gets the last one, never the code itself. */
+export const FAILED_BY_CODE = {
+  credential_changed: "The Hetzner token that made this server is no longer connected. Connect it again, then press Delete",
+  credential_invalid: "Hetzner no longer accepts the stored token. Remove it, add a new one, then press Delete",
+  hetzner_unauthorized: "Hetzner refused the stored token. Remove it, add a new one, then press Delete",
+  hetzner_forbidden: "The Hetzner token is Read only. It needs Read & Write access. Replace it, then press Delete",
+  delete_failed: "The delete didn't finish. Press Delete to try again",
+  server_not_in_token_project: "This server isn't in the Hetzner project of the connected token. Connect the token for the project it was made in, or delete it in the Hetzner Console.",
+  project_not_on_server: "The project moved to another machine, so nothing was removed. Check the project, then press Delete",
+  projects_placed: "A project is still placed on this server. Remove it first, then press Delete",
+  server_deleting: "This server is already being deleted. Wait for that to finish",
+};
+export const FAILED_OTHER = "This server failed. Press Delete to try again";
+export const failedWords = (code) => (typeof code === "string" && code !== "" ? (Object.hasOwn(FAILED_BY_CODE, code) ? FAILED_BY_CODE[code] : FAILED_OTHER) : "");
+
 const CONNECT_BY_CODE = {
   token_read_only: "This token is Read only. Nothing was saved. Make a Read & Write token and try again",
   token_invalid: HETZNER_REFUSED,
@@ -679,7 +694,7 @@ export const unlabelledText = (n) => "This Hetzner project has " + n + (n === 1 
 export function readServer(s) {
   if (!s || typeof s !== "object" || typeof s.id !== "string" || s.id === "") return null;
   const str = (v) => (typeof v === "string" ? v : "");
-  return { id: s.id, name: str(s.name).trim() || "Unnamed server", status: Object.hasOwn(SERVER_WORDS, s.status) ? SERVER_WORDS[s.status] : "Status not reported", size: str(s.server_type), location: str(s.location), created: str(s.created_at) };
+  return { id: s.id, name: str(s.name).trim() || "Unnamed server", status: Object.hasOwn(SERVER_WORDS, s.status) ? SERVER_WORDS[s.status] : "Status not reported", size: str(s.server_type), location: str(s.location), created: str(s.created_at), why: s.status === "failed" ? failedWords(s.failure_code) : "" };
 }
 export const readServers = (b) => (b && Array.isArray(b.servers) ? b.servers.map((s) => { const r = readServer(s); return r && { ...r, ...readServerMore(s) }; }).filter(Boolean) : null); // readServerMore: D#845 MC-10b2, below
 

@@ -1,5 +1,5 @@
 import type { Pool, PoolClient } from "pg";
-import { CONFINED_READ_ROLES, DEPLOY_VERIFIER_ROLE, NOT_RECORDED_MEASURE, PROPOSAL_VERIFIER_ROLE, RUNNER_ELIGIBLE_ROLES, REVIEW_JOB_ROLES, SURVEY_ROLE } from "@fulcrumaxe/runner-protocol";
+import { CONFINED_READ_ROLES, DEPLOY_VERIFIER_ROLE, NOT_RECORDED_MEASURE, PROPOSAL_VERIFIER_ROLE, RUNNER_ELIGIBLE_ROLES, REVIEW_JOB_ROLES, SURVEY_ROLE, publicRepoAllowed } from "@fulcrumaxe/runner-protocol";
 import { DEFAULT_BACKEND } from "@fx/runtime/src/backends/types.js";
 import { markRunnerWork, markWorkPending } from "@fx/core/src/pendingWork.js";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
@@ -191,12 +191,13 @@ export class RunnerTarget implements ExecutionTarget {
     return null;
   }
 
-  private async visibilityRefusal(run: { accountId: string; repoId?: string | null }): Promise<TargetPrecheckReason | null> {
+  private async visibilityRefusal(run: { accountId: string; repoId?: string | null; role: string }): Promise<TargetPrecheckReason | null> {
     // A repo the port could not read is refused, whatever the cause: a throw is the same as "unknown".
     const seen: RepoVisibility = run.repoId
       ? await this.deps.visibility.visibility({ accountId: run.accountId, repoId: run.repoId }).catch((): RepoVisibility => "unknown")
       : "unknown";
-    if (seen === "public") return "public_repo";
+    // D#845 ON-10e1: a public repo passes for the survey role alone (its task kind is `survey` by construction); `unknown` never passes.
+    if (seen === "public") return publicRepoAllowed(run.role, run.role === SURVEY_ROLE ? "survey" : "") ? null : "public_repo";
     if (seen !== "private") return "repo_visibility_unknown";
     return null;
   }

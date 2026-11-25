@@ -11,6 +11,8 @@ export const ENGINE_STEP_IDS = Object.freeze(["machine", "claude", "github_app",
 const ENGINE_STATES = Object.freeze(["done", "active", "pending", "failed"]);
 // D#845 ON-22: why the Engine plan does not cover one more engine (the server's closed list).
 const PLAN_GATES = Object.freeze(["plan_required", "engine_quantity", "plan_ended", "account_held", "unavailable"]);
+const PR_STATES = Object.freeze(["open", "merged", "closed"]);
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // D#845 ON-11a1: the setup phases and states the server sends on the engine track's `setup`.
 const SETUP_PHASES = Object.freeze(["survey", "plan", "install", "await_merge", "finish", "done", "removed"]);
 const SETUP_STATES = Object.freeze(["started", "ok", "failed", "skipped"]);
@@ -65,6 +67,12 @@ function parseEngine(list) {
       if (PLAN_GATES.includes(s.plan_gate)) entry.plan_gate = s.plan_gate;
       const n = s.engines;
       if (n && Number.isInteger(n.quantity) && Number.isInteger(n.live) && n.quantity >= 0 && n.live >= 0) entry.engines = { quantity: n.quantity, live: n.live };
+    }
+    // D#845 ON-20b: the install step's setup and its pull request (number and state), kept only when all three fit; anything else is "no pull request", never a failure of the whole track.
+    if (s.step === "install" && typeof s.setup_id === "string" && UUID_RE.test(s.setup_id) && Number.isInteger(s.pr_number) && s.pr_number > 0 && PR_STATES.includes(s.pr_state)) {
+      entry.setup_id = s.setup_id.toLowerCase();
+      entry.pr_number = s.pr_number;
+      entry.pr_state = s.pr_state;
     }
     steps.push(entry);
   }

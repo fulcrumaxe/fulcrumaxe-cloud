@@ -18,6 +18,18 @@
       "removal": { "state": "failed", "machine_name": "Studio box", "failure_code": "sandbox_busy" }
     }
   },
+  "servers": {
+    "one": {
+      "servers": [
+        {
+          "id": "5d1e7a32-9b64-4c0f-8e21-3a7c6b9d0f42", "name": "Studio server שלום", "kind": "hetzner_cloud", "status": "ready", "server_type": "cx32", "location": "fsn1", "public_ipv4": "203.0.113.7", "failure_code": null,
+          "price": { "currency": "EUR", "hourly_gross": "0.0070", "monthly_gross": "4.5101", "ipv4_monthly_gross": "0.5950" }, "created_at": "2026-11-23T10:20:00.000Z"
+        }
+      ]
+    },
+    "none": { "servers": [] }
+  },
+  "server_answer": { "id": "5d1e7a32-9b64-4c0f-8e21-3a7c6b9d0f42", "repo_id": "33333333-3333-4333-8333-333333333333", "status": "deleting" },
   "answers": {
     "queued_no_pr": { "repo_id": "33333333-3333-4333-8333-333333333333", "runner_id": "77777777-7777-4777-8777-777777777777", "machine_parts": "queued", "already_removed": false, "pr": null },
     "none_no_pr": { "repo_id": "33333333-3333-4333-8333-333333333333", "runner_id": null, "machine_parts": "none", "already_removed": true, "pr": null },

@@ -1,7 +1,7 @@
 /**
  * The daemon's one gate for a claimed job. A job is run only if all of these hold, and a refusal leaves no trace on the
  * machine (no workspace, no process, no `runJob` call):
- *  - the repository is private: the literal `true`. The protocol's job schema already refuses anything else; the check here
+ *  - the repository is private: the literal `true` (D#845 ON-10e1: or the literal `false` on a signed survey job of the survey role, the one public job). The protocol's job schema already refuses anything else; the check here
  *    is a second, independent one that reads the raw object first;
  *  - the Ed25519 signature verifies against a key this runner pins, the job has not expired, and it matches the job schema;
  *  - the task prompt, the role card and the role's tool list hash to the digests the signature covers;
@@ -14,7 +14,7 @@
  *  - a `continues.branch` must have the shape of a run branch (`fx/<uuid>-g<n>`, C25 section 1.3) or of the item's pull request branch (`fx/issue-<n>`,
  *    D#599 PL-2b), checked again here before anything is made. The item branch needs a `pr_number` and a null `session_id`; a run branch has no `pr_number`.
  */
-import { jobCarriesPinnedCommit, ITEM_PR_BRANCH, JobSignatureError, verifyJob as verifyJobSignature, type Job, type JobKeyring } from "@fulcrumaxe/runner-protocol";
+import { jobCarriesPinnedCommit, publicRepoAllowed, ITEM_PR_BRANCH, JobSignatureError, verifyJob as verifyJobSignature, type Job, type JobKeyring } from "@fulcrumaxe/runner-protocol";
 import { allowanceRefusal } from "../sandbox/allowances.js";
 import { jobHashRefusals, type HashRefusal } from "../job/verifyHashes.js";
 import { CONTINUES_BRANCH } from "./push.js";
@@ -39,7 +39,11 @@ function continuesShapeValid(continues: Record<string, unknown>): boolean {
 /** Checks a signed job taken from a claim reply. `keyring` holds the pinned public keys by `key_id`. */
 export function verifyJob(signed: unknown, keyring: JobKeyring, now: Date, engine: SandboxEngine = "os_sandbox"): VerifiedJob {
   const repo = isObject(signed) && isObject(signed["job"]) ? signed["job"]["repo"] : undefined;
-  if (isObject(repo) && repo["private"] !== true) return { ok: false, reason: "repo_not_private" };
+  const rawJob = isObject(signed) && isObject(signed["job"]) ? signed["job"] : undefined;
+  const rawTask = rawJob !== undefined && isObject(rawJob["task"]) ? rawJob["task"] : undefined;
+  // D#845 ON-10e1: only the literal `false` on the survey role's survey task passes; the signature and the schema are checked next, and the same rule is read again from the verified job.
+  const publicSurvey = isObject(repo) && repo["private"] === false && typeof rawJob?.["role"] === "string" && typeof rawTask?.["kind"] === "string" && publicRepoAllowed(rawJob["role"], rawTask["kind"]);
+  if (isObject(repo) && repo["private"] !== true && !publicSurvey) return { ok: false, reason: "repo_not_private" };
   // The continuation's shape is read from the raw object first, like the privacy flag: a branch that is neither shape, or an item branch without its
   // pull request number or with a session, gets its own closed reason even though the job schema would also refuse it (as a malformed job).
   const rawContinues = isObject(signed) && isObject(signed["job"]) ? signed["job"]["continues"] : undefined;
@@ -51,6 +55,7 @@ export function verifyJob(signed: unknown, keyring: JobKeyring, now: Date, engin
     if (error instanceof JobSignatureError) return { ok: false, reason: "job_signature_invalid" };
     throw error;
   }
+  if (!job.repo.private && !publicRepoAllowed(job.role, job.task.kind)) return { ok: false, reason: "repo_not_private" };
   const refusals = jobHashRefusals(job);
   if (refusals.length > 0) return { ok: false, reason: refusals[0]! };
   if (job.continues !== null && job.role !== "executor") return { ok: false, reason: "continues_wrong_role" };

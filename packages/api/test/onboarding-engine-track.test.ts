@@ -12,7 +12,7 @@ import { ROUTES } from '../src/routes/index.js';
 import { seedAccountWithMember } from './helpers/seed.js';
 
 interface Identity { accountId: string; userId: string }
-interface Track { track: string; chosen_at: string | null; steps: { step: string; state?: string; completed_at: string | null; tier?: string | null; kvm?: string; helper_missing?: boolean; preflight?: { code: string; fix: string }[] }[] }
+interface Track { track: string; chosen_at: string | null; steps: { step: string; setup_id?: string; pr_number?: number; pr_state?: string; state?: string; completed_at: string | null; tier?: string | null; kvm?: string; helper_missing?: boolean; preflight?: { code: string; fix: string }[] }[] }
 interface Body { started_at: string; steps: unknown[]; tracks: Track[] }
 
 /** D#845 ON-5: the tracks in `GET /api/v1/onboarding` and `PUT /api/v1/onboarding/track`, through the real dispatcher against real Postgres. */
@@ -82,6 +82,27 @@ describe('D#845 ON-5: onboarding engine track routes', () => {
       expect(body.tracks[1]!.steps.map((s) => s.step)).toEqual(['machine', 'claude', 'github_app', 'project', 'plan', 'install', 'live']);
       expect(body.tracks[1]!.steps.map((s) => s.state)).toEqual(['active', 'pending', 'pending', 'pending', 'pending', 'pending', 'pending']);
       expect(JSON.stringify(body)).not.toMatch(/undefined|NaN/);
+    });
+
+    // D#845 ON-20b: the install step names the setup and its pull request over the wire, for the account's own setup only.
+    it('install carries setup_id, pr_number and pr_state for the caller\'s own setup, and a second account sees none of them', async () => {
+      const a = await who('owner');
+      const b = await who('owner');
+      const setupFor = async (w: Identity, pr: number): Promise<string> => {
+        const inst = randomUUID();
+        const repo = randomUUID();
+        const id = randomUUID();
+        await admin.query(`INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, $3, 'team_readonly')`, [inst, w.accountId, 7_000_000 + Math.floor(Math.random() * 1_000_000)]);
+        await admin.query(`INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product) VALUES ($1, $2, $3, $4, 'team')`, [repo, w.accountId, inst, 7_000_000 + Math.floor(Math.random() * 1_000_000)]);
+        await admin.query(`INSERT INTO project_setups (id, account_id, repo_id, kind, phase, created_by, install_pr) VALUES ($1, $2, $3, 'existing', 'await_merge', $4, $5)`, [id, w.accountId, repo, w.userId, pr]);
+        return id;
+      };
+      const sa = await setupFor(a, 31);
+      await setupFor(b, 99);
+      const install = (body: Body) => body.tracks[1]!.steps.find((s) => s.step === 'install')!;
+      expect(install((await (await call(a, 'GET')).json()) as Body)).toMatchObject({ setup_id: sa, pr_number: 31, pr_state: 'open' });
+      const none = await who('owner');
+      expect(Object.keys(install((await (await call(none, 'GET')).json()) as Body))).not.toContain('pr_number');
     });
 
     it('machine and claude come from the account\'s own machines through the real facts read: a second account\'s signed-in machine counts for nobody else', async () => {

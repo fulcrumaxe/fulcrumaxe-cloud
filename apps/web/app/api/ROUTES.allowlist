@@ -99,6 +99,7 @@ system/mode/route.ts
 v1/[...path]/route.ts
 v1/assistant/messages/route.ts
 v1/engine/repos/[id]/start/route.ts
+v1/engine/repos/[id]/update/route.ts
 v1/events/route.ts
 v1/openapi.json/route.ts
 v1/runs/[id]/events/route.ts
@@ -110,3 +111,4 @@ v1/setups/[id]/install/merge/route.ts
 v1/setups/[id]/install/retry/route.ts
 v1/setups/[id]/install/summary/route.ts
 v1/setups/[id]/survey/retry/route.ts
+v1/setups/[id]/survey/start/route.ts

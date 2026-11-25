@@ -7,6 +7,7 @@ import { getRepoGuardSettings, isRepoHumanMergeOnly, setRepoGuardSettings } from
 import type { RepoGuardSettings } from "@fx/core/src/role-settings/types.js";
 import type { RouteEntry } from "../registry.js";
 import { repoPairingRoutes } from "./repoPairing.js";
+import { repoTwinRoutes } from "./repoTwins.js";
 import { readMergeQueueState, type MergeQueueState } from "./mergeQueueMode.js";
 import { decodeCursor, encodeCursor, parseLimit } from "../pagination.js";
 
@@ -176,4 +177,5 @@ export const repoRoutes: RouteEntry[] = [
     },
   },
   ...repoPairingRoutes,
+  ...repoTwinRoutes,
 ];

@@ -987,6 +987,23 @@ test.describe("D#845 MC-10b1: the server list and the create dialog", () => {
     await clean(page, errors);
   });
 
+  test("a failed server says why in words, as text only", async ({ page }) => {
+    const base = fx("listHetznerServers", "200-list.json").servers as Record<string, unknown>[];
+    const failed = [
+      { ...base[0], status: "failed", failure_code: "credential_changed" },
+      { ...base[1], status: "failed", failure_code: "<img src=x onerror=alert(1)>" },
+    ];
+    const { errors } = await setup(page, { hz: { credential: CONNECTED, servers: failed } });
+    await openServers(page);
+    const why = page.locator('[data-testid="runners-server-why"]');
+    await expect(why).toHaveText([
+      "The Hetzner token that made this server is no longer connected. Connect it again, then press Delete",
+      "This server failed. Press Delete to try again",
+    ]);
+    await expect(page.locator(`${WIN} [data-testid="runners-server"] img`)).toHaveCount(0);
+    await clean(page, errors);
+  });
+
   test("Create a server: the standard-tier sentence before the price, live sizes, the total on the button, and a create with exactly the quoted price", async ({ page }) => {
     const { mock, errors } = await setup(page, { hz: { credential: CONNECTED, servers: [] } });
     await openServers(page);

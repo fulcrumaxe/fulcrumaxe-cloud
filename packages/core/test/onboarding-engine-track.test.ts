@@ -128,4 +128,12 @@ describe('claudeDoneAt (Ruling 18: done while a live machine\'s latest hello say
   it('no facts reader injected: open', async () => {
     expect(await claudeDoneAt(runners, 'a', 'u', undefined)).toBeNull();
   });
+  // D#845 ON-20b: the install step carries its setup's install pull request; no other step does, and with none recorded the step has no such keys.
+  it('install carries setup_id, pr_number and pr_state from the sources, and only on the install step', () => {
+    const installPr = { setup_id: '3c1c0b7e-0000-4000-8000-000000000001', pr_number: 12, pr_state: 'open' as const };
+    const steps = buildEngineSteps(src({}, { installPr }));
+    expect(steps.find((s) => s.step === 'install')).toMatchObject(installPr);
+    expect(steps.filter((s) => 'pr_number' in s || 'setup_id' in s || 'pr_state' in s).map((s) => s.step)).toEqual(['install']);
+    for (const none of [src(), src({}, { installPr: null })]) expect(Object.keys(buildEngineSteps(none).find((s) => s.step === 'install')!)).not.toEqual(expect.arrayContaining(['pr_number']));
+  });
 });

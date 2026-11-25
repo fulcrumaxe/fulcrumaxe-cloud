@@ -80,6 +80,7 @@ describe("GET /api/cron/reconcile: the tick", () => {
       "engine_session_stops",
       "setup_install_pr",
       "setup_finish",
+      "engine_session_starts",
       "github_installations",
       "github_repos",
       "stripe_subscriptions",
@@ -109,6 +110,25 @@ describe("GET /api/cron/reconcile: the tick", () => {
     vi.stubEnv("DATABASE_URL_PLATFORM_OPS", "postgres://unused.invalid/none");
     try {
       expect(typeof defaultReconcileDeps().engineSystemStops).toBe("function");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("builds the start job over the injected pass: not_configured while none is wired, and the default deps wire it", async () => {
+    const run = async (deps: ReconcileHandlerDeps) => {
+      const runTickFn = vi.fn(async (_deps: TickDeps) => summary);
+      await reconcileHandler(requestWithAuth(`Bearer ${SECRET}`), deps, runTickFn);
+      return runTickFn.mock.calls[0]![0].jobs.find((job) => job.name === "engine_session_starts")!;
+    };
+    const ctx = (): JobContext => ({ pool: { query: vi.fn() } as never, cursor: null, signal: new AbortController().signal, calls: { limit: 0, used: 0, take: () => false }, msLeft: () => 4242, checkpoint: () => undefined });
+    expect(await (await run(fakeDeps())).run(ctx())).toEqual({ cursor: null, wrapped: false, code: "not_configured" });
+    const pass = vi.fn(async (_scope: { msLeft: () => number }) => ({ not_configured: false, issued: 0, results: [] }));
+    expect(await (await run(fakeDeps({ engineSystemStarts: pass }))).run(ctx())).toEqual({ cursor: null, wrapped: true });
+    expect(pass).toHaveBeenCalledTimes(1);
+    vi.stubEnv("DATABASE_URL_PLATFORM_OPS", "postgres://unused.invalid/none");
+    try {
+      expect(typeof defaultReconcileDeps().engineSystemStarts).toBe("function");
     } finally {
       vi.unstubAllEnvs();
     }

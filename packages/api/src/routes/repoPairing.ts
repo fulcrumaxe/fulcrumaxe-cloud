@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { clearRepoPairing, getRepoPairing, listPairingCandidates, MAX_OVERLAY_GLOBS, setRepoPairing, validatePairingInput, type RepoPairing } from "@fx/core/src/repos/pairing.js";
+import { TwinExistsError } from "@fx/core/src/repos/twins.js";
 import type { RouteEntry } from "../registry.js";
 import { ApiError } from "../errors.js";
 import { SESSION_LIMITS } from "../ratelimit/session.js";
@@ -14,7 +15,7 @@ export interface PairingRepoInspector {
     codeRepo: string,
     accountId: string,
     opts?: { hint?: { installationId: number; appKind: "team" | "team_readonly" }; signal?: AbortSignal },
-  ): Promise<{ visibility: "public" | "not_public"; defaultBranch: string | null; appInstalled: boolean }>;
+  ): Promise<{ visibility: "public" | "not_public"; defaultBranch: string | null; appInstalled: boolean; ownerGhId?: number | null }>;
 }
 
 /** Set by the app (the `/api/v1` catch-all). With none, the routes that must ask GitHub answer 503 and the read reports the install state as unknown. */
@@ -134,6 +135,7 @@ export const repoPairingRoutes: RouteEntry[] = [
     extraResponses: {
       "422": "`code_repo_not_public` (private or missing: the same answer for both), `code_repo_renamed` (use the repo's current name), or `public_default_branch_not_main` (`data.branch` is the branch name, null when it is not a plain branch name). Other 422s are `invalid_role_settings_input` with the field in `details`.",
       "503": "`github_unavailable` or `github_app_not_configured`: the public repo could not be checked, so nothing was saved.",
+      "409": "`twin_exists`: either repo belongs to a live private twin, which publishes the repo itself.",
     },
     paramsSchema: repoIdParamsSchema,
     bodySchema: putPairingBodySchema,
@@ -166,7 +168,12 @@ export const repoPairingRoutes: RouteEntry[] = [
       if (facts.defaultBranch !== "main") {
         throw new ApiError(422, "public_default_branch_not_main", "only a public repo whose default branch is main can be paired", [{ path: "code_repo", code: "default_branch_not_main" }], { branch: facts.defaultBranch });
       }
-      return toItem(await setRepoPairing(svc, input.params.id!, set), facts.appInstalled);
+      try {
+        return toItem(await setRepoPairing(svc, input.params.id!, set), facts.appInstalled);
+      } catch (err) {
+        if (err instanceof TwinExistsError) throw new ApiError(409, "twin_exists", "this repo belongs to a private twin; stop publishing the twin first");
+        throw err;
+      }
     },
   },
   {

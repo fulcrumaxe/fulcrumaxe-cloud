@@ -1,5 +1,6 @@
 import { SetupPushTokenMessage, SetupPushTokenReply, setupPushTokenPath } from "@fulcrumaxe/runner-protocol";
 import { RunnerHttpError, asRunner, parseJsonBody, parseMessage, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse } from "./http.js";
+import { definersForJob } from "./engineUpdateDefiners.js";
 import { verifyRunnerRequest, withRunnerSession } from "./verifyRunnerRequest.js";
 
 /**
@@ -29,7 +30,9 @@ export async function setupPushTokenRun(deps: RunnerCloudDeps, req: RunnerHttpRe
   if (!port) throw new RunnerHttpError(503, "not_configured", "the runner API has no push credential configured");
   const granted = await asRunner(() =>
     withRunnerSession(deps.appUserPool, runner, async (client) => {
-      const { rows } = await client.query<{ o_result: string; o_repo_id: string | null }>("SELECT o_result, o_repo_id FROM setup_push_grant($1::uuid, $2::uuid)", [setupId.toLowerCase(), jobId.toLowerCase()]);
+      // an engine_update job is fenced by its own definer (migration 1093); every other job by 1071's
+      const definers = await definersForJob(client, runner.accountId, setupId.toLowerCase(), jobId.toLowerCase());
+      const { rows } = await client.query<{ o_result: string; o_repo_id: string | null }>(definers.grant, [setupId.toLowerCase(), jobId.toLowerCase()]);
       const row = rows[0];
       if (row?.o_result !== "ok" || !row.o_repo_id) return { ok: false, result: row?.o_result ?? "not_found" } as const;
       const repo = (await client.query<{ gh_owner: string | null; gh_name: string | null }>("SELECT gh_owner, gh_name FROM repos WHERE account_id = $1 AND id = $2", [runner.accountId, row.o_repo_id])).rows[0];

@@ -13,7 +13,8 @@ import { parseSteps, parseTracks, shownTracks } from "../shell/core/onboarding-m
 import {
   ASK_OWNER, LABELS, NO_KVM, OPERATE_OFF, STATE_WORDS, TIME_TO_LIVE,
   COULDNT_CHECK, NEW_PRESET, NO_MACHINE, NO_OWNERS, PUBLIC_COPY, PUBLIC_OPERATE, createRefusal, dialsLine, linkedLine, machineChoices, operateBox, parseReturn, pickVisibility, placeRefusal, presetName, readPicker,
-  cleanOrigin, copyText, describeStep, enginePrice, installDetail, surveyDetail, fixFor, machineChoiceLine, machineCommands, machineContext, prerequisites, visibilityLabel,
+  cleanOrigin, copyText, describeStep, enginePrice, installDetail, surveyDetail, twinDetail, fixFor, machineChoiceLine, machineCommands, machineContext, prerequisites, visibilityLabel,
+  approveWords, draftRefusal, engineSection, planProblems, readDraft, toRoadmap,
 } from "../apps/onboarding/onboarding-engine.js";
 
 const V1 = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages", "api", "fixtures", "v1", "getOnboarding");
@@ -742,5 +743,175 @@ describe("surveyDetail (D#845 ON-10b2)", () => {
       undefined,
     ];
     for (const r of empty) expect(surveyDetail(r)).toEqual({});
+  });
+});
+
+/** A stand-in for the few DOM calls h() makes; `mk(tag)` makes an element the fake document accepts as a child. */
+function withFakeDom(fn) {
+  class FakeNode {}
+  class FakeText extends FakeNode { constructor(t) { super(); this.text = t; } }
+  class FakeEl extends FakeNode {
+    constructor(tag) { super(); this.tag = tag; this.children = []; this.attrs = {}; }
+    set className(v) { this.attrs.class = v; }
+    setAttribute(k, v) { this.attrs[k] = v; }
+    addEventListener() {}
+    appendChild(c) { this.children.push(c); }
+  }
+  vi.stubGlobal("Node", FakeNode);
+  vi.stubGlobal("document", { createElement: (t) => new FakeEl(t), createTextNode: (t) => new FakeText(t) });
+  try { fn((tag) => new FakeEl(tag)); } finally { vi.unstubAllGlobals(); }
+}
+
+// D#845 ON-11b: the plan review. The draft read, the checks that say in words what the server would refuse, every refusal's sentence, and Approve's answer.
+describe("the plan review (ON-11b)", () => {
+  const ROW = (over = {}) => ({ row_key: "A1", title: "First", summary: "Do it", size: "S", depends_on: [], keep: true, ...over });
+  const body = (over = {}) => ({ setup: { phase: "plan", state: "ok" }, draft: { id: "d1", version: 3, source: "survey", status: "draft", prd_md: "# PRD", roadmap: [ROW(), ROW({ row_key: "B2", depends_on: ["A1"], keep: false })], created_at: T }, review_mode: "standard", ...over });
+
+  it("reads a draft into the editor's rows, and a body that does not fit is null", () => {
+    const d = readDraft(body());
+    expect(d).toMatchObject({ version: 3, status: "draft", phase: "plan", prd: "# PRD", mode: "standard" });
+    expect(d.rows).toEqual([{ key: "A1", title: "First", summary: "Do it", size: "S", deps: "", keep: true }, { key: "B2", title: "First", summary: "Do it", size: "S", deps: "A1", keep: false }]);
+    for (const bad of [null, {}, { setup: {}, draft: {} }, body({ setup: { phase: 3 } }), { ...body(), draft: { ...body().draft, version: 0 } }, { ...body(), draft: { ...body().draft, status: "discarded" } }, { ...body(), draft: { ...body().draft, roadmap: [ROW({ size: "XL" })] } },
+      { ...body(), draft: { ...body().draft, roadmap: [ROW({ keep: "yes" })] } }, { ...body(), draft: { ...body().draft, roadmap: [ROW({ depends_on: [1] })] } }, { ...body(), draft: { ...body().draft, prd_md: null } }]) expect(readDraft(bad)).toBeNull();
+  });
+
+  it("fails closed: anything but a clear standard review mode is public", () => {
+    for (const mode of ["public", undefined, null, "", "Standard", 1]) expect(readDraft(body({ review_mode: mode })).mode, String(mode)).toBe("public");
+    expect(readDraft(body({ review_mode: "standard" })).mode).toBe("standard");
+  });
+
+  it("a clean plan has nothing to fix; each rule says its own words", () => {
+    const rows = readDraft(body()).rows;
+    expect(planProblems("# PRD", rows)).toEqual({ save: [], approve: [] });
+    const r = (over) => ({ key: "A1", title: "T", summary: "", size: "M", deps: "", keep: true, ...over });
+    expect(planProblems("", [r()]).save).toEqual(["The PRD must be between 1 and 200,000 characters."]);
+    expect(planProblems("x".repeat(200001), [r()]).save).toEqual(["The PRD must be between 1 and 200,000 characters."]);
+    expect(planProblems("x".repeat(200000), [r()]).save).toEqual([]);
+    expect(planProblems("x", [r({ keep: false })]).approve).toEqual(["Keep at least one row"]);
+    expect(planProblems("x", []).approve).toEqual(["Keep at least one row"]);
+    expect(planProblems("x", [r({ key: "a1" })]).save[0]).toMatch(/a key is capital letters/);
+    expect(planProblems("x", [r(), r()]).save).toEqual(["Two rows are called A1."]);
+    expect(planProblems("x", [r({ title: "" })]).save).toEqual(["A1: the title needs 1 to 120 characters."]);
+    expect(planProblems("x", [r({ title: "t".repeat(121) })]).save).toEqual(["A1: the title needs 1 to 120 characters."]);
+    expect(planProblems("x", [r({ summary: "s".repeat(501) })]).save).toEqual(["A1: the summary is limited to 500 characters."]);
+    expect(planProblems("x", [r({ deps: "A1" })]).save).toEqual(["A1 depends on A1, which is itself."]);
+    expect(planProblems("x", [r({ deps: "ZZ" })]).save).toEqual(["A1 depends on ZZ, which isn't a row in this plan."]);
+    expect(planProblems("x", [r({ deps: "B2" }), r({ key: "B2", keep: false })]).approve).toEqual(["A1 is kept but depends on B2, which you dropped."]);
+    expect(planProblems("x", [r({ deps: "B2" }), r({ key: "B2", keep: false })]).save).toEqual([]);
+    expect(planProblems("x", [r({ deps: "A, B, C, D, E, F, G, H, I, J, K" })]).save).toContain("A1: a row depends on at most 10 others.");
+    expect(planProblems("x", Array.from({ length: 201 }, (_, n) => r({ key: "K" + n }))).save).toContain("A plan holds at most 200 rows.");
+  });
+
+  it("counts characters, not UTF-16 units, like the server", () => {
+    expect(planProblems("😀".repeat(200000), [{ key: "A1", title: "T", summary: "", size: "M", deps: "", keep: true }]).save).toEqual([]);
+    expect(planProblems("😀".repeat(200001), [{ key: "A1", title: "😀".repeat(120), summary: "", size: "M", deps: "", keep: true }]).save).toEqual(["The PRD must be between 1 and 200,000 characters."]);
+  });
+
+  it("the roadmap goes to the server with its keys, dependency lists and keep flags", () => {
+    expect(toRoadmap([{ key: "A1", title: "T", summary: "S", size: "L", deps: "B2,  C3 D4", keep: false }])).toEqual([{ row_key: "A1", title: "T", summary: "S", size: "L", depends_on: ["B2", "C3", "D4"], keep: false }]);
+  });
+
+  it("every refusal has its own sentence, never the server's words", () => {
+    const e = (code, extra = {}) => Object.assign(new Error("SERVER WORDS <b>"), { status: 409, code, ...extra });
+    expect(draftRefusal(e("draft_conflict"))).toEqual({ text: "This plan changed in another window", conflict: true, reload: false });
+    expect(draftRefusal(e("plan_invalid", { reason: "no_kept_rows" })).text).toBe("Keep at least one row");
+    expect(draftRefusal(e("plan_invalid", { reason: "prd_length" })).text).toBe("The PRD must be between 1 and 200,000 characters.");
+    expect(draftRefusal(e("plan_invalid", { reason: "dependency_dropped" })).text).toBe("A kept row depends on a row you dropped. Keep that row too, or take the dependency out.");
+    expect(draftRefusal(e("plan_invalid", { reason: "constructor" })).text).toBe("The plan can't be approved as it is.");
+    expect(draftRefusal(e("plan_not_reviewed", { missing: 3 })).text).toBe("Read every item before you approve. 3 items are still to mark as read.");
+    expect(draftRefusal(e("plan_not_reviewed", { missing: 1 })).text).toBe("Read every item before you approve. 1 item is still to mark as read.");
+    expect(draftRefusal(e("plan_not_reviewed", { missing: "x" })).text).toBe("Read every item before you approve.");
+    expect(draftRefusal(e("setup_phase"))).toEqual({ text: "This setup has moved on, so the plan can't be changed here. Reloading.", conflict: false, reload: true });
+    expect(draftRefusal(e("public_repo")).text).toBe("This repo is public, so the survey can't run again. Write your own plan instead.");
+    expect(draftRefusal(e("repo_visibility_unknown")).text).toBe("We couldn't tell whether this repo is private, so the survey can't run. Try again in a minute, or write your own plan.");
+    expect(draftRefusal(e("forbidden")).text).toBe("Only owners and admins can edit or approve the plan.");
+    expect(draftRefusal(e("survey_running")).text).toBe("A survey is running now. Wait for it to finish.");
+    expect(draftRefusal(e("invalid_message")).text).toMatch(/^The plan has a value that can't be kept/);
+    for (const odd of [e("something_new"), e("constructor"), e("__proto__"), null, undefined, {}]) {
+      const r = draftRefusal(odd);
+      expect(r.text).toBe("That didn't go through. Try again.");
+      expect(r.conflict || r.reload).toBe(false);
+    }
+    // The client's own fixed sentences (offline, timeout, a 5xx) pass through; nothing else the server wrote does.
+    expect(draftRefusal({ status: 0, code: "offline", message: "You're offline. Check your connection and try again." }).text).toBe("You're offline. Check your connection and try again.");
+    expect(draftRefusal({ status: 503, kind: "server_error", code: "x", message: "Something went wrong on our side. Try again in a moment." }).text).toBe("Something went wrong on our side. Try again in a moment.");
+  });
+
+  it("Approve's answer: the install started, the Engine plan's gate (with its buy button), or an install that could not be issued", () => {
+    expect(approveWords({ install: { job_id: "j", attempt: 1 }, gate: null, install_error: null })).toEqual({ lines: ["Approved. The install has started."], actions: [] });
+    const gated = approveWords({ install: null, gate: { code: "plan_required", message: "SERVER" }, install_error: null }, { price: 13 });
+    expect(gated.lines).toEqual(["Approved. The install starts once the Engine plan covers this project.", "Pick the Engine plan to run the engine ($13.00 a month per engine)"]);
+    expect(gated.actions.map((a) => a.id)).toEqual(["choose_plan"]);
+    expect(approveWords({ install: null, gate: { code: "engine_quantity" }, install_error: null }).actions.map((a) => a.id)).toEqual(["add_engine"]);
+    expect(approveWords({ install: null, gate: { code: "account_held" }, install_error: null }).lines[1]).toBe("This account is on hold, so an engine can't be placed right now");
+    expect(approveWords({ install: null, gate: { code: "engine_plan_unavailable" }, install_error: null }).lines[1]).toBe("The Engine plan isn't available right now");
+    expect(approveWords({ install: null, gate: { code: "never_heard_of_it" }, install_error: null }).lines[1]).toBe("The Engine plan isn't available right now");
+    expect(approveWords({ install: null, gate: null, install_error: { code: "github_unavailable", message: "SERVER" } }).lines).toEqual(["Approved. GitHub couldn't be reached. Start the install again in a minute. Choose Start the install to try again."]);
+    for (const code of ["public_repo", "repo_visibility_unknown", "setup_not_placed", "engine_release_unset", "boss_login_missing", "github_refused", "not_configured", "setup_phase", "forbidden"]) {
+      const v = approveWords({ install: null, gate: null, install_error: { code, message: "SERVER <b>" } });
+      expect(v.lines[0], code).not.toContain("SERVER");
+      expect(v.lines[0], code).toMatch(/^Approved\. .+ Choose Start the install to try again\.$/);
+    }
+    expect(approveWords({ install: null, gate: null, install_error: { code: "install_error", message: "x" } }).lines[0]).toBe("Approved. The install couldn't be started now. Choose Start the install to try again.");
+  });
+
+  it("the plan step reads the setup: a survey that is running, or a plan waiting for review", () => {
+    const steps = track({ machine: "done", claude: "done", github_app: "done", project: "done", plan: "active" });
+    expect(at(steps, "plan", { setup: { id: "s", phase: "survey", state: "started" } }).lines).toEqual(["Reading your code and docs…"]);
+    expect(at(steps, "plan", { setup: { id: "s", phase: "plan", state: "ok" } }).lines).toEqual(["Your plan is ready to review"]);
+    for (const setup of [null, undefined, { id: "s", phase: "install", state: "ok" }, { id: "s", phase: "survey", state: "failed" }]) expect(at(steps, "plan", { setup }).lines, JSON.stringify(setup)).toEqual([]);
+    // The older view-model field still wins when a caller supplies it.
+    expect(at(steps, "plan", { setup: { id: "s", phase: "plan", state: "ok" }, plan: { stage: "not_started" } }).lines).toEqual(["The survey didn't start. Try again, or write your own plan."]);
+  });
+
+  it("the section carries the plan host only while the setup waits at the plan", () => {
+    const find = (n, f, out = []) => (f(n) && out.push(n), (n.children || []).forEach((c) => find(c, f, out)), out);
+    withFakeDom((mk) => {
+      const host = mk("div");
+      const has = (setup, state) => find(engineSection(track({ machine: "done", claude: "done", github_app: "done", project: "done", plan: state }), { ctx: { setup, isAdmin: true }, planHost: host, canOpen: () => false, openApp() {}, runAction() {}, announce() {} }), (n) => n === host).length;
+      expect(has({ id: "s", phase: "plan", state: "ok" }, "active")).toBe(1);
+      expect(has({ id: "s", phase: "plan", state: "ok" }, "done")).toBe(1);
+      expect(has({ id: "s", phase: "survey", state: "started" }, "active")).toBe(0);
+      expect(has({ id: "s", phase: "install", state: "ok" }, "done")).toBe(0);
+      expect(has(null, "active")).toBe(0);
+      expect(has({ id: "s", phase: "plan", state: "ok" }, "pending")).toBe(0);
+    });
+  });
+});
+
+describe("twinDetail (D#845 ON-27a)", () => {
+  const SHA = "a".repeat(40);
+  const row = (over) => ({ state: "seeding", private_name: "widgets-private", published_private_sha: null, ...over });
+  const STATES = ["creating", "not_connected", "seeding", "ready", "paused", "conflict", "refused", "failed", "removed"];
+
+  it("says something in plain words for every state, never a state name, null or undefined", () => {
+    for (const state of STATES) {
+      const v = twinDetail(row({ state, published_private_sha: state === "ready" ? SHA : null }), "acme").twin;
+      expect(v.state).toBe(state);
+      expect(v.lines.length).toBeGreaterThan(0);
+      for (const l of v.lines) expect(l).not.toMatch(/undefined|null|not_connected|creating|seeding|_/);
+      expect(v.private_url).toBe("https://github.com/acme/widgets-private");
+    }
+  });
+
+  it("offers the undo routes: pause or resume, Stop publishing once seeded, Cancel before, and nothing once removed", () => {
+    const ids = (r) => twinDetail(r, "acme").twin.actions.map((a) => a.id);
+    expect(ids(row({ state: "seeding" }))).toEqual(["pause", "cancel"]);
+    expect(ids(row({ state: "not_connected" }))).toEqual(["add_to_app", "pause", "cancel"]);
+    expect(ids(row({ state: "ready", published_private_sha: SHA }))).toEqual(["pause", "stop"]);
+    expect(ids(row({ state: "paused", published_private_sha: SHA }))).toEqual(["resume", "stop"]);
+    expect(ids(row({ state: "removed" }))).toEqual([]);
+    expect(twinDetail(row({ state: "not_connected" }), "acme").twin.actions[0].label).toBe("Add widgets-private to the GitHub app");
+    expect(twinDetail(row({ state: "ready", published_private_sha: SHA }), "acme").twin.actions.map((a) => a.label)).toEqual(["Pause", "Stop publishing"]);
+  });
+
+  it("a cancel before the seed, and a stopped twin, say the private repo stays on GitHub and is never deleted by us", () => {
+    for (const r of [row({ state: "seeding" }), row({ state: "removed" })]) expect(twinDetail(r, "acme").twin.lines.join(" ")).toContain("Delete widgets-private on GitHub if you don't want it. We never delete a repo.");
+    expect(twinDetail(row({ state: "ready", published_private_sha: SHA }), "acme").twin.lines.join(" ")).not.toContain("Delete ");
+  });
+
+  it("is empty for a missing row, an unknown state or a name that is not a repo name, and links only a well-formed owner", () => {
+    for (const bad of [null, undefined, {}, row({ state: "__proto__" }), row({ state: "toString" }), row({ private_name: "../x" }), row({ private_name: 3 })]) expect(twinDetail(bad, "acme")).toEqual({});
+    for (const owner of ["", undefined, "a/b", "-x", "x y"]) expect(twinDetail(row({}), owner).twin.private_url).toBe("");
   });
 });

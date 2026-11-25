@@ -206,6 +206,7 @@ export {
   setupPlanRun,
   type IssuedSetupJob,
 } from "./setupJobs.js";
+export { readEngineBehind, updateEngine, type EngineBehind, type IssuedEngineUpdate } from "./engineUpdate.js";
 export {
   moveEngineProject,
   type MovedEngine,
@@ -237,6 +238,7 @@ export {
 export {
   retrySurvey,
   startSurvey,
+  startSurveyRoute,
   type StartedSurvey,
 } from "./surveyJobs.js";
 export {
@@ -253,6 +255,15 @@ export {
   type SystemStopResult,
   type SystemStopScope,
 } from "./engineSystemStops.js";
+export { engineSessionSpendGuard, type EngineSpendGuardResult } from "./engineSpendGuard.js";
+export {
+  issueSystemStarts,
+  type SystemStartCause,
+  type SystemStartDeps,
+  type SystemStartPass,
+  type SystemStartResult,
+  type SystemStartScope,
+} from "./engineSystemStarts.js";
 export {
   memoryProposalsRun,
 } from "./memoryProposals.js";
@@ -390,6 +401,7 @@ export {
   type RepoRemoval,
 } from "./machineCleanups.js";
 export {
+  removeProjectCloudOnly,
   removeProjectIn,
   removeProjectRoute,
   removeProjectsOnRunner,

@@ -3,7 +3,7 @@ import type { Pool, PoolClient } from "pg";
 import { HetznerError, MANAGED_LABEL, MANAGED_LABEL_VALUE, createHetznerClient, type HetznerClient, type HetznerCode, type HetznerOptions } from "@fx/hetzner";
 import { MachineOpsError, machineKekSource, withHetznerToken, withManagedServer, type KekSource } from "@fx/model-connection";
 import { reportError } from "@fx/telemetry";
-import { RunnerHttpError, mintServerProvisioningToken, renderUserData, revokeProvisioningToken, type RunnerCloudDeps } from "@fx/runner-cloud";
+import { RunnerHttpError, mintServerProvisioningToken, removeProjectsOnRunner, renderUserData, revokeProvisioningToken, type RunnerCloudDeps } from "@fx/runner-cloud";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import type { MembershipRole } from "@fx/core/src/tenancy/authorize.js";
 import { ApiError } from "../errors.js";
@@ -84,14 +84,17 @@ export const machineServerDeps: {
   startStatusWorker?: (a: { accountId: string; userId: string; serverId: string }) => Promise<unknown>;
   /** MC-7: the worker's lease-fail port, which `revokeRunner` needs. Absent, a delete that has a runner to revoke answers 503 `leases_not_failed` after the revoke. */
   failRunnerLeases?: RunnerCloudDeps["failRunnerLeases"];
-  /** MC-7: removes the projects placed on a machine (ON-16, wired by MC-12). Absent: a delete asked to remove projects answers 409 `project_removal_unavailable`. */
+  /** MC-7: removes the projects placed on a machine. MC-12 wires it to ON-16's cloud parts (no machine parts: the server's disk goes with it). Absent (tests only): a delete asked to remove projects answers 409 `project_removal_unavailable`. */
   removeProjects?: (ctx: ServerCtx, runnerId: string) => Promise<void>;
+  /** MC-12: starts the one Workflow run that removes a project's cloud parts and then deletes its server (wired by the web app). Absent: the route answers 503 `not_configured`. */
+  startServerDelete?: (a: { accountId: string; userId: string; serverId: string; repoId: string; removalPr: boolean }) => Promise<unknown>;
   /** MC-7: how long a delete waits between two looks at Hetzner's delete action. */
   actionWaitMs?: number;
 } = {
   getKek: () => machineKekSource(),
   getOrigin: () => process.env.FX_APP_ORIGIN,
   hetznerOptions: () => ({}),
+  removeProjects: removeProjectsOfServer,
 };
 export type CreateStep = "price" | "firewall" | "token" | "render" | "insert" | "server" | "finalize" | "audit";
 const checkpoint = async (step: CreateStep): Promise<void> => {
@@ -218,11 +221,25 @@ export async function getServer(ctx: ServerCtx, id: string): Promise<ServerView 
   return row ? (await present(ctx, [row]))[0]! : null;
 }
 
-/** The account's servers that are not deleted, newest first, with the fields of `getServer`. The account predicate is explicit, on top of row security. */
-export async function listServers(ctx: ServerCtx): Promise<ServerView[]> {
+/**
+ * The account's servers that are not deleted, newest first, with the fields of `getServer`. The account predicate is explicit, on top of row security.
+ * With `repoId` (MC-12): only the server, not already being deleted, whose runner holds that repo's placement (so at most one).
+ */
+export async function listServers(ctx: ServerCtx, repoId?: string): Promise<ServerView[]> {
   const { accountId, userId } = ctx.principal;
-  const rows = await withTenant(ctx.pool, accountId, userId, async (c) => (await c.query<Row>(`SELECT ${COLUMNS} FROM managed_servers WHERE account_id = $1 AND status <> 'deleted' ORDER BY created_at DESC, id LIMIT 500`, [accountId])).rows);
+  const only = repoId === undefined ? "" : "AND status <> 'deleting' AND runner_id IN (SELECT runner_id FROM project_placements WHERE account_id = $1 AND repo_id = $2)";
+  const rows = await withTenant(ctx.pool, accountId, userId, async (c) => (await c.query<Row>(`SELECT ${COLUMNS} FROM managed_servers WHERE account_id = $1 AND status <> 'deleted' ${only} ORDER BY created_at DESC, id LIMIT 500`, repoId === undefined ? [accountId] : [accountId, repoId])).rows);
   return present(ctx, rows);
+}
+
+/** MC-12: the seam MC-7's delete calls for "remove projects too": ON-16's removal of every repo placed on the runner, cloud parts only, in the caller's own tenant transaction. */
+async function removeProjectsOfServer(ctx: ServerCtx, runnerId: string): Promise<void> {
+  const { accountId, userId } = ctx.principal;
+  try {
+    await withTenant(ctx.pool, accountId, userId, (c) => removeProjectsOnRunner(c, { accountId, userId }, runnerId, { machineParts: false }));
+  } catch (e) {
+    throw toApiError(e);
+  }
 }
 
 export interface CreateInput {

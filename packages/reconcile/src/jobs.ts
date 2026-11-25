@@ -30,6 +30,8 @@ export function buildReconcileJobs(extra: {
   setupInstall?: ReconcileJob;
   /** D#845 ON-13a4: the finish phase (Discussions and the team-log issue; it needs the GitHub port and the app database, so the route builds it). */
   setupFinish?: ReconcileJob;
+  /** D#845 ON-13c1: the system first start. It follows the finish phase, so a setup that finishes on a tick is started on the same tick. */
+  engineStarts?: ReconcileJob;
 }): readonly ReconcileJob[] {
-  return [...RECONCILE_JOBS, ...(extra.sandbox ?? []), ...(extra.machine ?? []), ...(extra.setupInstall ? [extra.setupInstall] : []), ...(extra.setupFinish ? [extra.setupFinish] : []), extra.githubInstallations, extra.githubRepos, extra.stripeSubscriptions, extra.modelKeyHealth, extra.modelCreditsRevalidate];
+  return [...RECONCILE_JOBS, ...(extra.sandbox ?? []), ...(extra.machine ?? []), ...(extra.setupInstall ? [extra.setupInstall] : []), ...(extra.setupFinish ? [extra.setupFinish] : []), ...(extra.engineStarts ? [extra.engineStarts] : []), extra.githubInstallations, extra.githubRepos, extra.stripeSubscriptions, extra.modelKeyHealth, extra.modelCreditsRevalidate];
 }

@@ -37,6 +37,8 @@ export interface PublicRepoFacts {
   defaultBranch: string | null;
   /** The caller's own write-App installation serves the repository (never true for anyone else's). */
   appInstalled: boolean;
+  /** The owner's GitHub id of a public repo (what a twin's create is authorised against); null when not public or not a number. */
+  ownerGhId: number | null;
 }
 
 /** A stored installation (from our own rows) that already serves a repo of this account, for a candidate the account installed through either App. */
@@ -72,7 +74,7 @@ export function createPublicRepoInspector(deps: PublicRepoInspectDeps) {
   const now = deps.now ?? Date.now;
   const origin = new URL(deps.apiOrigin ?? "https://api.github.com");
   if (origin.protocol !== "https:" || origin.pathname !== "/" || origin.search || origin.username) throw new Error("publicRepoInspect: apiOrigin must be a plain https origin");
-  const cache = new Map<string, { at: number; value: Pick<PublicRepoFacts, "visibility" | "defaultBranch"> }>();
+  const cache = new Map<string, { at: number; value: Pick<PublicRepoFacts, "visibility" | "defaultBranch" | "ownerGhId"> }>();
 
   async function call(method: "GET" | "DELETE", path: string, auth: string | undefined, signal?: AbortSignal, redirects: "renamed" | "return" = "renamed"): Promise<{ status: number; body: unknown }> {
     let res: Response;
@@ -122,7 +124,7 @@ export function createPublicRepoInspector(deps: PublicRepoInspectDeps) {
     return id;
   }
 
-  async function readRepository(owner: string, name: string, source: InstallationHint | null, signal?: AbortSignal): Promise<Pick<PublicRepoFacts, "visibility" | "defaultBranch">> {
+  async function readRepository(owner: string, name: string, source: InstallationHint | null, signal?: AbortSignal): Promise<Pick<PublicRepoFacts, "visibility" | "defaultBranch" | "ownerGhId">> {
     const key = `${owner}/${name}`.toLowerCase();
     const hit = source === null ? cache.get(key) : undefined;
     if (hit && now() - hit.at < FACTS_TTL_MS) return hit.value;
@@ -156,14 +158,15 @@ export function createPublicRepoInspector(deps: PublicRepoInspectDeps) {
     } finally {
       if (token) await revoke(token);
     }
-    let value: Pick<PublicRepoFacts, "visibility" | "defaultBranch">;
+    let value: Pick<PublicRepoFacts, "visibility" | "defaultBranch" | "ownerGhId">;
     if (res.status === 404) {
-      value = { visibility: "not_public", defaultBranch: null };
+      value = { visibility: "not_public", defaultBranch: null, ownerGhId: null };
     } else {
-      const b = res.status === 200 && res.body !== null && typeof res.body === "object" ? (res.body as { private?: unknown; full_name?: unknown; default_branch?: unknown }) : null;
+      const b = res.status === 200 && res.body !== null && typeof res.body === "object" ? (res.body as { private?: unknown; full_name?: unknown; default_branch?: unknown; owner?: { id?: unknown } }) : null;
       if (!b || typeof b.private !== "boolean" || typeof b.full_name !== "string" || b.full_name.toLowerCase() !== key) throw new PublicRepoInspectError("github_unavailable");
       const branch = typeof b.default_branch === "string" && PLAIN_BRANCH.test(b.default_branch) && !b.default_branch.includes("..") ? b.default_branch : null;
-      value = b.private ? { visibility: "not_public", defaultBranch: null } : { visibility: "public", defaultBranch: branch };
+      const ownerId = b.owner?.id;
+      value = b.private ? { visibility: "not_public", defaultBranch: null, ownerGhId: null } : { visibility: "public", defaultBranch: branch, ownerGhId: typeof ownerId === "number" && Number.isSafeInteger(ownerId) && ownerId > 0 ? ownerId : null };
     }
     if (source === null) {
       if (cache.size >= MAX_CACHED) cache.clear();
@@ -183,7 +186,7 @@ export function createPublicRepoInspector(deps: PublicRepoInspectDeps) {
       const owned = found !== null && (await deps.ownsTeamInstallation(accountId, found));
       const source: InstallationHint | null = owned ? { installationId: found, appKind: "team" } : (opts.hint ?? null);
       const facts = await readRepository(owner, name, source, opts.signal);
-      return facts.visibility === "public" ? { ...facts, appInstalled: owned } : { visibility: "not_public", defaultBranch: null, appInstalled: false };
+      return facts.visibility === "public" ? { ...facts, appInstalled: owned } : { visibility: "not_public", defaultBranch: null, appInstalled: false, ownerGhId: null };
     },
   };
 }
