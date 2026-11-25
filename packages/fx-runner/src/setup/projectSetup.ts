@@ -53,10 +53,10 @@ export interface ProjectSetupDeps {
 const LOG_CAP = 1024 * 1024;
 const DEFAULT_LIMITS = { bootstrap: 10 * 60_000, coldstart: 30 * 60_000, finalize: 5 * 60_000 };
 const VM_LIMIT_MS = 60 * 60_000;
-type RunnerStep = (typeof SETUP_RUNNER_STEPS)[number];
+export type RunnerStep =(typeof SETUP_RUNNER_STEPS)[number];
 
 /** The local log: 0600, opened without following a link, at most 1 MiB (the rest is dropped). It never throws and nothing in it is sent. */
-function openLog(dir: string, setupId: string | undefined): { write(text: string): void; close(): void } {
+export function openLog(dir: string, setupId: string | undefined): { write(text: string): void; close(): void } {
   let fd: number | undefined;
   let size = 0;
   try {
@@ -84,8 +84,8 @@ function openLog(dir: string, setupId: string | undefined): { write(text: string
   };
 }
 
-const reasonOf = (value: string | undefined): string | undefined => (value !== undefined && SETUP_FAILURE_REASON_PATTERN.test(value) ? value : undefined);
-const handleOf = (name: string): SandboxHandle => ({ runId: "", sandboxName: name, sessionId: "" });
+export const reasonOf =(value: string | undefined): string | undefined => (value !== undefined && SETUP_FAILURE_REASON_PATTERN.test(value) ? value : undefined);
+export const handleOf =(name: string): SandboxHandle => ({ runId: "", sandboxName: name, sessionId: "" });
 
 export function createProjectSetupHandler(deps: ProjectSetupDeps): MachineJobHandler<"project_setup"> {
   return async ({ job, reporter, signal }) => {
@@ -98,7 +98,7 @@ export function createProjectSetupHandler(deps: ProjectSetupDeps): MachineJobHan
  * The handler for each job's engine (`sandbox_engine`): a microVM runner uses the microVM guest, any other the OS sandbox's host guest (`hostGuest.ts`); nothing else in the handler differs. The engine is asked again for
  * each job. A guest this build has none of is the closed `engine_unsupported`, and nothing is started. Undefined when neither exists, so the dispatcher reports `kind_unsupported`.
  */
-export function setupHandlerFor(handlers: { microvm: MachineJobHandler<"project_setup"> | undefined; standard: MachineJobHandler<"project_setup"> | undefined }, engine: () => "microvm" | "os_sandbox"): MachineJobHandler<"project_setup"> | undefined {
+export function setupHandlerFor<K extends "project_setup" | "engine_update" = "project_setup">(handlers: { microvm: MachineJobHandler<K> | undefined; standard: MachineJobHandler<K> | undefined }, engine: () => "microvm" | "os_sandbox"): MachineJobHandler<K> | undefined {
   if (handlers.microvm === undefined && handlers.standard === undefined) return undefined;
   return async (context) => {
     const chosen = engine() === "microvm" ? handlers.microvm : handlers.standard;

@@ -34,6 +34,7 @@ import { isDraining, isPaused, loadSettings, omitsDevToken, setDraining } from "
 import { completeCaps, engineLineOf, engineMismatchClaimBlock, limitsClaimBlock, type ClaimBlock, type SandboxEngine, type VmHostFacts } from "../vm/limits.js";
 import { createLiveMicrovm, type LiveMicrovm, type LiveMicrovmParts } from "../vm/sandboxd/live.js";
 import { createSetupVmParts, createVmClaimGuard, createVmJobDeps, runEventHooks, type VmRunBlock } from "../daemon/vmJobDeps.js";
+import { createEngineUpdateHandler } from "../setup/engineUpdate.js";
 import { createProjectSetupHandler, setupHandlerFor } from "../setup/projectSetup.js";
 import { createHostSetupVm, type HostGuestDeps } from "../setup/hostGuest.js";
 import { createEngineLeaseGuard, createEngineSessionHandlers, createSessionLock, lockSessionHandlers, sessionStopperOf } from "../engineSession/lifecycle.js";
@@ -806,6 +807,9 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       const guestDeps: HostGuestDeps | undefined = host.engine.installCapture === undefined || host.selfCommand === undefined ? undefined : { start: host.engine.installCapture, host: host.sandbox, platform: host.platform, home, stateDir, binaryDir: path.dirname(binaryPath), jobsRoot: path.join(path.dirname(mirrorsRoot), "setup-guests"), cacheDir: path.dirname(mirrorsRoot), searchPath: guestPath, selfCommand: host.selfCommand, uid: host.uid, wsl: host.sandbox.wsl };
       const standardVm = guestDeps === undefined ? undefined : createHostSetupVm(guestDeps);
       const setupHandler = setupHandlerFor({ microvm: vmDeps === undefined ? undefined : setupWith(vmDeps), standard: standardVm === undefined ? undefined : setupWith(standardVm) }, () => effectiveEngine(engine, loadSettings(stateDir).sandboxEngine));
+      // D#845 ON-15b: `engine_update` runs on the same two guests; the repository's name comes from this machine's own mirror and the base is the mirror's default-branch tip after a sync.
+      const updateWith = (slice: Parameters<typeof createProjectSetupHandler>[0]["vm"]) => createEngineUpdateHandler({ vm: slice, apply: setupParts.apply, logDir: path.join(home, ".local", "state", "fx-runner", "setup"), push: { git: setupParts.git, client, revoke: (token) => setupRevoker.revokeToken(token), snapshotsRoot: path.join(stateDir, "git-snapshots") }, repos: setupRepos, repoOf: createRepoLookup({ git: setupParts.git, mirrorDir: (id: number) => mirrors.dir({ id: String(id), owner: "-", name: "-" }) }), baseOf: async (repo) => (await mirrors.sync(repo)).base });
+      const updateHandler = setupHandlerFor<"engine_update">({ microvm: vmDeps === undefined ? undefined : updateWith(vmDeps), standard: standardVm === undefined ? undefined : updateWith(standardVm) }, () => effectiveEngine(engine, loadSettings(stateDir).sandboxEngine));
       // D#845 ON-13a1: the three session kinds, on the same microVM stack. A persistent VM per repository; the repository is seeded from this machine's own mirror (`repoOf`), never from a name the cloud sent.
       // ON-13a3: on the standard tier the same handlers run over a root kept on this machine and one held process in a systemd user scope (`engineSession/standardTier.ts`); a machine with no user manager has none.
       const sessionCommon =
@@ -842,7 +846,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       const leaseOn = sessionHandlers !== undefined && inventoryReporter !== undefined;
       leaseGuard.bind(leaseOn ? sessionStopperOf(sessionHandlers.engine_session_stop, sessionLock) : undefined);
       engineLeaseArmed = leaseOn;
-      const machineJobs = (machineJobDispatcher = createMachineJobDispatcher({ client, keyring, runnerId: registration.runner_id, now: ctx.now, handlers: { ...(setupHandler === undefined ? {} : { project_setup: setupHandler }), ...(sessionHandlers === undefined ? {} : lockSessionHandlers(sessionHandlers, sessionLock)) },sandboxEngine: () => effectiveEngine(engine, loadSettings(stateDir).sandboxEngine), signal: stopped.signal, log: (event) => ctx.out(`fx-runner: machine job ${event.event}`) }));
+      const machineJobs = (machineJobDispatcher = createMachineJobDispatcher({ client, keyring, runnerId: registration.runner_id, now: ctx.now, handlers: { ...(setupHandler === undefined ? {} : { project_setup: setupHandler }), ...(updateHandler === undefined ? {} : { engine_update: updateHandler }), ...(sessionHandlers === undefined ? {} : lockSessionHandlers(sessionHandlers, sessionLock)) },sandboxEngine: () => effectiveEngine(engine, loadSettings(stateDir).sandboxEngine), signal: stopped.signal, log: (event) => ctx.out(`fx-runner: machine job ${event.event}`) }));
       // D#842 EB-3c: the engine bridge runs beside the claim loop, never under it: it is started here, nothing below awaits it, and it ends only when `finally` stops it.
       if (host.engineBridge !== undefined) {
         const cloud = { origin: registration.cloud_origin, key, now: ctx.now, fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass) };
