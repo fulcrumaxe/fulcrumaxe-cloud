@@ -4,7 +4,7 @@
 // the live quote, the disabled button, the second click after a price change, one key for an unknown outcome), every refusal as a fixed sentence, and nothing null,
 // undefined or NaN on screen. The bodies are the contract fixtures packages/api/test/contract.test.ts checks against the routes' schemas. The DOM is in e2e/runners.spec.ts.
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CLEAN_REFUSALS, SERVER_BEING_CREATED, SIGN_IN_AGAIN, TIER_NOTICE, TOO_MANY_TRIES, UNKNOWN_OUTCOME, availableIn, catalogUrl, connectSentence, connectedText, createCreator, createSentence, createServers, moneyText, offeredIn, priceLine, quoteUrl, readCatalog,
   readCredential, readQuote, readServers, removeSentence, specsText, totalText, unlabelledText, SERVER_WORDS, HETZNER_STEPS,
@@ -215,6 +215,8 @@ let uuids = 0;
 const uuid = () => `00000000-0000-4000-8000-${String(++uuids).padStart(12, "0")}`;
 
 describe("the create dialog", () => {
+  afterEach(() => vi.useRealTimers());
+
   it("opens on the first location, picks Small there, and has the live quote before the button is live", async () => {
     const { call, log } = cloud();
     const c = createCreator({ call, uuid });
@@ -497,6 +499,7 @@ describe("the create dialog", () => {
   it("a 429 after an unknown outcome holds the button for the wait and the next press sends the same key", async () => {
     const answers = [fail(0, "timeout"), fail(429, "rate_limited", { retryAfter: 1 })];
     const { call, log } = cloud({ create: () => answers.shift() || CREATED });
+    vi.useFakeTimers();
     const c = createCreator({ call, uuid });
     await c.open();
     await c.submit();
@@ -504,7 +507,7 @@ describe("the create dialog", () => {
     expect(c.state).toMatchObject({ wait: 1, locked: true });
     expect(await c.submit()).toMatchObject({ ok: false, code: "" }); // held
     expect(posts(log)).toHaveLength(2);
-    await new Promise((r) => setTimeout(r, 1300));
+    await vi.advanceTimersByTimeAsync(1300); // fake clock: the hold is a Date.now() deadline, so no wall-clock wait
     expect(c.state.wait).toBe(0);
     expect((await c.submit()).ok).toBe(true);
     expect(new Set(posts(log).map((x) => x.key)).size).toBe(1);
@@ -587,11 +590,12 @@ describe("the create dialog", () => {
   it("a 429 on the first press keeps the key, and the next press sends it again", async () => {
     const answers = [fail(429, "hetzner_rate_limit_exceeded", { retryAfter: 1 })];
     const { call, log } = cloud({ create: () => answers.shift() || CREATED });
+    vi.useFakeTimers();
     const c = createCreator({ call, uuid });
     await c.open();
     await c.submit();
     expect(c.state).toMatchObject({ locked: true, wait: 1 });
-    await new Promise((r) => setTimeout(r, 1300));
+    await vi.advanceTimersByTimeAsync(1300); // fake clock: the hold is a Date.now() deadline, so no wall-clock wait
     expect((await c.submit()).ok).toBe(true);
     expect(new Set(posts(log).map((x) => x.key)).size).toBe(1);
   });
