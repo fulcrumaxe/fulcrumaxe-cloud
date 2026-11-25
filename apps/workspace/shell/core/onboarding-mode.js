@@ -11,6 +11,10 @@ export const ENGINE_STEP_IDS = Object.freeze(["machine", "claude", "github_app",
 const ENGINE_STATES = Object.freeze(["done", "active", "pending", "failed"]);
 // D#845 ON-22: why the Engine plan does not cover one more engine (the server's closed list).
 const PLAN_GATES = Object.freeze(["plan_required", "engine_quantity", "plan_ended", "account_held", "unavailable"]);
+// D#845 ON-11a1: the setup phases and states the server sends on the engine track's `setup`.
+const SETUP_PHASES = Object.freeze(["survey", "plan", "install", "await_merge", "finish", "done", "removed"]);
+const SETUP_STATES = Object.freeze(["started", "ok", "failed", "skipped"]);
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const READ_TIMEOUT_MS = 5000;
 const AFTER_RESTORE_MS = 300; // script.js restores or opens its first windows 200 ms after DESKTOP
 
@@ -67,10 +71,17 @@ function parseEngine(list) {
   return steps;
 }
 
+/** D#845 ON-11a1: the engine track's live setup, kept only when its id is a UUID and its phase and state are known. Anything else is "no setup", never a failure of the track. */
+function parseSetup(v) {
+  if (!v || typeof v !== "object" || typeof v.id !== "string" || !UUID.test(v.id)) return null;
+  if (!SETUP_PHASES.includes(v.phase) || !SETUP_STATES.includes(v.state)) return null;
+  return { id: v.id, phase: v.phase, state: v.state };
+}
+
 /**
  * D#845 ON-6: both tracks of a GET /api/v1/onboarding body (`tracks`, pipeline first), or null when the pipeline track or the envelope does not fit.
  * An engine track that does not fit gives `engine: null` (the pipeline track still reads; the app shows the engine track's own error).
- * `chosen` is when the person chose each track, or null while they have not.
+ * `setup` is the engine track's `{ id, phase, state }` (null when absent or not valid). `chosen` is when the person chose each track, or null while they have not.
  */
 export function parseTracks(body) {
   if (!body || typeof body !== "object" || !Array.isArray(body.tracks) || body.tracks.length !== 2) return null;
@@ -81,7 +92,7 @@ export function parseTracks(body) {
   if (!pipeline) return null;
   if (p.chosen_at !== null && !validTime(p.chosen_at)) return null;
   if (e.chosen_at !== null && !validTime(e.chosen_at)) return null;
-  return { pipeline, engine, chosen: { pipeline: p.chosen_at, engine: e.chosen_at } };
+  return { pipeline, engine, setup: parseSetup(e.setup), chosen: { pipeline: p.chosen_at, engine: e.chosen_at } };
 }
 
 /**

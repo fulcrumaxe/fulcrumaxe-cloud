@@ -122,7 +122,8 @@
           "failure": null
         }
       ],
-      "chosen_at": "2026-09-20T09:00:00.000Z"
+      "chosen_at": "2026-09-20T09:00:00.000Z",
+      "setup": null
     }
   ]
 }

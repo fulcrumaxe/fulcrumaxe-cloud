@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { SANDBOX_PINNED_VCPUS, PINNED_MEMORY_MB, computeComputeUsd } from "@fx/spend";
 import { ONBOARDING_STEPS, getOnboarding } from "@fx/core/src/onboarding/progress.js";
-import { ENGINE_STEPS, TRACKS, chooseTrack } from "@fx/core/src/onboarding/engineTrack.js";
+import { ENGINE_STEPS, SETUP_PHASES, SETUP_STATES, TRACKS, chooseTrack } from "@fx/core/src/onboarding/engineTrack.js";
 import { PREFLIGHT_CODES } from "@fulcrumaxe/runner-protocol";
 import { readMachineFacts } from "@fx/runner-cloud";
 import { enginePlanOffered } from "@fx/billing";
@@ -64,12 +64,13 @@ const engineStepsSchema = z.array(
     failure: z.object({ code: z.string(), at: z.string() }).nullable(),
   }),
 );
+const engineSetupSchema = z.object({ id: z.string().uuid(), phase: z.enum(SETUP_PHASES), state: z.enum(SETUP_STATES) }).nullable();
 const onboardingSchema = z.object({
   started_at: z.string(),
   steps: pipelineStepsSchema,
   tracks: z.tuple([
     z.object({ track: z.literal("pipeline"), steps: pipelineStepsSchema, chosen_at: z.string().nullable() }),
-    z.object({ track: z.literal("engine"), steps: engineStepsSchema, chosen_at: z.string().nullable() }),
+    z.object({ track: z.literal("engine"), steps: engineStepsSchema, chosen_at: z.string().nullable(), setup: engineSetupSchema }),
   ]),
 });
 const trackBodySchema = z.strictObject({ track: z.enum(TRACKS) });
@@ -145,7 +146,7 @@ export const onboardingRoutes: RouteEntry[] = [
       "`completed_at` is a server time, or null while the step is open. `skipped` is true for a step that is not open but was never done: the free `preview` once the plan is chosen without one (it then has no time; a preview that finishes later turns it into a done step with its real time). Choosing a plan does not wait for any earlier step. Works for an account that has not subscribed yet. " +
       "`model_key` and `readonly_app` follow the current state, so they reopen when the model key is removed or stops working, or when the read-only GitHub App is uninstalled or suspended; the other steps are milestones that stay done. " +
       "`steps` is the pipeline track and is also `tracks[0].steps`. `tracks` lists the pipeline track, then the engine track (`machine`, `claude`, `github_app`, `project`, `plan`, `install`, `live`), each with `chosen_at` (null until the person chooses it). " +
-      "Every engine step is derived from current rows on each read: `state` is `done`, `failed` (a stored failure for that step while its source is still false; it clears when the source turns true), `active` (the first step not done) or `pending`. `tier` is on `machine` only. `plan_gate` is on `project` only, when the Engine plan does not cover one more engine: `plan_required`, `engine_quantity`, `plan_ended` (the plan ended, payment failed past its grace, or the subscription is not paying), `account_held` (a platform hold or a partner suspension; an owner's own pause is not one) or `unavailable` (the plan cannot be bought right now); it is derived on every read. `engines` (also on `project` only) is `{ quantity, live }`: the engines the plan pays for and the engines live now, present once the plan has a quantity.",
+      "Every engine step is derived from current rows on each read: `state` is `done`, `failed` (a stored failure for that step while its source is still false; it clears when the source turns true), `active` (the first step not done) or `pending`. `tier` is on `machine` only. `plan_gate` is on `project` only, when the Engine plan does not cover one more engine: `plan_required`, `engine_quantity`, `plan_ended` (the plan ended, payment failed past its grace, or the subscription is not paying), `account_held` (a platform hold or a partner suspension; an owner's own pause is not one) or `unavailable` (the plan cannot be bought right now); it is derived on every read. `engines` (also on `project` only) is `{ quantity, live }`: the engines the plan pays for and the engines live now, present once the plan has a quantity. The engine track also carries `setup`: `{ id, phase, state }` of the account's one live setup (any phase but `done` or `removed`), else null.",
     principals: ["session"],
     minRole: "admin",
     idempotency: "never",

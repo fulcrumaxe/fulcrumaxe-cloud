@@ -3941,6 +3941,11 @@ export interface Operations {
           }) | (null);
         }>;
         chosen_at: string | null;
+        setup: ({
+          id: string;
+          phase: "survey" | "plan" | "install" | "await_merge" | "finish" | "done" | "removed";
+          state: "started" | "ok" | "failed" | "skipped";
+        }) | (null);
       }];
     };
   };

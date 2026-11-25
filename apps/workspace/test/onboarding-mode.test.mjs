@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ONBOARDING_APPS, enterOnboardingMode, isOpenStep, parseSteps, resolveAccess } from "../shell/core/onboarding-mode.js";
+import { ONBOARDING_APPS, enterOnboardingMode, isOpenStep, parseSteps, parseTracks, resolveAccess } from "../shell/core/onboarding-mode.js";
 
 const V1 = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages", "api", "fixtures", "v1", "getOnboarding");
 const fixture = (name) => JSON.parse(readFileSync(join(V1, name), "utf8"));
@@ -257,5 +257,33 @@ describe("startSetupStrip: who reads, and how often", () => {
   it("reportSteps does nothing for a session that is not showing the strip", async () => {
     const { reportSteps } = await load();
     expect(() => reportSteps(parseSteps(fixture("200-pay.json")))).not.toThrow();
+  });
+});
+
+describe("parseTracks: the engine track's setup", () => {
+  // D#845 ON-11a1: the engine track's `setup` is kept only when its id is a UUID and its phase and state are known; anything else is "no setup" and the track still reads.
+  it("keeps the engine track's setup only when it is valid", () => {
+    const body = fixture("200-setup.json");
+    expect(parseTracks(body).setup).toEqual({ id: "6f1d2c3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f", phase: "plan", state: "ok" });
+    expect(parseTracks(fixture("200-new.json")).setup).toBeNull();
+    const withSetup = (setup) => parseTracks({ ...body, tracks: [body.tracks[0], { ...body.tracks[1], setup }] });
+    const id = "6f1d2c3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f";
+    for (const bad of [undefined, null, "x", 3, [], {}, { id, phase: "plan" }, { id: "not-a-uuid", phase: "plan", state: "ok" }, { id, phase: "nope", state: "ok" }, { id, phase: "plan", state: "nope" }, { id: 7, phase: "plan", state: "ok" }]) {
+      const parsed = withSetup(bad);
+      expect(parsed.setup, JSON.stringify(bad)).toBeNull();
+      expect(parsed.engine).toHaveLength(7);
+    }
+    expect(withSetup({ id, phase: "done", state: "failed", extra: "dropped" }).setup).toEqual({ id, phase: "done", state: "failed" });
+    const own = parseTracks(body);
+    expect(own.engine.every((s) => !("setup" in s))).toBe(true);
+  });
+
+  // A coldstart step the engine left to the cloud is stored as `skipped`; a live setup in that state must still read.
+  it("keeps a setup whose state is skipped", () => {
+    const body = fixture("200-setup.json");
+    const id = "6f1d2c3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f";
+    const parsed = parseTracks({ ...body, tracks: [body.tracks[0], { ...body.tracks[1], setup: { id, phase: "install", state: "skipped" } }] });
+    expect(parsed.setup).toEqual({ id, phase: "install", state: "skipped" });
+    expect(parsed.engine).toHaveLength(7);
   });
 });
