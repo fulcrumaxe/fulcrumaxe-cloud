@@ -188,11 +188,33 @@ export function installDetail(row) {
   const state = row.state === "started" ? "running" : row.state === "skipped" ? "ok" : row.state;
   return { install: { sub_steps: [{ id: row.sub_step, state }] } };
 }
+/** D#845 ON-10b2: the closed reasons a failed survey records, in plain words (Ruling 88 item 10). The sentence they sit in is `FIXES.survey_failed`: "The survey stopped (<these words>)". */
+const SURVEY_REASONS = {
+  output_invalid: "its answer wasn't a usable plan",
+  output_too_large: "its answer was too long",
+  no_output: "it gave no answer",
+  workspace_written: "it tried to change your files",
+  run_failed: "the run failed",
+  runner_lost: "your machine stopped answering",
+  refused_at_admit: "your machine couldn't take it",
+  cancelled: "it was cancelled",
+  deadline: "it ran past 20 minutes",
+};
+/**
+ * D#845 ON-10b2 (ON-6's fields): the plan step's detail from a setup row ({ phase, state, survey_run_id, failure_code, failure_reason }). A survey that started and has a run is "surveying" (with the run to open); one that started with
+ * no run is "not_started". A failed survey (code `survey_failed` or `survey_timeout`) carries its reason in plain words for the existing failure line. Anything else, an unknown reason included, is empty.
+ */
+export function surveyDetail(row) {
+  if (!row || row.phase !== "survey") return {};
+  if (row.state === "started") return typeof row.survey_run_id === "string" && row.survey_run_id !== "" ? { plan: { stage: "surveying", run_id: row.survey_run_id } } : { plan: { stage: "not_started" } };
+  if (row.state === "failed" && (row.failure_code === "survey_failed" || row.failure_code === "survey_timeout") && typeof row.failure_reason === "string" && Object.hasOwn(SURVEY_REASONS, row.failure_reason)) return { detail: { reason: SURVEY_REASONS[row.failure_reason] } };
+  return {};
+}
 /**
  * One engine step's copy. `steps` is the engine track, `i` the step, `ctx` the view-model (every field optional):
  *   name, origin, isAdmin, offline, last_seen_min, price (the Engine plan's monthly price), planNote (a refused purchase's sentence, or the "Engine added" notice), planBusy
  *   machine { linked_silent, helper_missing, kvm: "present"|"absent", preflight: [{ code, fix }], doctor_reason, doctor: [{ code, ...detail }] }
- *   project { no_eligible_machine }   plan { stage: "surveying"|"draft", run_id }
+ *   project { no_eligible_machine }   plan { stage: "surveying"|"not_started"|"draft", run_id }
  *   install { sub_steps: [{ id, state }], pr: { number, state: "open"|"closed" } }   live { operate: "on"|"off", silent_min, starting }
  * Returns { label, state, word, failed, lines, list, commands, actions }; an action with `app` is a hand-off to that app.
  */
@@ -259,6 +281,7 @@ export function describeStep(steps, i, ctx = {}) {
       const p = ctx.plan || {};
       if (step.state === "done") v.lines.push("Your plan is approved");
       else if (p.stage === "surveying") { v.lines.push("Reading your code and docs…"); if (p.run_id) v.actions.push(act("open_run", "Open the run", "runs")); }
+      else if (p.stage === "not_started") v.lines.push("The survey didn't start. Try again, or write your own plan.");
       else if (p.stage === "draft") v.lines.push("Your plan is ready to review");
       break;
     }

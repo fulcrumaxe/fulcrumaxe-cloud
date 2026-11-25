@@ -377,15 +377,15 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
   }
 
   /**
- * D#845 ON-10b1 (Ruling 88 item 6): a survey run is offered only to the machine its repo is placed on, and only while its setup is waiting for exactly this run. It authorizes (not only narrows),
- * so it is one condition here and not a routing rule. CWE-367: the machine must be the CURRENT placement AND the machine the start's seat was decided for (kept in the run's `run.input` meta as `survey_runner_id`); a placement that moved since the start (a $0 subscription seat, then an api_key machine) means the run is never claimed, and the setup's deadline or a retry handles it. `runExpr` and `runnerExpr` are SQL operands the caller owns (never user text). The claim re-checks it under the run's lock.
- */
-const surveyPinSql = (runExpr: string, runnerExpr: string, roleExpr: string, accountExpr: string): string =>
-  `(${roleExpr} <> '${SURVEY_ROLE}' OR EXISTS (SELECT 1 FROM project_setups s JOIN project_placements pp ON pp.account_id = s.account_id AND pp.repo_id = s.repo_id
-      WHERE s.account_id = ${accountExpr} AND s.survey_run_id = ${runExpr} AND s.phase = 'survey' AND s.state = 'started' AND pp.runner_id = ${runnerExpr}
-      AND EXISTS (SELECT 1 FROM run_events e WHERE e.account_id = ${accountExpr} AND e.run_id = ${runExpr} AND e.kind = 'run.input' AND e.payload #>> '{meta,survey_runner_id}' = ${runnerExpr}::uuid::text)))`;
+   * D#845 ON-10b1 (Ruling 88 item 6): a survey run is offered only to its repo's CURRENT placement, and only while its setup waits for exactly this run. The machine must also be the one the start's seat was decided for
+   * (`survey_runner_id` in the run's `run.input` meta, CWE-367). It authorizes, so it is a claim condition and not a routing rule; the claim re-checks it under the run's lock. The expressions are SQL operands the caller owns.
+   */
+  const surveyPinSql = (runExpr: string, runnerExpr: string, roleExpr: string, accountExpr: string): string =>
+    `(${roleExpr} <> '${SURVEY_ROLE}' OR EXISTS (SELECT 1 FROM project_setups s JOIN project_placements pp ON pp.account_id = s.account_id AND pp.repo_id = s.repo_id
+        WHERE s.account_id = ${accountExpr} AND s.survey_run_id = ${runExpr} AND s.phase = 'survey' AND s.state = 'started' AND pp.runner_id = ${runnerExpr}
+        AND EXISTS (SELECT 1 FROM run_events e WHERE e.account_id = ${accountExpr} AND e.run_id = ${runExpr} AND e.kind = 'run.input' AND e.payload #>> '{meta,survey_runner_id}' = ${runnerExpr}::uuid::text)))`;
 
-/** The claim of one candidate, in one transaction. */
+  /** The claim of one candidate, in one transaction. */
   async function claimOne(
     accountId: string,
     runnerId: string,

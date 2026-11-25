@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
-import { SURVEY_ROLE } from "@fulcrumaxe/runner-protocol";
+import { SURVEY_DEADLINE_GRACE_MS, SURVEY_MAX_RUN_MS, SURVEY_ROLE } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { reportError } from "@fx/telemetry";
 import { NotFoundError } from "@fx/core/src/tenancy/errors.js";
@@ -13,18 +13,17 @@ import {
   RunPrecheckRefusedError,
   acceptQueuedRunnerRun,
   startAgentRun,
+  surveyEndingFor,
+  writeRunStatusOn,
   type ExecutionTargetRegistry,
+  type RunStatus,
 } from "@fx/runner";
 import type { SeatRequest, SeatResult } from "./seat.js";
 
 /**
- * D#845 ON-10b1 (Ruling 88 items 4 and 6): the worker's start of a survey run. It holds the runner pool; nothing else does. It is given plain facts the caller already checked as the person (the setup, the repo, its
- * placed machine, the default branch's head): it resolves the `survey` seat, builds the fixed prompt, and starts the run on the registry with three things that make it safe:
- *  - the run is created for `runner_local` only (`expectedExecutionMode`), so a mode that moved after the seat throws before any row exists;
- *  - the run is bound to its setup INSIDE the create transaction (`survey_start_record`, under the verified principal's user id, cleared again straight after), so the bind commits with the run or not at all, and
- *    the issuer writes the job only after that, so no runner can see an unbound survey;
- *  - the idempotency key is `survey:<setup>:<prior survey run or none>`, so two clicks read the same prior run and exactly one wins.
- * The answer is the run's id or a closed refusal; no error text, pool or client leaves this module.
+ * D#845 ON-10b1 (Ruling 88 items 4 and 6): the worker's start of a survey run. It holds the runner pool and is given plain facts the caller already checked as the person. It resolves the `survey` seat, builds the fixed
+ * prompt and starts the run for `runner_local` only. The run is bound to its setup inside the create transaction, so the bind commits with the run or not at all, and the idempotency key
+ * `survey:<setup>:<prior run or none>` lets exactly one of two clicks win. The answer is the run's id or a closed refusal; no error text, pool or client leaves this module.
  */
 
 export interface StartSurveyRunInput {
@@ -54,15 +53,30 @@ export type StartSurveyRunResult =
   | { ok: false; status: 409; code: "survey_not_started"; reason: string }
   | { ok: false; status: 500; code: "internal" };
 
+/**
+ * One look of the deadline Workflow at a survey run (ON-10b2). `cancel` is the start's own failure path: the Workflow could not be started, so the run is ended now, `cancelled`, whatever its deadline.
+ * The answer is `final` (nothing more to look at) or the time of the next look, as ISO text so it crosses a Workflow step as plain data.
+ */
+export interface EndSurveyAtDeadlineInput {
+  accountId: string;
+  setupId: string;
+  runId: string;
+  cancel?: boolean;
+}
+export type SurveyDeadlineLook = { final: true } | { final: false; wakeAt: string };
+
 export interface SurveyStartDeps {
   /** The runner login's pool. */
   pool: Pool;
+  /** The clock the deadline reads (tests pass a fake one). */
+  now?: () => Date;
   registry: ExecutionTargetRegistry;
   resolveRunSeat(request: SeatRequest): Promise<SeatResult>;
 }
 
 export interface SurveyStartFacade {
   startSurveyRun(input: StartSurveyRunInput): Promise<StartSurveyRunResult>;
+  endSurveyAtDeadline(input: EndSurveyAtDeadlineInput): Promise<SurveyDeadlineLook>;
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -87,7 +101,40 @@ export function createSurveyStart(deps: SurveyStartDeps): SurveyStartFacade {
     }
   }
 
+  /**
+   * D#845 ON-10b2 (Ruling 88 item 7): one look at a survey run, in one tenant transaction on the runner login, under the setup row's lock. The setup no longer waiting for this run is final. A run that is over while its setup still waits
+   * ended by a move that bypasses the status writer (a mode change): it is closed out with the same mapping the writer's hook uses. A pending run is ended `timed_out` once the survey's own 22 minutes (20 and the grace) have passed since
+   * the survey started; a running one 22 minutes after it was claimed, so waiting for a machine never eats its 20. Either end goes through `writeRunStatusOn`, whose hook writes `survey_timeout`/`deadline` in the same transaction.
+   */
+  async function endAtDeadline(input: EndSurveyAtDeadlineInput): Promise<SurveyDeadlineLook> {
+    const { accountId, setupId, runId } = input;
+    if (![accountId, setupId, runId].every((id) => typeof id === "string" && UUID.test(id))) return { final: true };
+    const at = (deps.now ?? (() => new Date()))();
+    return withTenant(deps.pool, accountId, async (client): Promise<SurveyDeadlineLook> => {
+      const setup = (await client.query<{ phase: string; state: string; survey_run_id: string | null; survey_started_at: Date | null }>("SELECT phase, state, survey_run_id, survey_started_at FROM project_setups WHERE account_id = $1 AND id = $2 FOR UPDATE", [accountId, setupId])).rows[0];
+      if (!setup || setup.phase !== "survey" || setup.state !== "started" || setup.survey_run_id !== runId) return { final: true };
+      const run = (await client.query<{ status: RunStatus; started_at: Date | null }>("SELECT status, started_at FROM agent_runs WHERE account_id = $1 AND id = $2 AND role = $3", [accountId, runId, SURVEY_ROLE])).rows[0];
+      if (!run) return { final: true };
+      if (run.status !== "pending" && run.status !== "running" && run.status !== "paused") {
+        // Over, and the setup still waiting: a move that bypassed the status writer. Close it out the way the writer's hook would have (the failure reason is not known here, so `failed` reads as the run failing).
+        const ending = surveyEndingFor({ from: run.started_at === null ? "pending" : "running", to: run.status });
+        await client.query("SELECT survey_fail($1::uuid, $2, $3)", [runId, ending?.code ?? "survey_failed", ending?.reason ?? "no_output"]);
+        return { final: true };
+      }
+      const from = run.status;
+      const origin = from === "running" && run.started_at !== null ? run.started_at : (setup.survey_started_at ?? at);
+      const due = new Date(origin.getTime() + SURVEY_MAX_RUN_MS + SURVEY_DEADLINE_GRACE_MS);
+      if (input.cancel !== true && at.getTime() < due.getTime()) return { final: false, wakeAt: due.toISOString() };
+      // A paused run can only be cancelled (the table has no other way out of it); pending and running end `timed_out`, or `cancelled` on the start's own failure path.
+      const to: RunStatus = input.cancel === true || from === "paused" ? "cancelled" : "timed_out";
+      const written = await writeRunStatusOn(client, { accountId, runId, from, to, ...(to === "timed_out" ? { failureReason: "wall_clock_limit" } : {}) });
+      // The run moved under this look (a claim, or the runner's own end): look again at once, and the next look reads the new status.
+      return written.updated ? { final: true } : { final: false, wakeAt: at.toISOString() };
+    });
+  }
+
   return {
+    endSurveyAtDeadline: endAtDeadline,
     startSurveyRun: async (input) => {
       if (![input.accountId, input.userId, input.setupId, input.repoId, input.runnerId].every((id) => typeof id === "string" && UUID.test(id)) || (input.priorRunId !== null && !UUID.test(input.priorRunId))) return notStarted("invalid_input");
       const seat = await deps.resolveRunSeat({ accountId: input.accountId, role: SURVEY_ROLE, repoId: input.repoId, runnerId: input.runnerId, purpose: "survey" });

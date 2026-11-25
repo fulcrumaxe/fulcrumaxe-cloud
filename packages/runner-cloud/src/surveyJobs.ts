@@ -1,17 +1,16 @@
 import type { PoolClient } from "pg";
+import { reportError } from "@fx/telemetry";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { RunnerHttpError, type RunnerCloudDeps, type SessionPrincipal } from "./http.js";
+import { RunnerHttpError, type RunnerCloudDeps, type RunnerHttpResponse, type SessionPrincipal } from "./http.js";
 import { requireMemberRole } from "./memberRole.js";
 import { blockError, blockFor, readRepoVisibility } from "./repoPrivacy.js";
 import { RunPullRequestError } from "./runPullRequest.js";
 
 /**
- * D#845 ON-10b1 (Ruling 88 item 8): the cloud starts a project survey, for an owner or admin. The first look is the person's own tenant transaction on the web login: the setup is theirs and waiting at the survey step, its
- * repository is placed on a machine, and that machine's Claude login is one this person may use (a subscription machine runs only its registrant's runs). Then the repository must be private (read live), and the default
- * branch's head is read through the App's read-only port. The worker's `startSurveyRun` does the rest: the seat, the fixed prompt and the one create transaction that binds the run to the setup.
- *
- * Nothing is written before the worker's start, and a refusal at any step writes nothing. Refusals: 403 `forbidden`; 404 `not_found`; 409 `setup_phase`, `setup_not_placed`, `survey_needs_machine_owner`, `public_repo`,
- * `repo_visibility_unknown`, `default_branch_empty`, `survey_running` (with `run_id`) and `survey_not_started` (with a closed `reason`); 503 `not_configured` and `github_unavailable`; 502 `github_refused`.
+ * D#845 ON-10b1 and ON-10b2 (Ruling 88 items 7 and 8): the cloud starts a project survey for an owner or admin. The first look is the person's own tenant transaction (the setup is theirs and at the survey step, its repo is
+ * placed, and that machine's Claude login is one they may use); then the repo must be private and the default branch's head is read through the App's read-only port. The worker's `startSurveyRun` does the rest, and
+ * the deadline Workflow is started once the run exists; if that start throws, the run is cancelled at once and the answer is 503 `survey_unavailable`. Nothing is written before the worker's start, and every refusal
+ * writes nothing. `retrySurvey` is the same start for a survey that failed or has no live run (409 `not_retryable` otherwise; any body is 400).
  */
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -59,7 +58,8 @@ export async function startSurvey(deps: RunnerCloudDeps, principal: SessionPrinc
   if (!UUID.test(setupId)) throw refuse(404, "not_found", "no such setup");
   const runs = (await deps.surveyRuns?.()) ?? null;
   const github = deps.pullRequests ?? null;
-  if (runs === null || github === null) throw refuse(503, "not_configured", "the cloud cannot start a survey now");
+  const deadline = deps.surveyDeadline ?? null;
+  if (runs === null || github === null || deadline === null) throw refuse(503, "not_configured", "the cloud cannot start a survey now");
   const id = setupId.toLowerCase();
   const first = await withTenant(deps.appUserPool, principal.accountId, principal.userId, (client) => firstLook(client, principal.accountId, id));
   // A subscription machine takes only runs its registrant started (the claim would never offer this one to anyone else), so refuse now rather than let a survey wait 22 minutes and time out.
@@ -91,9 +91,41 @@ export async function startSurvey(deps: RunnerCloudDeps, principal: SessionPrinc
     priorRunId: first.priorRunId,
     ...(first.engine === "microvm" ? { requiresEngine: "microvm" as const } : {}),
   });
-  if (result.ok) return { setup_id: id, run_id: result.runId };
+  if (result.ok) {
+    try {
+      await deadline.start({ accountId: principal.accountId, setupId: id, runId: result.runId });
+    } catch (error) {
+      reportError(error, { stage: "survey.deadline_start" });
+      // No survey is left without its deadline: end the run now. If even that fails the run is still live and its end is written by whoever ends it; the answer is the same.
+      await runs.endSurveyAtDeadline({ accountId: principal.accountId, setupId: id, runId: result.runId, cancel: true }).catch((cancelError: unknown) => reportError(cancelError, { stage: "survey.deadline_cancel" }));
+      throw refuse(503, "survey_unavailable", "the survey could not be started now. Try again");
+    }
+    return { setup_id: id, run_id: result.runId };
+  }
   if (result.code === "forbidden") throw refuse(403, "forbidden", "only an owner or admin can start the survey");
   if (result.code === "survey_running") throw refuse(409, "survey_running", "a survey is already running", { run_id: result.runId });
   if (result.code === "survey_not_started") throw refuse(409, "survey_not_started", "the survey could not be started", { reason: result.reason });
   throw new RunnerHttpError(500, "internal", "internal error");
+}
+
+/**
+ * POST /api/v1/setups/:id/survey/retry. An owner or admin, a session, no body. Allowed only at the survey step and only when nothing is running: the survey failed, or it has no run, or its run is over. Anything else is 409
+ * `not_retryable`. It is `startSurvey`, so two clicks make one run (the second answers 409 `survey_running`).
+ */
+export async function retrySurvey(deps: RunnerCloudDeps, principal: SessionPrincipal, setupId: string, body: unknown): Promise<RunnerHttpResponse> {
+  if (body !== null && body !== undefined) throw refuse(400, "invalid_message", "this request takes no body");
+  if (!UUID.test(setupId)) throw refuse(404, "not_found", "no such setup");
+  const id = setupId.toLowerCase();
+  await withTenant(deps.appUserPool, principal.accountId, principal.userId, async (client) => {
+    const role = await requireMemberRole(client);
+    if (role !== "owner" && role !== "admin") throw refuse(403, "forbidden", "only an owner or admin can start the survey");
+    const setup = (await client.query<{ phase: string; state: string; survey_run_id: string | null }>("SELECT phase, state, survey_run_id FROM project_setups WHERE account_id = $1 AND id = $2", [principal.accountId, id])).rows[0];
+    if (!setup) throw refuse(404, "not_found", "no such setup");
+    const notRetryable = (): RunnerHttpError => refuse(409, "not_retryable", "the survey is not in a state that can be retried");
+    if (setup.phase !== "survey") throw notRetryable();
+    if (setup.state === "failed" || setup.survey_run_id === null) return;
+    const run = (await client.query<{ status: string }>("SELECT status FROM agent_runs WHERE account_id = $1 AND id = $2", [principal.accountId, setup.survey_run_id])).rows[0];
+    if (run && (run.status === "pending" || run.status === "running" || run.status === "paused")) throw notRetryable();
+  });
+  return { status: 200, body: await startSurvey(deps, principal, id), headers: { "cache-control": "no-store" } };
 }

@@ -404,4 +404,79 @@ describe("confirming a project [pg]", () => {
     expect(rows).toHaveLength(1);
     expect(JSON.stringify(rows[0].body)).toMatch(/^\{("[a-z_]+":(\d+|true|false|"[a-z0-9_.-]*"),?)*\}$/);
   });
+
+  // D#845 ON-10b2: after the confirm commits, an existing project starts its survey; a new one starts none; the confirm never depends on it.
+  describe("the survey after the confirm (ON-10b2)", () => {
+    const RUN = "44444444-4444-4444-8444-444444444444";
+    const HEAD = "e".repeat(40);
+    const github = { defaultBranch: async () => "main", branchState: async () => ({ exists: true, headOid: HEAD, aheadBy: 0, defaultBranch: "main" }) } as unknown as NonNullable<RunnerCloudDeps["pullRequests"]>;
+    function surveyDeps(o: { answer?: "ok" | "refused" | "throws" } = {}) {
+      const starts: Array<{ setupId: string; userId: string; headSha: string; runnerId: string }> = [];
+      const deadlines: string[] = [];
+      const deps: Partial<RunnerCloudDeps> = {
+        pullRequests: github,
+        surveyRuns: async () => ({
+          startSurveyRun: async (input) => {
+            starts.push({ setupId: input.setupId, userId: input.userId, headSha: input.headSha, runnerId: input.runnerId });
+            if (o.answer === "throws") throw new Error("boom: secret-detail");
+            return o.answer === "refused" ? { ok: false, status: 409, code: "survey_not_started", reason: "model_budget_unset" } : { ok: true, runId: RUN };
+          },
+          endSurveyAtDeadline: async () => ({ final: true }),
+        }),
+        surveyDeadline: { start: async (args) => void deadlines.push(args.runId) },
+      };
+      return { deps, starts, deadlines };
+    }
+
+    it("an existing confirm starts one survey after the commit, as the person, on the placed machine, and the body carries its run", async () => {
+      const w = await world();
+      const s = surveyDeps();
+      const res = await confirm(w, w.r1, { runner_id: w.m1 }, { deps: s.deps });
+      expect(res.status).toBe(201);
+      const setupId = (await q(`SELECT id FROM project_setups WHERE account_id = $1`, [w.a.accountId]))[0].id;
+      expect(res.body).toMatchObject({ kind: "existing", survey: { run_id: RUN } });
+      expect(s.starts).toEqual([{ setupId, userId: w.a.o1, headSha: HEAD, runnerId: w.m1 }]);
+      expect(s.deadlines).toEqual([RUN]);
+    });
+
+    it("a new confirm starts none and its body has no survey field", async () => {
+      const w = await world();
+      const s = surveyDeps();
+      const res = await confirm(w, w.r1, { kind: "new" }, { deps: s.deps });
+      expect(res.status).toBe(201);
+      expect(res.body).not.toHaveProperty("survey");
+      expect(s.starts).toEqual([]);
+      expect(s.deadlines).toEqual([]);
+    });
+
+    it("a refusal of the start still gives the 201 confirm, with its closed code and every confirm write in place", async () => {
+      const w = await world();
+      const res = await confirm(w, w.r1, { runner_id: w.m1 }, { deps: surveyDeps({ answer: "refused" }).deps });
+      expect(res.status).toBe(201);
+      expect(res.body).toMatchObject({ survey: { started: false, code: "survey_not_started" } });
+      expect(await q(`SELECT phase FROM project_setups WHERE account_id = $1`, [w.a.accountId])).toEqual([{ phase: "survey" }]);
+      expect(await q(`SELECT runner_id FROM project_placements WHERE account_id = $1`, [w.a.accountId])).toEqual([{ runner_id: w.m1 }]);
+    });
+
+    it("a public repo is confirmed and its survey is not started (public_repo); an unexpected error is the code internal with nothing of it in the body", async () => {
+      const pub = await world();
+      const s = surveyDeps();
+      const res = await confirm(pub, pub.r1, { runner_id: pub.m1 }, { deps: { ...s.deps, ...vis("public") } });
+      expect(res.status).toBe(201);
+      expect(res.body).toMatchObject({ survey: { started: false, code: "public_repo" } });
+      expect(s.starts).toEqual([]);
+      const w = await world();
+      const bad = await confirm(w, w.r1, { runner_id: w.m1 }, { deps: surveyDeps({ answer: "throws" }).deps });
+      expect(bad.status).toBe(201);
+      expect(bad.body).toMatchObject({ survey: { started: false, code: "internal" } });
+      expect(JSON.stringify(bad.body)).not.toContain("secret-detail");
+    });
+
+    it("a confirm that is refused starts no survey", async () => {
+      const w = await world();
+      const s = surveyDeps();
+      expect(await code(confirm(w, w.r1, { runner_id: w.m1 }, { user: w.a.m1, deps: s.deps }))).toBe("403 forbidden");
+      expect(s.starts).toEqual([]);
+    });
+  });
 });

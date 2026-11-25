@@ -49,9 +49,8 @@ export type SeatRequest =
    */
   | { accountId: string; role: string; repoId: string; purpose: "deploy_verify"; capUsd: number }
   /**
-   * D#845 ON-10b1 (Ruling 88): the project survey (`role` is project-surveyor), on the machine the repo is placed on (`runnerId`). It borrows VERIFY_LIMITS_ROLE's limits and model and runs on its
-   * own platform card. Only a `runner_local` repo gets one. What the account's model budget must be depends on how Claude is signed in on that machine (`runnerSignInKind`, owner ruling 88.0):
-   * a subscription costs nothing metered (`capUsd: 0`, any budget), an API key meets the normal budget gate, and a sign-in the cloud cannot tell is treated as an API key.
+   * D#845 ON-10b1 (Ruling 88): the project survey, on the machine the repo is placed on (`runnerId`). It borrows VERIFY_LIMITS_ROLE's limits and model and runs on its own platform card, for a `runner_local` repo only.
+   * A subscription machine costs nothing metered (`capUsd: 0`); an API key meets the normal budget gate; a sign-in the cloud cannot tell is treated as an API key (`runnerSignInKind`, owner ruling 88.0).
    */
   | { accountId: string; role: string; repoId: string; runnerId: string; purpose: "survey" };
 

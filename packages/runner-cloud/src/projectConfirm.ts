@@ -1,6 +1,7 @@
 import type { PoolClient } from "pg";
 import { markRunnerWork } from "@fx/core/src/pendingWork.js";
 import { emitSetupChanged } from "@fx/core/src/onboarding/engineTrack.js";
+import { reportError } from "@fx/telemetry";
 import { writeEngineAudit } from "@fx/db/src/engineAudit.js";
 import { EngineOperateRefusal, lockEngineBridge, readEngineBridgeSettings, setEngineBridgeSettings } from "@fx/db/src/engineBridge.js";
 import { assertMayAddReposToRunner, PlanHolderOnlyError } from "@fx/db/src/runnerPlanLoosen.js";
@@ -9,6 +10,7 @@ import { RunnerHttpError, pgCode, type RunnerCloudDeps, type RunnerHttpResponse,
 import { requireMemberRole } from "./memberRole.js";
 import { autoPlaceProject, lockRunners, placeProject } from "./placement.js";
 import { readRepoVisibility, type RepoVisibilityAnswer } from "./repoPrivacy.js";
+import { startSurvey } from "./surveyJobs.js";
 import { configuredWakeKey } from "./wakeToken.js";
 
 /**
@@ -18,8 +20,8 @@ import { configuredWakeKey } from "./wakeToken.js";
  * audit row commit together, so a write that fails undoes every one before it. The visibility read goes to GitHub, so it happens before the transaction opens and is never stored:
  * a public repo is accepted on this path (the engine track), `unknown` is refused with 409 `repo_visibility_unknown` and nothing is written. Other runner paths still refuse public repos.
  *
- * `kind` is `existing` (a survey follows, so the setup starts at `survey`) or `new` (a repo made through create-intent: nothing to survey, so it starts at `plan`). `kind` is the client's word and only picks the starting phase; it grants nothing. (The create-repo service's audit row names the repo, but production code may not read the audit log, so deriving it server-side needs a definer: a follow-up.) The route starts no
- * survey itself. There is no coverage check here (the Engine plan gates the install). Operate is never turned on by itself: with `turn_on_operate: true` and the account switch off, it
+ * `kind` is `existing` (a survey follows, so the setup starts at `survey`) or `new` (a repo made through create-intent: nothing to survey, so it starts at `plan`). `kind` is the client's word and only picks the starting phase; it grants nothing. (The create-repo service's audit row names the repo, but production code may not read the audit log, so deriving it server-side needs a definer: a follow-up.) After the transaction
+ * commits, an `existing` project starts its survey (`startSurvey`); a `new` one starts none. The confirm's answer never depends on it: the body carries `survey: {run_id}` or `survey: {started: false, code}` (the start's own refusal code, or `internal`). There is no coverage check here (the Engine plan gates the install). Operate is never turned on by itself: with `turn_on_operate: true` and the account switch off, it
  * goes on only when `operate_others` names exactly the other repos that would be operated with it (409 `operate_consent_stale` when the list the person saw is not the current one).
  *
  * Refusals: 403 `forbidden`, 404 `not_found`, 409 `setup_exists` (with the first setup's id), `account_not_active`, `repo_visibility_unknown`, `project_already_placed`,
@@ -60,6 +62,17 @@ export async function firstLiveSetup(client: PoolClient, accountId: string, repo
 const publicPending = (): RunnerHttpError => new RunnerHttpError(409, "operate_public_pending", "Operate isn't available for public repos yet. The engine can watch this repo, but won't act on it.");
 
 const setupExists = (id: string): RunnerHttpError => new RunnerHttpError(409, "setup_exists", "this repository is already being set up", { setup_id: id });
+
+/** The survey a confirmed project starts. Whatever happens, the confirm stands: a refusal is its closed code, anything unexpected is `internal` (nothing of the error is sent). */
+async function startSurveyAfterConfirm(deps: RunnerCloudDeps, principal: SessionPrincipal, setupId: string): Promise<{ run_id: string } | { started: false; code: string }> {
+  try {
+    return { run_id: (await startSurvey(deps, principal, setupId)).run_id };
+  } catch (error) {
+    if (error instanceof RunnerHttpError) return { started: false, code: error.code };
+    reportError(error, { stage: "survey.start_after_confirm" });
+    return { started: false, code: "internal" };
+  }
+}
 
 export async function placeProjectRoute(deps: RunnerCloudDeps, principal: SessionPrincipal, repoId: string, body: unknown): Promise<RunnerHttpResponse> {
   if (!UUID.test(repoId)) throw new RunnerHttpError(404, "not_found", "no such repository");
@@ -170,9 +183,10 @@ export async function placeProjectRoute(deps: RunnerCloudDeps, principal: Sessio
       return { setupId, runnerId, operate };
     });
     void markRunnerWork(accountId);
+    const survey = input.kind === "existing" ? await startSurveyAfterConfirm(deps, principal, done.setupId) : null;
     return {
       status: 201,
-      body: { setup_id: done.setupId, repo_id: repoId, runner_id: done.runnerId, kind: input.kind, phase: input.kind === "existing" ? "survey" : "plan", operate_enabled: done.operate },
+      body: { setup_id: done.setupId, repo_id: repoId, runner_id: done.runnerId, kind: input.kind, phase: input.kind === "existing" ? "survey" : "plan", operate_enabled: done.operate, ...(survey === null ? {} : { survey }) },
       headers: { "cache-control": "no-store" },
     };
   } catch (error) {

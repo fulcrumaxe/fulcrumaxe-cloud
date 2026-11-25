@@ -1,5 +1,5 @@
 import type { Pool, PoolClient } from "pg";
-import { SignedJobSchema } from "@fulcrumaxe/runner-protocol";
+import { SURVEY_ROLE, SignedJobSchema } from "@fulcrumaxe/runner-protocol";
 import { markRunnerWork, markWorkPending } from "@fx/core/src/pendingWork.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { JobIssueError, isRunnerMode, resolveExecutionTarget, writeRunStatus, type ExecutionRun, type ExecutionTargetRegistry } from "@fx/runner";
@@ -54,6 +54,10 @@ export const JOBLESS_FAIL_AFTER_MS = 15 * 60_000;
 
 /** Inside the caller's tenant transaction, after the parent's move to `failed`. */
 export async function requestFollowUp(client: PoolClient, parentRunId: string): Promise<FollowUpOutcome> {
+  // D#845 ON-10b2: a survey run is never followed by another run. `runner_follow_up_run` would match a lost one (it needs no work item), and a survey is started again only by a person (retry, Start over). Read first, so
+  // both callers (the claim path and the lease sweep) are covered by this one guard.
+  const role = await client.query<{ role: string }>("SELECT role FROM agent_runs WHERE id = $1::uuid", [parentRunId]);
+  if (role.rows[0]?.role === SURVEY_ROLE) return { kind: "not_eligible" };
   // A work item that already finished, or gave up on this run (moved to Needs a person after the run began), is owed no further run. Asked first, so the
   // chain's own bookkeeping never runs for it; a parent that is not a failed runner run answers false here and is judged by the definer below.
   const finished = await client.query<{ finished: boolean }>("SELECT runner_follow_up_item_finished($1::uuid) AS finished", [parentRunId]);

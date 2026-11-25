@@ -235,7 +235,7 @@ export interface CreateWorkerOptions {
  * worker's own sweep/kick only, never directly callable from a user request.
  * H14c-3b's CARRY-28 enforces caller authorisation.
  */
-export interface Worker extends PlanePublish, Pick<SurveyStartFacade, "startSurveyRun">, RunActionFacade, RunnerLeaseFacade, RunnerClaimFacade, RunnerDoneFacade, RunnerGitTicketFacade, RunnerPlanePushFacade, RunnerMemoryProposalsFacade, RunnerQueueSweeper, RunnerLeaseSweeper, Pick<RunHandoffs, "sweepRunHandoffs" | "completeRunHandoff" | "completeHandoffOnDone">, RunnerNoticeSweeper, InvariantSweeper, Pick<StageResume, "sweepParkedStages">, Pick<GateReask, "wakeMergeGate" | "wakeConflictingSiblings">, PreviewFacade, RetryFacade, AdvanceFacade, ResumeFacade, ContinueFacade {
+export interface Worker extends PlanePublish, Pick<SurveyStartFacade, "startSurveyRun" | "endSurveyAtDeadline">, RunActionFacade, RunnerLeaseFacade, RunnerClaimFacade, RunnerDoneFacade, RunnerGitTicketFacade, RunnerPlanePushFacade, RunnerMemoryProposalsFacade, RunnerQueueSweeper, RunnerLeaseSweeper, Pick<RunHandoffs, "sweepRunHandoffs" | "completeRunHandoff" | "completeHandoffOnDone">, RunnerNoticeSweeper, InvariantSweeper, Pick<StageResume, "sweepParkedStages">, Pick<GateReask, "wakeMergeGate" | "wakeConflictingSiblings">, PreviewFacade, RetryFacade, AdvanceFacade, ResumeFacade, ContinueFacade {
   registry: ExecutionTargetRegistry;
   /** EB-8a: signs an engine bridge command with the job-signing key; null while that key is not configured (the pull route then answers 503). */
   engineCommandSigner: Pick<JobSigner, "keyId" | "signEngineCommand" | "signSandboxCommand" | "signMachineJob" | "signMachineCommand"> | null;
@@ -672,6 +672,7 @@ export function createWorker(options: CreateWorkerOptions): Promise<Worker> {
       engineCommandSigner,
       resolveRunSeat,
       startSurveyRun,
+      endSurveyAtDeadline,
       sweepComputeSettle,
       sweepAutoStart,
       sweepDiscoveryQueue,
@@ -776,6 +777,7 @@ export function createWorker(options: CreateWorkerOptions): Promise<Worker> {
         engineCommandSigner,
         resolveRunSeat,
         startSurveyRun,
+        endSurveyAtDeadline,
         sweepComputeSettle,
         sweepSandboxReap,
         sandboxInventory: inventory,

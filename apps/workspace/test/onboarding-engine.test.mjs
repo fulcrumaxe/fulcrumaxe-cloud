@@ -13,7 +13,7 @@ import { parseSteps, parseTracks, shownTracks } from "../shell/core/onboarding-m
 import {
   ASK_OWNER, LABELS, NO_KVM, OPERATE_OFF, STATE_WORDS, TIME_TO_LIVE,
   COULDNT_CHECK, NEW_PRESET, NO_MACHINE, NO_OWNERS, PUBLIC_COPY, PUBLIC_OPERATE, createRefusal, dialsLine, linkedLine, machineChoices, operateBox, parseReturn, pickVisibility, placeRefusal, presetName, readPicker,
-  cleanOrigin, copyText, describeStep, enginePrice, installDetail, fixFor, machineChoiceLine, machineCommands, machineContext, prerequisites, visibilityLabel,
+  cleanOrigin, copyText, describeStep, enginePrice, installDetail, surveyDetail, fixFor, machineChoiceLine, machineCommands, machineContext, prerequisites, visibilityLabel,
 } from "../apps/onboarding/onboarding-engine.js";
 
 const V1 = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages", "api", "fixtures", "v1", "getOnboarding");
@@ -686,5 +686,61 @@ describe("the project picker's reads and words (ON-7b)", () => {
     expect(parseReturn("?create=ok")).toEqual({ outcome: "ok", repo: "" });
     expect(parseReturn("?create=failed&repo=" + A)).toEqual({ outcome: "failed", repo: "" });
     for (const s of ["", "?create=bogus", "?create=__proto__", "?x=1", undefined, null]) expect(parseReturn(s)).toBeNull();
+  });
+});
+
+describe("surveyDetail (D#845 ON-10b2)", () => {
+  const RUN = "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e";
+  const steps = track({ machine: "done", claude: "done", github_app: "done", project: "done", plan: "active" });
+  const failedSteps = track({ machine: "done", claude: "done", github_app: "done", project: "done", plan: "failed" }, { code: "survey_failed" });
+  const row = (over) => ({ phase: "survey", state: "started", survey_run_id: RUN, failure_code: null, failure_reason: null, ...over });
+
+  it("a started survey with a run is surveying, with the run to open", () => {
+    expect(surveyDetail(row({}))).toEqual({ plan: { stage: "surveying", run_id: RUN } });
+    const v = at(steps, "plan", surveyDetail(row({})));
+    expect(text(v)).toBe("Reading your code and docs…");
+    expect(v.actions).toEqual([{ id: "open_run", label: "Open the run", app: "runs" }]);
+  });
+
+  it("a started survey with no run says it did not start, with its one copy line and no action", () => {
+    for (const none of [null, ""]) expect(surveyDetail(row({ survey_run_id: none }))).toEqual({ plan: { stage: "not_started" } });
+    const v = at(steps, "plan", surveyDetail(row({ survey_run_id: null })));
+    expect(text(v)).toBe("The survey didn't start. Try again, or write your own plan.");
+    expect(v.actions).toEqual([]);
+  });
+
+  const WORDS = {
+    output_invalid: "its answer wasn't a usable plan",
+    output_too_large: "its answer was too long",
+    no_output: "it gave no answer",
+    workspace_written: "it tried to change your files",
+    run_failed: "the run failed",
+    runner_lost: "your machine stopped answering",
+    refused_at_admit: "your machine couldn't take it",
+    cancelled: "it was cancelled",
+    deadline: "it ran past 20 minutes",
+  };
+  it.each(Object.entries(WORDS))("a failed survey with reason %s reads %s, in the existing failure line", (reason, words) => {
+    for (const code of ["survey_failed", "survey_timeout"]) {
+      const detail = surveyDetail(row({ state: "failed", failure_code: code, failure_reason: reason }));
+      expect(detail).toEqual({ detail: { reason: words } });
+      expect(text(describeStep(failedSteps, IDS.indexOf("plan"), { name: "box-1", detail: detail.detail }))).toBe("The survey stopped (" + words + "). Try again, or write your own plan");
+    }
+  });
+
+  it("anything else is empty: another phase, a code that is not a survey's, an unknown or inherited reason, a done survey, a missing row", () => {
+    const empty = [
+      row({ phase: "install" }),
+      row({ phase: "plan", state: "ok" }),
+      row({ state: "failed", failure_code: "deps_failed", failure_reason: "run_failed" }),
+      row({ state: "failed", failure_code: "survey_failed", failure_reason: "nope" }),
+      row({ state: "failed", failure_code: "survey_failed", failure_reason: "constructor" }),
+      row({ state: "failed", failure_code: "survey_failed", failure_reason: null }),
+      row({ state: "ok" }),
+      {},
+      null,
+      undefined,
+    ];
+    for (const r of empty) expect(surveyDetail(r)).toEqual({});
   });
 });

@@ -120,6 +120,14 @@ function planePushIdentity(): { name: string; email: string } | null {
 /** D#845 MC-8a: the machine key reader for the Claude sign-in link. Built once; the key is read on each use, so an unset key is a 503 on the sign-in routes and nothing more. */
 let machineLoginSealer: ReturnType<typeof createMachineLoginSealer> | undefined;
 
+/** D#845 ON-10b2: the worker's survey start and deadline look, resolved per call (null, and so a 503 `not_configured`, while no worker is configured). */
+const surveyRuns: NonNullable<RunnerCloudDeps["surveyRuns"]> = async () => {
+  const worker = await getWorker();
+  return worker === null ? null : { startSurveyRun: (input) => worker.startSurveyRun(input), endSurveyAtDeadline: (input) => worker.endSurveyAtDeadline(input) };
+};
+/** The deadline Workflow's start, imported on first use so the workflow bundle is not part of every route's module graph. */
+const surveyDeadline: NonNullable<RunnerCloudDeps["surveyDeadline"]> = { start: async (args) => (await import("./surveyDeadline")).startSurveyDeadline(args) };
+
 export function runnerDeps(): RunnerCloudDeps {
   const auth = defaultAuthDeps();
   return {
@@ -145,6 +153,8 @@ export function runnerDeps(): RunnerCloudDeps {
     deviceFlowGlobalPerHour: () => readDeviceGlobalLimit(process.env),
     engineCommandSigner: async () => (await getWorker())?.engineCommandSigner ?? null,
     machineLoginSealer: (machineLoginSealer ??= createMachineLoginSealer()),
+    surveyRuns,
+    surveyDeadline,
   };
 }
 

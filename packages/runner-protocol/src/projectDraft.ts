@@ -9,6 +9,8 @@ import { redactText } from "./redact.js";
 export const SURVEY_ROLE = "project-surveyor";
 /** The most a survey run may take on the machine; the cloud's own deadline is this plus a grace (ON-10b). */
 export const SURVEY_MAX_RUN_MS = 20 * 60_000;
+/** The grace the cloud's deadline adds to `SURVEY_MAX_RUN_MS` before it ends a survey run itself (the runner's own clock gets first go). */
+export const SURVEY_DEADLINE_GRACE_MS = 120_000;
 /** The codes the cloud writes on a failed survey. They are not part of the runner's progress vocabulary: a runner can never report them. */
 export const SURVEY_FAILURE_CODES = ["survey_failed", "survey_timeout"] as const;
 export const SURVEY_FAILURE_REASONS = ["output_invalid", "output_too_large", "no_output", "workspace_written", "run_failed", "runner_lost", "refused_at_admit", "cancelled", "deadline"] as const;
