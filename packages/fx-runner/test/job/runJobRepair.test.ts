@@ -1,7 +1,7 @@
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { DISCOVERY_ANALYST_ROLE, PROPOSAL_VERIFIER_ROLE, STRUCTURED_FAILURE_CODES, type NormalizedEvent } from "@fulcrumaxe/runner-protocol";
-import { createMemoryLedger, runJob, type RunJobDeps, type RunnableJob } from "../../src/job/runJob.js";
+import { DISCOVERY_ANALYST_ROLE, PROPOSAL_VERIFIER_ROLE, ProjectDraft, STRUCTURED_FAILURE_CODES, SURVEY_MAX_RUN_MS, SURVEY_ROLE, type NormalizedEvent } from "@fulcrumaxe/runner-protocol";
+import { createMemoryLedger, DEFAULT_WALL_CLOCK_MS, runJob, SANDBOX_MARGIN_MS, wallClockFor, type RunJobDeps, type RunnableJob } from "../../src/job/runJob.js";
 import type { SandboxHandle, SandboxPort, StartDetachedOptions, StartDetachedResult } from "../../src/sandbox/port.js";
 import { sampleJob } from "../helpers/sampleJob.js";
 
@@ -177,5 +177,76 @@ describe("runJob: the one repair turn for a structured role", () => {
     const out = await runJob(jobFor(PROPOSAL_VERIFIER_ROLE), depsFor(port, []));
     expect(launches).toHaveLength(1);
     expect(out).toMatchObject({ status: "done" });
+  });
+});
+
+/**
+ * D#845 ON-10c: the project survey's answer is a `ProjectDraft`. A bad first answer gets exactly one repair turn, by closed code and nothing else; a good one is returned untouched; and the run's wall clock is the survey's own.
+ */
+describe("runJob: the project survey", () => {
+  const DRAFT = { v: 1, prd_md: "# Plan\n\nA small service.\n", roadmap: [{ row_key: "A", title: "First", summary: "Do it.", size: "S", depends_on: [] }, { row_key: "B", title: "Second", summary: "Then this.", size: "M", depends_on: ["A"] }] };
+  const BAD_DRAFT = { v: 1, prd_md: SECRET_TEXT, roadmap: [{ row_key: "A", title: "x", summary: "y", size: "S", depends_on: ["NOPE"] }] };
+  const surveyEvent = (agentOutput: Record<string, unknown> | undefined, over: Partial<NormalizedEvent> = {}) => ok(agentOutput, { role: SURVEY_ROLE, ...over });
+  const surveyJob = (): RunnableJob => ({ ...jobFor(SURVEY_ROLE), task: { ...sampleJob({ role: SURVEY_ROLE }).task, kind: "survey" } });
+
+  it("a valid draft is the run's answer and no repair is made", async () => {
+    const { port, launches } = scriptedPort([surveyEvent(DRAFT)]);
+    const out = await runJob(surveyJob(), depsFor(port, []));
+    expect(out).toMatchObject({ status: "done", agentOutput: DRAFT });
+    expect(ProjectDraft.safeParse((out as { agentOutput: unknown }).agentOutput).success).toBe(true);
+    expect(launches.map((l) => l.kind)).toEqual(["start"]);
+  });
+
+  it("a bad first answer gets exactly one repair turn, named by closed code with no text from the answer; the repaired draft is the answer", async () => {
+    const { port, launches } = scriptedPort([surveyEvent(BAD_DRAFT), surveyEvent(DRAFT, { sessionId: "sess-2" })]);
+    const out = await runJob(surveyJob(), depsFor(port, []));
+    expect(launches.map((l) => l.kind)).toEqual(["start", "resume"]);
+    expect(launches[1]!.sessionId).toBe("sess-1");
+    expect(launches[1]!.prompt).toContain("bad_depends");
+    expect(launches[1]!.prompt).not.toContain("ZZ-UNTRUSTED");
+    expect(out).toMatchObject({ status: "done", sessionId: "sess-2", agentOutput: DRAFT });
+  });
+
+  it("the bound holds: a second bad answer is not repaired again, and goes on as it is (the cloud refuses it, and stores nothing)", async () => {
+    const { port, launches } = scriptedPort([surveyEvent(BAD_DRAFT), surveyEvent(BAD_DRAFT)]);
+    const out = await runJob(surveyJob(), depsFor(port, []));
+    expect(launches).toHaveLength(2);
+    expect(out).toMatchObject({ status: "done", agentOutput: BAD_DRAFT });
+  });
+
+  it("an answer with no envelope at all is repaired once (no_envelope)", async () => {
+    const { port, launches } = scriptedPort([surveyEvent(undefined), surveyEvent(DRAFT)]);
+    await runJob(surveyJob(), depsFor(port, []));
+    expect(launches[1]!.prompt).toContain("no_envelope");
+  });
+
+  it("the sandbox is asked for the survey's 20 minutes (plus the margin), whatever longer wall clock is set", async () => {
+    const asked: number[] = [];
+    const { port } = scriptedPort([surveyEvent(DRAFT)]);
+    const spied: SandboxPort = { ...port, createSandbox: async (opts) => (asked.push(opts.timeoutMs), port.createSandbox(opts)) };
+    await runJob(surveyJob(), { ...depsFor(spied, []), wallClockMs: 2 * 60 * 60_000 });
+    expect(asked).toEqual([SURVEY_MAX_RUN_MS + SANDBOX_MARGIN_MS]);
+    expect(SURVEY_MAX_RUN_MS).toBe(20 * 60_000);
+    expect(wallClockFor(SURVEY_ROLE, undefined)).toBe(SURVEY_MAX_RUN_MS);
+    expect(wallClockFor(SURVEY_ROLE, 5 * 60_000)).toBe(5 * 60_000);
+    expect(wallClockFor("executor", undefined)).toBe(DEFAULT_WALL_CLOCK_MS);
+    expect(wallClockFor("executor", 90 * 60_000)).toBe(90 * 60_000);
+  });
+
+  it("a survey that never answers ends wall_clock at 20 minutes, on the runner's own clock", async () => {
+    vi.useFakeTimers();
+    try {
+      const { port } = scriptedPort([() => new Promise<never>(() => undefined)]);
+      const pending = runJob(surveyJob(), { ...depsFor(port, []), wallClockMs: 2 * 60 * 60_000 });
+      await vi.advanceTimersByTimeAsync(SURVEY_MAX_RUN_MS - 1);
+      let settled = false;
+      void pending.then(() => (settled = true));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(2);
+      expect(await pending).toMatchObject({ status: "failed", reason: "wall_clock" });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

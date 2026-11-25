@@ -2,7 +2,7 @@ import type { CleanEnvOptions, CredentialMode } from "./cleanEnv.js";
 import { cleanEnv } from "./cleanEnv.js";
 import { buildPrompt } from "./prompt.js";
 import { jobHashRefusals, type HashCheckedJob, type HashRefusal } from "./verifyHashes.js";
-import { cliModelNameFor, repairPromptFor, structuredFailures, type ContextLedgerMeasure, type Job, type NormalizedEvent } from "@fulcrumaxe/runner-protocol";
+import { SURVEY_MAX_RUN_MS, SURVEY_ROLE, cliModelNameFor, repairPromptFor, structuredFailures, type ContextLedgerMeasure, type Job, type NormalizedEvent } from "@fulcrumaxe/runner-protocol";
 import type { SandboxHandle, SandboxPort } from "../sandbox/port.js";
 import { MODEL_HOST } from "../sandbox/sandboxSettings.js";
 import type { WorkspaceStore } from "./workspace.js";
@@ -76,6 +76,11 @@ export interface RunJobDeps {
 }
 
 export const DEFAULT_WALL_CLOCK_MS = 2 * 60 * 60_000;
+/** The wall clock a job runs under: the runner's setting (or the default), and for the project survey never more than `SURVEY_MAX_RUN_MS` (D#845 ON-10c). One rule for the run, the sandbox's limit and a VM's. */
+export function wallClockFor(role: string, configured: number | undefined): number {
+  const ms = configured ?? DEFAULT_WALL_CLOCK_MS;
+  return role === SURVEY_ROLE ? Math.min(ms, SURVEY_MAX_RUN_MS) : ms;
+}
 /** How long the sandbox outlives the wall clock, so this module's clock fires first. */
 export const SANDBOX_MARGIN_MS = 10 * 60_000;
 
@@ -123,7 +128,7 @@ export async function runJob(job: RunnableJob, deps: RunJobDeps): Promise<RunJob
   const planned = deps.planSession(job.continues);
   const plan: SessionPlan = planned.kind === "resume" && !deps.workspaces.owns(planned.workspace) ? { kind: "fresh", branch: job.continues?.branch ?? null } : planned;
   const workspace = plan.kind === "resume" ? plan.workspace : await deps.workspaces.create(job.run_id);
-  const wallClockMs = deps.wallClockMs ?? DEFAULT_WALL_CLOCK_MS;
+  const wallClockMs = wallClockFor(job.role, deps.wallClockMs);
   const start = {
     runId: job.run_id,
     role: job.role,

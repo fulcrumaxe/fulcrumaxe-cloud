@@ -1,5 +1,5 @@
 import type { Pool, PoolClient } from "pg";
-import { CONFINED_READ_ROLES, DEPLOY_VERIFIER_ROLE, NOT_RECORDED_MEASURE, PROPOSAL_VERIFIER_ROLE, RUNNER_ELIGIBLE_ROLES, REVIEW_JOB_ROLES } from "@fulcrumaxe/runner-protocol";
+import { CONFINED_READ_ROLES, DEPLOY_VERIFIER_ROLE, NOT_RECORDED_MEASURE, PROPOSAL_VERIFIER_ROLE, RUNNER_ELIGIBLE_ROLES, REVIEW_JOB_ROLES, SURVEY_ROLE } from "@fulcrumaxe/runner-protocol";
 import { DEFAULT_BACKEND } from "@fx/runtime/src/backends/types.js";
 import { markRunnerWork, markWorkPending } from "@fx/core/src/pendingWork.js";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
@@ -185,8 +185,9 @@ export class RunnerTarget implements ExecutionTarget {
     // D#483 S4-f4: the discovery analyst is refused in a Local-only repository (its refs are re-read by our cloud; S4-f5 owns Local-only).
     // D#749 V2b: the deploy verifier is confined read-only too, but it IS served in a Local-only repository: the owner's machine is the runner, its result is the browser job's own
     // evidence (not a repository read by our cloud), and its checkout read stays behind the read guard. The hosted sandbox still refuses it (agentConfig.ts).
+    // D#845 ON-10c: the survey is confined read-only too, and runs on the person's own machine in a Local-only repository (its output is an inert draft the person approves).
     // verifier-only: the claim verifier is served on Local-only (its result is re-read by the cloud for now), like the deploy verifier
-    if (this.mode === "runner_local" && CONFINED_READ_ROLES.has(run.role) && run.role !== DEPLOY_VERIFIER_ROLE && run.role !== PROPOSAL_VERIFIER_ROLE) return "role_not_runner_eligible";
+    if (this.mode === "runner_local" && CONFINED_READ_ROLES.has(run.role) && run.role !== DEPLOY_VERIFIER_ROLE && run.role !== PROPOSAL_VERIFIER_ROLE && run.role !== SURVEY_ROLE) return "role_not_runner_eligible";
     return null;
   }
 

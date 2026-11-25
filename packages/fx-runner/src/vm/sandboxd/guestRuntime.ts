@@ -14,7 +14,7 @@
  *  - `abort()` of a stream only closes the host's socket, so the stop ladder kills the guest command first (SIGTERM, grace, SIGKILL) and aborts only after that.
  *  - Not supported in v1: API-key mode, browser jobs (playwright or Chrome), take-over (the wiring leaves it off for VM jobs).
  */
-import { MAX_LINE_INPUT_SIDE_TOKENS, MAX_LINE_OUTPUT_TOKENS, MAX_METERED_IDS, SESSION_ID_PATTERN, isBrowserJobRole, structuredSchemaFor, type AgentHandle, type AgentRuntime, type LocalOnlyEvent, type StartOptions } from "@fulcrumaxe/runner-protocol";
+import { MAX_LINE_INPUT_SIDE_TOKENS, MAX_LINE_OUTPUT_TOKENS, MAX_METERED_IDS, SESSION_ID_PATTERN, SURVEY_ROLE, isBrowserJobRole, structuredSchemaFor, type AgentHandle, type AgentRuntime, type LocalOnlyEvent, type StartOptions } from "@fulcrumaxe/runner-protocol";
 import { claudeArgv } from "../../engines/claude/argv.js";
 import { CLI_MODEL, RUN_ID, type EngineStartOptions, type RunOutcome } from "../../engines/claude/engine.js";
 import { confineFileTools } from "../../engines/claude/filePermissions.js";
@@ -242,6 +242,8 @@ export function createGuestRuntime(config: GuestRuntimeConfig): AgentRuntime & {
     const files = guestJobFiles({ jobsDir, runId: opts.runId, role: opts.role, workdir, excludes: opts.excludes, checkArgv: opts.checkArgv, ...(config.sandbox === undefined ? {} : { sandbox: config.sandbox }) });
     const schema = structuredSchemaFor(opts.role);
     const argv = claudeArgv({ cliModel: opts.model, roleTools, allowRules: confineFileTools(roleTools, workdir), settingsPath: files.settingsPath, mcpPath: files.mcpPath, chrome: false, ...(schema === undefined ? {} : { jsonSchema: schema }), ...(resumeSessionId === undefined ? {} : { resumeSessionId }) });
+    // D#845 ON-10c: the survey's TMPDIR is its own temp directory (the guest's pinned `/tmp` stays for every other role).
+    const runEnv = opts.role === SURVEY_ROLE ? { ...env, TMPDIR: files.tempDir } : env;
     const log = createRunLog(config.logDir, opts.runId, []);
     const pidFile = `/tmp/fx-pid-${opts.runId}-${stamp()}`;
     const timeoutS = Math.min(Math.ceil(((config.timeoutMs?.() ?? FALLBACK_LIMIT_MS) + VM_BACKSTOP_MS) / 1000), MAX_TIMEOUT_S);
@@ -251,7 +253,7 @@ export function createGuestRuntime(config: GuestRuntimeConfig): AgentRuntime & {
     try {
       engineVersion = await binaryVersion(env);
       await config.writeFiles(files.files);
-      stream = await config.launch({ id: `${opts.runId}-${stamp()}`, cmd: "/bin/sh", args: ["-c", WRAP, "fx-run", pidFile, files.tempDir, agentPath, ...argv], cwd: workdir, env, stdin: Buffer.from(opts.prompt), timeoutS, withToken: true, user: "ubuntu" });
+      stream = await config.launch({ id: `${opts.runId}-${stamp()}`, cmd: "/bin/sh", args: ["-c", WRAP, "fx-run", pidFile, files.tempDir, agentPath, ...argv], cwd: workdir, env: runEnv, stdin: Buffer.from(opts.prompt), timeoutS, withToken: true, user: "ubuntu" });
     } catch (error) {
       if (error instanceof EngineRefusal || error instanceof JobTokenError) throw error;
       if (error instanceof AgentError && error.code === "unsupported") throw new EngineRefusal("guest_agent_unsupported");

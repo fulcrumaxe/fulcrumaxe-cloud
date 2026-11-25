@@ -1,6 +1,6 @@
 import { mkdirSync, rmSync } from "node:fs";
 import path from "node:path";
-import type { AgentHandle, AgentRuntime, NormalizedEvent } from "@fulcrumaxe/runner-protocol";
+import { SURVEY_ROLE, type AgentHandle, type AgentRuntime, type NormalizedEvent } from "@fulcrumaxe/runner-protocol";
 import { cleanEnv, type CleanEnvOptions, type CredentialMode } from "../job/cleanEnv.js";
 import { checkedAllowances, grantsOf, jobEnvFor, type AllowanceGrants } from "./allowances.js";
 import { claimScratch, releaseScratch, WriteScratchRefused, type ScratchDirs } from "./writeScratch.js";
@@ -34,7 +34,7 @@ import {
   type StartDetachedOptions,
   type StartDetachedResult,
 } from "./port.js";
-import { assertEnabledSandbox, protectedPaths, sandboxSettings, type ProtectedPaths } from "./sandboxSettings.js";
+import { MODEL_HOST, assertEnabledSandbox, protectedPaths, sandboxSettings, type ProtectedPaths } from "./sandboxSettings.js";
 
 /** An agent runtime that can also be sent an interrupt (SIGINT, which ends the agent's turn cleanly), for a take-over (D#6 R4a-7). */
 export type InterruptibleRuntime = AgentRuntime & { interrupt?(handle: AgentHandle): void };
@@ -177,6 +177,8 @@ export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
     for (const rule of opts.networkPolicy) {
       if (rule.authHeader !== undefined || rule.authValue !== undefined || rule.purpose === "github_proxy") throw new HostSandboxRefused("network_rule_forbidden");
     }
+    // D#845 ON-10c: the project survey reaches the model host and nothing else: no other rule, no allowance, and no registry the machine is set up with (below).
+    if (opts.role === SURVEY_ROLE && (opts.networkPolicy.some((rule) => rule.host !== MODEL_HOST) || opts.allowances !== undefined)) throw new HostSandboxRefused(opts.allowances !== undefined ? "sandbox_allowance_forbidden" : "network_rule_forbidden");
     if (!sameEnv(opts.env, cleanEnv(config.credentials, config.envOptions))) throw new HostSandboxRefused("env_not_clean");
     const workdir = opts.workdir;
     if (workdir === undefined || !path.isAbsolute(workdir)) throw new HostSandboxRefused("bad_workdir");
@@ -221,10 +223,12 @@ export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
       tempRoot: config.tempRoot,
       ...(config.extraRoots === undefined ? {} : { extraRoots: config.extraRoots }),
       ...(toolchain.length === 0 ? {} : { toolchainReadPaths: toolchain }),
-      ...(config.registries === undefined ? {} : { registries: config.registries }),
+      ...(config.registries === undefined || opts.role === SURVEY_ROLE ? {} : { registries: config.registries }),
       ...(config.mirrorsRoot === undefined ? {} : { mirrorsRoot: config.mirrorsRoot }),
       ...(config.spillRoot === undefined ? {} : { spillRoot: config.spillRoot }),
       ...(wslDeny === undefined ? {} : { wslDenyPaths: wslDeny }),
+      // D#845 ON-10c: the project survey reads the workspace and writes only in its own temp directory.
+      ...(opts.role === SURVEY_ROLE ? { readOnlyWorkspace: true } : {}),
       ...(opts.extraReadPaths === undefined ? {} : { extraReadPaths: opts.extraReadPaths }),
       extraDomains: [...opts.networkPolicy.map((rule) => rule.host), ...(grants?.domains ?? [])],
       ...(grants === undefined ? {} : { allowanceReadPaths: grants.readPaths, allowanceWritePaths: grants.writePaths, allowLoopbackBind: grants.loopback }),

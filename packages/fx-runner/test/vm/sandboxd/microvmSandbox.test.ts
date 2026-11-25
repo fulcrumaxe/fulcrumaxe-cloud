@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AgentRuntime } from "@fulcrumaxe/runner-protocol";
+import { SURVEY_ROLE, type AgentRuntime } from "@fulcrumaxe/runner-protocol";
 import type { SandboxHandle, StartDetachedOptions } from "../../../src/sandbox/port.js";
 import { createDaemonSdk, type LimitControl } from "../../../src/vm/sandboxd/sdkAdapter.js";
 import { cleanEnv, FIXED_ENV, LOGIN_SHELL_MARKERS, SUBSCRIPTION_TOKEN_VAR } from "../../../src/job/cleanEnv.js";
@@ -181,6 +181,23 @@ describe("the microVM engine's own promises", () => {
     await expect(port.runCommand(handle, { role: "r", cmd: "true", args: [], env: {}, networkPolicy: [{ host: "a.example", purpose: "github_proxy" }], timeoutMs: 1000 })).rejects.toMatchObject({ code: "network_rule_forbidden" });
     expect(log).toEqual(before);
     expect(rig.helper.frames.length).toBe(frames);
+  });
+
+  // D#845 ON-10c: the project survey reaches the model host and nothing else; its policy on the daemon is exactly that one name.
+  it("a survey job's network is the model host alone: any other rule (GitHub, a registry, an address) is refused before a VM or runtime is touched, and the model rule alone goes through", async () => {
+    const { port, log, rig } = setup();
+    const handle = await create(port, "m-survey");
+    const before = [...log];
+    const frames = rig.helper.frames.length;
+    for (const host of ["github.com", "registry.npmjs.org", "api.github.com", "169.254.169.254"]) {
+      expect(() => port.startDetached(handle, opts({ role: SURVEY_ROLE, networkPolicy: [{ host: "api.anthropic.com", purpose: "model" }, { host, purpose: "other" }] })), host).toThrowError(expect.objectContaining({ code: "network_rule_forbidden" }) as Error);
+    }
+    expect(log).toEqual(before);
+    expect(rig.helper.frames.length).toBe(frames);
+    await port.startDetached(handle, opts({ role: SURVEY_ROLE, networkPolicy: [{ host: "api.anthropic.com", purpose: "model" }] })).hookFired;
+    expect(log.slice(before.length)).toEqual(['policy {"allow":["api.anthropic.com"]}', "runtime built", "agent start"]);
+    // the same rule list is no problem for another role (the control: the refusal is the survey's)
+    await port.startDetached(await create(port, "m-other"), opts({ role: "executor", networkPolicy: [{ host: "registry.npmjs.org", purpose: "deps" }] })).hookFired;
   });
 
   it("a run that outlives the port's timeout ends as `sandbox_timeout`, and the VM's own timer is set past it", async () => {

@@ -17,7 +17,7 @@
  * checkpoint prompt (`checkpointTurn.ts`), the commit is pushed, and one `run_ended` `handed_off` (`pushed`, `push_failed` or `deadline`) goes out in place
  * of `done`. The note the agent writes stays on this machine.
  */
-import { CONFINED_READ_ROLES, DONE_RETRY_AFTER_SECONDS, isBrowserJobRole, LocalOnlyEvent, contextLedgerToWire, type ContextLedgerMeasure, type CheckNotRunReason, type BrowserMethod, type ConflictAttestation, type ContextSection, type DoneCheck, type HANDED_OFF_DETAILS, type Job, type JobKeyring, type StopReason } from "@fulcrumaxe/runner-protocol";
+import { CONFINED_READ_ROLES, DONE_RETRY_AFTER_SECONDS, SURVEY_ROLE, isBrowserJobRole, LocalOnlyEvent, contextLedgerToWire, type ContextLedgerMeasure, type CheckNotRunReason, type BrowserMethod, type ConflictAttestation, type ContextSection, type DoneCheck, type HANDED_OFF_DETAILS, type Job, type JobKeyring, type StopReason } from "@fulcrumaxe/runner-protocol";
 import { CHECKPOINT_MAX_TURN_MS, runCheckpointTurn } from "./checkpointTurn.js";
 import type { CheckpointNote } from "../job/checkpoint.js";
 import type { NixDetail, NixFromDefault, NixResult, NixShellStep, NixSkip, NixSource } from "./nixShell.js";
@@ -32,7 +32,7 @@ import type { LockfileSync } from "./lockfileSync.js";
 import { scopeVerdict, type ChangedFiles } from "./scopeStep.js";
 import { readDerivedRules, verifyDerivedOutputs, type GeneratorFailure } from "./derivedStep.js";
 import { NotAPlainSegment, segmentUnder } from "../job/plainSegment.js";
-import { cliModelFor, DEFAULT_WALL_CLOCK_MS, runJob, SANDBOX_MARGIN_MS,type JobLedger, type RunJobDeps, type RunJobResult } from "../job/runJob.js";
+import { cliModelFor, runJob, SANDBOX_MARGIN_MS, wallClockFor, type JobLedger, type RunJobDeps, type RunJobResult } from "../job/runJob.js";
 import { storeKeyOf, type JobAllowanceGrant } from "../sandbox/allowances.js";
 import { AgentRunFailed } from "../sandbox/agentOutcome.js";
 import { journalHome, journalSecrets } from "../job/cleanEnv.js";
@@ -232,6 +232,14 @@ export interface JobHandlerDeps {
   interrupt?: (handle: SandboxHandle) => void | Promise<void>;
   /** The session a run was in, from its local transcript. A handoff resumes it; without this (and without a session in the run's result) no checkpoint turn runs. */
   sessionOfRun?: (runId: string) => string | undefined;
+}
+
+/** D#845 ON-10c: why a survey run ends before its answer is taken. Only the closed code is read (`runJob`'s reason). */
+class SurveyRefusal extends Error {
+  constructor(readonly code: "workspace_written" | "agent_exit") {
+    super(code);
+    this.name = "SurveyRefusal";
+  }
 }
 
 /** What the handler knows of the sandbox it made for the run. */
@@ -740,6 +748,19 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
            * An OS-sandbox run runs the returned check at once (`afterAgent`). A microVM run reaches here through the host_apply step of runVmJob, after the agent's commits were read out of its
            * guest and brought into the host copy (D#587 B-5b), and runs the check in the fresh VM `runVmJob` makes for it: the agent's VM is already quiesced and stopped.
            */
+          /** True when the host working copy is exactly the commit the survey started from: no commit, no changed tracked file, no new file. A read that cannot say is "no" (fail closed). */
+          const surveyWorkspaceUntouched = async (workspace: string): Promise<boolean> => {
+            if (started.base === undefined) return false;
+            clearStubs(workspace);
+            try {
+              const changed = await deps.changedFiles?.(workspace, started.base);
+              const tip = git.tip === undefined ? started.base : await git.tip(job, workspace);
+              return changed !== undefined && changed !== null && changed.length === 0 && tip === started.base;
+            } catch {
+              // fx-swallow-ok: a listing that threw (the repository folder's shape was refused) is not a clean working copy; the closed refusal is the report
+              return false;
+            }
+          };
           const hostSteps = async (sandboxHandle: SandboxHandle, workspace: string): Promise<((checkVm?: SandboxHandle) => Promise<void>) | undefined> => {
             let agentStopFailed = false;
             // Before the check's before-and-after comparison of the protected files, so a placeholder is neither checked nor reported as a change.
@@ -853,6 +874,12 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
             };
           };
           const afterAgent = async (sandboxHandle: SandboxHandle, workspace: string): Promise<void> => {
+            // D#845 ON-10c: a survey has no check, no lockfile and nothing to push: once its agent is gone, the working copy must be exactly what it started as.
+            if (job.role === SURVEY_ROLE) {
+              if (!(await allowed.stop(sandboxHandle).then(() => true, () => false))) throw new SurveyRefusal("agent_exit");
+              if (!(await surveyWorkspaceUntouched(workspace))) throw new SurveyRefusal("workspace_written");
+              return;
+            }
             await (await hostSteps(sandboxHandle, workspace))?.();
           };
           const runOptions: RunJobDeps = { ...deps.run, promptNotes: () => promptNotes, repoMap: () => repoMapHeld.map, pinned: () => pinsHeld.read?.items, ...(spillHeld === undefined ? {} : { taskPrompt: spillHeld.rewrite }), planSession, workspaces: filledWith(deps.run.workspaces, fill), sandbox: stopOnAbort(allowed, stopRun, held), ledger: deps.ledger };
@@ -868,7 +895,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
             let agentRun: Promise<RunJobResult> | undefined;
             const outcome = await runVmJob<RunJobResult, { bundle: Buffer; base: string } | null, ((checkVm?: SandboxHandle) => Promise<void>) | undefined, void>({
               names,
-              port: typeof life.port === "function" ? life.port({ timeoutMs: (deps.run.wallClockMs ?? DEFAULT_WALL_CLOCK_MS) + SANDBOX_MARGIN_MS, runId: claimed.runId }) : life.port,
+              port: typeof life.port === "function" ? life.port({ timeoutMs: wallClockFor(job.role, deps.run.wallClockMs) + SANDBOX_MARGIN_MS, runId: claimed.runId }) : life.port,
               registry: life.registry,
               caps: life.caps,
               request: life.request,
@@ -908,6 +935,11 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
                 },
                 hostApply: async (collected) => {
                   if (agent?.status !== "done") throw new StepRefusal("vm_workspace_failed");
+                  // D#845 ON-10c: a survey that committed anything in its guest is refused here, and its bundle is never applied: the host copy is not touched for this role.
+                  if (job.role === SURVEY_ROLE) {
+                    if (collected !== null) throw new StepRefusal("workspace_written");
+                    return undefined;
+                  }
                   try {
                     if (collected !== null) {
                       const applied = await vm.apply({ bundle: collected.bundle, base: collected.base, mirrorDir: vmMirror, workspace: agent.workspace });

@@ -5,6 +5,7 @@
  * `assertEnabledSandbox` before anything is built, so a block that is off, or leaves a way out, refuses the start before the guest is touched.
  * Nothing of the host (its home, state directory or binary directory) is an input here, so none can be in a file.
  */
+import { SURVEY_ROLE } from "@fulcrumaxe/runner-protocol";
 import { assertEnabledSandbox } from "../../sandbox/sandboxSettings.js";
 import { EngineRefusal } from "../../engines/claude/refusal.js";
 import { jobDirFor } from "../../engines/claude/engine.js";
@@ -33,7 +34,9 @@ export interface GuestJobFilesInput {
 
 export function guestJobFiles(input: GuestJobFilesInput): GuestJobFiles {
   const dir = jobDirFor(input.jobsDir, input.runId);
-  const layout: GuestLayout = { workdir: input.workdir, tempDir: `/tmp/fx-${input.runId}`, jobsDir: input.jobsDir };
+  // D#845 ON-10c: the project survey's one writable path is /tmp/fx-survey/<run_id>/ (made 0700 and set as TMPDIR by the runtime), and its working copy is read-only.
+  const survey = input.role === SURVEY_ROLE;
+  const layout: GuestLayout = { workdir: input.workdir, tempDir: survey ? `/tmp/fx-survey/${input.runId}` : `/tmp/fx-${input.runId}`, jobsDir: input.jobsDir, ...(survey ? { readOnlyWorkdir: true } : {}) };
   const sandbox = (input.sandbox ?? guestSandboxSettings)(layout);
   try {
     assertEnabledSandbox(sandbox);

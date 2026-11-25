@@ -1,15 +1,15 @@
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AgentRuntime } from "@fulcrumaxe/runner-protocol";
+import { SURVEY_ROLE, type AgentRuntime } from "@fulcrumaxe/runner-protocol";
 import { cleanEnv, type CleanEnvOptions } from "../src/job/cleanEnv.js";
 import { AgentRunFailed, HostSandboxRefused, createHostSandbox } from "../src/sandbox/hostSandbox.js";
 import type { NetworkRule, StartDetachedOptions } from "../src/sandbox/port.js";
 import type { WslMachine } from "../src/sandbox/platform.js";
 import { tempDir } from "./helpers/tempTree.js";
 
-type Block = { filesystem: { allowWrite: string[]; denyWrite: string[] }; network: { allowedDomains: string[] } } & Record<string, unknown>;
+type Block = { filesystem: { allowWrite: string[]; denyWrite: string[]; allowRead: string[] }; network: { allowedDomains: string[] } } & Record<string, unknown>;
 const HOME = "/home/jane";
 const ROOT_TABLE = "26 1 8:16 / / rw,relatime - ext4 /dev/sdb rw\n";
 /** The runner state directory must be writable: the per-job env file is made under it (D#6 C44-1). */
@@ -379,5 +379,75 @@ describe("hostSandbox: git path B reads one repo mirror's objects and nothing el
     const handle = await bare.create("rn-2");
     expect(() => bare.host.startDetached(handle, bare.opts({ extraReadPaths: [OBJECTS] }))).toThrow(/not under a runner-owned root/);
     expect(bare.blocks).toEqual([]);
+  });
+});
+
+/**
+ * D#845 ON-10c: the project survey on the OS-sandbox tier. Its working copy is read-only (denied for writes, not granted), the one place a command may write is the run's own temp directory (its TMPDIR, made 0700
+ * and removed with the sandbox), and its network is the model host alone, whatever the machine is set up with and whatever the job's rules say.
+ */
+describe("hostSandbox: the project survey (D#845 ON-10c)", () => {
+  const model: NetworkRule = { host: "api.anthropic.com", purpose: "model" };
+
+  it("the workspace is read-only: not in allowWrite, in denyWrite, and the run's own temp directory is the one write grant", async () => {
+    const t = setup();
+    const handle = await t.create();
+    await t.host.startDetached(handle, t.opts({ role: SURVEY_ROLE })).hookFired;
+    const block = t.blocks[0]!;
+    const own = path.join(t.tempRoot, "rn-1");
+    expect(block.filesystem.allowWrite).toEqual([own]);
+    expect(block.filesystem.denyWrite).toContain(t.workdir);
+    expect(existsSync(own)).toBe(true);
+    expect(statSync(own).mode & 0o777).toBe(0o700);
+    // read access to the checkout is still there
+    expect(block.filesystem.allowRead).toContain(t.workdir);
+  });
+
+  it("the executor's block is unchanged: its workspace is writable (the control)", async () => {
+    const t = setup();
+    const handle = await t.create();
+    await t.host.startDetached(handle, t.opts()).hookFired;
+    expect(t.blocks[0]!.filesystem.allowWrite).toContain(t.workdir);
+    expect(t.blocks[0]!.filesystem.denyWrite).not.toContain(t.workdir);
+  });
+
+  it("the network is the model host and nothing else, even on a machine set up with a registry", async () => {
+    const t = setup();
+    const handle = await t.create();
+    await t.host.startDetached(handle, t.opts({ role: SURVEY_ROLE, networkPolicy: [model] })).hookFired;
+    expect(t.blocks[0]!.network).toEqual({ allowedDomains: ["api.anthropic.com"], strictAllowlist: true, allowLocalBinding: false });
+    const other = setup();
+    const again = await other.create();
+    await other.host.startDetached(again, other.opts({ networkPolicy: [model] })).hookFired;
+    expect(other.blocks[0]!.network.allowedDomains).toEqual(["api.anthropic.com", "registry.npmjs.org"]);
+  });
+
+  it.each([
+    ["github.com", { host: "github.com", purpose: "github_direct" }],
+    ["a registry", { host: "registry.npmjs.org", purpose: "other" }],
+    ["an address", { host: "169.254.169.254", purpose: "other" }],
+  ] as Array<[string, NetworkRule]>)("a survey job with a rule for %s is refused before a runtime is built", async (_name, rule) => {
+    const t = setup();
+    const handle = await t.create();
+    expect(() => t.host.startDetached(handle, t.opts({ role: SURVEY_ROLE, networkPolicy: [model, rule] }))).toThrow(HostSandboxRefused);
+    expect(t.blocks).toEqual([]);
+    expect(t.starts).toEqual([]);
+  });
+
+  it("a survey job that carries sandbox allowances is refused too", async () => {
+    const t = setup();
+    const handle = await t.create();
+    expect(() => t.host.startDetached(handle, t.opts({ role: SURVEY_ROLE, allowances: { entries: [{ kind: "domain", value: "registry.npmjs.org", access: "connect", reason: "install" }], commandTimeoutS: 60, storeKey: "k" } as never }))).toThrow(HostSandboxRefused);
+    expect(t.blocks).toEqual([]);
+  });
+
+  it("the run's temp directory goes with the sandbox", async () => {
+    const t = setup();
+    const handle = await t.create();
+    await t.host.startDetached(handle, t.opts({ role: SURVEY_ROLE })).hookFired;
+    const own = path.join(t.tempRoot, "rn-1");
+    expect(existsSync(own)).toBe(true);
+    await t.host.deleteSandbox(handle);
+    expect(existsSync(own)).toBe(false);
   });
 });

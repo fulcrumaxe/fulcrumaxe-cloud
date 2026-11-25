@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { NormalizedEvent } from "@fulcrumaxe/runner-protocol";
+import { SURVEY_MAX_RUN_MS, SURVEY_ROLE, type NormalizedEvent } from "@fulcrumaxe/runner-protocol";
 import { createRunnerClient } from "../../src/daemon/client.js";
 import type { CheckOutcome, CheckStepInput } from "../../src/daemon/checkStep.js";
 import type { FreshCheckInput } from "../../src/vm/workspace/guestCheck.js";
@@ -681,5 +681,68 @@ describe("a microVM job runs through runVmJob: every way it can end tears every 
     await r.handler(await r.claim(jobFor({ check: CHECK })));
     expect(r.lifecycle.registry.ids()).toEqual([]);
     expect(r.log.filter((l) => l.startsWith("release:") || l === "vm.teardown")).toEqual([]);
+  });
+});
+
+/**
+ * D#845 ON-10c: the project survey on a microVM runner. The working copy goes in as the archive of the pinned commit (the same crossing every run uses), the survey's wall clock is its own 20 minutes,
+ * and a guest that committed anything is refused: its bundle is never applied to the host's copy, and no answer is sent.
+ */
+describe("the project survey in a microVM", () => {
+  const survey = (over: Partial<Parameters<typeof jobFor>[0]> = {}) => jobFor({ role: SURVEY_ROLE, task: { ...jobFor().task, kind: "survey" as const }, role_tools_sha256: roleToolsDigest(SURVEY_ROLE), review: { head_sha: TIP }, ...over });
+  const ended = (): Array<Record<string, unknown>> => cloud.seen.filter((s) => s.path.endsWith("/events")).flatMap((s) => ((s.body as { events: Array<Record<string, unknown>> }).events).filter((e) => e.type === "run_ended"));
+  const dones = (): unknown[] => cloud.seen.filter((s) => s.path.endsWith("/done"));
+
+  it("a clean run gets the archive of the pinned commit from the mirror, runs in the VM, applies nothing, and its answer goes to the cloud", async () => {
+    const r = rig();
+    expect((await r.handler(await r.claim(survey()))).status).toBe("completed");
+    // The crossing is bound to the pinned commit's archive from the mirror (the recording port does not run the crossing itself).
+    const source = r.sources[0]?.source as WorkspaceSource;
+    await source.archive(await source.startCommit("/host/workspace"));
+    expect(r.archives).toEqual([{ mirror: expect.stringMatching(/^\/mirrors\/b\//) as string, commit: TIP }]);
+    expect(r.log).toContain("vm.agent");
+    expect(r.log).toContain("collect");
+    expect(r.log).not.toContain("apply");
+    expect(r.log.filter((l) => l.startsWith("host."))).toEqual([]);
+    expect(dones()).toHaveLength(1);
+    expect(ended()).toEqual([]);
+    clean(r);
+  });
+
+  it("a guest that committed is refused workspace_written: the bundle is collected but never applied, no done is sent, and the VM is still deleted", async () => {
+    const r = rig({ bundle: Buffer.from("bundle") });
+    expect(await r.handler(await r.claim(survey()))).toEqual({ status: "failed", reason: "workspace_written" });
+    expect(r.log).toContain("collect");
+    expect(r.log).not.toContain("apply");
+    expect(r.applied).toEqual([]);
+    expect(dones()).toHaveLength(0);
+    expect(ended()).toEqual([expect.objectContaining({ reason: "runner_setup", detail: "workspace_written" })]);
+    expect(r.log).toContain("vm.delete");
+    clean(r);
+  });
+
+  it("the same bundle is applied for an executor (the control: the refusal is the survey's)", async () => {
+    const r = rig({ bundle: Buffer.from("bundle") });
+    await r.handler(await r.claim(jobFor()));
+    expect(r.applied).toHaveLength(1);
+  });
+
+  it("the VM's limit is the survey's own 20 minutes plus the margin, whatever longer wall clock the runner is set to", async () => {
+    const seen: number[] = [];
+    const long = rig({ portTimeouts: seen, wallClockMs: 90 * 60_000 });
+    await long.handler(await long.claim(survey()));
+    const plain = rig({ portTimeouts: seen });
+    await plain.handler(await plain.claim(survey()));
+    expect(seen).toEqual([SURVEY_MAX_RUN_MS + SANDBOX_MARGIN_MS, SURVEY_MAX_RUN_MS + SANDBOX_MARGIN_MS]);
+    clean(long);
+    clean(plain);
+  });
+
+  it("a runner set to a wall clock shorter than the survey's keeps the shorter one", async () => {
+    const seen: number[] = [];
+    const short = rig({ portTimeouts: seen, wallClockMs: 5 * 60_000 });
+    await short.handler(await short.claim(survey()));
+    expect(seen).toEqual([5 * 60_000 + SANDBOX_MARGIN_MS]);
+    clean(short);
   });
 });
