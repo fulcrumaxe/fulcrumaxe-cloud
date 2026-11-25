@@ -5,6 +5,7 @@ import { MachineOpsError, machineKekSource, withHetznerToken, withManagedServer,
 import { reportError } from "@fx/telemetry";
 import { RunnerHttpError, mintServerProvisioningToken, renderUserData, revokeProvisioningToken, type RunnerCloudDeps } from "@fx/runner-cloud";
 import { withTenant } from "@fx/db/src/withTenant.js";
+import type { MembershipRole } from "@fx/core/src/tenancy/authorize.js";
 import { ApiError } from "../errors.js";
 
 /**
@@ -60,6 +61,16 @@ export interface ServerView {
   /** Derived on each read from the linked runner's own hello (`runners.model_auth_present`), never stamped on the row: true or false once the machine has said, null when no live runner is linked or it has not said. */
   claude_signed_in: boolean | null;
   created_at: string;
+  /** The server's own runner once it has registered, else null. The sign-in panel targets this id, never a name. */
+  runner_id: string | null;
+  /** When `status` last changed. */
+  status_at: string;
+  /** True once the person chose to keep an orphan (derived from `kept_at`). */
+  kept: boolean;
+  /** The linked runner's last contact, null when none is linked or it has not been heard from. */
+  last_seen_at: string | null;
+  /** Owners and admins only: the projects placed on this server's runner. The key is absent, not empty, for anyone else. */
+  placed_projects?: Array<{ repo_id: string; name: string }>;
 }
 
 /** Test seams. Production wiring: the machine KEK and the public origin come from the environment, Hetzner is the real API over TLS. */
@@ -112,7 +123,8 @@ export function toApiError(e: unknown): unknown {
   return new ApiError(a.status, `hetzner_${e.code}`, a.message, undefined, e.retryAfter === undefined ? undefined : { retry_after: e.retryAfter });
 }
 
-export interface Caller { accountId: string; userId: string }
+/** `role` is optional; only "owner" and "admin" see `placed_projects`, so a caller that does not say gets the narrower view. */
+export interface Caller { accountId: string; userId: string; role?: MembershipRole }
 export interface ServerCtx { pool: Pool; principal: Caller }
 
 export const clientFor = (token: string): HetznerClient => {
@@ -169,26 +181,48 @@ export async function quoteServer(ctx: ServerCtx, input: { serverType: string; l
 interface Row {
   id: string; name: string; status: string; server_type: string | null; location: string | null; public_ipv4: string | null; failure_code: string | null;
   price_hourly_gross: string | null; price_monthly_gross: string | null; ipv4_monthly_gross: string | null; currency: string; claude_signed_in: boolean | null; created_at: Date;
+  runner_id: string | null; status_at: Date; kept: boolean; last_seen_at: Date | null;
 }
 const COLUMNS = `id, name, status, server_type, location, host(public_ipv4) AS public_ipv4, failure_code, price_hourly_gross::text, price_monthly_gross::text, ipv4_monthly_gross::text, currency,
-  (SELECT r.model_auth_present FROM runners r WHERE r.account_id = managed_servers.account_id AND r.id = managed_servers.runner_id AND r.revoked_at IS NULL) AS claude_signed_in, created_at`;
+  (SELECT r.model_auth_present FROM runners r WHERE r.account_id = managed_servers.account_id AND r.id = managed_servers.runner_id AND r.revoked_at IS NULL) AS claude_signed_in, created_at,
+  runner_id, status_at, (kept_at IS NOT NULL) AS kept, (SELECT r.last_seen_at FROM runners r WHERE r.account_id = managed_servers.account_id AND r.id = managed_servers.runner_id) AS last_seen_at`;
 const viewOf = (r: Row): ServerView => ({
   id: r.id, name: r.name, kind: "hetzner_cloud", status: r.status, server_type: r.server_type, location: r.location, public_ipv4: r.public_ipv4, failure_code: r.failure_code,
   // A server found by the orphan sweep was not made through a create, so no price was stamped: it has none, and says so.
   price: r.price_hourly_gross === null || r.price_monthly_gross === null || r.ipv4_monthly_gross === null ? null : { currency: r.currency, hourly_gross: r.price_hourly_gross, monthly_gross: r.price_monthly_gross, ipv4_monthly_gross: r.ipv4_monthly_gross }, claude_signed_in: r.claude_signed_in, created_at: r.created_at.toISOString(),
+  runner_id: r.runner_id, status_at: r.status_at.toISOString(), kept: r.kept, last_seen_at: r.last_seen_at === null ? null : r.last_seen_at.toISOString(),
 });
+
+/**
+ * The rows as views. An owner or admin also gets `placed_projects` (a repo with no name falls back to its product label, never null). Both tables carry an explicit account predicate,
+ * and so does the join, on top of row security and the composite foreign keys. A member's view has no such key and the query is not run.
+ */
+async function present(ctx: ServerCtx, rows: Row[]): Promise<ServerView[]> {
+  const views = rows.map(viewOf);
+  const { accountId, userId, role } = ctx.principal;
+  if (role !== "owner" && role !== "admin") return views;
+  const runnerIds = rows.flatMap((r) => (r.runner_id === null ? [] : [r.runner_id]));
+  const by = new Map<string, Array<{ repo_id: string; name: string }>>();
+  if (runnerIds.length > 0) {
+    const placed = await withTenant(ctx.pool, accountId, userId, async (c) => (await c.query<{ runner_id: string; repo_id: string; name: string }>(
+      `SELECT p.runner_id, r.id AS repo_id, COALESCE(r.gh_owner || '/' || r.gh_name, r.product) AS name FROM project_placements p JOIN repos r ON r.account_id = p.account_id AND r.id = p.repo_id
+        WHERE p.account_id = $1 AND p.runner_id = ANY($2::uuid[]) ORDER BY name, r.id`, [accountId, runnerIds])).rows);
+    for (const p of placed) by.set(p.runner_id, [...(by.get(p.runner_id) ?? []), { repo_id: p.repo_id, name: p.name }]);
+  }
+  return views.map((v, i) => ({ ...v, placed_projects: (rows[i]!.runner_id === null ? undefined : by.get(rows[i]!.runner_id!)) ?? [] }));
+}
 
 /** One of the account's servers, or null. The id must be a UUID (the caller checks; a malformed one never reaches the database). */
 export async function getServer(ctx: ServerCtx, id: string): Promise<ServerView | null> {
   const row = await withTenant(ctx.pool, ctx.principal.accountId, ctx.principal.userId, async (c) => (await c.query<Row>(`SELECT ${COLUMNS} FROM managed_servers WHERE account_id = $1 AND id = $2`, [ctx.principal.accountId, id])).rows[0]);
-  return row ? viewOf(row) : null;
+  return row ? (await present(ctx, [row]))[0]! : null;
 }
 
 /** The account's servers that are not deleted, newest first, with the fields of `getServer`. The account predicate is explicit, on top of row security. */
 export async function listServers(ctx: ServerCtx): Promise<ServerView[]> {
   const { accountId, userId } = ctx.principal;
   const rows = await withTenant(ctx.pool, accountId, userId, async (c) => (await c.query<Row>(`SELECT ${COLUMNS} FROM managed_servers WHERE account_id = $1 AND status <> 'deleted' ORDER BY created_at DESC, id LIMIT 500`, [accountId])).rows);
-  return rows.map(viewOf);
+  return present(ctx, rows);
 }
 
 export interface CreateInput {
@@ -338,7 +372,7 @@ async function createLocked(ctx: ServerCtx, input: CreateInput, lock: PoolClient
   const existing = await withTenant(ctx.pool, accountId, userId, async (c) => (await c.query<Row>(`SELECT ${COLUMNS} FROM managed_servers WHERE account_id = $1 AND idempotency_key = $2`, [accountId, input.idempotencyKey])).rows[0]);
   if (existing) {
     if (existing.status === "failed" && existing.failure_code === "cleanup_failed") throw outcomeUnknown();
-    return { server: viewOf(existing), reused: true };
+    return { server: (await present(ctx, [existing]))[0]!, reused: true };
   }
   // One create per account at a time, whatever the key: a reload or a second tab has lost the first key. The per-key lock above is already held, so a retry with the same key
   // has been answered by the lookup above and never gets here. This one does not wait, and it is held (on the same transaction) for as long as the per-key lock.
@@ -420,7 +454,7 @@ async function createLocked(ctx: ServerCtx, input: CreateInput, lock: PoolClient
         await cl.query("SELECT audit_write('server.create_confirmed', $1::jsonb)", [JSON.stringify({ server_id: serverId, server_type: input.serverType, location: input.location })]);
         return rows[0];
       });
-      return { server: viewOf(row), reused: false };
+      return { server: (await present(ctx, [row]))[0]!, reused: false };
     }).then(async (out) => {
       // The queued status worker follows the row to ready or failed. A start that is refused does not undo a server that now exists and is billed: it is reported, and the person's Delete still works.
       try { await machineServerDeps.startStatusWorker?.({ accountId, userId, serverId: out.server.id }); } catch (e) { reportError(e, { stage: "machine_server.start_status_worker", route: "/api/v1/machine-servers" }); }
@@ -435,7 +469,7 @@ async function createLocked(ctx: ServerCtx, input: CreateInput, lock: PoolClient
     }
     if (raced) {
       const again = await withTenant(ctx.pool, accountId, userId, async (c) => (await c.query<Row>(`SELECT ${COLUMNS} FROM managed_servers WHERE account_id = $1 AND idempotency_key = $2`, [accountId, input.idempotencyKey])).rows[0]);
-      if (again) return { server: viewOf(again), reused: true };
+      if (again) return { server: (await present(ctx, [again]))[0]!, reused: true };
     }
     throw toApiError(e);
   }

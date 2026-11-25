@@ -55,6 +55,11 @@ export const serverSchema = z.object({
   price: priceSchema.nullable(),
   claude_signed_in: z.boolean().nullable(),
   created_at: z.string(),
+  runner_id: z.string().uuid().nullable(),
+  status_at: z.string(),
+  kept: z.boolean(),
+  last_seen_at: z.string().nullable(),
+  placed_projects: z.array(z.object({ repo_id: z.string().uuid(), name: z.string() })).optional(),
 });
 
 const catalogPriceSchema = z.object({ location: z.string(), available: z.boolean(), hourly_gross: z.string(), monthly_gross: z.string(), ipv4_monthly_gross: z.string() });
@@ -70,7 +75,7 @@ export const catalogSchema = z.object({
 });
 export const serverListSchema = z.object({ servers: z.array(serverSchema) });
 
-const serverCtx = (ctx: RouteContext): ServerCtx => ({ pool: ctx.pool, principal: { accountId: ctx.principal.accountId, userId: ctx.principal.userId } });
+const serverCtx = (ctx: RouteContext): ServerCtx => ({ pool: ctx.pool, principal: { accountId: ctx.principal.accountId, userId: ctx.principal.userId, role: ctx.principal.role } });
 const CREATE_409 = "Error `server_creating`: another server is already being made for this account (any key); wait and try again.";
 const EXTRA = {
   "409": "Error `price_changed`: the live price differs from `quoted` by any amount; nothing was created, and `data.live` holds the live price. Other 409s are `hetzner_*` codes (limit reached, size not available, name used) and `credential_invalid`.",
@@ -83,7 +88,7 @@ export const machineServerRoutes: RouteEntry[] = [
     path: "/api/v1/machine-servers",
     operationId: "listHetznerServers",
     summary: "The Hetzner Cloud servers of this account that have not been deleted, newest first",
-    description: "Session only, owner or admin. Each entry has the same fields as one server. Reads the account's own rows only; it does not open the token and does not call Hetzner.",
+    description: "Session only, owner or admin. Each entry has the same fields as one server (`runner_id`, `status_at`, `kept`, `last_seen_at`, and `placed_projects`, the projects placed on its runner, which only an owner or admin is sent). Reads the account's own rows only; it does not open the token and does not call Hetzner.",
     idempotency: "never",
     rateClass: "read",
     minRole: "admin",

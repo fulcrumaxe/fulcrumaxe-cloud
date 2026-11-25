@@ -13,9 +13,10 @@ import { ROUTES } from '../src/routes/index.js';
 import { generateToken } from '../src/tokens/format.js';
 import { hashToken } from '../src/tokens/resolve.js';
 import { hetznerCredentialStatusSchema } from '../src/routes/machine-credential.js';
-import { catalogSchema, serverListSchema } from '../src/routes/machine-servers.js';
+import { catalogSchema, serverListSchema, serverSchema } from '../src/routes/machine-servers.js';
 import { CATALOG_TTL_MS, catalogDeps, clearCatalogCache, getCatalog, resolvePreset, type CatalogType } from '../src/machines/catalog.js';
-import { listServers, machineServerDeps } from '../src/machines/servers.js';
+import { getServer, listServers, machineServerDeps } from '../src/machines/servers.js';
+import { insertRunner } from '@fx/db/test/helpers/runnerFixtures.js';
 import { seedAccountWithMember, seedUser } from './helpers/seed.js';
 
 const API = 'http://localhost/api/v1';
@@ -180,6 +181,113 @@ describe('machine read routes', () => {
       expect(await listServers({ pool: adminPool, principal: b })).toEqual([]);
       expect(await listServers({ pool: adminPool, principal: { accountId: randomUUID(), userId: b.userId } })).toEqual([]);
       expect((await listServers({ pool: adminPool, principal: a })).length).toBe(1);
+    });
+  });
+
+  describe('the server view: runner, status time, kept, last contact and placed projects', () => {
+    const REPLICA = 'SET session_replication_role = replica';
+    const seedRepo = async (accountId: string, name: string | null): Promise<string> => {
+      const id = randomUUID();
+      await admin.query(`INSERT INTO repos (id, account_id, gh_repo_id, product, gh_owner, gh_name) VALUES ($1, $2, $3, 'team', $4, $5)`, [id, accountId, Math.floor(Math.random() * 1e9) + 1, name === null ? null : 'acme', name]);
+      return id;
+    };
+    const place = (accountId: string, repoId: string, runnerId: string) => admin.query(`INSERT INTO project_placements (repo_id, account_id, runner_id, placed_by) VALUES ($1, $2, $3, 'person')`, [repoId, accountId, runnerId]);
+    /** A server of `who` that has registered a runner: returns both ids. */
+    async function serverWithRunner(who: Who): Promise<{ id: string; runnerId: string }> {
+      const id = ((await (await makeServer(who)).json()) as { id: string }).id;
+      const runnerId = await insertRunner(admin, who.accountId, who.userId);
+      await admin.query(`UPDATE managed_servers SET runner_id = $3 WHERE account_id = $1 AND id = $2`, [who.accountId, id, runnerId]);
+      return { id, runnerId };
+    }
+
+    it('answers runner_id (null before the runner registers), status_at, kept and last_seen_at, the same on the list and on GET /{id}', async () => {
+      const a = await owner();
+      const fresh = (await getJson(a, `/machine-servers/${((await (await makeServer(a)).json()) as { id: string }).id}`)).body;
+      expect(fresh).toMatchObject({ runner_id: null, kept: false, last_seen_at: null });
+      expect(new Date(fresh.status_at as string).toISOString()).toBe(fresh.status_at);
+      expect(fresh.placed_projects).toEqual([]);
+
+      const s = await serverWithRunner(a);
+      await admin.query(`UPDATE runners SET last_seen_at = timestamptz '2026-11-24T10:00:00Z' WHERE id = $1`, [s.runnerId]);
+      await admin.query(`UPDATE managed_servers SET status = 'orphaned', kept_at = now(), kept_by = $3, status_at = timestamptz '2026-11-24T09:00:00Z' WHERE account_id = $1 AND id = $2`, [a.accountId, s.id, a.userId]);
+      const one = await getJson(a, `/machine-servers/${s.id}`);
+      expect(serverSchema.safeParse(one.body).success).toBe(true);
+      expect(one.body).toMatchObject({ runner_id: s.runnerId, kept: true, last_seen_at: '2026-11-24T10:00:00.000Z', status_at: '2026-11-24T09:00:00.000Z' });
+      const listed = (await getJson(a, '/machine-servers')).body.servers.find((x: { id: string }) => x.id === s.id);
+      expect(listed).toEqual(one.body);
+    });
+
+    it("lists the projects placed on that server's runner only: not the account's other repos, not another server's, and a repo with no name shows its product label", async () => {
+      const a = await owner();
+      const one = await serverWithRunner(a);
+      const two = await serverWithRunner(a);
+      const named = await seedRepo(a.accountId, 'widgets');
+      const bare = await seedRepo(a.accountId, null);
+      await seedRepo(a.accountId, 'unplaced');
+      const elsewhere = await seedRepo(a.accountId, 'elsewhere');
+      await place(a.accountId, named, one.runnerId);
+      await place(a.accountId, elsewhere, two.runnerId);
+      expect((await getJson(a, `/machine-servers/${one.id}`)).body.placed_projects).toEqual([{ repo_id: named, name: 'acme/widgets' }]);
+      expect((await getJson(a, `/machine-servers/${two.id}`)).body.placed_projects).toEqual([{ repo_id: elsewhere, name: 'acme/elsewhere' }]);
+      await admin.query('DELETE FROM project_placements WHERE repo_id = $1', [named]);
+      await place(a.accountId, bare, one.runnerId);
+      expect((await getJson(a, `/machine-servers/${one.id}`)).body.placed_projects).toEqual([{ repo_id: bare, name: 'team' }]);
+    });
+
+    it("never shows another account's runner or repo, read through the RLS-bypassing client: rows made inconsistent on purpose, so only the queries' own account predicates stand in the way", async () => {
+      const a = await owner();
+      const b = await owner();
+      const mine = await serverWithRunner(a);
+      const foreignRunner = await insertRunner(admin, b.accountId, b.userId);
+      await admin.query(`UPDATE runners SET last_seen_at = now() WHERE id = $1`, [foreignRunner]);
+      const foreignRepo = await seedRepo(b.accountId, 'secret');
+      await place(b.accountId, foreignRepo, foreignRunner);
+      const own = await seedRepo(a.accountId, 'own');
+      // a's server points at b's runner; a's placements point at b's repo, and a's repo at b's runner. The composite foreign keys forbid all of it, so the checks are switched off for these writes only.
+      await admin.query(REPLICA);
+      try {
+        await admin.query(`UPDATE managed_servers SET runner_id = $3 WHERE account_id = $1 AND id = $2`, [a.accountId, mine.id, foreignRunner]);
+        await place(a.accountId, foreignRepo, mine.runnerId);
+        await place(a.accountId, own, foreignRunner);
+      } finally {
+        await admin.query('RESET session_replication_role');
+      }
+      const view = await getServer({ pool: adminPool, principal: { ...a, role: 'owner' } }, mine.id);
+      expect(view).toMatchObject({ runner_id: foreignRunner, last_seen_at: null });
+      expect(JSON.stringify(view)).not.toContain(foreignRepo);
+      expect(JSON.stringify(view)).not.toContain('secret');
+      expect(view!.placed_projects!.map((p) => p.name)).toEqual(['acme/own']);
+      // With a's runner back, b's repo placed there under a's account still does not show.
+      await admin.query(`UPDATE managed_servers SET runner_id = $3 WHERE account_id = $1 AND id = $2`, [a.accountId, mine.id, mine.runnerId]);
+      expect((await getServer({ pool: adminPool, principal: { ...a, role: 'owner' } }, mine.id))!.placed_projects).toEqual([]);
+      // A foreign account (or an unknown one) reads none of a's servers.
+      expect(await getServer({ pool: adminPool, principal: { ...b, role: 'owner' } }, mine.id)).toBeNull();
+      expect(await listServers({ pool: adminPool, principal: { ...b, role: 'owner' } })).toEqual([]);
+      expect(await listServers({ pool: adminPool, principal: { accountId: randomUUID(), userId: b.userId, role: 'owner' } })).toEqual([]);
+    });
+
+    it('sends placed_projects to an owner and an admin and no such key at all to a member or a caller that names no role; the routes stay owner-or-admin', async () => {
+      const a = await owner();
+      const s = await serverWithRunner(a);
+      await place(a.accountId, await seedRepo(a.accountId, 'widgets'), s.runnerId);
+      const adminWho = await member(a.accountId);
+      await admin.query(`UPDATE account_members SET role = 'admin' WHERE account_id = $1 AND user_id = $2`, [a.accountId, adminWho.userId]);
+      for (const role of ['owner', 'admin'] as const) {
+        const v = await getServer({ pool: adminPool, principal: { ...a, role } }, s.id);
+        expect(v!.placed_projects).toHaveLength(1);
+        expect((await listServers({ pool: adminPool, principal: { ...a, role } }))[0]!.placed_projects).toHaveLength(1);
+      }
+      expect((await getJson(adminWho, `/machine-servers/${s.id}`)).body.placed_projects).toHaveLength(1);
+      const plain = await member(a.accountId);
+      for (const principal of [{ ...a, role: 'member' as const }, { ...a }]) {
+        const v = await getServer({ pool: adminPool, principal }, s.id);
+        expect(v).not.toHaveProperty('placed_projects');
+        expect(v).toMatchObject({ id: s.id, runner_id: s.runnerId });
+        const l = await listServers({ pool: adminPool, principal });
+        expect(l).toHaveLength(1);
+        expect(l[0]).not.toHaveProperty('placed_projects');
+      }
+      expect((await call(plain, 'GET', `/machine-servers/${s.id}`)).status).toBe(403);
     });
   });
 

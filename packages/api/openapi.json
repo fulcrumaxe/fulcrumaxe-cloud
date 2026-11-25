@@ -14837,7 +14837,7 @@
       "get": {
         "operationId": "listHetznerServers",
         "summary": "The Hetzner Cloud servers of this account that have not been deleted, newest first",
-        "description": "Session only, owner or admin. Each entry has the same fields as one server. Reads the account's own rows only; it does not open the token and does not call Hetzner.",
+        "description": "Session only, owner or admin. Each entry has the same fields as one server (`runner_id`, `status_at`, `kept`, `last_seen_at`, and `placed_projects`, the projects placed on its runner, which only an owner or admin is sent). Reads the account's own rows only; it does not open the token and does not call Hetzner.",
         "security": [
           {
             "session": []
@@ -14939,6 +14939,51 @@
                           },
                           "created_at": {
                             "type": "string"
+                          },
+                          "runner_id": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "format": "uuid",
+                                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "status_at": {
+                            "type": "string"
+                          },
+                          "kept": {
+                            "type": "boolean"
+                          },
+                          "last_seen_at": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "placed_projects": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "repo_id": {
+                                  "type": "string",
+                                  "format": "uuid",
+                                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                                },
+                                "name": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "repo_id",
+                                "name"
+                              ],
+                              "additionalProperties": false
+                            }
                           }
                         },
                         "required": [
@@ -14952,7 +14997,11 @@
                           "failure_code",
                           "price",
                           "claude_signed_in",
-                          "created_at"
+                          "created_at",
+                          "runner_id",
+                          "status_at",
+                          "kept",
+                          "last_seen_at"
                         ],
                         "additionalProperties": false
                       }
@@ -15183,6 +15232,51 @@
                     },
                     "created_at": {
                       "type": "string"
+                    },
+                    "runner_id": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "status_at": {
+                      "type": "string"
+                    },
+                    "kept": {
+                      "type": "boolean"
+                    },
+                    "last_seen_at": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "placed_projects": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "repo_id": {
+                            "type": "string",
+                            "format": "uuid",
+                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                          },
+                          "name": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "repo_id",
+                          "name"
+                        ],
+                        "additionalProperties": false
+                      }
                     }
                   },
                   "required": [
@@ -15196,7 +15290,11 @@
                     "failure_code",
                     "price",
                     "claude_signed_in",
-                    "created_at"
+                    "created_at",
+                    "runner_id",
+                    "status_at",
+                    "kept",
+                    "last_seen_at"
                   ],
                   "additionalProperties": false
                 }
@@ -15858,6 +15956,51 @@
                     },
                     "created_at": {
                       "type": "string"
+                    },
+                    "runner_id": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "status_at": {
+                      "type": "string"
+                    },
+                    "kept": {
+                      "type": "boolean"
+                    },
+                    "last_seen_at": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "placed_projects": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "repo_id": {
+                            "type": "string",
+                            "format": "uuid",
+                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                          },
+                          "name": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "repo_id",
+                          "name"
+                        ],
+                        "additionalProperties": false
+                      }
                     }
                   },
                   "required": [
@@ -15871,7 +16014,11 @@
                     "failure_code",
                     "price",
                     "claude_signed_in",
-                    "created_at"
+                    "created_at",
+                    "runner_id",
+                    "status_at",
+                    "kept",
+                    "last_seen_at"
                   ],
                   "additionalProperties": false
                 }

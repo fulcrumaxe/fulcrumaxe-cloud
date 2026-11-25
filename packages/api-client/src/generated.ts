@@ -1702,6 +1702,14 @@ export interface Operations {
         }) | (null);
         claude_signed_in: boolean | null;
         created_at: string;
+        runner_id: (string) | (null);
+        status_at: string;
+        kept: boolean;
+        last_seen_at: string | null;
+        placed_projects?: Array<{
+          repo_id: string;
+          name: string;
+        }>;
       }>;
     };
   };
@@ -1737,6 +1745,14 @@ export interface Operations {
       }) | (null);
       claude_signed_in: boolean | null;
       created_at: string;
+      runner_id: (string) | (null);
+      status_at: string;
+      kept: boolean;
+      last_seen_at: string | null;
+      placed_projects?: Array<{
+        repo_id: string;
+        name: string;
+      }>;
     };
   };
   getHetznerCatalog: {
@@ -1820,6 +1836,14 @@ export interface Operations {
       }) | (null);
       claude_signed_in: boolean | null;
       created_at: string;
+      runner_id: (string) | (null);
+      status_at: string;
+      kept: boolean;
+      last_seen_at: string | null;
+      placed_projects?: Array<{
+        repo_id: string;
+        name: string;
+      }>;
     };
   };
   deleteHetznerServer: {
