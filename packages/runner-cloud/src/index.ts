@@ -206,6 +206,7 @@ export {
   setupPlanRun,
   type IssuedSetupJob,
 } from "./setupJobs.js";
+export { readEngineBehind, updateEngine, type EngineBehind, type IssuedEngineUpdate } from "./engineUpdate.js";
 export {
   moveEngineProject,
   type MovedEngine,

@@ -517,6 +517,8 @@ describe('audit_write / audit_write_system: append-only, unforgeable audit_log (
         '1083_engine_move_cleanups.sql',
         // 1092 (D#845 ON-13c3) executes 1077's predicates, so it goes with it.
         '1092_engine_session_lease.sql',
+        // 1093 (D#845 ON-15a) reads 1035's project_placements and 1053's machine_jobs, so it goes with them.
+        '1093_engine_updates.sql',
       ];
       const AUDIT_WRITE_MIGRATIONS = allFiles.filter(
         (f) => BUILDS_ON_HELD_BACK.includes(f) || isAuditWriteMigration(readFileSync(path.join(DEFAULT_MIGRATIONS_DIR, f), 'utf8')),
