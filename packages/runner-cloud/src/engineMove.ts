@@ -73,7 +73,6 @@ export async function moveEngineProject(deps: RunnerCloudDeps, principal: Sessio
   if (!UUID.test(input.toRunnerId)) throw refuse(404, "not_found", "no such machine");
   const repoId = input.repoId.toLowerCase();
   const toRunnerId = input.toRunnerId.toLowerCase();
-  const signer = await signerOf(deps);
   const { accountId } = principal;
   const tenant = <T>(fn: (client: PoolClient) => Promise<T>) => withTenant(deps.appUserPool, accountId, principal.userId, fn);
   // The cheap refusals first, so a move that cannot be made never costs a GitHub call. The same gates run again under the lock below.
@@ -84,6 +83,8 @@ export async function moveEngineProject(deps: RunnerCloudDeps, principal: Sessio
     if (!(await readOperate(client, accountId, false)).enabled || !(await repoOperated(client, accountId, repoId))) throw refuse(409, "operate_off", "operate is off, so the engine cannot be started on the new machine");
     return placed;
   }));
+  // After the role check: a member is told 403 whether or not the cloud can sign a job.
+  const signer = await signerOf(deps);
   if (first.owner === null || first.name === null) throw refuse(409, "default_branch_empty", "the repository has no name on record");
   const head = await defaultBranchHead(deps, { id: repoId, owner: first.owner, name: first.name });
 

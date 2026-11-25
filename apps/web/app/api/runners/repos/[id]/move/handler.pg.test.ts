@@ -16,7 +16,7 @@ import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
 const jobKeys = generateKeyPairSync("ed25519");
 const keyring = { "job-key-1": jobKeys.publicKey };
 const HEAD = "f".repeat(40);
-const state = vi.hoisted(() => ({ pools: null as null | { appUserPool: unknown; platformOpsPool: unknown }, session: null as null | { accountId: string; userId: string }, signerKey: null as unknown }));
+const state = vi.hoisted(() => ({ pools: null as null | { appUserPool: unknown; platformOpsPool: unknown }, session: null as null | { accountId: string; userId: string }, signerKey: null as unknown, noSigner: false }));
 
 vi.mock("../../../../auth/_lib/deps", () => ({ defaultAuthDeps: () => state.pools }));
 vi.mock("../../../../../../lib/shell/session-guard", () => ({
@@ -24,7 +24,7 @@ vi.mock("../../../../../../lib/shell/session-guard", () => ({
   applyRefreshedSessionCookie: (res: unknown) => res,
 }));
 vi.mock("../../../../../../lib/worker", () => ({
-  getWorker: async () => ({ engineCommandSigner: { keyId: "job-key-1", signEngineCommand: () => { throw new Error("unused"); }, signMachineJob: (job: MachineJob) => signMachineJob(job, "job-key-1", state.signerKey as never) } }),
+  getWorker: async () => ({ engineCommandSigner: state.noSigner ? undefined : { keyId: "job-key-1", signEngineCommand: () => { throw new Error("unused"); }, signMachineJob: (job: MachineJob) => signMachineJob(job, "job-key-1", state.signerKey as never) } }),
 }));
 vi.mock("../../../../../../lib/github/runnerPullRequest", () => ({
   createAppRunPullRequestPort: () => ({ defaultBranch: async () => "main", branchState: async () => ({ exists: true, headOid: "f".repeat(40), aheadBy: 0, defaultBranch: "main" }) }),
@@ -102,6 +102,23 @@ describe("POST /api/runners/repos/:id/move, the real route [pg]", () => {
     expect(mine.map((j) => j.kind)).toEqual(["engine_session_start"]);
     expect(verifyMachineJob(mine[0]!.job, keyring, r.to)).toMatchObject({ repo_gh_id: r.ghRepoId, args: { at_sha: HEAD, resume: false, operate_epoch: 1 } });
     expect(w.cleanups).toEqual([{ runner_id: r.from, reason: "move" }]);
+  });
+
+  it("checks the role before the signer: a member gets 403 with no signer configured, the owner gets 503 and nothing changes", async () => {
+    const r = await rig();
+    const before = JSON.stringify(await world(r));
+    state.noSigner = true;
+    try {
+      state.session = { accountId: r.who.accountId, userId: r.member };
+      const member = await post(r.who.repoId, { to_runner_id: r.to });
+      expect([member.status, (member.body as { error: { code: string } }).error.code]).toEqual([403, "forbidden"]);
+      state.session = { accountId: r.who.accountId, userId: r.who.userId };
+      const owner = await post(r.who.repoId, { to_runner_id: r.to });
+      expect([owner.status, (owner.body as { error: { code: string } }).error.code]).toEqual([503, "not_configured"]);
+    } finally {
+      state.noSigner = false;
+    }
+    expect(JSON.stringify(await world(r))).toBe(before);
   });
 
   it("refuses with the codes the screen reads, and a refused move changes nothing: signed out 401, a member 403, operate off 409, a body that is not the route's 400", async () => {
