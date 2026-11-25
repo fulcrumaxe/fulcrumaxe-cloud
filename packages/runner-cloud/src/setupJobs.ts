@@ -106,7 +106,7 @@ export function buildPlanFile(input: { kind: "existing" | "new"; owner: string |
 }
 
 /** Maps a failed GitHub read to a status. The messages are fixed text: nothing of GitHub's answer reaches the caller. */
-function githubFailure(error: unknown): never {
+export function githubFailure(error: unknown): never {
   if (error instanceof RunPullRequestError) throw error.retryable ? refuse(503, "github_unavailable", "GitHub could not be read now") : refuse(502, "github_refused", "GitHub refused the read");
   throw error;
 }

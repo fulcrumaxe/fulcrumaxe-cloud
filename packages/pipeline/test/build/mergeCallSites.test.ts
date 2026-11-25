@@ -51,8 +51,28 @@ describe("R-P1d-1: the merge gate is the only way the product merges", () => {
     expect(mentioning(/\b(?:ENQUEUE_PULL_REQUEST_DOCUMENT|ENABLE_AUTO_MERGE_DOCUMENT)\b/)).toEqual(DOCUMENTS);
   });
 
-  it("only the port and the runner build the merge endpoint's path", () => {
-    expect(mentioning(/\/pulls\/\$\{[^}]+\}\/merge/)).toEqual(["packages/fx-runner/src/daemon/planePushGithub.ts", "packages/pipeline/src/build/githubMergePort.ts"]);
+  it("only the port, the runner and the one install-merge call build the merge endpoint's path", () => {
+    expect(mentioning(/\/pulls\/\$\{[^}]+\}\/merge/)).toEqual(["packages/fx-runner/src/daemon/planePushGithub.ts", "packages/pipeline/src/build/githubMergePort.ts", "packages/runner-cloud/src/runPullRequest.ts"]);
+  });
+
+  // D#845 ON-20a: a person's click merges the INSTALL pull request, which has no work item, author record, lease or queue slot for the gate to read, so it cannot go through `runMergeGate`.
+  // Its one call is pinned here: a single site, inside `mergeInstall`, on a client fenced to exactly one repository, number and head (`installMerge`), with the body exactly
+  // { sha, merge_method: "squash" }; and `mergeInstall` is named only by the port's own file and the person-only route's module.
+  it("the install merge is one call, inside mergeInstall, on a client pinned to one pull request and head, named by one route module only", () => {
+    const file = "packages/runner-cloud/src/runPullRequest.ts";
+    const src = readFileSync(path.join(REPO_ROOT, file), "utf8");
+    expect(src.match(/\/pulls\/\$\{[^}]+\}\/merge/g)).toHaveLength(1);
+    const start = src.indexOf("async mergeInstall(");
+    expect(start).toBeGreaterThan(0);
+    const end = src.indexOf("\n    },", start);
+    expect(end).toBeGreaterThan(start);
+    const fn = src.slice(start, end);
+    expect(fn).toMatch(/purpose: "setup_merge", installMerge: \{ owner: repo\.owner, name: repo\.name, number, sha \}/);
+    expect(fn.match(/\/pulls\/\$\{[^}]+\}\/merge/g)).toHaveLength(1);
+    expect(fn).toMatch(/body: \{ sha, merge_method: "squash" \}/);
+    expect(fn.indexOf("installMerge:")).toBeLessThan(fn.indexOf("/merge`"));
+    expect(mentioning(/\bmergeInstall\b/)).toEqual([file, "packages/runner-cloud/src/setupInstallMerge.ts"]);
+    expect(mentioning(/\binstallMergeRun\b/)).toEqual(["apps/web/app/api/v1/setups/[id]/install/merge/handler.ts", "packages/runner-cloud/src/index.ts", "packages/runner-cloud/src/setupInstallMerge.ts"]);
   });
 
   it("only the runner API's go phase and the token builders mint the plane_merge credential", () => {

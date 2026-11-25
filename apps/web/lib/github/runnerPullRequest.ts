@@ -12,7 +12,7 @@ import { openInstallationHttp, readRepoAppLogin } from "./installationHttp";
  * write. `createRunPullRequestPort` puts every call through `localOnlyGithub`, so only the allowlist's A1 to A5 ever reach it; this
  * file only translates a request into the installation client's shape.
  */
-const METHODS = new Set<string>(["GET", "POST", "PATCH"]);
+const METHODS = new Set<string>(["GET", "POST", "PATCH", "PUT"]);
 
 /** The raw pull-request installation client. Private to this file on purpose: it can send any GraphQL and its token reads contents, so no caller outside gets it unfenced. */
 function openRunnerPrHttp(open: typeof openInstallationHttp, repo: { repoId: string; owner: string; name: string }) {
@@ -37,7 +37,8 @@ export function createAppRunPullRequestPort(deps: { open?: typeof openInstallati
       // D#845 ON-8f2b: the install step's labels need `issues: write` and `POST /labels`, which the pull request kind holds neither of; they go through the `setup_labels` kind (the one write, exact list).
       // D#845 ON-13a4: the finish phase's Discussions and issues go through the `setup_finish` kind (Discussions and Issues write, no contents), never the pull request token.
       const target = { repoId: repo.id, owner: repo.owner, name: repo.name };
-      const http = purpose === "setup_labels" ? await open("setup_labels", target) : purpose === "setup_finish" ? await open("setup_finish", target) : await openRunnerPrHttp(open, target);
+      // D#845 ON-20a: the install merge (A10) goes through the merge gate's client, the only pull request kind whose token holds contents write; the port's `installMerge` pin leaves it that one call.
+      const http = purpose === "setup_labels" ? await open("setup_labels", target) : purpose === "setup_finish" ? await open("setup_finish", target) : purpose === "setup_merge" ? await open("merge_gate", target) : await openRunnerPrHttp(open, target);
       return {
         request(req: GithubRequest) {
           if (!METHODS.has(req.method)) return Promise.reject(new Error("method_refused"));
