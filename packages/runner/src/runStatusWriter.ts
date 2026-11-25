@@ -14,7 +14,8 @@ import { assertLegalRunTransition, type RunStatus } from "./statusTransitions.js
 import type { ExtensionProgress } from "./runLimitDecision.js";
 import type { Role } from "./types.js";
 import { isRunnerMode } from "./runnerModes.js";
-import { ITEM_PR_BRANCH, RUNNER_RUN_BRANCH } from "@fulcrumaxe/runner-protocol";
+import { ITEM_PR_BRANCH, RUNNER_RUN_BRANCH, SURVEY_ROLE, type SurveyFailureReason } from "@fulcrumaxe/runner-protocol";
+import { reportError } from "@fx/telemetry";
 import { resolveBuildIdentity } from "@fx/core/src/work-items/buildIdentity.js";
 
 /**
@@ -911,10 +912,52 @@ export async function recordRunStatusMove(client: PoolClient, params: Pick<Write
   await emitRunStatusDomainEvent(client, params);
 }
 
-/** Wakes the verify stage when the run that just ended is a post-merge tester's. Any other role does nothing. */
-async function wakeVerifyStageForRun(client: PoolClient, accountId: string, runId: string): Promise<void> {
-  const { rows } = await client.query<{ role: string }>(`SELECT role FROM agent_runs WHERE account_id = $1 AND id = $2`, [accountId, runId]);
-  if (rows[0]?.role === VERIFY_TESTER_ROLE) wakeVerifyStage();
+/**
+ * D#845 ON-10b2 (Ruling 88 item 5): how a survey run's end lands on its setup. Null: nothing to write (the `done` branch wrote the draft, or already called `survey_fail` for an answer it refused). Otherwise the closed
+ * code and reason `survey_fail` takes. The runner can never name either: they come from the status move alone. `workspace_written` is ON-10c's row.
+ */
+export function surveyEndingFor(move: Pick<WriteRunStatusParams, "from" | "to" | "failureReason">): { code: "survey_failed" | "survey_timeout"; reason: SurveyFailureReason } | null {
+  const failed = (reason: SurveyFailureReason) => ({ code: "survey_failed" as const, reason });
+  switch (move.to) {
+    case "succeeded":
+      return null;
+    case "timed_out":
+      return { code: "survey_timeout", reason: "deadline" };
+    case "cancelled":
+      return failed("cancelled");
+    case "refused_spend":
+      return failed("refused_at_admit");
+    case "killed_spend":
+      return failed("run_failed");
+    case "failed":
+      if (move.failureReason === "survey_output_invalid") return null;
+      if (move.from === "pending") return failed("refused_at_admit");
+      return failed(move.failureReason === "runner_lost" ? "runner_lost" : "run_failed");
+    default:
+      return null;
+  }
+}
+
+/**
+ * What a run that just ended sets going: the verify stage's wake for a post-merge tester's run, and the setup's failed state for a survey's. One read of the run's role serves both. A survey's `survey_fail` runs inside
+ * a savepoint: a refusal (an inactive account, a login that may not call it) rolls back to the savepoint and is logged by its closed name, and the status move that was already written stands.
+ */
+async function onRunEnded(client: PoolClient, params: Pick<WriteRunStatusParams, "accountId" | "runId" | "from" | "to" | "failureReason">): Promise<void> {
+  const { rows } = await client.query<{ role: string }>(`SELECT role FROM agent_runs WHERE account_id = $1 AND id = $2`, [params.accountId, params.runId]);
+  const role = rows[0]?.role;
+  if (role === VERIFY_TESTER_ROLE) wakeVerifyStage();
+  if (role !== SURVEY_ROLE) return;
+  const ending = surveyEndingFor(params);
+  if (ending === null) return;
+  await client.query("SAVEPOINT survey_fail_hook");
+  try {
+    await client.query("SELECT survey_fail($1::uuid, $2, $3)", [params.runId, ending.code, ending.reason]);
+    await client.query("RELEASE SAVEPOINT survey_fail_hook");
+  } catch {
+    await client.query("ROLLBACK TO SAVEPOINT survey_fail_hook");
+    // Only the closed name is logged: nothing of the database's error text, and the run's own end is already written.
+    reportError(new Error("survey_fail_refused"), { stage: "survey.fail_hook" });
+  }
 }
 
 /**
@@ -967,7 +1010,8 @@ export async function writeRunStatusOn(client: PoolClient, params: WriteRunStatu
     if (params.to === "succeeded" || params.to === "failed" || params.to === "timed_out") void markWorkPending("invariant-sweep");
     // D#749: a finished post-merge tester run is what the verify stage waits on; wake the verify sweep now (marker and kick) instead of at its next tick. Only that role:
     // any other run's end changes nothing the stage reads.
-    if (isTerminalRunStatus(params.to)) await wakeVerifyStageForRun(client, params.accountId, params.runId);
+    // D#845 ON-10b2: and a finished survey run puts its setup into the failed state (the one status funnel every ending but the two bypassing moves goes through).
+    if (isTerminalRunStatus(params.to)) await onRunEnded(client, params);
     return { updated: true };
   }
   const { rows } = await client.query<{ status: RunStatus }>(

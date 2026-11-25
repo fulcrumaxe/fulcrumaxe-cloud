@@ -98,7 +98,7 @@ export interface RunnerCloudDeps {
    * `engineCommandSigner` is.
    */
   surveyRuns?: (() => Promise<SurveyRunPort | null>) | null;
-  /** D#845 ON-10b1: the deadline Workflow's start. Typed here and not called yet: the start that sets it lands with the deadline (ON-10b2), which then makes it required. */
+  /** D#845 ON-10b2: the deadline Workflow's start. `startSurvey` needs it: while it is absent the start is 503 `not_configured` and writes nothing, so no survey is ever started without its deadline. */
   surveyDeadline?: { start(args: { accountId: string; setupId: string; runId: string }): Promise<void> } | null;
   /** The worker's lease-fail method, or null while no worker is configured. Called after a revoke has committed. */
   failRunnerLeases: FailRunnerLeases | null;
@@ -215,6 +215,8 @@ export interface SurveyRunPort {
     | { ok: false; status: 409; code: "survey_not_started"; reason: string }
     | { ok: false; status: 500; code: "internal" }
   >;
+  /** The deadline Workflow's look, used here only on the start's own failure path (`cancel: true`: end the run now, `cancelled`). */
+  endSurveyAtDeadline(input: { accountId: string; setupId: string; runId: string; cancel?: boolean }): Promise<{ final: true } | { final: false; wakeAt: string }>;
 }
 
 /**

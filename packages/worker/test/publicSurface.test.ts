@@ -98,6 +98,7 @@ describe("C70 / CARRY-8: what createWorker hands a web route", () => {
       "completeHandoffOnDone",
       "completeRunHandoff",
       "confirmReversal",
+      "endSurveyAtDeadline",
       "engineCommandSigner",
       "failRunnerLeases",
       "finishRunnerDone",

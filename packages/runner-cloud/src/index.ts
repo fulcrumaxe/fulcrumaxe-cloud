@@ -211,6 +211,7 @@ export {
   submitClaudeLoginCode,
 } from "./machineLogin.js";
 export {
+  retrySurvey,
   startSurvey,
   type StartedSurvey,
 } from "./surveyJobs.js";

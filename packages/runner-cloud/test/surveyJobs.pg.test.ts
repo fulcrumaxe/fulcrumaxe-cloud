@@ -4,15 +4,19 @@ import { SURVEY_ROLE } from "@fulcrumaxe/runner-protocol";
 import { seedF2, type F2Fixture } from "@fx/db/test/helpers/members.js";
 import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
 import { RunPullRequestError } from "../src/runPullRequest.js";
-import { RunnerHttpError, requestHandoff, startSurvey, type RunnerCloudDeps, type RunPullRequestPort, type SurveyRunPort } from "../src/index.js";
+import { RunnerHttpError, requestHandoff, retrySurvey, startSurvey, type RunnerCloudDeps, type RunPullRequestPort, type SurveyRunPort } from "../src/index.js";
 import { harness, type Harness } from "./helpers.js";
 
 const HEAD = "d".repeat(40);
 type StartInput = Parameters<SurveyRunPort["startSurveyRun"]>[0];
 type StartAnswer = Awaited<ReturnType<SurveyRunPort["startSurveyRun"]>>;
 
+type Deadline = NonNullable<RunnerCloudDeps["surveyDeadline"]>;
+type DeadlineArgs = Parameters<Deadline["start"]>[0];
+type EndInput = Parameters<SurveyRunPort["endSurveyAtDeadline"]>[0];
+
 /**
- * [pg] D#845 ON-10b1 (Ruling 88 item 8): the cloud's start of a survey, as the person. Its own first look is the person's tenant transaction on the web login; the worker's start is a fake port that records what it was given
+ * [pg] D#845 ON-10b1 and ON-10b2 (Ruling 88 item 8): the cloud's start of a survey, as the person. Its own first look is the person's tenant transaction on the web login; the worker's start is a fake port that records what it was given
  * (the worker's own start is tested against the real run starter in packages/worker). Every refusal writes nothing and never reaches the port.
  */
 describe("startSurvey [pg]", () => {
@@ -38,9 +42,12 @@ describe("startSurvey [pg]", () => {
     runnerId: string;
     setupId: string;
     calls: StartInput[];
+    /** The deadline Workflow's starts, and the worker's `endSurveyAtDeadline` calls (the start's own failure path). */
+    deadlines: DeadlineArgs[];
+    ends: EndInput[];
     deps: (over?: Partial<RunnerCloudDeps>) => RunnerCloudDeps;
   }
-  async function rig(o: { credential?: "subscription" | "api_key"; registrant?: "o1" | "o2"; engine?: "os_sandbox" | "microvm" | null; place?: boolean; phase?: string; answer?: StartAnswer; visibility?: "private" | "public" | "unknown"; github?: RunPullRequestPort | null; port?: boolean; prior?: boolean } = {}): Promise<Rig> {
+  async function rig(o: { credential?: "subscription" | "api_key"; registrant?: "o1" | "o2"; engine?: "os_sandbox" | "microvm" | null; place?: boolean; phase?: string; answer?: StartAnswer; visibility?: "private" | "public" | "unknown"; github?: RunPullRequestPort | null; port?: boolean; prior?: boolean; deadline?: "throws" | "missing"; priorStatus?: string; state?: string } = {}): Promise<Rig> {
     const f = await seedF2(h.admin);
     const repoId = randomUUID();
     await h.admin.query("INSERT INTO repos (id, account_id, gh_repo_id, product, gh_owner, gh_name, execution_mode) VALUES ($1, $2, $3, 'team', 'acme', 'widgets', 'runner_local')", [repoId, f.accountId, Math.floor(Math.random() * 1e12)]);
@@ -51,23 +58,40 @@ describe("startSurvey [pg]", () => {
     await h.admin.query("INSERT INTO project_setups (id, account_id, repo_id, kind, phase, created_by) VALUES ($1, $2, $3, 'existing', $4, $5)", [setupId, f.accountId, repoId, o.phase ?? "survey", f.o1]);
     if (o.prior === true) {
       const run = randomUUID();
-      await h.admin.query("INSERT INTO agent_runs (id, account_id, role, runtime, status, execution_mode, dispatch_repo_id) VALUES ($1, $2, $3, 'runner', 'failed', 'runner_local', $4)", [run, f.accountId, SURVEY_ROLE, repoId]);
-      await h.admin.query("UPDATE project_setups SET survey_run_id = $2, state = 'failed' WHERE id = $1", [setupId, run]);
+      await h.admin.query("INSERT INTO agent_runs (id, account_id, role, runtime, status, execution_mode, dispatch_repo_id) VALUES ($1, $2, $3, 'runner', $5, 'runner_local', $4)", [run, f.accountId, SURVEY_ROLE, repoId, o.priorStatus ?? "failed"]);
+      await h.admin.query("UPDATE project_setups SET survey_run_id = $2, state = $3 WHERE id = $1", [setupId, run, o.state ?? "failed"]);
     }
     const calls: StartInput[] = [];
+    const deadlines: DeadlineArgs[] = [];
+    const ends: EndInput[] = [];
     const port: SurveyRunPort = {
       startSurveyRun: async (input) => {
         calls.push(input);
         return o.answer ?? { ok: true, runId: "11111111-1111-4111-8111-111111111111" };
       },
+      endSurveyAtDeadline: async (input) => {
+        ends.push(input);
+        return { final: true };
+      },
     };
+    const surveyDeadline: Deadline | null =
+      o.deadline === "missing"
+        ? null
+        : {
+            start: async (args) => {
+              deadlines.push(args);
+              if (o.deadline === "throws") throw new Error("workflow refused: secret-detail");
+            },
+          };
     return {
       f,
       repoId,
       runnerId,
       setupId,
       calls,
-      deps: (over = {}) => h.deps({ pullRequests: o.github === undefined ? github() : o.github, repoVisibility: async () => o.visibility ?? "private", surveyRuns: o.port === false ? null : async () => port, ...over }),
+      deadlines,
+      ends,
+      deps: (over = {}) => h.deps({ pullRequests: o.github === undefined ? github() : o.github, repoVisibility: async () => o.visibility ?? "private", surveyRuns: o.port === false ? null : async () => port, surveyDeadline, ...over }),
     };
   }
   const written = async (r: Rig) => ({
@@ -204,6 +228,78 @@ describe("startSurvey [pg]", () => {
       const error = await refusal(startSurvey(r.deps(), as(r), r.setupId));
       expect([error.status, error.code, error.extra]).toEqual([status, code, extra]);
       expect(r.calls).toHaveLength(1);
+      expect(r.deadlines).toEqual([]);
+    });
+  });
+
+  describe("the deadline Workflow (ON-10b2)", () => {
+    it("is started once after the run exists, with the plain ids of the account, the setup and the run", async () => {
+      const r = await rig();
+      await startSurvey(r.deps(), as(r), r.setupId);
+      expect(r.deadlines).toEqual([{ accountId: r.f.accountId, setupId: r.setupId, runId: "11111111-1111-4111-8111-111111111111" }]);
+      expect(r.ends).toEqual([]);
+    });
+    it("a start that throws ends the run at once as cancelled through the worker, and answers 503 survey_unavailable with nothing of the error in it", async () => {
+      const r = await rig({ deadline: "throws" });
+      const error = await refusal(startSurvey(r.deps(), as(r), r.setupId));
+      expect([error.status, error.code, error.extra]).toEqual([503, "survey_unavailable", {}]);
+      expect(error.message).not.toContain("secret-detail");
+      expect(r.ends).toEqual([{ accountId: r.f.accountId, setupId: r.setupId, runId: "11111111-1111-4111-8111-111111111111", cancel: true }]);
+    });
+    it("a missing deadline port is 503 not_configured before anything is written or the worker is reached", async () => {
+      await refused(await rig({ deadline: "missing" }), 503, "not_configured");
+    });
+  });
+
+  describe("retry (ON-10b2)", () => {
+    const retry = (r: Rig, over: { who?: string; body?: unknown; setupId?: string } = {}) => retrySurvey(r.deps(), as(r, over.who), over.setupId ?? r.setupId, over.body === undefined ? null : over.body);
+    it("works from a failed survey and from a setup with no survey run, and answers the new run", async () => {
+      const failed = await rig({ prior: true });
+      const out = await retry(failed);
+      expect(out).toMatchObject({ status: 200, body: { setup_id: failed.setupId, run_id: "11111111-1111-4111-8111-111111111111" }, headers: { "cache-control": "no-store" } });
+      expect(failed.calls).toHaveLength(1);
+      expect(failed.calls[0]!.priorRunId).not.toBeNull();
+      const none = await rig();
+      await retry(none);
+      expect(none.calls).toHaveLength(1);
+      expect(none.calls[0]!.priorRunId).toBeNull();
+    });
+    it("works when the setup still says started but its run is over (a move the writer never saw)", async () => {
+      const r = await rig({ prior: true, state: "started", priorStatus: "cancelled" });
+      await retry(r);
+      expect(r.calls).toHaveLength(1);
+    });
+    it.each(["pending", "running"])("is 409 not_retryable while the survey's run is %s, and writes nothing", async (priorStatus) => {
+      const r = await rig({ prior: true, state: "started", priorStatus });
+      const before = await written(r);
+      const error = await refusal(retry(r));
+      expect([error.status, error.code]).toEqual([409, "not_retryable"]);
+      expect(await written(r)).toEqual(before);
+      expect(r.calls).toEqual([]);
+    });
+    it("is 409 not_retryable outside the survey step", async () => {
+      for (const phase of ["plan", "install", "done"]) {
+        const r = await rig({ phase });
+        expect((await refusal(retry(r))).code).toBe("not_retryable");
+        expect(r.calls).toEqual([]);
+      }
+    });
+    it("two clicks make one run: the loser of the worker's start answers survey_running with the winner's run", async () => {
+      const second = await rig({ prior: true, answer: { ok: false, status: 409, code: "survey_running", runId: "33333333-3333-4333-8333-333333333333" } });
+      const error = await refusal(retry(second));
+      expect([error.status, error.code, error.extra]).toEqual([409, "survey_running", { run_id: "33333333-3333-4333-8333-333333333333" }]);
+      expect(second.deadlines).toEqual([]);
+    });
+    it("a member is 403, a stranger is 403, another account's setup and a malformed id are 404, and a body of any kind is 400", async () => {
+      const r = await rig({ prior: true });
+      const stranger = await rig();
+      const other = await rig();
+      expect((await refusal(retry(r, { who: r.f.m1 }))).status).toBe(403);
+      expect((await refusal(retry(r, { who: stranger.f.o1 }))).status).toBe(403);
+      expect((await refusal(retry(r, { setupId: other.setupId }))).status).toBe(404);
+      expect((await refusal(retry(r, { setupId: "x" }))).status).toBe(404);
+      for (const body of [{}, [], "x", 0, { run_id: "x" }]) expect((await refusal(retry(r, { body }))).status).toBe(400);
+      expect(r.calls).toEqual([]);
     });
   });
 
