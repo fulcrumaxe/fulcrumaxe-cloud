@@ -667,6 +667,10 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "placement_busy",
   // Operate on a public repo waits for the decide rule for work from strangers (D#845 S-8): 409 from the settings write and the project confirm.
   "operate_public_pending",
+  // The plan draft and Approve (D#845 ON-11a): a stale edit, a plan that cannot be approved, and a public-repo plan not yet read in full.
+  "draft_conflict",
+  "plan_invalid",
+  "plan_not_reviewed",
   // Envelope edits and the weekly auto-start envelope (D#483 S5-e2): the one new code the routes throw.
   "confirmation_required",
 ];
