@@ -91,10 +91,23 @@ async function setup(o: Setup = {}) {
 const INSTALLED = json(200, { id: 42, app_slug: "fulcrumaxe" });
 const SITE = { "/repos/acme/site": repo("acme/site"), "/repos/acme/site/installation": INSTALLED };
 
+describe("the owner's GitHub id (ON-27a)", () => {
+  it("is read from the repo, only for a public one, and only when it is a positive integer", async () => {
+    const ok = await setup({ routes: { "/repos/acme/site": repo("acme/site", { owner: { id: 4242 } }), "/repos/acme/site/installation": json(404, {}) } });
+    await expect(ok.inspector.inspect("acme/site", ACCOUNT)).resolves.toMatchObject({ visibility: "public", ownerGhId: 4242 });
+    for (const id of ["4242", -1, 1.5, null]) {
+      const t = await setup({ routes: { "/repos/acme/site": repo("acme/site", { owner: { id } }), "/repos/acme/site/installation": json(404, {}) } });
+      await expect(t.inspector.inspect("acme/site", ACCOUNT)).resolves.toMatchObject({ ownerGhId: null });
+    }
+    const priv = await setup({ routes: { "/repos/acme/site": repo("acme/site", { private: true, owner: { id: 4242 } }), "/repos/acme/site/installation": json(404, {}) } });
+    await expect(priv.inspector.inspect("acme/site", ACCOUNT)).resolves.toMatchObject({ visibility: "not_public", ownerGhId: null });
+  });
+});
+
 describe("a repo the caller's own write App serves", () => {
   it("looks the installation up first, then reads with a one-repo metadata token, revokes it, and reports installed", async () => {
     const t = await setup({ routes: SITE, owned: [[ACCOUNT, 42]] });
-    await expect(t.inspector.inspect("acme/site", ACCOUNT)).resolves.toEqual({ visibility: "public", defaultBranch: "main", appInstalled: true });
+    await expect(t.inspector.inspect("acme/site", ACCOUNT)).resolves.toEqual({ visibility: "public", defaultBranch: "main", appInstalled: true, ownerGhId: null });
     expect(t.seenPaths()).toEqual(["GET /repos/acme/site/installation", "GET /repos/acme/site", "DELETE /installation/token"]);
     expect(t.minted).toEqual([expect.objectContaining({ installationId: 42, repositories: ["site"], permissions: { metadata: "read" } })]);
     const read = t.server.seen.find((s) => s.path === "/repos/acme/site")!;
@@ -113,7 +126,7 @@ describe("a repo the caller's own write App serves", () => {
 
   it("reads a private repo it serves as not public, with no branch and not installed (the same as a missing one)", async () => {
     const t = await setup({ routes: { ...SITE, "/repos/acme/site": repo("acme/site", { private: true }) }, owned: [[ACCOUNT, 42]] });
-    await expect(t.inspector.inspect("acme/site", ACCOUNT)).resolves.toEqual({ visibility: "not_public", defaultBranch: null, appInstalled: false });
+    await expect(t.inspector.inspect("acme/site", ACCOUNT)).resolves.toEqual({ visibility: "not_public", defaultBranch: null, appInstalled: false, ownerGhId: null });
   });
 
   it("refuses a token GitHub did not narrow as asked, and revokes it", async () => {
@@ -139,14 +152,14 @@ describe("a repo the caller's own write App serves", () => {
 describe("a repo no installation of the caller serves", () => {
   it("reads a public repo with no credential, spends no token, and reports not installed", async () => {
     const t = await setup({ routes: { "/repos/acme/site": repo("acme/site") } });
-    await expect(t.inspector.inspect("acme/site", ACCOUNT)).resolves.toEqual({ visibility: "public", defaultBranch: "main", appInstalled: false });
+    await expect(t.inspector.inspect("acme/site", ACCOUNT)).resolves.toEqual({ visibility: "public", defaultBranch: "main", appInstalled: false, ownerGhId: null });
     expect(t.server.seen.find((s) => s.path === "/repos/acme/site")!.headers["authorization"]).toBeUndefined();
     expect(t.minted).toEqual([]);
   });
 
   it("never reports another account's installation as installed, and never mints with it", async () => {
     const t = await setup({ routes: SITE, owned: [[OTHER, 42]] });
-    await expect(t.inspector.inspect("acme/site", ACCOUNT)).resolves.toEqual({ visibility: "public", defaultBranch: "main", appInstalled: false });
+    await expect(t.inspector.inspect("acme/site", ACCOUNT)).resolves.toEqual({ visibility: "public", defaultBranch: "main", appInstalled: false, ownerGhId: null });
     expect(t.minted).toEqual([]);
     expect(t.server.seen.find((s) => s.path === "/repos/acme/site")!.headers["authorization"]).toBeUndefined();
     // The same GitHub answers give the owner true: the difference is only whose rows hold the installation.
@@ -158,13 +171,13 @@ describe("a repo no installation of the caller serves", () => {
     async (_l, routes) => {
       // The App is installed under ANOTHER account on it; the answer must still be the plain one.
       const t = await setup({ routes: { ...routes, "/repos/acme/site/installation": INSTALLED }, owned: [[OTHER, 42]] });
-      await expect(t.inspector.inspect("acme/site", ACCOUNT)).resolves.toEqual({ visibility: "not_public", defaultBranch: null, appInstalled: false });
+      await expect(t.inspector.inspect("acme/site", ACCOUNT)).resolves.toEqual({ visibility: "not_public", defaultBranch: null, appInstalled: false, ownerGhId: null });
     },
   );
 
   it("reads a candidate through the stored installation it came from (either App), still reporting installed only for the write App's own", async () => {
     const t = await setup({ routes: { "/repos/acme/site": repo("acme/site") } });
-    await expect(t.inspector.inspect("acme/site", ACCOUNT, { hint: { installationId: 7, appKind: "team_readonly" } })).resolves.toEqual({ visibility: "public", defaultBranch: "main", appInstalled: false });
+    await expect(t.inspector.inspect("acme/site", ACCOUNT, { hint: { installationId: 7, appKind: "team_readonly" } })).resolves.toEqual({ visibility: "public", defaultBranch: "main", appInstalled: false, ownerGhId: null });
     expect(t.minted).toEqual([expect.objectContaining({ installationId: 7, repositories: ["site"], permissions: { metadata: "read" } })]);
     expect(t.server.seen.find((s) => s.path === "/repos/acme/site")!.headers["authorization"]).toBe(`Bearer ${TOKEN}`);
   });
@@ -210,7 +223,7 @@ describe("answers that are not clear", () => {
   it("reads a redirect on the installation lookup as no installation: a private repo the App sees under an old name is just not public", async () => {
     // The App's lookup is redirected; the anonymous read of a private repo is a 404, never a redirect.
     const t = await setup({ routes: { "/repos/acme/site/installation": moved("acme/renamed") }, owned: [[ACCOUNT, 42]] });
-    await expect(t.inspector.inspect("acme/site", ACCOUNT)).resolves.toEqual({ visibility: "not_public", defaultBranch: null, appInstalled: false });
+    await expect(t.inspector.inspect("acme/site", ACCOUNT)).resolves.toEqual({ visibility: "not_public", defaultBranch: null, appInstalled: false, ownerGhId: null });
     // A public repo behind the same redirect is public and not installed.
     const u = await setup({ routes: { "/repos/acme/site/installation": moved("acme/renamed"), "/repos/acme/site": repo("acme/site") }, owned: [[ACCOUNT, 42]] });
     await expect(u.inspector.inspect("acme/site", ACCOUNT)).resolves.toMatchObject({ visibility: "public", appInstalled: false });

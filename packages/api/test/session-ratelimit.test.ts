@@ -342,6 +342,7 @@ describe('session rate limits', () => {
       expect(Object.fromEntries(own)).toEqual({
         getInstallUrl: 'github-install-url',
         createRepoIntent: 'github-create-intent',
+        createRepoTwinIntent: 'github-create-intent',
         putModelConnection: 'model-key-put',
         testModelConnection: 'model-key-test',
         connectVercel: 'vercel-token-put',

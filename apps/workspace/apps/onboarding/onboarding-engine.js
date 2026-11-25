@@ -213,6 +213,37 @@ export function surveyDetail(row) {
 }
 /** D#845 ON-11a1: the plan step's stage from the engine track's `setup` ({ id, phase, state }): a survey that is running, or a plan waiting for review. Anything else is empty. */
 const stageOf = (setup) => (setup && setup.phase === "survey" && setup.state === "started" ? { stage: "surveying" } : setup && setup.phase === "plan" ? { stage: "draft" } : {});
+/** D#845 ON-27a: what each state of a private twin says, in plain words (no state name, no internal label). */
+const TWIN_WORDS = {
+  creating: "Creating the private repo…",
+  not_connected: "The private repo exists. Add it to the GitHub app so we can copy your code into it.",
+  seeding: "Copying your code into the private repo…",
+  ready: "Your work happens in the private repo. Merged work comes back as a pull request you merge.",
+  paused: "Paused. Nothing is published or synced, and the engine keeps working in the private repo.",
+  conflict: "Your public repo and the private repo changed in the same place. The sync pull request needs a hand.",
+  refused: "A change was held back because it looked like it contained something private.",
+  failed: "The twin stopped.",
+  removed: "Stopped. The private repo is still on GitHub.",
+};
+const TWIN_NAME_RE = /^[A-Za-z0-9._-]{1,100}$/;
+const TWIN_OWNER_RE = /^[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
+/**
+ * D#845 ON-27a: the private twin's card from a twin row (the item of GET /api/v1/repos/:id/twin) and the public repo's owner login. A missing row, or a state this does not know, is empty.
+ * Returns { twin: { state, lines, actions: [{ id, label }], private_url } }. The actions are the undo routes: Pause or Resume, Stop publishing, and Cancel before the seed (which leaves the empty private repo on GitHub and says so).
+ */
+export function twinDetail(row, owner) {
+  if (!row || typeof row.state !== "string" || !Object.hasOwn(TWIN_WORDS, row.state) || typeof row.private_name !== "string" || !TWIN_NAME_RE.test(row.private_name)) return {};
+  const url = typeof owner === "string" && TWIN_OWNER_RE.test(owner) ? "https://github.com/" + owner + "/" + row.private_name : "";
+  const lines = [TWIN_WORDS[row.state]];
+  const actions = [];
+  const seeded = typeof row.published_private_sha === "string" && row.published_private_sha !== "";
+  if (row.state === "not_connected") actions.push({ id: "add_to_app", label: "Add " + row.private_name + " to the GitHub app" });
+  if (row.state === "paused") actions.push({ id: "resume", label: "Resume" });
+  else if (row.state !== "removed") actions.push({ id: "pause", label: "Pause" });
+  if (row.state !== "removed") actions.push(seeded ? { id: "stop", label: "Stop publishing" } : { id: "cancel", label: "Cancel" });
+  if (row.state === "removed" || (!seeded && row.state !== "ready")) lines.push("Delete " + row.private_name + " on GitHub if you don't want it. We never delete a repo.");
+  return { twin: { state: row.state, lines, actions, private_url: url } };
+}
 /**
  * One engine step's copy. `steps` is the engine track, `i` the step, `ctx` the view-model (every field optional):
  *   name, origin, isAdmin, offline, last_seen_min, price (the Engine plan's monthly price), planNote (a refused purchase's sentence, or the "Engine added" notice), planBusy

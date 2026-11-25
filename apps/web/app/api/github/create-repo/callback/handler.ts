@@ -50,6 +50,8 @@ const OUTCOMES = new Set([
   "ok", "created_not_connected", "name_taken", "visibility_not_allowed", "refused", "github_busy", "rate_limited", "install_first", "failed",
 ]);
 
+const TWIN_WORDS = new Set(["ok", "not_found", "pairing_exists", "twin_exists", "failed"]);
+
 /** Only a plain https://github.com address survives. */
 function githubUrl(raw: string | undefined): string | null {
   if (!raw) return null;
@@ -67,6 +69,8 @@ function redirect(result: CreateRepoResult, refreshedToken: string | null = null
   const params = new URLSearchParams({ create: outcome });
   // On success only, the account's own repos.id (a uuid we hold; never GitHub text), checked for shape before it is echoed.
   if (outcome === "ok" && typeof result.repoId === "string" && UUID.test(result.repoId)) params.set("repo", result.repoId.toLowerCase());
+  // A twin's create (ON-27a) adds one fixed word saying whether the twin was recorded.
+  if (result.twin !== undefined && TWIN_WORDS.has(result.twin)) params.set("twin", result.twin);
   if (outcome === "created_not_connected") {
     const repo = githubUrl(result.repoUrl);
     const settings = githubUrl(result.installationUrl);

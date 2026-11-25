@@ -444,4 +444,85 @@ describe('createCustomerRepo (D#2 RC-1a)', () => {
     expect((await run(bad, s, stateFor(s, { description: 'Our widgets' }))).outcome).toBe('failed');
     expect(bad.reqs).toEqual([]);
   });
+
+  describe('a private twin (D#845 ON-27a)', () => {
+    const twinState = (s: Awaited<ReturnType<typeof setup>>, pub: string, over: Record<string, unknown> = {}) =>
+      stateFor(s, { name: 'widgets-private', visibility: 'private', auto_init: false, purpose: 'twin', twin_of: pub, ...over });
+    const publicRepo = async (accountId: string): Promise<string> => {
+      const id = randomUUID();
+      await admin.query(`INSERT INTO repos (id, account_id, gh_repo_id, product, gh_owner, gh_name) VALUES ($1, $2, $3, 'team', 'acme', 'widgets')`, [id, accountId, nextGh++]);
+      return id;
+    };
+    const created = (h: ReturnType<typeof harness>) => JSON.parse(h.reqs.find((r) => r.method === 'POST' && r.url.endsWith('/user/repos'))!.body!) as Record<string, unknown>;
+    const twinRows = async (accountId: string) => (await admin.query('SELECT * FROM repo_twins WHERE account_id = $1', [accountId])).rows;
+
+    it('creates the repo private, empty and with Discussions on, records the twin as seeding, and never deletes anything', async () => {
+      const s = await setup();
+      const pub = await publicRepo(s.accountId);
+      const h = harness(s);
+      const res = await run(h, s, twinState(s, pub));
+      expect(res).toMatchObject({ outcome: 'ok', twin: 'ok' });
+      expect(created(h)).toEqual({ name: 'widgets-private', private: true, auto_init: false, has_discussions: true });
+      const [row] = await twinRows(s.accountId);
+      expect(row).toMatchObject({ public_repo_id: pub, private_repo_id: res.repoId, private_name: 'widgets-private', private_gh_repo_id: String(424242), state: 'seeding', created_by: s.userId });
+      expect(h.reqs.some((r) => r.method === 'DELETE')).toBe(false);
+      expect(await rows('audit_log', s.accountId, `AND action = 'twin.created'`)).toHaveLength(1);
+    });
+
+    it('an ordinary create never asks for Discussions, and records no twin', async () => {
+      const s = await setup();
+      const h = harness(s);
+      const res = await run(h, s);
+      expect(res.twin).toBeUndefined();
+      expect(created(h)).not.toHaveProperty('has_discussions');
+      expect(await twinRows(s.accountId)).toEqual([]);
+    });
+
+    it('a repo the App cannot see yet is recorded as not_connected, with its GitHub id kept for the connect', async () => {
+      const s = await setup();
+      const pub = await publicRepo(s.accountId);
+      const res = await run(harness(s, { listNew: false }), s, twinState(s, pub));
+      expect(res).toMatchObject({ outcome: 'created_not_connected', twin: 'ok' });
+      expect((await twinRows(s.accountId))[0]).toMatchObject({ state: 'not_connected', private_repo_id: null, private_gh_repo_id: String(424242) });
+    });
+
+    it("a pairing or a twin on the repo is reported, not recorded, and the created repo is left alone; another account's repo is not found", async () => {
+      const s = await setup();
+      const other = await setup();
+      const paired = await publicRepo(s.accountId);
+      await admin.query(`INSERT INTO repo_pairing (repo_id, account_id, code_repo, overlay_globs) VALUES ($1, $2, 'acme/x', ARRAY['p/**'])`, [paired, s.accountId]);
+      expect((await run(harness(s), s, twinState(s, paired))).twin).toBe('pairing_exists');
+      const foreign = await publicRepo(other.accountId);
+      const h = harness(s);
+      expect(await run(h, s, twinState(s, foreign))).toMatchObject({ outcome: 'ok', twin: 'not_found' });
+      expect(h.reqs.some((r) => r.method === 'DELETE')).toBe(false);
+      expect(await twinRows(s.accountId)).toEqual([]);
+      expect(await twinRows(other.accountId)).toEqual([]);
+      const live = await publicRepo(s.accountId);
+      expect((await run(harness(s), s, twinState(s, live))).twin).toBe('ok');
+      expect((await run(harness(s), s, twinState(s, live))).twin).toBe('twin_exists');
+    });
+
+    it('a member who is not an owner or admin cannot create: refused before GitHub, nothing recorded', async () => {
+      const s = await setup('member');
+      const pub = await publicRepo(s.accountId);
+      const h = harness(s);
+      expect((await run(h, s, twinState(s, pub))).outcome).toBe('failed');
+      expect(h.reqs.filter((r) => r.url.endsWith('/user/repos'))).toEqual([]);
+      expect(await twinRows(s.accountId)).toEqual([]);
+    });
+
+    it('a twin state is only good for a private, empty repo with a repo id; any other shape is refused before GitHub', async () => {
+      const s = await setup();
+      const pub = await publicRepo(s.accountId);
+      for (const over of [{ visibility: 'public' }, { auto_init: true }, { twin_of: 'not-a-uuid' }, { purpose: 'other' }, { twin_of: undefined }]) {
+        const h = harness(s);
+        expect((await run(h, s, twinState(s, pub, over))).outcome).toBe('failed');
+        expect(h.reqs).toEqual([]);
+      }
+      const plain = harness(s);
+      expect((await run(plain, s, stateFor(s, { twin_of: pub }))).outcome).toBe('failed');
+      expect(plain.reqs).toEqual([]);
+    });
+  });
 });

@@ -13,7 +13,7 @@ import { parseSteps, parseTracks, shownTracks } from "../shell/core/onboarding-m
 import {
   ASK_OWNER, LABELS, NO_KVM, OPERATE_OFF, STATE_WORDS, TIME_TO_LIVE,
   COULDNT_CHECK, NEW_PRESET, NO_MACHINE, NO_OWNERS, PUBLIC_COPY, PUBLIC_OPERATE, createRefusal, dialsLine, linkedLine, machineChoices, operateBox, parseReturn, pickVisibility, placeRefusal, presetName, readPicker,
-  cleanOrigin, copyText, describeStep, enginePrice, installDetail, surveyDetail, fixFor, machineChoiceLine, machineCommands, machineContext, prerequisites, visibilityLabel,
+  cleanOrigin, copyText, describeStep, enginePrice, installDetail, surveyDetail, twinDetail, fixFor, machineChoiceLine, machineCommands, machineContext, prerequisites, visibilityLabel,
   approveWords, draftRefusal, engineSection, planProblems, readDraft, toRoadmap,
 } from "../apps/onboarding/onboarding-engine.js";
 
@@ -876,5 +876,42 @@ describe("the plan review (ON-11b)", () => {
       expect(has(null, "active")).toBe(0);
       expect(has({ id: "s", phase: "plan", state: "ok" }, "pending")).toBe(0);
     });
+  });
+});
+
+describe("twinDetail (D#845 ON-27a)", () => {
+  const SHA = "a".repeat(40);
+  const row = (over) => ({ state: "seeding", private_name: "widgets-private", published_private_sha: null, ...over });
+  const STATES = ["creating", "not_connected", "seeding", "ready", "paused", "conflict", "refused", "failed", "removed"];
+
+  it("says something in plain words for every state, never a state name, null or undefined", () => {
+    for (const state of STATES) {
+      const v = twinDetail(row({ state, published_private_sha: state === "ready" ? SHA : null }), "acme").twin;
+      expect(v.state).toBe(state);
+      expect(v.lines.length).toBeGreaterThan(0);
+      for (const l of v.lines) expect(l).not.toMatch(/undefined|null|not_connected|creating|seeding|_/);
+      expect(v.private_url).toBe("https://github.com/acme/widgets-private");
+    }
+  });
+
+  it("offers the undo routes: pause or resume, Stop publishing once seeded, Cancel before, and nothing once removed", () => {
+    const ids = (r) => twinDetail(r, "acme").twin.actions.map((a) => a.id);
+    expect(ids(row({ state: "seeding" }))).toEqual(["pause", "cancel"]);
+    expect(ids(row({ state: "not_connected" }))).toEqual(["add_to_app", "pause", "cancel"]);
+    expect(ids(row({ state: "ready", published_private_sha: SHA }))).toEqual(["pause", "stop"]);
+    expect(ids(row({ state: "paused", published_private_sha: SHA }))).toEqual(["resume", "stop"]);
+    expect(ids(row({ state: "removed" }))).toEqual([]);
+    expect(twinDetail(row({ state: "not_connected" }), "acme").twin.actions[0].label).toBe("Add widgets-private to the GitHub app");
+    expect(twinDetail(row({ state: "ready", published_private_sha: SHA }), "acme").twin.actions.map((a) => a.label)).toEqual(["Pause", "Stop publishing"]);
+  });
+
+  it("a cancel before the seed, and a stopped twin, say the private repo stays on GitHub and is never deleted by us", () => {
+    for (const r of [row({ state: "seeding" }), row({ state: "removed" })]) expect(twinDetail(r, "acme").twin.lines.join(" ")).toContain("Delete widgets-private on GitHub if you don't want it. We never delete a repo.");
+    expect(twinDetail(row({ state: "ready", published_private_sha: SHA }), "acme").twin.lines.join(" ")).not.toContain("Delete ");
+  });
+
+  it("is empty for a missing row, an unknown state or a name that is not a repo name, and links only a well-formed owner", () => {
+    for (const bad of [null, undefined, {}, row({ state: "__proto__" }), row({ state: "toString" }), row({ private_name: "../x" }), row({ private_name: 3 })]) expect(twinDetail(bad, "acme")).toEqual({});
+    for (const owner of ["", undefined, "a/b", "-x", "x y"]) expect(twinDetail(row({}), owner).twin.private_url).toBe("");
   });
 });

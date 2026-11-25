@@ -21,6 +21,9 @@ export interface CreateRepoClaims {
   /** The trimmed description itself: the callback is a GET, so it rides in the signed state. */
   description?: string;
   auto_init: boolean;
+  /** ON-27a: a repo made as the private twin of `twin_of` (a repos.id of the account). It is created private, empty and with Discussions on. */
+  purpose?: "twin";
+  twin_of?: string;
   nonce: string;
   exp: number;
 }
@@ -54,7 +57,10 @@ export function verifyCreateRepoState(state: string, secret: string, now: Date =
       (c.visibility === "private" || c.visibility === "public") && typeof c.description_sha256 === "string" &&
       (c.description === undefined || typeof c.description === "string") &&
       typeof c.auto_init === "boolean" && typeof c.nonce === "string" && typeof c.exp === "number" &&
-      c.exp > Math.floor(now.getTime() / 1000);
+      c.exp > Math.floor(now.getTime() / 1000) &&
+      (c.purpose === undefined
+        ? c.twin_of === undefined
+        : c.purpose === "twin" && typeof c.twin_of === "string" && /^[0-9a-f-]{36}$/i.test(c.twin_of) && c.visibility === "private" && c.auto_init === false);
     return ok ? (c as unknown as CreateRepoClaims) : null;
   } catch {
     // fx-swallow-ok: a state token that does not decode or verify is rejected as null; the caller treats it as invalid input
