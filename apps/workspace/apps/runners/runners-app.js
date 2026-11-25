@@ -12,6 +12,7 @@ import {
   KVM_NOTE, MACHINES_UNAVAILABLE, NO_MACHINES, ONLY_ADMINS_ADD, TABS, addSteps, createMachines, tierText, needsVmInstall, vmInstallLine, VM_INSTALL_COMMAND, needsVmToken, VM_TOKEN_COMMAND, VM_TOKEN_LINE, VM_TOKEN_STAYS,
   BILLED_BY, CONNECT_FIRST, HETZNER_REFUSED, HETZNER_STEPS, ONLY_ADMINS_CREATE, ONLY_ADMINS_HETZNER, ONLY_ADMINS_SEE, PRICES_FAILED, SLOW_DOWN, TIER_NOTICE, availableIn, connectedText, createCreator, createSentence, createServers, offeredIn, priceLine, specsText, totalText, unlabelledText,
 } from "./runners-fleet.js";
+import { LOGOUT_SENTENCE, ONLY_ADMINS_ACT, REBOOT_SENTENCE, SERVER_WORDS, SLOW_WORDS, createSignIn, deleteSentence, isStuck, moveProject, moveTargets, notConnectedYet, orphanSentence, serverAct, serverActions, serverLines } from "./runners-fleet.js";
 import { retryWords } from "../_lib/api.js";
 
 const FULC = window.FULC;
@@ -288,7 +289,8 @@ function mountApp(contentEl) {
     // neither does a page whose fleet read failed (the role is not known), which shows that failure instead.
     if (!f || !f.isAdmin) return;
     servers.loadCredential();
-    servers.loadList();
+    // A server that waits for a Claude sign-in has its request read once, so a page opened mid-sign-in shows where it is; a live one is then followed by the panel itself.
+    servers.loadList().then(() => servers.list.items.filter((s) => s.runnerId && needsSignIn(s)).forEach((s) => signin.load(s.runnerId, s.statusAt)));
   }
   function selectTab(id) {
     tab = id;
@@ -453,11 +455,139 @@ function mountApp(contentEl) {
     if (held) focusId(held);
   }
 
+  // ── D#845 MC-10b2: what each server card adds: its elapsed-time lines, projects, Claude sign-in panel and buttons ──
+  const isAdmin = () => !!(fleet.state.fleet && fleet.state.fleet.isAdmin);
+  const machineOf = (s) => (s.runnerId ? machines.state.list.find((m) => m.id === s.runnerId) : undefined);
+  const offlineOf = (s) => s.state === "ready" && !!machineOf(s) && !machineOf(s).live;
+  const rowStatus = (s) => (offlineOf(s) ? SERVER_WORDS.offline : s.status);
+  const needsSignIn = (s) => s.state === "needs_claude_login" || (s.state === "ready" && s.claudeIn === "no");
+  const notes = new Map(); // a server id: what its last action said, until the next Refresh
+  const drafts = new Map(); // a runner id: the code typed so far, kept across repaints
+  const signin = createSignIn({ signal: ac.signal, onChange: () => paint() });
+  const sid = (s, part) => "runners-srv-" + s.id + "-" + part;
+  const note = (s, text, bad) => (notes.set(s.id, { text, bad: !!bad }), paint());
+
+  /** A sheet that says in a plain sentence what pressing the button does and costs. `run` resolves to "" when done, else the sentence to show. */
+  function confirmSheet({ from, back, title, body, label, run, done, off }) {
+    const err = h("p", { class: "runners-error", role: "alert", tabindex: "-1", "data-testid": "runners-confirm-error" });
+    const yes = button(label, { id: "runners-confirm-yes", "aria-disabled": off ? "true" : "false", "data-testid": "runners-confirm-yes" }, async () => {
+      if (yes.getAttribute("aria-disabled") === "true") return;
+      yes.setAttribute("aria-disabled", "true");
+      const said = await run();
+      if (said === "") return (returnTo = back || from), closeDialog(), done();
+      yes.setAttribute("aria-disabled", "false");
+      err.textContent = said;
+      err.focus();
+    });
+    openDialog({ title, from, labelId: "runners-confirm-h", body: h("div", null, body, err), actions: [yes, button("Cancel", { id: "runners-confirm-cancel", "data-testid": "runners-confirm-cancel" }, closeDialog)] });
+    focusId("runners-confirm-cancel");
+    return yes;
+  }
+  const afterAction = (s, text) => () => (note(s, text), servers.loadList());
+  /** Keep it changes nothing at Hetzner, so it needs no sheet. The card then says so from `kept`, and the focus moves to the button that is left. */
+  async function keepIt(s) {
+    const said = await serverAct("keep", s.id, { signal: ac.signal });
+    if (said) return note(s, said, true);
+    notes.delete(s.id);
+    await servers.loadList();
+    focusId(sid(s, "delete-orphan"));
+  }
+  function reboot(s, from) {
+    confirmSheet({ from, title: "Reboot " + s.name + "?", body: h("p", null, REBOOT_SENTENCE), label: "Reboot", run: () => serverAct("reboot", s.id, { signal: ac.signal }), done: afterAction(s, "Reboot sent to Hetzner.") });
+  }
+  /** kind: "delete", "retry" (Delete and retry) or "delete-orphan". The name is typed first; a server with projects needs them moved or the box ticked. */
+  function deleteSheet(s, kind, from) {
+    const orphan = kind === "delete-orphan";
+    const placed = s.placed || [];
+    const typed = h("input", { type: "text", id: "runners-del-name", class: "runners-input", autocomplete: "off", "aria-describedby": "runners-del-why", "data-testid": "runners-del-name", onInput: () => sync() });
+    const tick = placed.length ? h("input", { type: "checkbox", id: "runners-del-projects", "data-testid": "runners-del-projects", onChange: () => sync() }) : null;
+    const why = h("p", { id: "runners-del-why", class: "runners-muted", "data-testid": "runners-del-why" });
+    const need = () => (typed.value !== s.name ? "Type the server's name to confirm." : tick && !tick.checked ? "Tick the box to remove its projects with it, or move them to another machine first." : "");
+    const sync = () => (yes.setAttribute("aria-disabled", need() ? "true" : "false"), (why.textContent = need()));
+    const label = orphan ? "Delete it in Hetzner" : kind === "retry" ? "Delete and retry" : "Delete server";
+    const yes = confirmSheet({
+      from, back: "runners-srv-create", title: (kind === "retry" ? "Delete and retry " : "Delete ") + s.name + "?", label, off: true,
+      body: h("div", null, h("p", null, orphan ? orphanSentence(s.cost) : deleteSentence(s.cost)),
+        placed.length ? h("div", { "data-testid": "runners-del-projects-list" }, h("p", null, "These projects run on it:"), h("ul", null, placed.map((p) => h("li", null, h("bdi", null, p.name)))),
+          h("label", { class: "runners-choice", for: "runners-del-projects" }, tick, h("span", null, "Also remove these projects. Their work on this server is lost."))) : null,
+        h("label", { for: "runners-del-name" }, "Type " + s.name + " to confirm"), typed, why),
+      run: () => serverAct(orphan ? "delete-orphan" : "delete", s.id, { signal: ac.signal, removeProjects: !!(tick && tick.checked) }),
+      done: afterAction(s, kind === "retry" ? "Deleted. Press Create server to try again." : "Deleting…"),
+    });
+    sync();
+    focusId("runners-del-name");
+  }
+  function moveSheet(s, p, from) {
+    const targets = moveTargets(machines.state.list, s.runnerId);
+    const pick = h("select", { id: "runners-move-to", class: "runners-input", "data-testid": "runners-move-to" }, targets.map((m) => h("option", { value: m.id }, m.name)));
+    confirmSheet({
+      from, title: "Move " + p.name + " to another machine?", label: "Move project", off: targets.length === 0,
+      body: targets.length
+        ? h("div", null, h("p", null, p.name + " stops running on " + s.name + " and starts on the machine you choose. Its team memory is not carried along; it starts fresh there."), h("label", { for: "runners-move-to" }, "Move to"), pick)
+        : h("p", { "data-testid": "runners-move-none" }, "No other machine is online with room for it. Add a machine first."),
+      run: () => moveProject(p.id, pick.value, { signal: ac.signal }), done: () => (note(s, p.name + " was moved."), servers.loadList(), machines.load()),
+    });
+  }
+  function signOut(s, from) {
+    confirmSheet({ from, title: "Sign " + s.name + " out of Claude?", body: h("p", null, LOGOUT_SENTENCE), label: "Sign out", run: async () => ((await signin.logout(s.runnerId)) ? "" : signin.get(s.runnerId).error || "That didn't work. Try again."), done: afterAction(s, "Sign-out sent. This updates when the server next reports.") });
+  }
+  function signInPanel(s, admin) {
+    const id = s.runnerId;
+    const box = (...kids) => h("div", { class: "runners-signin", "data-testid": "runners-signin" }, ...kids);
+    if (!id) return box(h("p", { "data-testid": "runners-signin-wait" }, notConnectedYet(s.name)));
+    const v = signin.get(id);
+    const off = !admin || v.busy;
+    const start = (label) => h("span", { class: "runners-control" }, button(label, { id: sid(s, "signin"), "aria-disabled": off ? "true" : "false", "aria-describedby": admin ? null : sid(s, "signin-why"), "data-testid": "runners-signin-start" }, () => !off && signin.start(id)),
+      admin ? null : h("span", { id: sid(s, "signin-why"), class: "runners-reason runners-muted", "data-testid": "runners-reason" }, ONLY_ADMINS_ACT));
+    const send = async () => {
+      const code = input.value.trim();
+      if (!code || off) return;
+      input.value = ""; // cleared as soon as it is sent
+      drafts.delete(id);
+      await signin.sendCode(id, code);
+    };
+    const input = h("input", { type: "text", id: sid(s, "code"), class: "runners-input", autocomplete: "off", autocapitalize: "off", maxLength: 512, value: drafts.get(id) || "", "data-testid": "runners-signin-code",
+      onInput: (e) => drafts.set(id, e.target.value), onKeydown: (e) => e.key === "Enter" && send() });
+    const said = v.error ? h("p", { class: "runners-error", role: "alert", "data-testid": "runners-signin-error" }, v.error) : null;
+    if (v.status === "pending") return box(h("p", { role: "status", "data-testid": "runners-signin-status" }, "Starting the sign-in on " + s.name + "…"), said);
+    if (v.status === "code_ready") return box(h("p", { role: "status", "data-testid": "runners-signin-status" }, "Code sent. Waiting for " + s.name + "…"), said);
+    if (v.status === "done") return box(h("p", { role: "status", "data-testid": "runners-signin-status" }, "Signed in. This updates in a moment."), said);
+    if (v.status === "awaiting_code") {
+      return box(v.authUrl ? h("a", { href: v.authUrl, target: "_blank", rel: "noopener noreferrer", class: "runners-link", "data-testid": "runners-signin-open" }, "Open Claude sign-in") : h("p", { "data-testid": "runners-signin-nolink" }, "Waiting for the link…"),
+        h("label", { for: sid(s, "code") }, "Code from the sign-in page"), input, h("span", { class: "runners-actions" }, button("Send code", { id: sid(s, "send"), "aria-disabled": off ? "true" : "false", "data-testid": "runners-signin-send" }, send)), said);
+    }
+    return box(v.words ? h("p", { class: "runners-error", role: "alert", "data-testid": "runners-signin-words" }, v.words) : null, start(v.words ? "Start again" : "Sign in to Claude on " + s.name), said);
+  }
+  function serverExtras(s) {
+    const admin = isAdmin();
+    if (s.runnerId && s.state === "ready" && s.claudeIn === "yes") signin.forget(s.runnerId); // the list shows it signed in: what was seen of its request is spent
+    const stuck = isStuck(s, Date.now());
+    const n = notes.get(s.id);
+    const acts = serverActions(s, { stuck, isAdmin: admin }).map((a) => {
+      const from = sid(s, a.id);
+      const go = () => (a.id === "keep" ? keepIt(s) : a.id === "reboot" ? reboot(s, from) : deleteSheet(s, a.id, from));
+      return h("span", { class: "runners-control" }, button(a.label, { id: from, "aria-disabled": a.why ? "true" : "false", "aria-describedby": a.why ? from + "-why" : null, "data-testid": "runners-srv-" + a.id }, () => !a.why && go()),
+        a.why ? h("span", { id: from + "-why", class: "runners-reason runners-muted", "data-testid": "runners-reason" }, a.why) : null);
+    });
+    if (s.state === "ready" && s.claudeIn === "yes" && s.runnerId && admin) acts.push(button("Sign out of Claude", { id: sid(s, "signout"), "data-testid": "runners-srv-signout" }, () => signOut(s, sid(s, "signout"))));
+    const hosted = !s.placedKnown || !["ready", "needs_claude_login"].includes(s.state) ? null
+      : s.placed.length === 0 ? h("p", { "data-testid": "runners-srv-noprojects" }, "No projects" + (s.cost ? " · " + s.cost : ""))
+      : h("ul", { class: "runners-tokens", "data-testid": "runners-srv-projects" }, s.placed.map((p) => h("li", null, h("bdi", null, p.name), h("span", { class: "runners-control" }, button("Move to another machine", { id: sid(s, "move-" + p.id), "aria-label": "Move to another machine: " + p.name, "aria-disabled": admin ? "false" : "true", "aria-describedby": admin ? null : sid(s, "move-" + p.id) + "-why", "data-testid": "runners-srv-move" }, () => admin && moveSheet(s, p, sid(s, "move-" + p.id))),
+        admin ? null : h("span", { id: sid(s, "move-" + p.id) + "-why", class: "runners-reason runners-muted", "data-testid": "runners-reason" }, ONLY_ADMINS_ACT)))));
+    return [
+      ...serverLines(s, offlineOf(s), Date.now()).map((t) => h("p", { class: t === SLOW_WORDS ? "runners-note" : "runners-muted", "data-testid": "runners-server-line" }, t)),
+      hosted, needsSignIn(s) ? signInPanel(s, admin) : null,
+      acts.length ? h("div", { class: "runners-controls" }, acts) : null,
+      n ? h("p", { class: n.bad ? "runners-error" : "runners-muted", role: n.bad ? "alert" : "status", "data-testid": "runners-server-note" }, n.text) : null,
+    ];
+  }
+
   function serverRow(s) {
     return h("li", { class: "runners-row", "data-testid": "runners-server" },
       h("h3", { class: "runners-name", "data-testid": "runners-server-name" }, h("bdi", null, s.name)),
-      h("p", { class: "runners-state", "data-testid": "runners-server-status" }, s.status),
-      h("p", { class: "runners-muted" }, [s.size, s.location].filter(Boolean).join(" in "), s.created ? [" · created ", timeNode(s.created, true)] : ""));
+      h("p", { class: "runners-state", "data-testid": "runners-server-status" }, rowStatus(s)),
+      h("p", { class: "runners-muted" }, [s.size, s.location].filter(Boolean).join(" in "), s.created ? [" · created ", timeNode(s.created, true)] : ""),
+      ...serverExtras(s));
   }
   function paintServers() {
     const f = fleet.state.fleet;
@@ -489,7 +619,7 @@ function mountApp(contentEl) {
       : h("ul", { class: "runners-rows", "data-testid": "runners-servers" }, l.items.map(serverRow));
     return panel(
       h("div", { class: "runners-head" }, h("h2", { class: "runners-title" }, "Servers"),
-        h("span", { class: "runners-actions" }, button("Refresh", { id: "runners-servers-refresh", "data-testid": "runners-servers-refresh" }, () => ((created = false), loadServers())),
+        h("span", { class: "runners-actions" }, button("Refresh", { id: "runners-servers-refresh", "data-testid": "runners-servers-refresh" }, () => ((created = false), notes.clear(), loadServers())),
           button("Create server", { id: "runners-srv-create", "aria-disabled": why ? "true" : "false", "aria-describedby": why ? "runners-srv-create-why" : null, "data-testid": "runners-srv-create" }, () => !why && openCreate("runners-srv-create"))),
         why ? h("span", { id: "runners-srv-create-why", class: "runners-reason runners-muted", "data-testid": "runners-reason" }, why) : null),
       h("section", { class: "runners-cred", "data-testid": "runners-cred", "aria-label": "Hetzner Cloud" }, h("h3", { class: "runners-subtitle" }, "Hetzner Cloud"), ...credBody),
@@ -595,6 +725,7 @@ function mountApp(contentEl) {
       ac.abort();
       adder.close();
       servers.stop();
+      signin.stop();
       creator.close();
       if (dialog) {
         dialog.dlg.close();

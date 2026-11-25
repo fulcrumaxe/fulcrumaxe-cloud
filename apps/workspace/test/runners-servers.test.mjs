@@ -126,7 +126,8 @@ describe("the server list", () => {
     expect(list[0]).toMatchObject({ name: "fx-5d1e7a32", size: "cx32", location: "fsn1" });
     clean(list);
     const odd = readServers({ servers: [{ id: "x", name: "  ", status: "mystery", server_type: null }, { name: "no id" }, null] });
-    expect(odd).toEqual([{ id: "x", name: "Unnamed server", status: "Status not reported", size: "", location: "", created: "" }]);
+    expect(odd).toMatchObject([{ id: "x", name: "Unnamed server", status: "Status not reported", size: "", location: "", created: "", state: "", runnerId: "", placed: [], placedKnown: false, cost: "" }]);
+    clean(odd);
     for (const st of ["creating", "booting", "installing", "registering", "needs_claude_login", "ready", "offline", "deleting", "failed", "orphaned"]) expect(SERVER_WORDS[st], st).toMatch(/\S/);
     expect(readServers({})).toBeNull();
     expect(readServers({ servers: [] })).toEqual([]);
