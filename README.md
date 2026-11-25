@@ -94,16 +94,19 @@ The plan is off until `STRIPE_PRICE_ID_ENGINE` and the plan data's engine price 
 `packages/core/src/onboarding/engineCoverage.ts`, `packages/api/src/engineCoverage.ts`).
 The cloud can also open the pull request that takes the engine's files out of a project's repository again,
 through the GitHub App and deleting only what the install added and nobody has changed since
-(`packages/runner-cloud/src/engineRemovalPr.ts`); nothing in the product calls it yet.
+(`packages/runner-cloud/src/engineRemovalPr.ts`); removing a project (`POST /api/runners/repos/{id}/remove`) calls it when the person asks for the pull request.
 
 The protocol (version 27) also defines the signed jobs, commands and capabilities for
 setting a project up on a person's own machine (`packages/runner-protocol/src/machineJobs.ts`).
-The runner now takes one such job at a time and acts on `project_setup` only: it fetches the
+The runner now takes one such job at a time and acts on `project_setup` and the engine session jobs: it fetches the
 engine and the approved plan, runs the engine's coldstart in a microVM or, on a machine
 without one, in the OS sandbox, and reports each step (`packages/fx-runner/src/setup/`,
-`packages/fx-runner/src/daemon/machineJobs.ts`); pushing the result is not built yet. The cloud
-issues the job, serves the plan and can retry a failed install
-(`packages/runner-cloud/src/setupJobs.ts`). The cloud does keep what
+`packages/fx-runner/src/daemon/machineJobs.ts`) and then pushes the install commit itself with a
+one-use credential (`packages/fx-runner/src/setup/setupPush.ts`). The cloud
+issues the job, serves the plan, opens and watches the install pull request or finishes a direct install,
+and can retry a failed install (`packages/runner-cloud/src/setupJobs.ts`,
+`packages/runner-cloud/src/setupInstallPr.ts`). For an existing project it first surveys the repository in a
+read-only run on the placed machine (`packages/runner-cloud/src/surveyJobs.ts`). The cloud does keep what
 each machine last said about its free memory, free disk, running setups and whether it holds
 model credentials, for placement and display only (`packages/runner-cloud/src/machineFacts.ts`).
 Placement puts a project on

@@ -143,6 +143,7 @@ stale fetch leaves the event free to be retried. After the commit, when the
 write moved the account's subscription to active or trialing from another
 state, the optional `onSubscriptionActivated` hook is called once; a replayed
 event never calls it and a throw from it never fails the webhook.
+In the same way the optional `onEngineCoverageChanged` hook is called once after the commit when the write ended the subscription or left it in a standing that does not pay (canceled, unpaid, paused, incomplete; a past due write does not count, because its grace runs 7 days). Production marks the reconcile tick, and the job `engine_session_stops` then stops the engine sessions the plan covered; a missed call is picked up by the next tick's own list, and a throw never fails the webhook (#1243).
 
 **Idempotency.** The Stripe-event dedupe ledger is `stripe_webhook_events`
 (`packages/db/migrations/0606_derived_account_status.sql`), a dedicated

@@ -29,7 +29,7 @@ Sources:
 - [`@fx/billing`](packages/billing.md) — Stripe billing: the hosted plans, the Engine plan's per-engine quantity item on the same subscription, and the pinned customer portal.
 - [`@fx/partners`](packages/partners.md) — partner layer.
 - [`@fx/decisions`](packages/decisions.md) — decision-type catalogue, presets, and the pure `decide()` resolver.
-- [`@fx/runner`](packages/runner.md) — per-role sandbox orchestration and the `ExecutionTarget` seam; also the local runner's engine bridge (including how `engine-bridge enable` finds the engine's checkout) and engine host (`fx-runner engine-host`), its platform support, the microVM engine (VM helper and its install plan, sandbox daemon and SDK adapter, egress proxy, the per-job VM lifecycle and the job's model token inside a VM), the clone size watch, sandbox inventory and signed sandbox commands, the project setup job, in a microVM or in the OS sandbox, the engine session jobs on the microVM tier, the Servers tab's Hetzner wording, and how the runner is installed and updated from signed release metadata.
+- [`@fx/runner`](packages/runner.md) — per-role sandbox orchestration and the `ExecutionTarget` seam; also the local runner's engine bridge (including how `engine-bridge enable` finds the engine's checkout) and engine host (`fx-runner engine-host`), its platform support, the microVM engine (VM helper and its install plan, sandbox daemon and SDK adapter, egress proxy, the per-job VM lifecycle and the job's model token inside a VM), the clone size watch, sandbox inventory and signed sandbox commands, the project setup job, in a microVM or in the OS sandbox, with its push and the install pull request, the project survey run, the Claude sign-in link on a machine, the engine session jobs on both tiers and the cloud's own stops of them, the Servers tab's Hetzner wording, and how the runner is installed and updated from signed release metadata.
 - [`@fx/runtime`](packages/runtime.md) — model/runtime adapters.
 - [`@fx/model-router`](packages/model-router.md) — data-driven model routing, escalation, floors.
 - [`@fx/model-connection`](packages/model-connection.md) — customer bring-your-own-key model connections.
@@ -40,7 +40,7 @@ Sources:
 - [`@fx/sitekit-claims`](packages/sitekit-claims.md) — claim schema and the render-refuses-unverified gate.
 - [`@fx/sitekit-template`](packages/sitekit-template.md) — the fixed site template.
 - [`@fx/sitekit-checks`](packages/sitekit-checks.md) — deterministic mechanical checks over rendered output.
-- [`@fx/hetzner`](packages/hetzner.md) — typed Hetzner Cloud API client (servers, snapshots, images) the provider-neutral machine seam, the probe that checks a customer's token, and the fake of the API that staging serves; the API's machine routes use the client to quote, create and delete a server, and answer `server_outcome_unknown` when a create may have landed without an answer.
+- [`@fx/hetzner`](packages/hetzner.md) — typed Hetzner Cloud API client (servers, snapshots, images) the provider-neutral machine seam, the probe that checks a customer's token, and the fake of the API that staging serves; the API's machine routes use the client to quote, create and delete a server, and answer `server_outcome_unknown` when a create may have landed without an answer, and what happens to a server afterwards (follow-up, the orphan sweep, reboot, keep and delete-orphan) and how its cost is worked out for Budget & billing.
 - [`@fx/design`](packages/design.md) — the shared visual token/component layer.
 
 ## Apps
