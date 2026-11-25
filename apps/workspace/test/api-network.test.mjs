@@ -282,6 +282,15 @@ describe("api() server_error and what reaches the screen", () => {
     }
   });
 
+  it("a 409 plan_not_reviewed carries how many items are unread, as a whole number only", async () => {
+    for (const [missing, want] of [[3, 3], [0, 0], [-1, undefined], [1.5, undefined], ["3", undefined], [null, undefined]]) {
+      fetch.mockReset();
+      fetch.mockResolvedValue(reply(409, JSON.stringify({ error: { code: "plan_not_reviewed", message: "x" }, missing })));
+      const err = await api("POST", "/api/v1/x", {}).catch((e) => e);
+      expect([err.code, err.missing], String(missing)).toEqual(["plan_not_reviewed", want]);
+    }
+  });
+
   it("a 5xx with no JSON code has code server_error", async () => {
     fetch.mockResolvedValue(reply(500, "<html>oops</html>"));
     const err = await api("POST", "/api/v1/x", {}).catch((e) => e);

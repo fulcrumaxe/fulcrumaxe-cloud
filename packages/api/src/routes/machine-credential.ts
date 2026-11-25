@@ -13,6 +13,7 @@ import type { RouteEntry } from "../registry.js";
 import { SESSION_LIMITS } from "../ratelimit/session.js";
 import { ApiError } from "../errors.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
+import { refuseWhileDeleting } from "../machines/projectServer.js";
 
 /**
  * D#845 MC-2: `POST|DELETE /api/v1/machine-credentials/hetzner`, thin wrappers over the sealed Hetzner Cloud token (`@fx/model-connection` machineOps).
@@ -124,12 +125,15 @@ export const machineCredentialRoutes: RouteEntry[] = [
     path: "/api/v1/machine-credentials/hetzner",
     operationId: "removeHetznerCredential",
     summary: "Remove the stored Hetzner token (its servers stay)",
+    description: "Refused with 409 `credential_in_use` while a server of the account is being deleted: wait for the delete to finish, then remove the token.",
     minRole: "admin",
     idempotency: "never",
     rateClass: "write",
     responseSchema: z.null(),
     successStatus: 204,
     async handler(ctx) {
+      // A server being deleted needs this token for its last step; without it the server would keep billing and nothing could delete it. Replacing a token is this call, then a connect.
+      await refuseWhileDeleting(ctx);
       try {
         await removeHetznerCredential(serviceCtx(ctx));
         return null;

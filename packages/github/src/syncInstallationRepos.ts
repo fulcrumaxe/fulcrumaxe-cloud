@@ -357,6 +357,17 @@ export async function syncInstallationRepos(deps: SyncDeps, installationId: stri
     // D#600 CX-3a: a detached repository keeps no cached repository map (same transaction).
     await client.query("DELETE FROM repo_context_maps WHERE account_id = $1 AND repo_id = ANY($2::uuid[])", [accountId, gone.rows.map((r) => r.id)]);
     counts.detached = gone.rowCount ?? 0;
+    // ON-27a: a private twin that was waiting for the App to see its repo moves on, in this same transaction.
+    // Inside a savepoint: whatever the twin step raises, the repo writes above stay.
+    await client.query("SAVEPOINT twin_connect");
+    try {
+      await client.query("SELECT twin_connect_seen()");
+      await client.query("RELEASE SAVEPOINT twin_connect");
+    } catch (err) {
+      // fx-swallow-ok: the twin step is best effort; the notice below is logged and the repo writes must not be lost
+      await client.query("ROLLBACK TO SAVEPOINT twin_connect");
+      (deps.warn ?? console.warn)(`syncInstallationRepos: twin connect step failed (${String((err as { code?: string }).code ?? "unknown").replace(/[^A-Za-z0-9_]/g, "")}); repos kept`);
+    }
     // A change to the repo list tells the open Repos window to re-read (same transaction as the writes).
     if (counts.inserted + counts.updated + counts.repointed + counts.detached > 0) {
       await emitDomainEvent(client, { type: "repos.changed", accountId, subjectId: installationId, payload: { kind, inserted: counts.inserted, detached: counts.detached } });

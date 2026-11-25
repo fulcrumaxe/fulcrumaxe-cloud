@@ -5,6 +5,7 @@ import { requireOwnerOrAdmin, type MembershipRole } from '../tenancy/authorize.j
 import { NotFoundError } from '../tenancy/errors.js';
 import { withTenant } from '../tenancy/withTenant.js';
 import { assertRepoIdShape } from './read.js';
+import { assertNoLiveTwin } from './twins.js';
 import { redactEventText } from '../events/redact.js';
 import { syncDerivedSetupRequest } from '../setup-requests/store.js';
 import { checkPrFooter } from '@fulcrumaxe/runner-protocol/planePushText';
@@ -179,7 +180,7 @@ export async function listPairingCandidates(ctx: RepoPairingCtx, repoId: string)
   });
 }
 
-/** Owner or admin. Turns pairing on, or replaces the existing row; one audit row. Changing it affects only items started afterwards. */
+/** Owner or admin. Turns pairing on, or replaces the existing row; one audit row. Refused for a repo of a live private twin. Changing it affects only items started afterwards. */
 export async function setRepoPairing(ctx: RepoPairingCtx, repoId: string, input: SetRepoPairingInput): Promise<RepoPairing> {
   assertRepoIdShape(repoId);
   validatePairingInput(input);
@@ -187,6 +188,8 @@ export async function setRepoPairing(ctx: RepoPairingCtx, repoId: string, input:
   return withTenant(ctx.pool, accountId, userId, async (client) => {
     await requireAdmin(client, accountId, userId);
     const own = await ownFullName(client, repoId);
+    // ON-27a: one repo never has two publishers. Either repo of a live twin, as the repo or as its code_repo, is refused (TwinExistsError, a 409 in the route).
+    await assertNoLiveTwin(client, accountId, repoId, input.codeRepo);
     if (own !== null && own.toLowerCase() === input.codeRepo.toLowerCase()) {
       invalid('the paired public repo must be a different repo from this one', 'code_repo');
     }

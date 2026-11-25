@@ -586,6 +586,7 @@ function mountApp(contentEl) {
     return h("li", { class: "runners-row", "data-testid": "runners-server" },
       h("h3", { class: "runners-name", "data-testid": "runners-server-name" }, h("bdi", null, s.name)),
       h("p", { class: "runners-state", "data-testid": "runners-server-status" }, rowStatus(s)),
+      s.why ? h("p", { class: "runners-error", "data-testid": "runners-server-why" }, s.why) : null,
       h("p", { class: "runners-muted" }, [s.size, s.location].filter(Boolean).join(" in "), s.created ? [" · created ", timeNode(s.created, true)] : ""),
       ...serverExtras(s));
   }

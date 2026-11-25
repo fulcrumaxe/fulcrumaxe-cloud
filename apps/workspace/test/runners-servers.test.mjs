@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CLEAN_REFUSALS, SERVER_BEING_CREATED, SIGN_IN_AGAIN, TIER_NOTICE, TOO_MANY_TRIES, UNKNOWN_OUTCOME, availableIn, catalogUrl, connectSentence, connectedText, createCreator, createSentence, createServers, moneyText, offeredIn, priceLine, quoteUrl, readCatalog,
-  readCredential, readQuote, readServers, removeSentence, specsText, totalText, unlabelledText, SERVER_WORDS, HETZNER_STEPS,
+  readCredential, readQuote, readServers, removeSentence, specsText, totalText, unlabelledText, SERVER_WORDS, HETZNER_STEPS, FAILED_BY_CODE, FAILED_OTHER, failedWords,
 } from "../apps/runners/runners-fleet.js";
 
 const fixture = (op, name) => JSON.parse(readFileSync(new URL(`../../../packages/api/fixtures/v1/${op}/${name}`, import.meta.url), "utf8"));
@@ -126,11 +126,35 @@ describe("the server list", () => {
     expect(list[0]).toMatchObject({ name: "fx-5d1e7a32", size: "cx32", location: "fsn1" });
     clean(list);
     const odd = readServers({ servers: [{ id: "x", name: "  ", status: "mystery", server_type: null }, { name: "no id" }, null] });
-    expect(odd).toMatchObject([{ id: "x", name: "Unnamed server", status: "Status not reported", size: "", location: "", created: "", state: "", runnerId: "", placed: [], placedKnown: false, cost: "" }]);
+    expect(odd).toMatchObject([{ id: "x", name: "Unnamed server", status: "Status not reported", size: "", location: "", created: "", why: "", state: "", runnerId: "", placed: [], placedKnown: false, cost: "" }]);
     clean(odd);
     for (const st of ["creating", "booting", "installing", "registering", "needs_claude_login", "ready", "offline", "deleting", "failed", "orphaned"]) expect(SERVER_WORDS[st], st).toMatch(/\S/);
     expect(readServers({})).toBeNull();
     expect(readServers({ servers: [] })).toEqual([]);
+  });
+
+  it("a failed server says why in one sentence per code, never the code; other statuses and codes with no words say nothing extra", () => {
+    const row = (status, failure_code) => readServers({ servers: [{ id: "x", name: "n", status, failure_code }] })[0];
+    for (const code of ["credential_changed", "credential_invalid", "hetzner_unauthorized", "hetzner_forbidden", "delete_failed", "project_not_on_server", "projects_placed", "server_not_in_token_project", "server_deleting"]) {
+      expect(row("failed", code).why, code).toBe(FAILED_BY_CODE[code]);
+      expect(FAILED_BY_CODE[code], code).toMatch(/^[A-Z][^_]*\.?$/); // a sentence, with no snake_case word in it
+      expect(FAILED_BY_CODE[code]).not.toContain(code);
+    }
+    // The words are true for a create row and a delete row alike, and promise only what works.
+    expect(FAILED_BY_CODE.credential_changed).toBe("The Hetzner token that made this server is no longer connected. Connect it again, then press Delete");
+    expect(FAILED_BY_CODE.hetzner_unauthorized).toBe("Hetzner refused the stored token. Remove it, add a new one, then press Delete");
+    expect(FAILED_BY_CODE.hetzner_forbidden).toBe("The Hetzner token is Read only. It needs Read & Write access. Replace it, then press Delete");
+    expect(FAILED_BY_CODE.delete_failed).toBe("The delete didn't finish. Press Delete to try again");
+    expect(FAILED_BY_CODE.server_not_in_token_project).toBe("This server isn't in the Hetzner project of the connected token. Connect the token for the project it was made in, or delete it in the Hetzner Console.");
+    expect(FAILED_BY_CODE.server_deleting).toBe("This server is already being deleted. Wait for that to finish");
+    expect(Object.hasOwn(FAILED_BY_CODE, "server_outcome_unknown")).toBe(false);
+    expect(row("failed", "server_outcome_unknown").why).toBe(FAILED_OTHER);
+    expect(row("failed", "never_heard_of_it").why).toBe(FAILED_OTHER);
+    expect(row("failed", null).why).toBe("");
+    expect(row("ready", "credential_changed").why).toBe("");
+    expect(failedWords("")).toBe("");
+    expect(failedWords(7)).toBe("");
+    expect(failedWords("constructor")).toBe(FAILED_OTHER);
   });
 
   it("loads and keeps the last good list", async () => {

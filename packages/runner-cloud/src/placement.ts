@@ -25,7 +25,7 @@ export const LOAD_STALE_AFTER_INTERVALS = 3;
 export const STATE_CARRY_MAX_BYTES = 50 * 1024 * 1024;
 
 /** Why a machine cannot take a project, in the order they are checked. `has_project` first, because the screen names the project that holds it. */
-export type IneligibleReason = "has_project" | "not_live" | "paused" | "draining" | "claude_not_ready" | "load_unknown" | "low_memory" | "low_disk";
+export type IneligibleReason = "has_project" | "server_deleting" | "not_live" | "paused" | "draining" | "claude_not_ready" | "load_unknown" | "low_memory" | "low_disk";
 
 export interface MachineCapacity {
   runner_id: string;
@@ -44,6 +44,8 @@ export interface MachineCapacity {
   claude: boolean;
   mem_avail_mb: number | null;
   disk_free_mb: number | null;
+  /** MC-12: the machine is a server of ours that is being deleted (with its project): nothing may be placed on it. Absent reads as false. */
+  deleting?: boolean;
   /** The project placed on it, for the greyed "Runs <owner/name>" line. */
   running: { repo_id: string; name: string } | null;
   eligible: boolean;
@@ -56,6 +58,7 @@ type MachineFacts = Omit<MachineCapacity, "eligible" | "reason">;
 export function assessMachine(m: MachineFacts): MachineCapacity {
   const reason: IneligibleReason | null =
     m.running !== null ? "has_project"
+    : m.deleting === true ? "server_deleting"
     : !m.live ? "not_live"
     : m.paused ? "paused"
     : m.draining ? "draining"
@@ -82,6 +85,7 @@ interface MachineRow {
   kvm: string | null;
   live: boolean;
   paused: boolean;
+  deleting: boolean;
   draining: boolean;
   repo_id: string | null;
   repo_name: string | null;
@@ -96,6 +100,7 @@ export async function readMachineCapacity(client: PoolClient, accountId: string,
   const live = runnerLiveSql({ runner: "rn", now: "$2", onlineSeconds: "$3", wakeEnabled: o.wakeEnabled === true });
   const { rows } = await client.query<MachineRow>(
     `SELECT rn.id AS runner_id, st.name, f.sandbox_engine, rn.kvm, COALESCE(${live}, false) AS live, (st.paused_at IS NOT NULL) AS paused, COALESCE(st.draining, false) AS draining, p.repo_id,
+            EXISTS (SELECT 1 FROM managed_servers ms WHERE ms.account_id = rn.account_id AND ms.runner_id = rn.id AND ms.status = 'deleting') AS deleting,
             COALESCE(NULLIF(g.gh_owner || '/' || g.gh_name, ''), 'a repository') AS repo_name
        FROM runners rn
             LEFT JOIN runner_settings st ON st.account_id = rn.account_id AND st.runner_id = rn.id
@@ -117,6 +122,7 @@ export async function readMachineCapacity(client: PoolClient, accountId: string,
       live: r.live,
       paused: r.paused,
       draining: r.draining,
+      deleting: r.deleting,
       load_age_s: f?.host_load ? Math.max(0, Math.floor((now.getTime() - Date.parse(f.host_load.seen_at)) / 1000)) : null,
       claude: f?.model_auth_present === true,
       mem_avail_mb: f?.host_load?.mem_avail_mb ?? null,

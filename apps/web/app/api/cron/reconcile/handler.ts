@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isStagingPaused, MARKER_HORIZON_MS, runGatedTick } from "@fx/core/src/pendingWork";
-import { issueSystemStops } from "@fx/runner-cloud";
+import { issueSystemStarts, issueSystemStops } from "@fx/runner-cloud";
 import { createPool } from "@fx/db/src/pool";
 import { queueActivationDiscovery } from "../../../../lib/discoveryWake";
 import { createErrorReporter, reportError } from "@fx/telemetry";
@@ -24,9 +24,11 @@ import {
   RECONCILE_ROUTE,
   runTick,
   sandboxInventoryJob,
+  createEngineSessionStarts,
   createEngineSessionStops,
   createMachineServerSweep,
   createSetupInstallPrJob,
+  type EngineSessionStartsPass,
   type EngineSessionStopsPass,
   createSetupFinishJob,
   type SetupFinishStep,
@@ -137,6 +139,8 @@ export interface ReconcileHandlerDeps {
    * supplies it over the platform_ops pool and the worker's job signer, which answers null while that key is not configured.
    */
   engineSystemStops?: ((scope: { msLeft: () => number }) => Promise<EngineSessionStopsPass>) | undefined;
+  /** D#845 ON-13c1: one pass of the system first start (an installed project whose engine is due its first session). Absent (a test double): the job reports not_configured. defaultReconcileDeps supplies it. */
+  engineSystemStarts?: ((scope: { msLeft: () => number }) => Promise<EngineSessionStartsPass>) | undefined;
   /** D#845 ON-13a4: the GitHub port of the finish step, built when a setup is due. Absent: the app port. */
   setupFinishPort?: (() => SetupFinishPort) | undefined;
   /** The raw FX_SANDBOX_REAP_MODE: unset is dry_run, off | dry_run | on are themselves, anything else is off (and reported). */
@@ -293,6 +297,8 @@ export function defaultReconcileDeps(): ReconcileHandlerDeps {
     startMachineSweep,
     engineSystemStops: (scope) =>
       issueSystemStops({ pool: cachedPlatformOpsPool!, engineCommandSigner: async () => (await getWorker())?.engineCommandSigner ?? null, reportError }, scope),
+    engineSystemStarts: (scope) =>
+      issueSystemStarts({ pool: cachedPlatformOpsPool!, engineCommandSigner: async () => (await getWorker())?.engineCommandSigner ?? null, pullRequests: createAppRunPullRequestPort, reportError }, scope),
     getWorker,
     readSandboxReapDbMode: () => readSandboxReapDbMode(cachedPlatformOpsPool!),
     capacityPass: async () => (await getWorker())?.capacityClaimPass(),
@@ -372,6 +378,7 @@ export async function reconcileHandler(
         machine: [createMachineServerSweep(deps.startMachineSweep ?? null), createEngineSessionStops(deps.engineSystemStops ?? null)],
         setupInstall: createSetupInstallPrJob(setupInstallStep(deps)),
         setupFinish: createSetupFinishJob(setupFinishStep(deps)),
+        engineStarts: createEngineSessionStarts(deps.engineSystemStarts ?? null),
         sandbox: [...sandboxReapJobs(worker, sandboxDeps), sandboxInventoryJob(worker, sandboxDeps)],
       }),
       enabled: deps.enabled,

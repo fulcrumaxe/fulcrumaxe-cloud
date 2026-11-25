@@ -5,6 +5,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MAX_PRD_BYTES, ProjectDraft } from "@fulcrumaxe/runner-protocol";
 import { MAX_MARKDOWN_BYTES, TRUNCATED_NOTE, capText, parseMarkdown, renderMarkdown } from "../apps/_lib/markdown.js";
+import { prdView } from "../apps/onboarding/onboarding-engine.js";
 import { FIXTURE_DRAFTS, HOSTILE_DRAFT, MAX_DRAFT } from "../../../packages/runner-protocol/test/helpers/projectDrafts.ts";
 
 // A stand-in for the few DOM calls h() makes (the same one markdown.test.mjs uses).
@@ -80,5 +81,29 @@ describe("a survey's PRD through the public renderer", () => {
       expect(tags(html)).not.toContain("script");
       expect(all(html).filter((x) => x instanceof FakeEl && x.tag === "a")).toEqual([]);
     }
+  });
+});
+
+// D#845 ON-11b: the plan review draws a PRD through prdView, the one function its editor, its read-only view and its member view all use.
+describe("the plan review's PRD view (ON-11b)", () => {
+  it("script tags, script-scheme links and raw HTML in a PRD stay inert text; only the one https link is a link", () => {
+    const html = prdView(HOSTILE_DRAFT.prd_md);
+    const t = text(html);
+    expect(tags(html)).not.toContain("script");
+    expect(tags(html)).not.toContain("img");
+    expect(all(html).filter((x) => x instanceof FakeEl && x.tag === "a").map((l) => l.attrs.href)).toEqual(["https://example.com/docs"]);
+    expect(t).toContain("<script>alert(1)</script>");
+    expect(t).toContain("[click](javascript:alert(1))");
+    expect(t).toContain('<img src=x onerror="alert(1)">');
+    for (const tag of tags(html)) expect(ALLOWED.has(tag) || tag === "div", tag).toBe(true);
+    expect(html.attrs["data-testid"]).toBe("ob-plan-prd-view");
+  });
+
+  it("every fixture draft shows with no note; a PRD past the renderer's cap says the preview stops and the text is kept", () => {
+    for (const draft of Object.values(FIXTURE_DRAFTS)) expect(tags(prdView(draft.prd_md))).not.toContain("script");
+    expect(text(prdView(MAX_DRAFT.prd_md))).not.toContain("The preview stops at 64 KiB");
+    const over = text(prdView(`${MAX_DRAFT.prd_md}x`));
+    expect(over).toContain("The preview stops at 64 KiB. The whole text is kept.");
+    expect(over).toContain(TRUNCATED_NOTE);
   });
 });

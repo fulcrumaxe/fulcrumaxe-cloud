@@ -24,7 +24,7 @@ const ALL = [FX.repos.none, FX.repos.waiting_machine, FX.repos.removing, FX.repo
 
 interface Sent { method: string; path: string; body: string | null }
 
-async function setup(page: Page, opts: { admin?: boolean; remove?: () => { status: number; json: unknown } } = {}) {
+async function setup(page: Page, opts: { admin?: boolean; remove?: () => { status: number; json: unknown }; servers?: unknown; serverDelete?: () => { status: number; json: unknown } } = {}) {
   const appErrors: string[] = [];
   page.on("console", (m) => m.type() === "error" && !m.text().startsWith("Failed to load resource") && appErrors.push(m.text()));
   page.on("pageerror", (e) => appErrors.push(`pageerror: ${e.message}`));
@@ -51,6 +51,18 @@ async function setup(page: Page, opts: { admin?: boolean; remove?: () => { statu
     const r = opts.remove ? opts.remove() : { status: 200, json: FX.answers.queued_no_pr };
     return json(route, r.status, r.json);
   });
+  // MC-12: the server that holds the project (none unless a test says), and the one request that deletes it with the project.
+  await page.route((u) => u.pathname === "/api/v1/machine-servers", (route) => {
+    const req = route.request();
+    sent.push({ method: req.method(), path: new URL(req.url()).pathname + new URL(req.url()).search, body: req.postData() });
+    return json(route, 200, opts.servers ?? FX.servers.none);
+  });
+  await page.route((u) => /^\/api\/v1\/machine-servers\/[^/]+\/delete-with-project$/.test(u.pathname), (route) => {
+    const req = route.request();
+    sent.push({ method: req.method(), path: new URL(req.url()).pathname, body: req.postData() });
+    const r = opts.serverDelete ? opts.serverDelete() : { status: 202, json: FX.server_answer };
+    return json(route, r.status, r.json);
+  });
   await bootToDesktop(page);
   return { sent, appErrors };
 }
@@ -64,6 +76,7 @@ const openRow = async (page: Page, name: string) => {
   await expect(tid(page, "repos-remove-open")).toBeVisible();
 };
 const removes = (sent: Sent[]) => sent.filter((s) => s.method === "POST" && s.path.endsWith("/remove"));
+const serverRemoves = (sent: Sent[]) => sent.filter((s) => s.method === "POST" && s.path.endsWith("/delete-with-project"));
 const repoGets = (sent: Sent[]) => sent.filter((s) => s.method === "GET" && s.path === "/api/v1/repos");
 
 test.describe("D#845 ON-16a2: Remove from fulcrumaxe (mocked API)", () => {
@@ -213,6 +226,101 @@ test.describe("D#845 ON-16a2: Remove from fulcrumaxe (mocked API)", () => {
     await openRow(page, "acme/docs");
     await tid(page, "repos-remove-open").click();
     await expect(page.locator(DIALOG)).toBeVisible();
+    const res = await new AxeBuilder({ page }).include(DIALOG).withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa", "best-practice"]).analyze();
+    expect(res.violations.filter((v) => v.impact === "serious" || v.impact === "critical").map((v) => `${v.impact} ${v.id}`)).toEqual([]);
+  });
+  test("MC-12: the box 'Also delete server' shows the server's name in <bdi> and its stored monthly price, and ticking it swaps the stop line and the sandbox box for one line", async ({ page }) => {
+    const { sent, appErrors } = await setup(page, { admin: true, servers: FX.servers.one });
+    await openRepos(page);
+    await openRow(page, "acme/widgets");
+    await tid(page, "repos-remove-open").click();
+    const box = sheet(page, "repos-remove-server");
+    await expect(box).toBeVisible();
+    await expect(box).not.toBeChecked();
+    await expect(page.locator(`${DIALOG} label`).filter({ hasText: "Also delete server" })).toHaveText("Also delete server Studio server שלום (stops €5.1051 a month)");
+    expect(await sheet(page, "repos-remove-server-name").evaluate((e) => e.tagName)).toBe("BDI");
+    expect(sent.filter((s) => s.path.startsWith("/api/v1/machine-servers")).map((s) => s.path)).toEqual([`/api/v1/machine-servers?repo_id=${FX.repos.none.id}`]);
+    await expect(sheet(page, "repos-remove-sandbox")).toBeVisible();
+    await box.check();
+    await expect(sheet(page, "repos-remove-sandbox")).toHaveCount(0);
+    await expect(sheet(page, "repos-remove-stop")).toHaveCount(0);
+    await expect(sheet(page, "repos-remove-server-fact")).toContainText("sandbox and snapshots");
+    await expect(page.locator(DIALOG)).not.toContainText(/undefined|null|NaN/);
+    await box.uncheck(); // the undo: back to the plain removal's two lines
+    await expect(sheet(page, "repos-remove-sandbox")).toBeChecked();
+    await expect(sheet(page, "repos-remove-server-fact")).toHaveCount(0);
+    expect(removes(sent)).toHaveLength(0);
+    expect(serverRemoves(sent)).toHaveLength(0);
+    expect(appErrors).toEqual([]);
+  });
+
+  test("MC-12: ticked, confirming sends one request to the server's route and none to the plain removal, and the answer says the server is being deleted", async ({ page }) => {
+    const { sent, appErrors } = await setup(page, { admin: true, servers: FX.servers.one });
+    await openRepos(page);
+    await openRow(page, "acme/widgets");
+    const reads = repoGets(sent).length;
+    await tid(page, "repos-remove-open").click();
+    await sheet(page, "repos-remove-server").check();
+    await sheet(page, "repos-remove-pr").check();
+    await sheet(page, "repos-remove-confirm").click();
+    await expect(sheet(page, "repos-remove-done")).toHaveText("Removed.");
+    await expect(sheet(page, "repos-remove-server-done")).toContainText("The server is being deleted");
+    await expect(sheet(page, "repos-remove-server-done")).toContainText("removal PR is opened with it");
+    await expect(sheet(page, "repos-remove-machine")).toHaveCount(0);
+    expect(removes(sent)).toHaveLength(0);
+    expect(serverRemoves(sent)).toHaveLength(1);
+    expect(serverRemoves(sent)[0]!.path).toBe(`/api/v1/machine-servers/${FX.servers.one.servers[0].id}/delete-with-project`);
+    expect(JSON.parse(serverRemoves(sent)[0]!.body!)).toEqual({ repo_id: FX.repos.none.id, removal_pr: true });
+    await expect.poll(() => repoGets(sent).length).toBeGreaterThan(reads);
+    expect(appErrors).toEqual([]);
+  });
+
+  test("MC-12: a box ticked and then unticked sends the plain removal request", async ({ page }) => {
+    const { sent, appErrors } = await setup(page, { admin: true, servers: FX.servers.one });
+    await openRepos(page);
+    await openRow(page, "acme/widgets");
+    await tid(page, "repos-remove-open").click();
+    await sheet(page, "repos-remove-server").check();
+    await sheet(page, "repos-remove-server").uncheck();
+    await sheet(page, "repos-remove-confirm").click();
+    await expect(sheet(page, "repos-remove-done")).toHaveText("Removed.");
+    expect(serverRemoves(sent)).toHaveLength(0);
+    expect(JSON.parse(removes(sent)[0]!.body!)).toEqual({ delete_sandbox: true, removal_pr: false });
+    expect(appErrors).toEqual([]);
+  });
+
+  test("MC-12: a repo whose machine is not one of our servers has no box, and the sheet is the same two boxes as before", async ({ page }) => {
+    const { appErrors } = await setup(page, { admin: true });
+    await openRepos(page);
+    await openRow(page, "acme/widgets");
+    await tid(page, "repos-remove-open").click();
+    await expect(sheet(page, "repos-remove-sandbox")).toBeVisible();
+    await expect(sheet(page, "repos-remove-server")).toHaveCount(0);
+    await expect(page.locator(`${DIALOG} input[type="checkbox"]`)).toHaveCount(2);
+    expect(appErrors).toEqual([]);
+  });
+
+  test("MC-12: a refused server delete is a sentence of the app's own, the ticks stay, and nothing reads as removed", async ({ page }) => {
+    const { sent, appErrors } = await setup(page, { admin: true, servers: FX.servers.one, serverDelete: () => ({ status: 409, json: { error: { code: "project_not_on_server", message: "server text that must never show", request_id: "req_test" } } }) });
+    await openRepos(page);
+    await openRow(page, "acme/widgets");
+    await tid(page, "repos-remove-open").click();
+    await sheet(page, "repos-remove-server").check();
+    await sheet(page, "repos-remove-confirm").click();
+    await expect(sheet(page, "repos-remove-error")).toHaveText("This project isn't on that server any more. Close this and open it again.");
+    await expect(page.locator(DIALOG)).not.toContainText("server text");
+    await expect(sheet(page, "repos-remove-server")).toBeChecked();
+    await expect(sheet(page, "repos-remove-done")).toHaveCount(0);
+    expect(serverRemoves(sent)).toHaveLength(1);
+    expect(appErrors).toEqual([]);
+  });
+
+  test("MC-12: the sheet with the server box has no serious or critical accessibility violation", async ({ page }) => {
+    await setup(page, { admin: true, servers: FX.servers.one });
+    await openRepos(page);
+    await openRow(page, "acme/widgets");
+    await tid(page, "repos-remove-open").click();
+    await sheet(page, "repos-remove-server").check();
     const res = await new AxeBuilder({ page }).include(DIALOG).withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa", "best-practice"]).analyze();
     expect(res.violations.filter((v) => v.impact === "serious" || v.impact === "critical").map((v) => `${v.impact} ${v.id}`)).toEqual([]);
   });

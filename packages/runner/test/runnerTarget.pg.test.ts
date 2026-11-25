@@ -174,6 +174,25 @@ describe("RunnerTarget [pg]", () => {
     });
   });
 
+  // D#845 ON-10e1: the matrix at the target's gate (`precheck` and `admit` share it): only the survey role passes on a public repo, and an unknown visibility passes for no role.
+  describe("the public-repo gate, every role against every visibility", () => {
+    const roles = [...RUNNER_TARGET_ROLES];
+    it.each(["public", "unknown"] as const)("a %s repo: precheck and admit agree, role by role", async (seen) => {
+      const w = await world();
+      for (const role of roles) {
+        const run = await insertRun(w, { role });
+        const t = new RunnerTarget({ limits: createFakeRunnerLimits(1000), pool: db.runWriterPool, issuer: createFakeJobIssuer(), visibility: createFakeVisibility(seen) });
+        const pre = await t.precheck({ accountId: w.accountId, repoId: w.repoId, role });
+        const admit = await t.admit(run, db.admin);
+        expect(pre.ok, `${role} precheck on ${seen}`).toBe(admit.admitted);
+        if (seen === "public") expect(pre.ok, `${role} on public`).toBe(role === "project-surveyor");
+        if (seen === "unknown") expect(pre.ok, `${role} on unknown`).toBe(false);
+        if (!pre.ok) expect(["public_repo", "repo_visibility_unknown", "role_not_runner_eligible"]).toContain(pre.reason);
+        if (seen === "public" && role === "project-surveyor") expect(admit).toEqual({ admitted: true });
+      }
+    });
+  });
+
   describe("admit: the repo's visibility (fails closed)", () => {
     it("a public repo is refused as public_repo", async () => {
       const w = await world();

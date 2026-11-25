@@ -43,7 +43,11 @@ export interface CreateRepoResult {
   repoId?: string;
   /** `created_not_connected` only: the installation's settings page on GitHub. */
   installationUrl?: string;
+  /** A twin's create (ON-27a) only, once the repo exists: what recording the twin answered. `failed` means the repo exists and no twin row was written. */
+  twin?: TwinRecordOutcome;
 }
+
+export type TwinRecordOutcome = "ok" | "not_found" | "pairing_exists" | "twin_exists" | "failed";
 
 export interface CreateRepoDeps extends SyncDeps {
   env: Record<string, string | undefined>;
@@ -170,7 +174,7 @@ async function attempt(deps: CreateRepoDeps, input: CreateRepoInput, claims: Cre
   const created = await fetchImpl(type === "User" ? "https://api.github.com/user/repos" : `https://api.github.com/orgs/${login}/repos`, {
     method: "POST",
     headers: { ...headers(token), "content-type": "application/json" },
-    body: JSON.stringify({ name: claims.name, private: claims.visibility !== "public", auto_init: claims.auto_init, ...(description ? { description } : {}) }),
+    body: JSON.stringify({ name: claims.name, private: claims.visibility !== "public", auto_init: claims.auto_init, ...(claims.purpose === "twin" ? { has_discussions: true } : {}), ...(description ? { description } : {}) }),
     redirect: "error",
     signal: AbortSignal.timeout(TIMEOUT_MS),
   });
@@ -197,13 +201,29 @@ async function attempt(deps: CreateRepoDeps, input: CreateRepoInput, claims: Cre
   await audit(deps, input.accountId, "github.repo_created", {
     gh_owner_id: claims.owner_gh_id, gh_repo_id: ghRepoId ?? null, name: claims.name, visibility: claims.visibility, connected, by: input.userId, nonce: claims.nonce,
   });
-  if (connected && repoId !== undefined) return { outcome: "ok", repoUrl, repoId };
-  if (connected) return { outcome: "ok", repoUrl };
+  // A twin's repo is recorded whether or not the App can see it yet; the record says which (not_connected until it can).
+  const twin = claims.purpose === "twin" && claims.twin_of ? await recordTwin(deps, input, claims.twin_of, repoId, ghRepoId, claims.name) : undefined;
+  if (connected && repoId !== undefined) return { outcome: "ok", repoUrl, repoId, ...(twin ? { twin } : {}) };
+  if (connected) return { outcome: "ok", repoUrl, ...(twin ? { twin } : {}) };
   const installationUrl =
     type === "User"
       ? `https://github.com/settings/installations/${rec.ghInstallationId}`
       : `https://github.com/organizations/${login}/settings/installations/${rec.ghInstallationId}`;
-  return { outcome: "created_not_connected", repoUrl, installationUrl };
+  return { outcome: "created_not_connected", repoUrl, installationUrl, ...(twin ? { twin } : {}) };
+}
+
+/** The twin's row, in the person's own transaction. Nothing GitHub said is stored beyond the numeric id; a failure is reported, never thrown (the repo exists by now). */
+async function recordTwin(deps: CreateRepoDeps, input: CreateRepoInput, publicRepoId: string, privateRepoId: string | undefined, ghRepoId: unknown, name: string): Promise<TwinRecordOutcome> {
+  try {
+    const gh = typeof ghRepoId === "number" && Number.isSafeInteger(ghRepoId) && ghRepoId > 0 ? ghRepoId : null;
+    const { rows } = await withTenant(deps.appUserPool, input.accountId, input.userId, (client) =>
+      client.query<{ o_result: TwinRecordOutcome }>("SELECT o_result FROM twin_record($1, $2, $3, $4)", [publicRepoId, privateRepoId ?? null, gh, name]),
+    );
+    return rows[0]?.o_result ?? "failed";
+  } catch (err) {
+    reportError(err, { stage: "github.create_repo.twin" });
+    return "failed";
+  }
 }
 
 export async function createCustomerRepo(deps: CreateRepoDeps, input: CreateRepoInput): Promise<CreateRepoResult> {

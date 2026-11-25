@@ -78,6 +78,16 @@ export const FINALIZE = [
   'GIT_AUTHOR_NAME=fulcrumaxe GIT_AUTHOR_EMAIL=runner@localhost GIT_COMMITTER_NAME=fulcrumaxe GIT_COMMITTER_EMAIL=runner@localhost GIT_AUTHOR_DATE="$WHEN" GIT_COMMITTER_DATE="$WHEN" git -c core.hooksPath=/dev/null -c commit.gpgsign=false commit -q --no-verify -m "Install the fulcrumaxe engine $V"',
 ].join("\n");
 
+/** args: engine version, the commit time (the job's `issued_at`), the base commit. An engine update's one commit: the engine's own bootstrap changed the tree and nothing is generated. */
+export const UPDATE_COMMIT = [
+  ...PRELUDE,
+  "V=$1; WHEN=$2; BASE=$3",
+  'cd "$W"',
+  'git reset --soft "$BASE"',
+  "git add -A",
+  'GIT_AUTHOR_NAME=fulcrumaxe GIT_AUTHOR_EMAIL=runner@localhost GIT_COMMITTER_NAME=fulcrumaxe GIT_COMMITTER_EMAIL=runner@localhost GIT_AUTHOR_DATE="$WHEN" GIT_COMMITTER_DATE="$WHEN" git -c core.hooksPath=/dev/null -c commit.gpgsign=false commit -q --no-verify -m "Update the fulcrumaxe engine to $V"',
+].join("\n");
+
 const UNPACK_ENGINE = ["set -eu", "umask 022", "S=$2; SHA=$3; E=$S/engine", 'rm -rf "$E"; mkdir -p "$E"', 'base64 -d "$S/engine.b64" >"$S/engine.tgz"', 'rm -f "$S/engine.b64"', '[ "$(sha256sum "$S/engine.tgz" | cut -d" " -f1)" = "$SHA" ]', 'tar -xzf "$S/engine.tgz" -C "$E" --strip-components=1 --no-same-owner --no-same-permissions', 'rm -f "$S/engine.tgz"'].join("\n");
 
 /** The largest engine archive (compressed) one guest file frame carries once it is base64. */

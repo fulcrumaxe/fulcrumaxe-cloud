@@ -11,6 +11,8 @@ import {
   RUNNER_ELIGIBLE_ROLES,
   RUNNER_LEASE_SECONDS,
   SURVEY_ROLE,
+  SURVEY_PUBLIC_CAPABILITY,
+  publicRepoAllowed,
   SignedJobSchema,
   canonicalJson,
   capacityFreeSlots,
@@ -524,6 +526,8 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
                   -- D#749 V2c-1: a job that names a browser method (the deploy verifier's, signed by the cloud) is offered only to a runner whose latest hello lists that method's capability.
                   -- A method the cloud does not know matches nothing (the CASE is NULL), so it is never offered.
                   AND (a.job_signed #>> '{job,browser_method}' IS NULL OR (${BROWSER_METHOD_CAPABILITY_SQL}) = ANY($22::text[]))
+                  -- D#845 ON-10e1: a job that names a public repo (the survey's alone) goes only to a runner whose latest hello lists survey_public_v1; an old runner is never handed a job it would refuse.
+                  AND (a.job_signed #>> '{job,repo,private}' IS DISTINCT FROM 'false' OR 'survey_public_v1' = ANY($22::text[]))
                   AND (CASE WHEN a.role = ANY($10::text[]) THEN $11::int ELSE $12::int END) > 0
                   ${ROUTING_WHERE_SQL}
                 ORDER BY ($4 = 'subscription' AND COALESCE(a.initiated_by = $5 OR a.approved_by = $5, false)) DESC, (p.runner_id IS NOT NULL AND p.runner_id = $7) DESC, a.created_at, a.id
@@ -548,7 +552,9 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
             visibility = await deps.visibility.visibility({ accountId, repoId: candidate.dispatch_repo_id }).catch((): "unknown" => "unknown");
             seen.set(candidate.dispatch_repo_id, visibility);
           }
-          if (visibility !== "private") {
+          // D#845 ON-10e1: the survey role on a survey task may name a public repo, for a runner that lists survey_public_v1 (the query above is the first line of that rule, this the second). `unknown` never passes.
+          const publicOk = visibility === "public" && publicRepoAllowed(parsed.data.job.role, parsed.data.job.task.kind) && parsed.data.job.repo.private === false && (runner.capabilities ?? []).includes(SURVEY_PUBLIC_CAPABILITY);
+          if (visibility !== "private" && !publicOk) {
             const failureReason: FailureReason = visibility === "public" ? "public_repo" : "repo_visibility_unknown";
             await withTenant(runnerPool, accountId, (client) => writeRunStatusOn(client, { accountId, runId: candidate.id, from: "pending", to: "failed", failureReason }));
             continue;

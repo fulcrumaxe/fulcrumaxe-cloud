@@ -321,8 +321,14 @@ describe("machine job claim and setup progress [pg]", () => {
     const r = await rig();
     const job = await issue(r, { kind: "engine_update" });
     expect(handedOver((await pickup(r)).body)).toBe(true);
-    expect((await progress(r, step(job.id, 0, { sub_step: "gh_labels", state: "ok" }))).status).toBe(200);
+    // an engine_update job is for an installed project (setup done) and reports to its update (migration 1093), which must exist; without one the report is refused
+    await h.admin.query("UPDATE project_setups SET phase = 'done' WHERE id = $1", [r.setupId]);
+    expect((await progress(r, step(job.id, 0, { sub_step: "gh_labels", state: "ok" }))).status).toBe(409);
+    await h.admin.query("INSERT INTO engine_updates (account_id, repo_id, setup_id, from_version, to_version, attempt, created_by) VALUES ($1, $2, $3, '1.0.0', '1.0.1', $4, $5)", [r.who.accountId, r.who.repoId, r.setupId, job.attempt, r.who.userId]);
+    const before = await setupRow(r.setupId);
+    expect((await progress(r, step(job.id, 1, { sub_step: "gh_labels", state: "ok" }))).status).toBe(200);
     expect(await jobState(job.id)).toBe("delivered");
+    expect(await setupRow(r.setupId)).toEqual(before);
     expect(await pickup(r)).toMatchObject({ body: { retry_after: 60 } });
   });
 

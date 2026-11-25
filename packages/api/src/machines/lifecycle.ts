@@ -88,11 +88,95 @@ async function createInFlight(ctx: ServerCtx, key: string | null): Promise<boole
   return rows[0]?.got !== true;
 }
 
-export interface DeleteInput { removeProjects: boolean }
+/** The account's connected Hetzner credential is the one that made the server, or 409 `credential_changed`. Writes nothing. */
+export async function requireCredential(ctx: ServerCtx, credentialId: string): Promise<void> {
+  const { accountId, userId } = ctx.principal;
+  const active = await withTenant(ctx.pool, accountId, userId, async (c) => (await c.query<{ id: string }>(`SELECT id FROM machine_provider_credentials WHERE account_id = $1 AND provider = 'hetzner_cloud' AND removed_at IS NULL`, [accountId])).rows[0]?.id);
+  if (active !== credentialId) throw new ApiError(409, "credential_changed", "The Hetzner token that made this server is no longer connected. Connect it again to delete the server");
+}
+
+/** Ruling 99's sentence. One constant, so the route, the sheet and the tests read the same words. */
+export const NOT_IN_TOKEN_PROJECT_MESSAGE = "This server isn't in the Hetzner project of the connected token. Connect the token for the project it was made in, or delete it in the Hetzner Console.";
+
+/**
+ * The delete path's token check. The connected token is the one that made the server (same credential id): fine. No token connected: 409 `credential_changed`, nothing used. A
+ * DIFFERENT token connected (a reconnect makes a new id, even for the same token): Hetzner is asked through the CURRENT token (the row's own credential is the old, removed one, so
+ * the by-server door cannot be used), and only a server that carries our managed label AND this row's id is rebound to the current credential, in one transaction with its audit row.
+ * Not found, or a label that does not match: 409 `server_not_in_token_project`, and nothing is deleted. A row with no Hetzner server id is looked up by the same labels.
+ * Returns the credential id the row follows from now on (the connected one).
+ */
+export async function ensureCredential(ctx: ServerCtx, s: { id: string; credential_id: string; provider_server_id: string | null }): Promise<string> {
+  const { accountId, userId } = ctx.principal;
+  const active = await withTenant(ctx.pool, accountId, userId, async (c) => (await c.query<{ id: string }>(`SELECT id FROM machine_provider_credentials WHERE account_id = $1 AND provider = 'hetzner_cloud' AND removed_at IS NULL`, [accountId])).rows[0]?.id);
+  if (active === s.credential_id) return active;
+  if (active === undefined) throw new ApiError(409, "credential_changed", "The Hetzner token that made this server is no longer connected. Connect it again to delete the server");
+  const ours = (l: { labels: Record<string, string> }): boolean => l.labels[MANAGED_LABEL] === MANAGED_LABEL_VALUE && l.labels["fx-server"] === s.id;
+  let found: boolean;
+  try {
+    found = await withHetznerClient(ctx, async (client) => {
+      if (s.provider_server_id !== null) {
+        const server = await client.getServer(Number(s.provider_server_id)).catch((e: unknown) => {
+          if (e instanceof HetznerError && e.code === "not_found") return null;
+          throw e;
+        });
+        return server !== null && ours(server);
+      }
+      if ((await client.listServers({ labelSelector: `fx-server=${s.id}` })).some(ours)) return true;
+      return (await client.listFirewalls({ labelSelector: `fx-server=${s.id}` })).some(ours);
+    });
+  } catch (e) {
+    throw toApiError(e);
+  }
+  if (!found) throw new ApiError(409, "server_not_in_token_project", NOT_IN_TOKEN_PROJECT_MESSAGE);
+  // Both labels match: the row follows the token. The update names the account and the old credential, so a row that moved meanwhile is not touched; the audit row is in the same transaction.
+  try {
+    await withTenant(ctx.pool, accountId, userId, async (c) => {
+      // A sweep of the new token may already hold this very Hetzner server as an orphan row (the unique index is on credential and server id). That duplicate is only a leftover: it is retired
+      // (deleted, unlinked) so this row, which has the history, is the one that holds the server.
+      if (s.provider_server_id !== null) {
+        await c.query(
+          `UPDATE managed_servers SET status = 'deleted', status_at = now(), deleted_at = COALESCE(deleted_at, now()), deleted_by = COALESCE(deleted_by, $5), provider_server_id = NULL
+            WHERE account_id = $1 AND credential_id = $2 AND provider_server_id = $3 AND id <> $4 AND status IN ('orphaned', 'deleted') AND runner_id IS NULL AND provider_firewall_id IS NULL`,
+          [accountId, active, s.provider_server_id, s.id, userId]);
+      }
+      const moved = await c.query(`UPDATE managed_servers SET credential_id = $3 WHERE account_id = $1 AND id = $2 AND credential_id = $4 AND status <> 'deleted'`, [accountId, s.id, active, s.credential_id]);
+      if (moved.rowCount !== 1) throw new ApiError(409, "credential_changed", "The Hetzner token changed while this was being checked. Try again");
+      await c.query("SELECT audit_write('machine_server.credential_rebound', $1::jsonb)", [JSON.stringify({ server_id: s.id, from_credential_id: s.credential_id, credential_id: active })]);
+    });
+  } catch (e) {
+    if (typeof e === "object" && e !== null && (e as { code?: unknown }).code === "23505") throw new ApiError(409, "credential_changed", "The Hetzner token changed while this was being checked. Try again");
+    throw e;
+  }
+  return active;
+}
+
+/**
+ * MC-12: a delete that ended without deleting. A row set to `deleting` becomes `failed` with the closed code (the Servers tab shows Failed, and Delete finishes it); any other row is left alone.
+ * `markedAt` is the `status_at` text the caller's own mark returned: given, only that very mark is turned to `failed`, so a row that a run (or another request) has marked since is not
+ * touched. The queued run passes none, because it owns the row.
+ */
+export async function markDeleteFailed(ctx: ServerCtx, serverId: string, code: string, markedAt?: string): Promise<void> {
+  const { accountId, userId } = ctx.principal;
+  const word = /^[a-z][a-z0-9_]{0,63}$/.test(code) ? code : "delete_failed";
+  await withTenant(ctx.pool, accountId, userId, (c) => markedAt === undefined
+    ? c.query(`UPDATE managed_servers SET status = 'failed', status_at = now(), failure_code = $3 WHERE account_id = $1 AND id = $2 AND status = 'deleting'`, [accountId, serverId, word])
+    : c.query(`UPDATE managed_servers SET status = 'failed', status_at = now(), failure_code = $3 WHERE account_id = $1 AND id = $2 AND status = 'deleting' AND status_at::text = $4`, [accountId, serverId, word, markedAt]));
+}
+
+/** The longest a delete run holds a server at `deleting` (a soft bound: see the comment in projectServer.ts). A plain Delete is refused inside it, and so is the token's removal. */
+export const DELETE_RUN_MAX_MINUTES = 30;
+
+export interface DeleteInput {
+  removeProjects: boolean;
+  /** Only the queued "Also delete server" run sets this: it owns a `deleting` row, so its tries are not refused by it. */
+  fromRun?: boolean;
+  /** Called with the `status_at` text of this call's own mark, when it made one. The route uses it to fail only that mark. */
+  onMarked?: (markedAt: string) => void;
+}
 export interface DeleteResult { id: string; status: "deleted"; already_deleted: boolean }
 interface DeleteRow {
   status: string; credential_id: string; provider_server_id: string | null; provider_firewall_id: string | null; runner_id: string | null; provisioning_token_id: string | null;
-  failure_code: string | null; idempotency_key: string | null;
+  failure_code: string | null; idempotency_key: string | null; run_owned: boolean;
 }
 
 /** Owner or admin (the route enforces it, and opening the token checks it again). Returns once the server and its firewall are gone from Hetzner and the row says so. */
@@ -101,14 +185,32 @@ export async function deleteManagedServer(ctx: ServerCtx, id: string, input: Del
   const { accountId, userId } = ctx.principal;
   const inTx = <T>(f: (c: import("pg").PoolClient) => Promise<T>): Promise<T> => withTenant(ctx.pool, accountId, userId, f);
   const row = await inTx(async (c) => (await c.query<DeleteRow>(
-    `SELECT status, credential_id, provider_server_id, provider_firewall_id, runner_id, provisioning_token_id, failure_code, idempotency_key FROM managed_servers WHERE account_id = $1 AND id = $2`, [accountId, id])).rows[0]);
+    `SELECT status, credential_id, provider_server_id, provider_firewall_id, runner_id, provisioning_token_id, failure_code, idempotency_key,
+            (status = 'deleting' AND status_at > now() - make_interval(mins => $3::int)) AS run_owned FROM managed_servers WHERE account_id = $1 AND id = $2`, [accountId, id, DELETE_RUN_MAX_MINUTES])).rows[0]);
   if (!row) throw new ApiError(404, "not_found", "no such server");
   if (row.status === "deleted") return { id, status: "deleted", already_deleted: true };
+  // A `deleting` row inside the run's window belongs to a delete that is going on (the queued run, or another request): a plain Delete leaves it alone, so it cannot fail or re-mark it. The run itself
+  // passes `fromRun`. An older row has no delete behind it (a killed run, a crashed request), and Delete finishes it.
+  if (row.run_owned && input.fromRun !== true) throw new ApiError(409, "server_deleting", "This server is already being deleted");
   // While the create is still running there is nothing to delete here, and a delete now would leave the server it is about to make without a row. A create that was killed
   // (a timeout, a crash, a deploy) leaves the row `creating` with no id and no lock held: then Delete goes on and finds the server by its label.
   if (row.status === "creating" && row.provider_server_id === null && (await createInFlight(ctx, row.idempotency_key))) throw new ApiError(409, "server_creating", "This server is still being created. Try again in a minute");
   const ownedBy = (l: { labels: Record<string, string> }): boolean => l.labels[MANAGED_LABEL] === MANAGED_LABEL_VALUE && l.labels["fx-server"] === id;
   const byLabel = row.provider_server_id === null && row.provider_firewall_id === null && row.provisioning_token_id !== null && (row.status === "creating" || row.status === "deleting" || row.failure_code === "cleanup_failed");
+
+  // An orphan that is linked to a Hetzner server: the sweep found it by our label, but the label may have been taken off since. A server that no longer says it is ours is not
+  // deleted from here, by either route (this one and delete-orphan). Gone at Hetzner is fine (404 is done).
+  if (row.status === "orphaned" && row.provider_server_id !== null) {
+    const labels = await withHetznerServerClient(ctx, row.provider_server_id, (client) => client.getServer(Number(row.provider_server_id)).then((s) => s.labels, (e: unknown) => {
+      if (e instanceof HetznerError && e.code === "not_found") return null;
+      throw e;
+    })).catch((e: unknown) => { throw toApiError(e); });
+    if (labels !== null && labels[MANAGED_LABEL] !== MANAGED_LABEL_VALUE) throw new ApiError(409, "not_an_orphan", "That server no longer carries our label, so it isn't deleted from here");
+  }
+
+  // 0. The token. The server belongs to the Hetzner project of the credential that made it; another token (or none) must never be used to delete it. This is checked before anything
+  // is changed (projects, runner, token), so a refusal leaves everything as it was and the person can connect the right token and try again.
+  if (row.provider_server_id !== null || row.provider_firewall_id !== null || byLabel) await ensureCredential(ctx, { id, credential_id: row.credential_id, provider_server_id: row.provider_server_id });
 
   // 1. Projects. A server whose runner holds a placement is not deleted unless the person said to remove them too.
   if (row.runner_id !== null) {
@@ -120,18 +222,15 @@ export async function deleteManagedServer(ctx: ServerCtx, id: string, input: Del
       if ((await placed()) > 0) throw new ApiError(409, "projects_placed", "Projects are still placed on this server");
     }
   }
-  // An orphan that is linked to a Hetzner server: the sweep found it by our label, but the label may have been taken off since. A server that no longer says it is ours is not
-  // deleted from here, by either route (this one and delete-orphan). Gone at Hetzner is fine (404 is done).
-  if (row.status === "orphaned" && row.provider_server_id !== null) {
-    const labels = await withHetznerServerClient(ctx, row.provider_server_id, (client) => client.getServer(Number(row.provider_server_id)).then((s) => s.labels, (e: unknown) => {
-      if (e instanceof HetznerError && e.code === "not_found") return null;
-      throw e;
-    })).catch((e: unknown) => { throw toApiError(e); });
-    if (labels !== null && labels[MANAGED_LABEL] !== MANAGED_LABEL_VALUE) throw new ApiError(409, "not_an_orphan", "That server no longer carries our label, so it isn't deleted from here");
-  }
   // A row that began as a create has a token; an orphan found by the sweep does not and has no `deleting` step. A sweep-returned orphan that kept its token does, and a "kept" mark
   // (only valid while orphaned or deleted) is cleared by the same update, so the CHECK keeps its meaning.
-  if (row.provisioning_token_id !== null) await inTx((c) => c.query(`UPDATE managed_servers SET status = 'deleting', status_at = now(), kept_at = NULL, kept_by = NULL WHERE account_id = $1 AND id = $2 AND status <> 'deleted'`, [accountId, id]));
+  // The mark is compare-and-set on the status read above: a run that began between the read and here makes this call answer 409 instead of taking its row over.
+  if (row.provisioning_token_id !== null) {
+    const marked = await inTx((c) => c.query<{ at: string }>(
+      `UPDATE managed_servers SET status = 'deleting', status_at = now(), kept_at = NULL, kept_by = NULL WHERE account_id = $1 AND id = $2 AND status = $3 RETURNING status_at::text AS at`, [accountId, id, row.status]));
+    if (marked.rowCount !== 1) throw new ApiError(409, "server_deleting", "This server changed while it was being deleted. Check the Servers tab, then try again");
+    input.onMarked?.(marked.rows[0]!.at);
+  }
 
   // 2. The runner and the token: both are made useless before the machine goes, so neither can be used from a copy of its secrets.
   // Each has its own try: a runner that is already gone answers 404, and the token must still be revoked.
@@ -141,9 +240,6 @@ export async function deleteManagedServer(ctx: ServerCtx, id: string, input: Del
 
   // 3. Hetzner: the server, then the firewall (Hetzner refuses to delete a firewall that is still applied). A 404 on either is deleted.
   if (row.provider_server_id !== null || row.provider_firewall_id !== null || byLabel) {
-    const active = await inTx(async (c) => (await c.query<{ id: string }>(`SELECT id FROM machine_provider_credentials WHERE account_id = $1 AND provider = 'hetzner_cloud' AND removed_at IS NULL`, [accountId])).rows[0]?.id);
-    // The server belongs to the Hetzner project of the credential that made it. Another token (or none) must never be used to delete it.
-    if (active !== row.credential_id) throw new ApiError(409, "credential_changed", "The Hetzner token that made this server is no longer connected. Connect it again to delete the server");
     try {
       const door = row.provider_server_id !== null ? (f: (client: HetznerClient) => Promise<void>) => withHetznerServerClient(ctx, row.provider_server_id!, f) : (f: (client: HetznerClient) => Promise<void>) => withHetznerClient(ctx, f);
       // A row with a Hetzner server id opens the token for that server through the machine-ops reader, which refuses an id that is not this account's.

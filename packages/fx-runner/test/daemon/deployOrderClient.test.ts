@@ -4,6 +4,8 @@ import { createRunnerClient, type ClaimResult } from "../../src/daemon/client.js
 import { pollLoop } from "../../src/daemon/pollLoop.js";
 import { generateRunnerKey } from "../../src/keys.js";
 import { RUNNER_BUILD_CAPABILITIES, RUNNER_PROTOCOL_VERSION, RUNNER_VERSION } from "../../src/version.js";
+// D#845 ON-10e1: `survey_public_v1` is the newest capability of all and is dropped before everything on the ladder (pinned in surveyPublic.test.ts); these tests pin the ladder behind it.
+const BUILD_BEHIND_PUBLIC = RUNNER_BUILD_CAPABILITIES.filter((c) => c !== "survey_public_v1");
 import { OPEN_GATE } from "../helpers/openGate.js";
 import { instantClock } from "../helpers/manualClock.js";
 
@@ -70,7 +72,7 @@ describe("the claim reply's deploy_order flag", () => {
 });
 
 describe("the hello: the two new capabilities are the first to go", () => {
-  const hello: HelloMessage = { protocol_version: RUNNER_PROTOCOL_VERSION, binary_version: RUNNER_VERSION, model_auth_present: false, isolation: "host_sandbox", capabilities: [...RUNNER_BUILD_CAPABILITIES, BROWSER_CHROME_CAPABILITY, DEPLOY_ORDER_CAPABILITY] };
+  const hello: HelloMessage = { protocol_version: RUNNER_PROTOCOL_VERSION, binary_version: RUNNER_VERSION, model_auth_present: false, isolation: "host_sandbox", capabilities: [...BUILD_BEHIND_PUBLIC, BROWSER_CHROME_CAPABILITY, DEPLOY_ORDER_CAPABILITY] };
 
   /** A cloud that predates the two capabilities: it answers 400 invalid_message to a hello that lists either, and 200 to one that does not. */
   function oldCloud() {
@@ -89,12 +91,12 @@ describe("the hello: the two new capabilities are the first to go", () => {
     const answer = await client.hello(hello);
     expect(answer).toMatchObject({ kind: "ok", dropped: [BROWSER_CHROME_CAPABILITY, DEPLOY_ORDER_CAPABILITY] });
     expect(sent).toHaveLength(3);
-    expect(sent.at(-1)).toEqual([...RUNNER_BUILD_CAPABILITIES]);
+    expect(sent.at(-1)).toEqual([...BUILD_BEHIND_PUBLIC]);
   });
 
   it("a hello that lists neither is sent once and drops nothing", async () => {
     const { client, sent } = oldCloud();
-    expect(await client.hello({ ...hello, capabilities: [...RUNNER_BUILD_CAPABILITIES] })).toEqual({ kind: "ok" });
+    expect(await client.hello({ ...hello, capabilities: [...BUILD_BEHIND_PUBLIC] })).toEqual({ kind: "ok" });
     expect(sent).toHaveLength(1);
   });
 });

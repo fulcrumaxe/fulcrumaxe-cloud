@@ -3,7 +3,7 @@
  * `key_id` names. Verification returns the job or throws a `JobSignatureError`; it never throws anything else.
  */
 import { createHash, createPublicKey, sign, verify, type KeyObject } from "node:crypto";
-import { JobSchema, jobDigestMismatches, type Job, type SignedJob } from "./job.js";
+import { JobSchema, jobDigestMismatches, publicRepoAllowed, type Job, type SignedJob } from "./job.js";
 import type { AllowanceSet } from "./sandboxAllowances.js";
 
 export type JobSignatureErrorCode =
@@ -53,6 +53,8 @@ export function allowanceSetSha256(set: AllowanceSet): string {
 /** Signs `job` with the cloud's job-signing private key. `job.key_id` must name that key. */
 export function signJob(job: Job, privateKey: KeyObject): SignedJob {
   const parsed = JobSchema.parse(job);
+  // D#845 ON-10e1: a public repository is the survey job's alone (the same rule as SignedJobSchema's, which this path does not run).
+  if (!parsed.repo.private && !publicRepoAllowed(parsed.role, parsed.task.kind)) throw new TypeError("signJob: only a survey job may name a public repository");
   // A job whose digests do not match its texts is never signed: a runner would refuse it anyway.
   if (jobDigestMismatches(parsed).length > 0) throw new TypeError("signJob: a digest does not match its text");
   const signature = sign(null, Buffer.from(canonicalJson(parsed), "utf8"), privateKey).toString("base64url");
@@ -85,6 +87,7 @@ export function verifyJob(signed: unknown, keyring: JobKeyring, options: VerifyJ
     const parsed = JobSchema.safeParse(signed["job"]);
     if (!parsed.success) throw new JobSignatureError("malformed", "the job does not match the job schema");
     const job = parsed.data;
+    if (!job.repo.private && !publicRepoAllowed(job.role, job.task.kind)) throw new JobSignatureError("malformed", "only a survey job may name a public repository");
     const entry = Object.hasOwn(keyring, job.key_id) ? keyring[job.key_id] : undefined;
     if (entry === undefined) throw new JobSignatureError("unknown_key_id", "the job names a key this runner does not trust");
     const publicKey = isKeyObject(entry) ? entry : createPublicKey({ key: entry, format: "jwk" });

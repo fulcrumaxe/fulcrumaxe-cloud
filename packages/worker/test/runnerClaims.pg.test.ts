@@ -68,13 +68,13 @@ describe("runner claim, heartbeat and events [pg]", () => {
     return id;
   }
   /** A pending runner run with a real signed job. */
-  async function pending(o: { role?: string; columnRole?: string; repoId?: string; initiatedBy?: string | null; approvedBy?: string | null; parent?: string | null; expiresAt?: number; mode?: string; createdAt?: number; workItemId?: string | null; browserMethod?: Job["browser_method"] | null; rawMethod?: string } = {}): Promise<string> {
+  async function pending(o: { rawPublic?: boolean; isPrivate?: boolean; role?: string; columnRole?: string; repoId?: string; initiatedBy?: string | null; approvedBy?: string | null; parent?: string | null; expiresAt?: number; mode?: string; createdAt?: number; workItemId?: string | null; browserMethod?: Job["browser_method"] | null; rawMethod?: string } = {}): Promise<string> {
     const id = randomUUID();
     const job: Job = {
       schema_version: 1,
       job_id: randomUUID(),
       run_id: id,
-      repo: { id: o.repoId ?? A.repoId, owner: "acme", name: "app", private: true },
+      repo: { id: o.repoId ?? A.repoId, owner: "acme", name: "app", private: o.isPrivate ?? true },
       role: (o.role ?? "executor") as Job["role"],
       mode: o.mode === "runner_verified" ? "verified" : "local",
       spec: null,
@@ -93,7 +93,7 @@ describe("runner claim, heartbeat and events [pg]", () => {
     await admin.query(
       `INSERT INTO agent_runs (id, account_id, role, runtime, status, execution_mode, dispatch_repo_id, job_signed, initiated_by, approved_by, parent_run_id, created_at, work_item_id)
        VALUES ($1, $2, $3, 'runner', 'pending', $4, $5, $6::jsonb, $7, $8, $9, to_timestamp($10 / 1000.0), $11)`,
-      [id, A.accountId, o.columnRole ?? job.role, o.mode ?? "runner_local", o.repoId ?? A.repoId, JSON.stringify(o.rawMethod === undefined ? signJob(job, key) : { ...signJob(job, key), job: { ...job, browser_method: o.rawMethod } }), o.initiatedBy === undefined ? A.userId : o.initiatedBy, o.approvedBy ?? null, o.parent ?? null, o.createdAt ?? T0 - 5000, o.workItemId ?? null],
+      [id, A.accountId, o.columnRole ?? job.role, o.mode ?? "runner_local", o.repoId ?? A.repoId, JSON.stringify(o.rawPublic === true ? { ...signJob(job, key), job: { ...job, repo: { ...job.repo, private: false } } } : o.rawMethod === undefined ? signJob(job, key) : { ...signJob(job, key), job: { ...job, browser_method: o.rawMethod } }), o.initiatedBy === undefined ? A.userId : o.initiatedBy, o.approvedBy ?? null, o.parent ?? null, o.createdAt ?? T0 - 5000, o.workItemId ?? null],
     );
     return id;
   }
@@ -573,6 +573,52 @@ describe("runner claim, heartbeat and events [pg]", () => {
       visibility = "unknown";
       expect((await claim()).kind).toBe("idle");
       expect((await statusEvents(b)).map((e) => e.payload)).toEqual([{ from: "pending", to: "failed", failureReason: "repo_visibility_unknown" }]);
+    });
+
+    // D#845 ON-10e1: the claim's public-repo gate. The survey role on a survey task is the one public job, offered only to a runner that lists survey_public_v1.
+    describe("a public survey (D#845 ON-10e1)", () => {
+      async function surveyOn(runnerId: string, o: { isPrivate: boolean }): Promise<string> {
+        const id = await pending({ role: "project-surveyor", isPrivate: o.isPrivate });
+        await admin.query("DELETE FROM project_setups WHERE account_id = $1 AND repo_id = $2", [A.accountId, A.repoId]);
+        await admin.query("DELETE FROM project_placements WHERE account_id = $1 AND (repo_id = $2 OR runner_id = $3)", [A.accountId, A.repoId, runnerId]);
+        await admin.query("INSERT INTO project_placements (repo_id, account_id, runner_id, placed_by) VALUES ($1, $2, $3, 'person')", [A.repoId, A.accountId, runnerId]);
+        await admin.query("INSERT INTO project_setups (id, account_id, repo_id, kind, phase, created_by, survey_run_id) VALUES ($1, $2, $3, 'existing', 'survey', $4, $5)", [randomUUID(), A.accountId, A.repoId, A.userId, id]);
+        await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, 'run.input', $3::jsonb)", [A.accountId, id, JSON.stringify({ meta: { survey_runner_id: runnerId } })]);
+        return id;
+      }
+
+      it("goes to a runner that lists survey_public_v1 and never to one that lists only survey_v1, which keeps the job pending", async () => {
+        const old = await newRunner({ roles: [] });
+        await capable(old, ["survey_v1"]);
+        const id = await surveyOn(old, { isPrivate: false });
+        visibility = "public";
+        expect((await claim(old)).kind).toBe("idle");
+        expect((await row(id)).status).toBe("pending");
+        await capable(old, ["survey_v1", "survey_public_v1"]);
+        expect(await claim(old)).toMatchObject({ kind: "claimed", runId: id });
+      });
+
+      it("is failed, not handed out, when the repo reads unknown, and when it is public but the job was signed private", async () => {
+        const fresh = await newRunner({ roles: [] });
+        await capable(fresh, ["survey_v1", "survey_public_v1"]);
+        const id = await surveyOn(fresh, { isPrivate: false });
+        visibility = "unknown";
+        expect((await claim(fresh)).kind).toBe("idle");
+        expect((await statusEvents(id)).map((e) => e.payload)).toEqual([{ from: "pending", to: "failed", failureReason: "repo_visibility_unknown" }]);
+        const second = await surveyOn(fresh, { isPrivate: true });
+        visibility = "public";
+        expect((await claim(fresh)).kind).toBe("idle");
+        expect((await statusEvents(second)).map((e) => e.payload)).toEqual([{ from: "pending", to: "failed", failureReason: "public_repo" }]);
+      });
+
+      it("a stored job of any other role that names a public repo is never claimed, whatever the runner lists", async () => {
+        const fresh = await newRunner({ roles: [] });
+        await capable(fresh, ["survey_v1", "survey_public_v1", "proposal_verifier", "discovery_analyst", "browser_chrome_v1"]);
+        const id = await pending({ rawPublic: true });
+        visibility = "public";
+        expect((await claim(fresh)).kind).toBe("idle");
+        expect((await row(id)).status).toBe("pending");
+      });
     });
 
     it("prefers the runner that ran the parent run, and skips a job past its expiry", async () => {

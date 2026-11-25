@@ -233,6 +233,40 @@ describe('engine track (pg)', () => {
     expect((await engine(a)).find((s) => s.step === 'plan')).toMatchObject({ state: 'failed', failure: { code: 'survey_timeout' } });
   });
 
+  // D#845 ON-20b: the install step's pull request comes from this account's own active setup, never another account's, and never another setup's number.
+  it('install carries the active setup\'s pull request: open, closed and merged by its phase, and a second account never sees it', async () => {
+    const a = await account();
+    const b = await account();
+    const sa = await setup(a, 'await_merge');
+    await admin.query(`UPDATE project_setups SET install_pr = 41 WHERE id = $1`, [sa]);
+    const sb = await setup(b, 'await_merge');
+    await admin.query(`UPDATE project_setups SET install_pr = 77 WHERE id = $1`, [sb]);
+    // B's setup is the newer one: through the RLS-bypassing admin client asked as A, only A's own account predicate keeps it out
+    expect((await readEngineSources(admin, a.accountId, null)).sources.installPr).toEqual({ setup_id: sa, pr_number: 41, pr_state: 'open' });
+    expect((await readEngineSources(admin, randomUUID(), null)).sources.installPr).toBeNull();
+    const install = async (x: Acct) => (await engine(x)).find((s) => s.step === 'install')!;
+    expect(await install(a)).toMatchObject({ setup_id: sa, pr_number: 41, pr_state: 'open' });
+    expect(await install(b)).toMatchObject({ setup_id: sb, pr_number: 77, pr_state: 'open' });
+    await admin.query(`UPDATE project_setups SET failure_code = 'pr_closed', failure_at = now() WHERE id = $1`, [sa]);
+    expect(await install(a)).toMatchObject({ setup_id: sa, pr_number: 41, pr_state: 'closed' });
+    await admin.query(`UPDATE project_setups SET phase = 'finish', failure_code = NULL, failure_at = NULL WHERE id = $1`, [sa]);
+    expect(await install(a)).toMatchObject({ state: 'done', pr_number: 41, pr_state: 'merged' });
+    // the admin (RLS-bypassing) client asked as A: B's setup must not come back through the account predicate alone
+    expect((await readEngineSources(admin, a.accountId, null)).sources.installPr).toEqual({ setup_id: sa, pr_number: 41, pr_state: 'merged' });
+    // a setup with no pull request, and a removed one, give none
+    const c = await account();
+    await setup(c, 'install');
+    expect(Object.keys(await install(c))).not.toContain('pr_number');
+    await admin.query(`UPDATE project_setups SET phase = 'removed' WHERE id = $1`, [sb]);
+    expect(Object.keys(await install(b))).not.toContain('setup_id');
+    // a second repo of the same account: the most recently moved setup holding a pull request is the active one
+    const repo2 = randomUUID();
+    await admin.query(`INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product) SELECT $2, account_id, installation_id, $3, 'team' FROM repos WHERE id = $1`, [a.repoId, repo2, randomInt(1, 2_000_000_000)]);
+    const s2 = randomUUID();
+    await admin.query(`INSERT INTO project_setups (id, account_id, repo_id, kind, phase, created_by, install_pr) VALUES ($1, $2, $3, 'new', 'await_merge', $4, 52)`, [s2, a.accountId, repo2, a.userId]);
+    expect(await install(a)).toMatchObject({ setup_id: s2, pr_number: 52, pr_state: 'open' });
+  });
+
   // D#845 ON-11a1: the engine track's `setup`, the one setup the screens work on.
   describe('track setup', () => {
     const trackSetup = async (a: Acct) => (await getOnboarding(ctx(a), { readMachineFacts: facts(a) })).tracks[1].setup;

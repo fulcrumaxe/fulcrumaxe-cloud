@@ -47,14 +47,15 @@ describe("the survey start [pg]", () => {
   };
 
   /** The statements one connection saw, in order. A wrapper over the pool, so the real code runs against the real database. */
-  function recording(pool: Pool, log: string[]): Pool {
+  function recording(pool: Pool, log: string[], failOn?: RegExp): Pool {
     const wrap = (client: PoolClient): PoolClient =>
       new Proxy(client, {
         get(target, key) {
           if (key !== "query") return passthrough(target, key);
           return (...args: unknown[]) => {
             const [sql, params] = args as [unknown, unknown[] | undefined];
-            if (typeof sql === "string" && /app\.user_id|survey_start_record/.test(sql)) log.push(`${sql.replace(/\s+/g, " ").trim()} ${JSON.stringify(params ?? [])}`);
+            if (failOn !== undefined && typeof sql === "string" && failOn.test(sql)) return Promise.reject(new Error("injected failure"));
+            if (typeof sql === "string" && /app\.user_id|survey_start_record|audit_write/.test(sql)) log.push(`${sql.replace(/\s+/g, " ").trim()} ${JSON.stringify(params ?? [])}`);
             return (target.query as (...a: unknown[]) => unknown)(...args);
           };
         },
@@ -67,9 +68,9 @@ describe("the survey start [pg]", () => {
     });
   }
 
-  function build(o: { pool?: Pool; seat?: (request: SeatRequest) => Promise<SeatResult> } = {}) {
+  function build(o: { pool?: Pool; seat?: (request: SeatRequest) => Promise<SeatResult>; visibility?: "private" | "public" } = {}) {
     const pool = o.pool ?? writerPool;
-    const visibility = createFakeVisibility("private");
+    const visibility = createFakeVisibility(o.visibility ?? "private");
     const issuer = createJobIssuer({ pool, signer: createJobSigner({ keyId: "job-key-1", privateKey }), visibility, context: createPgJobContext(pool) });
     const harness = createSandboxTargetHarness(pool);
     const sandbox = new SandboxTarget(harness.deps);
@@ -226,6 +227,60 @@ describe("the survey start [pg]", () => {
       const { start } = build();
       expect(await start.startSurveyRun(input(w))).toEqual({ ok: false, status: 409, code: "survey_not_started", reason: "model_budget_unset" });
       await leftNothing(w);
+    });
+  });
+
+  /** D#845 ON-10e2a (Rulings 89 and 106): the consent's audit row is written inside the run's create transaction, after the bind. */
+  describe("the public-survey consent audit", () => {
+    const consentRows = async (w: SeedRefs) => (await admin.query("SELECT actor, payload FROM audit_log WHERE account_id = $1 AND action = 'project.public_survey_consented'", [w.accountId])).rows;
+
+    it("commits with the run: one row with the setup, the run, the head and the machine, as the person, written after the bind on the same connection", async () => {
+      const w = await world();
+      const log: string[] = [];
+      const { start } = build({ pool: recording(writerPool, log), visibility: "public" });
+      const runId = started(await start.startSurveyRun(input(w, { publicConsented: true })));
+      expect(await consentRows(w)).toEqual([{ actor: w.userId, payload: { setup_id: w.setupId, run_id: runId, head_sha: HEAD, runner_id: w.runnerId } }]);
+      expect((await surveyRuns(w)).map((r) => r.id)).toEqual([runId]);
+      const call = log.findIndex((l) => l.includes("survey_start_record"));
+      const audit = log.findIndex((l) => l.includes("audit_write"));
+      const clear = log.findIndex((l) => l.includes("set_config('app.user_id', '', true)"));
+      expect(call).toBeGreaterThanOrEqual(0);
+      expect(audit).toBeGreaterThan(call);
+      expect(clear).toBeGreaterThan(audit);
+    });
+
+    it("is not written without the consent, and not for a refused start", async () => {
+      const w = await world();
+      const { start } = build();
+      started(await start.startSurveyRun(input(w)));
+      expect(await consentRows(w)).toEqual([]);
+      const refused = await world({ role: "member" });
+      expect(await build().start.startSurveyRun(input(refused, { publicConsented: true }))).toEqual({ ok: false, status: 403, code: "forbidden" });
+      expect(await consentRows(refused)).toEqual([]);
+    });
+
+    it("rolls back with the run: a refused bind leaves no audit row, and a failed audit write leaves no run, no key and the setup as it was", async () => {
+      const w = await world();
+      await admin.query("UPDATE project_setups SET phase = 'plan' WHERE id = $1", [w.setupId]);
+      expect(await build({ visibility: "public" }).start.startSurveyRun(input(w, { publicConsented: true }))).toMatchObject({ ok: false, status: 409, code: "survey_running" });
+      expect(await consentRows(w)).toEqual([]);
+      expect(await surveyRuns(w)).toEqual([]);
+
+      const f = await world();
+      const result = await build({ pool: recording(writerPool, [], /audit_write/), visibility: "public" }).start.startSurveyRun(input(f, { publicConsented: true }));
+      expect(result).toEqual({ ok: false, status: 500, code: "internal" });
+      expect(await consentRows(f)).toEqual([]);
+      await leftNothing(f);
+    });
+
+    it("never crosses accounts: another account's setup with the consent is refused and writes no audit row in either account", async () => {
+      const w = await world();
+      const other = await world();
+      const result = await build({ visibility: "public" }).start.startSurveyRun(input(w, { setupId: other.setupId, publicConsented: true }));
+      expect(result).toMatchObject({ ok: false, status: 403, code: "forbidden" });
+      expect(await consentRows(w)).toEqual([]);
+      expect(await consentRows(other)).toEqual([]);
+      expect(await surveyRuns(other)).toEqual([]);
     });
   });
 

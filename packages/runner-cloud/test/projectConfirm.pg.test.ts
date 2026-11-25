@@ -466,13 +466,16 @@ describe("confirming a project [pg]", () => {
       expect(await q(`SELECT runner_id FROM project_placements WHERE account_id = $1`, [w.a.accountId])).toEqual([{ runner_id: w.m1 }]);
     });
 
-    it("a public repo is confirmed and its survey is not started (public_repo); an unexpected error is the code internal with nothing of it in the body", async () => {
+    it("a public repo is confirmed and its survey is not started by itself: public_survey_consent_required, with no start and no deadline, on a machine that lists survey_public_v1 or not (D#845 ON-10e2a); an unexpected error is the code internal with nothing of it in the body", async () => {
       const pub = await world();
       const s = surveyDeps();
       const res = await confirm(pub, pub.r1, { runner_id: pub.m1 }, { deps: { ...s.deps, ...vis("public") } });
       expect(res.status).toBe(201);
-      expect(res.body).toMatchObject({ survey: { started: false, code: "public_repo" } });
+      expect(res.body).toMatchObject({ survey: { started: false, code: "public_survey_consent_required" } });
       expect(s.starts).toEqual([]);
+      expect(s.deadlines).toEqual([]);
+      // The confirm's own writes stand, and an `existing` project waits at the survey step for the person's consent.
+      expect(await q(`SELECT phase, survey_run_id FROM project_setups WHERE account_id = $1`, [pub.a.accountId])).toEqual([{ phase: "survey", survey_run_id: null }]);
       const w = await world();
       const bad = await confirm(w, w.r1, { runner_id: w.m1 }, { deps: surveyDeps({ answer: "throws" }).deps });
       expect(bad.status).toBe(201);

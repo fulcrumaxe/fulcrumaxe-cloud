@@ -7,7 +7,7 @@ import { MACHINE_JOB_CLAIM_PATH, machineJobProgressPath, signMachineJob, signReq
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import {
-  CLAIM_PATH, HELLO_PATH, LocalOnlyGithubError, autoPlaceProject, cleanupOpen, removeProjectIn, claimRun, localOnlyGithub, machineJobClaimRun, machineJobProgressRun, moveProject, placeProject, readRepoRemovals, removeProjectRoute, removeProjectsOnRunner, runnerHello, toResponse,
+  CLAIM_PATH, HELLO_PATH, LocalOnlyGithubError, autoPlaceProject, cleanupOpen, removeProjectCloudOnly, removeProjectIn, claimRun, localOnlyGithub, machineJobClaimRun, machineJobProgressRun, moveProject, placeProject, readRepoRemovals, removeProjectRoute, removeProjectsOnRunner, runnerHello, toResponse,
   type GithubRequest, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerLeaseOps,
 } from "../src/index.js";
 import { ORIGIN, harness, newKey, registerKey, respond, signed, type Harness, type TestKey } from "./helpers.js";
@@ -325,6 +325,41 @@ describe("removing a project [pg]", () => {
       expect(s.placements).toEqual([{ runner_id: other.runnerId }]);
       const member = withTenant(h.appPool, r.who.accountId, r.member, (c) => removeProjectsOnRunner(c, as(r, "member"), other.runnerId, { machineParts: false }));
       await expect(member).rejects.toMatchObject({ status: 403, code: "forbidden" });
+    });
+  });
+
+  describe("removeProjectCloudOnly (MC-12: Also delete server)", () => {
+    const cloudOnly = (r: Rig, removalPr: boolean, deps: Partial<RunnerCloudDeps> = {}, who: "owner" | "member" = "owner") =>
+      toResponse(() => removeProjectCloudOnly(depsFor(deps), as(r, who), r.who.repoId, removalPr));
+
+    it("removes the placement, the machine's repo, the tick and the setup, and skips the machine parts although the machine ran a session: no cleanup, no job, the audit row says none", async () => {
+      const r = await rig();
+      const res = await cloudOnly(r, false);
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ repo_id: r.who.repoId, runner_id: r.runnerId, machine_parts: "none", already_removed: false, pr: null });
+      expect(await snapshot(r)).toMatchObject({
+        placements: [], allowed: [], ticks: [], phases: ["removed"], cleanups: [], jobs: [],
+        removed: [{ repo_id: r.who.repoId, runner_id: r.runnerId, delete_sandbox: false, removal_pr: false, machine_parts: "none" }],
+      });
+      // The claim that would issue the machine's stop and delete has nothing to issue.
+      await claimReply(r);
+      expect((await snapshot(r)).jobs).toEqual([]);
+    });
+
+    it("builds the removal PR after commit when ticked, and a repeat writes nothing and only tries the PR again; a member is refused", async () => {
+      const r = await rig();
+      expect((await cloudOnly(r, false, {}, "member")).status).toBe(403);
+      expect((await snapshot(r)).placements).toHaveLength(1);
+      let committed: number | null = null;
+      const gh = github({ fail: true, onCall: async () => { committed ??= (await h.admin.query("SELECT 1 FROM project_placements WHERE account_id = $1", [r.who.accountId])).rows.length; } });
+      const res = await cloudOnly(r, true, { engineRemovalGithub: async () => gh.client });
+      expect(res.body).toMatchObject({ machine_parts: "none", pr: { code: "github_unavailable" } });
+      expect(committed).toBe(0);
+      const after = await snapshot(r);
+      expect(after.cleanups).toEqual([]);
+      const again = await cloudOnly(r, true, { engineRemovalGithub: async () => gh.client });
+      expect(again.body).toMatchObject({ already_removed: true, machine_parts: "none" });
+      expect(await snapshot(r)).toEqual(after);
     });
   });
 

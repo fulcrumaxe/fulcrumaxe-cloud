@@ -379,9 +379,17 @@ describe('machine tables [pg]', () => {
 
     it.each([
       ['price_hourly_gross', '1'], ['price_monthly_gross', '1'], ['ipv4_monthly_gross', '1'], ['ipv4_hourly_gross', '1'], ['currency', `'USD'`], ['kind', `'hetzner_cloud'`],
-      ['credential_id', 'credential_id'], ['provisioning_token_id', 'provisioning_token_id'], ['created_by', 'created_by'], ['created_at', 'created_at'], ['account_id', 'account_id'], ['id', 'id'],
+      ['provisioning_token_id', 'provisioning_token_id'], ['created_by', 'created_by'], ['created_at', 'created_at'], ['account_id', 'account_id'], ['id', 'id'],
     ])('managed_servers.%s cannot be updated by app_user, even to its own value', async (col, val) => {
       await expect(asA((c) => c.query(`UPDATE managed_servers SET ${col} = ${val} WHERE id = $1 AND account_id = $2`, [serverA, a.accountId]))).rejects.toMatchObject({ code: PG_ERROR.INSUFFICIENT_PRIVILEGE });
+    });
+
+    it('managed_servers.credential_id (1095) moves only to a credential of the same account, and a foreign one is refused by the key', async () => {
+      const credA2 = await credential(a, true);
+      await asA((c) => c.query(`UPDATE managed_servers SET credential_id = $3 WHERE id = $1 AND account_id = $2`, [serverA, a.accountId, credA2]));
+      expect((await admin.query(`SELECT credential_id FROM managed_servers WHERE id = $1`, [serverA])).rows[0].credential_id).toBe(credA2);
+      await expect(asA((c) => c.query(`UPDATE managed_servers SET credential_id = $3 WHERE id = $1 AND account_id = $2`, [serverA, a.accountId, credB]))).rejects.toMatchObject({ code: PG_ERROR.FOREIGN_KEY_VIOLATION });
+      await asA((c) => c.query(`UPDATE managed_servers SET credential_id = $3 WHERE id = $1 AND account_id = $2`, [serverA, a.accountId, credA]));
     });
 
     it.each([['provider', `'hetzner_cloud'`], ['created_by', 'created_by'], ['created_at', 'created_at'], ['account_id', 'account_id'], ['id', 'id']])(

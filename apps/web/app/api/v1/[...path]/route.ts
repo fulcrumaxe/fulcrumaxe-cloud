@@ -24,7 +24,7 @@ import { operatorMode } from "@fx/worker";
 import { httpRunActionSignalFromEnv } from "@fx/api/src/runActions/httpSignal.js";
 import { machineServerDeps } from "@fx/api/src/machines/servers.js";
 import { failRunnerLeases } from "../../../../lib/runnerRoutes";
-import { startStatusWorker } from "../../../../lib/machineServers";
+import { startServerDelete, startStatusWorker } from "../../../../lib/machineServers";
 import { getWorker, previewEnabled, workerConfigured } from "../../../../lib/worker";
 import { createStartRetryPush, openPublicPullRequestViaWorker } from "../../../../lib/retryPush";
 import { dequeueQueuedItem } from "../../../../lib/mergeQueue";
@@ -70,6 +70,8 @@ publicChangeDeps.startRetryPush = (args) => (workerConfigured() ? createStartRet
 publicChangeDeps.openPublicPullRequest = openPublicPullRequestViaWorker;
 // D#845 MC-7: a created Hetzner server starts its queued status worker; a delete revokes the server's runner and fails that runner's leases through the worker.
 machineServerDeps.startStatusWorker = startStatusWorker;
+// D#845 MC-12: Also delete server removes the project and deletes its server in one queued run.
+machineServerDeps.startServerDelete = startServerDelete;
 machineServerDeps.failRunnerLeases = failRunnerLeases;
 // D#694 B6-5: Remove from queue asks the host to take the pull request out, with the repository's merge-gate token.
 queueActionDeps.dequeue = (args) => dequeueQueuedItem(appUserPool(), args);

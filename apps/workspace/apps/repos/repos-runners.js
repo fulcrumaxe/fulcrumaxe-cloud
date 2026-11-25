@@ -12,6 +12,7 @@
 // A refusal is shown as a sentence of this file's own, chosen by status, never the server's message. Text only.
 import { h, timeNode } from "../_lib/dom.js";
 import { api, ApiFailure } from "../_lib/api.js";
+import { moneyText } from "../runners/runners-fleet.js";
 
 export const RUNNERS_URL = "/api/runners";
 export const consentUrl = (id) => RUNNERS_URL + "/" + encodeURIComponent(id) + "/plan-consent";
@@ -1010,8 +1011,35 @@ export const REFUSALS = {
   setup_running: "Wait for the install to finish, or let it fail, then remove.",
   placement_busy: "Another change to this machine is in progress. Try again.",
   invalid_message: "That request wasn't valid. Close this and try again.",
+  project_not_on_server: "This project isn't on that server any more. Close this and open it again.",
+  projects_placed: "Other projects are placed on that server. Remove them first, or leave the box unticked.",
+  credential_changed: "The Hetzner token that made this server isn't the connected one any more. Connect it again, or untick the box to remove the project only.",
+  server_deleting: "This server is already being deleted.",
+  not_configured: "Deleting a server isn't available right now. Untick the box to remove the project only.",
   other: "The project couldn't be removed. Try again.",
 };
+
+// MC-12: "Also delete server". The sheet asks which server (if any) holds this project, and shows the box only for a server the account made.
+export const serversUrl = (repoId) => "/api/v1/machine-servers?repo_id=" + encodeURIComponent(repoId);
+export const deleteServerUrl = (serverId) => "/api/v1/machine-servers/" + encodeURIComponent(serverId) + "/delete-with-project";
+const MONEY = /^[0-9]{1,6}(\.[0-9]{1,6})?$/;
+
+/** The server the project is on, as the box needs it: { id, name, money } where `money` is "€X" (the stored monthly price of the server and its IPv4) or "" when none was stored. Null when the read is not one server. */
+export function serverView(body) {
+  const s = body && Array.isArray(body.servers) && body.servers.length === 1 ? body.servers[0] : null;
+  if (!s || typeof s.id !== "string" || s.id === "") return null;
+  const p = s.price;
+  const priced = p && typeof p.currency === "string" && /^[A-Z]{3}$/.test(p.currency) && MONEY.test(String(p.monthly_gross)) && MONEY.test(String(p.ipv4_monthly_gross));
+  return { id: s.id, name: typeof s.name === "string" && s.name.trim() !== "" ? s.name : "Unnamed server", money: priced ? moneyText(p.currency, p.monthly_gross, p.ipv4_monthly_gross) : "" };
+}
+
+/** The box's words around the server's name: [before, after]. The name goes between them, in <bdi>. */
+export function serverWords(view) {
+  return ["Also delete server ", view.money ? " (stops " + view.money + " a month)" : ""];
+}
+export const serverText = (view) => serverWords(view).join(view.name);
+export const SERVER_FACT = "The server and its disk are deleted with it, and so are the sandbox and snapshots. Nothing is left to stop.";
+export const SERVER_DONE = "The server is being deleted. This takes a minute or two.";
 
 /** The sentence for a refused or failed removal: by code, then by status. */
 export function refusalSentence(e) {
@@ -1028,21 +1056,38 @@ export function readAnswer(b) {
   return { queued: b.machine_parts === "queued", already: b.already_removed === true, pr: prLine(b.pr === undefined ? null : b.pr) };
 }
 
+/** The server route's answer (202 `{ id, repo_id, status: "deleting" }`), as the same summary shape; `serverDelete` says the server went with it. Null for anything else. */
+export function readServerAnswer(b) {
+  return b && typeof b === "object" && b.status === "deleting" ? { queued: false, already: false, pr: null, serverDelete: true } : null;
+}
+
 /** The sheet's controller: begin(repo), toggle, cancel, confirm. Exactly one POST per confirm; a double press is one request. */
 export function createRemoveFlow({ call = api, signal, onChange = () => {}, onDone = () => {} } = {}) {
-  let st = null; // { repoId, name, deleteSandbox, removalPr, phase: "ask" | "sending" | "done" | "error", error, answer }
+  let st = null; // { repoId, name, deleteSandbox, removalPr, server, deleteServer, phase: "ask" | "sending" | "done" | "error", error, answer }; `server` is null until a read finds the project's server
+  let opened = 0;
   const set = (next) => {
     st = next;
     onChange();
   };
+  // MC-12: which server holds this project. A read that fails or finds none leaves the box out; the removal itself is unchanged.
+  async function loadServer(repoId, mine) {
+    let view = null;
+    try {
+      view = serverView(await call("GET", serversUrl(repoId), undefined, signal));
+    } catch {
+      // fx-swallow-ok: no server read means no box; the sheet removes the project exactly as before
+    }
+    if (view && st && opened === mine && st.phase === "ask") set({ ...st, server: view });
+  }
   return {
     get state() { return st; },
     begin(repo) {
       if (st && st.phase === "sending") return;
-      set({ repoId: repo.id, name: repo.full_name || repo.product, deleteSandbox: DEFAULT_TICKS.deleteSandbox, removalPr: DEFAULT_TICKS.removalPr, phase: "ask", error: "", answer: null });
+      set({ repoId: repo.id, name: repo.full_name || repo.product, deleteSandbox: DEFAULT_TICKS.deleteSandbox, removalPr: DEFAULT_TICKS.removalPr, server: null, deleteServer: false, phase: "ask", error: "", answer: null });
+      void loadServer(repo.id, ++opened);
     },
     toggle(key, value) {
-      if (!st || st.phase === "sending" || st.phase === "done" || (key !== "deleteSandbox" && key !== "removalPr")) return;
+      if (!st || st.phase === "sending" || st.phase === "done" || (key !== "deleteSandbox" && key !== "removalPr" && key !== "deleteServer") || (key === "deleteServer" && !st.server)) return;
       set({ ...st, [key]: value === true, phase: "ask", error: "" });
     },
     cancel() {
@@ -1053,7 +1098,10 @@ export function createRemoveFlow({ call = api, signal, onChange = () => {}, onDo
       const asked = st;
       set({ ...asked, phase: "sending", error: "" });
       try {
-        const answer = readAnswer(await call("POST", removeUrl(asked.repoId), { delete_sandbox: asked.deleteSandbox, removal_pr: asked.removalPr }, signal));
+        // Ticked: one request that queues the project's removal and the server's delete together (the machine's own parts are skipped: its disk goes with it).
+        const answer = asked.deleteServer && asked.server
+          ? readServerAnswer(await call("POST", deleteServerUrl(asked.server.id), { repo_id: asked.repoId, removal_pr: asked.removalPr }, signal))
+          : readAnswer(await call("POST", removeUrl(asked.repoId), { delete_sandbox: asked.deleteSandbox, removal_pr: asked.removalPr }, signal));
         if (!answer) {
           set({ ...asked, phase: "error", error: REFUSALS.other });
           onDone();
@@ -1089,7 +1137,7 @@ export function createRemoveSheet({ call = api, signal, doc = document, getRepo,
 
   function box(testid, label, checked, key, disabled) {
     const input = h("input", { type: "checkbox", checked, disabled, "data-testid": testid, onChange: () => flow.toggle(key, input.checked) });
-    return h("label", { class: "repos-toggle" }, input, h("span", null, h("strong", null, label)));
+    return h("label", { class: "repos-toggle" }, input, h("span", null, h("strong", null, [].concat(label))));
   }
 
   function paint() {
@@ -1117,17 +1165,21 @@ export function createRemoveSheet({ call = api, signal, doc = document, getRepo,
       h("p", null, h("bdi", { "data-testid": "repos-remove-name" }, d.name), " stops working with fulcrumaxe. The GitHub repo itself is never deleted."),
     ];
     if (!done) {
-      nodes.push(
-        h("p", { "data-testid": "repos-remove-stop" }, "Its engine is stopped on its machine."),
-        box("repos-remove-sandbox", DELETE_LABEL, d.deleteSandbox, "deleteSandbox", sending),
-        box("repos-remove-pr", PR_LABEL, d.removalPr, "removalPr", sending)
-      );
+      // MC-12: with the server box ticked the machine's own parts are skipped (its disk, sandbox and snapshots go with the server), so the stop fact and the sandbox box give way to one line.
+      if (d.deleteServer) nodes.push(h("p", { "data-testid": "repos-remove-server-fact" }, SERVER_FACT));
+      else nodes.push(h("p", { "data-testid": "repos-remove-stop" }, "Its engine is stopped on its machine."), box("repos-remove-sandbox", DELETE_LABEL, d.deleteSandbox, "deleteSandbox", sending));
+      nodes.push(box("repos-remove-pr", PR_LABEL, d.removalPr, "removalPr", sending));
+      if (d.server) {
+        const [before, after] = serverWords(d.server);
+        nodes.push(box("repos-remove-server", [before, h("bdi", { "data-testid": "repos-remove-server-name" }, d.server.name), after], d.deleteServer, "deleteServer", sending));
+      }
       if (waiting) {
         nodes.push(h("p", { class: "repos-muted", "data-testid": "repos-remove-waiting" }, h("bdi", null, waiting.machine), " will stop and clean up when it reconnects."));
       }
     } else {
       const a = d.answer;
       nodes.push(h("p", { "data-testid": "repos-remove-done" }, a.already ? "It was already removed." : "Removed."));
+      if (a.serverDelete) nodes.push(h("p", { class: "repos-muted", "data-testid": "repos-remove-server-done" }, SERVER_DONE + (d.removalPr ? " The removal PR is opened with it." : "")));
       if (a.queued) nodes.push(h("p", { class: "repos-muted", "data-testid": "repos-remove-machine" }, "Its machine stops the engine and cleans up when it can. The repo's row shows how that is going."));
       if (a.pr) {
         nodes.push(h("p", { "data-testid": "repos-remove-pr-line", "data-outcome": a.pr.number ? "opened" : "none" },

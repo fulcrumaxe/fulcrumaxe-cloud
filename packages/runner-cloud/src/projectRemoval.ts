@@ -144,7 +144,7 @@ async function openRemovalPr(deps: RunnerCloudDeps, principal: SessionPrincipal,
 }
 
 /** POST /api/runners/repos/:id/remove. See the header. 200 `{ repo_id, runner_id, machine_parts, already_removed, pr }`, `pr` null unless `removal_pr` was ticked. */
-export async function removeProjectRoute(deps: RunnerCloudDeps, principal: SessionPrincipal, repoId: string, body: unknown, hooks: RemovalHooks = {}): Promise<RunnerHttpResponse> {
+export async function removeProjectRoute(deps: RunnerCloudDeps, principal: SessionPrincipal, repoId: string, body: unknown, hooks: RemovalHooks = {}, o: { machineParts: boolean } = { machineParts: true }): Promise<RunnerHttpResponse> {
   if (!UUID.test(repoId)) throw refuse(404, "not_found", "no such repository");
   repoId = repoId.toLowerCase();
   const input = parse(body);
@@ -156,7 +156,7 @@ export async function removeProjectRoute(deps: RunnerCloudDeps, principal: Sessi
       if (role !== "owner" && role !== "admin") throw refuse(403, "forbidden", "only an owner or admin can remove a project");
       const repo = (await client.query<{ gh_owner: string | null; gh_name: string | null }>("SELECT gh_owner, gh_name FROM repos WHERE account_id = $1 AND id = $2 FOR UPDATE", [principal.accountId, repoId])).rows[0];
       if (!repo) throw refuse(404, "not_found", "no such repository");
-      const out = await removeProjectIn(client, actor, repoId, { ...input, machineParts: true });
+      const out = await removeProjectIn(client, actor, repoId, { ...input, machineParts: o.machineParts });
       await hooks.beforeCommit?.();
       return { ...out, owner: repo.gh_owner, name: repo.gh_name };
     });
@@ -176,3 +176,10 @@ export async function removeProjectRoute(deps: RunnerCloudDeps, principal: Sessi
     headers: NO_STORE,
   };
 }
+
+/**
+ * D#845 MC-12: the removal of "Also delete server". The server's disk takes the sandbox and its snapshots with it, so the machine parts are skipped and no cleanup is written:
+ * the cloud parts run, then the removal PR when ticked. Safe to repeat (a removed repo writes nothing and only re-tries the PR).
+ */
+export const removeProjectCloudOnly = (deps: RunnerCloudDeps, principal: SessionPrincipal, repoId: string, removalPr: boolean): Promise<RunnerHttpResponse> =>
+  removeProjectRoute(deps, principal, repoId, { delete_sandbox: false, removal_pr: removalPr }, {}, { machineParts: false });

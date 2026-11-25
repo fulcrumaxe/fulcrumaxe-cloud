@@ -12,7 +12,7 @@
  * Failures are closed codes: `push_failed` with a reason word, and `direct_raced` when the default branch got a commit first (the cloud then issues the same setup again as a pull request).
  */
 import path from "node:path";
-import { ENGINE_INSTALL_BRANCH, type MachineJobOf } from "@fulcrumaxe/runner-protocol";
+import { ENGINE_INSTALL_BRANCH, ENGINE_UPDATE_BRANCH, type MachineJobOf } from "@fulcrumaxe/runner-protocol";
 import type { RunnerClient } from "../daemon/client.js";
 import type { Git } from "../daemon/git.js";
 import { githubUrl } from "../daemon/mirror.js";
@@ -32,8 +32,10 @@ export interface SetupPushDeps {
 }
 
 export interface SetupPushInput {
-  job: MachineJobOf<"project_setup">;
-  repo: { id: string; owner: string; name: string; defaultBranch: string };
+  /** An `engine_update` job only ever pushes its signed update branch, on top of `base` (the default branch tip the host read); it has no default branch to push. */
+  job: MachineJobOf<"project_setup"> | MachineJobOf<"engine_update">;
+  base?: string;
+  repo: { id: string; owner: string; name: string; defaultBranch: string | null };
   /** The directory whose objects the workspace borrows, and the workspace the verified bundle was applied to. */
   mirrorDir: string;
   workspace: string;
@@ -55,14 +57,15 @@ class Stop extends Error {
 
 export async function pushSetup(deps: SetupPushDeps, input: SetupPushInput): Promise<SetupPushOutcome> {
   const { job, repo } = input;
-  const direct = job.args.mode === "direct";
+  const direct = job.kind === "project_setup" && job.args.mode === "direct";
+  const baseSha = job.kind === "project_setup" ? job.args.base_sha : input.base;
   const localRef = `refs/fx-push/setup-${job.job_id}`;
   let token: string | undefined;
   try {
-    const branch = direct ? repo.defaultBranch : job.args.branch;
+    const branch = direct ? (repo.defaultBranch as string) : job.args.branch;
     // The target is never taken from anything the guest wrote; the signed job and the plan name it, and it is checked again here.
-    if (!FULL.test(input.tip) || !DEFAULT_BRANCH.test(branch) || branch.includes("..") || branch.endsWith(".lock") || job.setup_id === undefined) throw new Stop("push_failed", "target");
-    if (!direct && (!ENGINE_INSTALL_BRANCH.test(branch) || branch === repo.defaultBranch)) throw new Stop("push_failed", "target");
+    if (!FULL.test(input.tip) || !DEFAULT_BRANCH.test(branch) || branch.includes("..") || branch.endsWith(".lock") || job.setup_id === undefined || baseSha === undefined || !FULL.test(baseSha) || (job.kind === "project_setup" && repo.defaultBranch === null)) throw new Stop("push_failed", "target");
+    if (!direct && (!(job.kind === "project_setup" ? ENGINE_INSTALL_BRANCH : ENGINE_UPDATE_BRANCH).test(branch) || branch === repo.defaultBranch)) throw new Stop("push_failed", "target");
     const url = (deps.remoteUrl ?? githubUrl)(repo);
     const target = new URL(url);
     // https only; plain http is for a test server on loopback (a replaced `remoteUrl`), as the other push transports allow
@@ -70,7 +73,7 @@ export async function pushSetup(deps: SetupPushDeps, input: SetupPushInput): Pro
     if (!(target.protocol === "https:" || (deps.remoteUrl !== undefined && target.protocol === "http:" && loopback)) || target.username !== "" || target.password !== "") throw new Stop("push_failed", "remote");
 
     const sha = await stage(deps, input, localRef);
-    if (!direct && (await deps.git.run("push_failed", ["-C", input.mirrorDir, "rev-parse", "--verify", `${sha}^`])).trim() !== job.args.base_sha) throw new Stop("push_failed", "not_on_base");
+    if (!direct && (await deps.git.run("push_failed", ["-C", input.mirrorDir, "rev-parse", "--verify", `${sha}^`])).trim() !== baseSha) throw new Stop("push_failed", "not_on_base");
 
     const got = await deps.client.setupPushToken(job.setup_id, job.job_id);
     if (got.kind !== "token") throw new Stop("push_failed", got.kind === "refused" ? "token_refused" : "token_failed");
@@ -84,7 +87,7 @@ export async function pushSetup(deps: SetupPushDeps, input: SetupPushInput): Pro
       const seen = await remoteBranchTip(authed, input.mirrorDir, url, branch).catch(() => undefined);
       if (seen === undefined) throw new Stop("push_failed", "ls_remote");
       if (seen !== null) throw new Stop("direct_raced", "head_exists");
-      pushed = await rootCommit(deps.git, input.mirrorDir, sha, job, localRef);
+      pushed = await rootCommit(deps.git, input.mirrorDir, sha, job as MachineJobOf<"project_setup">, localRef);
     } else {
       const tipNow = await remoteBranchTip(authed, input.mirrorDir, url, branch).catch(() => undefined);
       if (tipNow === undefined) throw new Stop("push_failed", "ls_remote");

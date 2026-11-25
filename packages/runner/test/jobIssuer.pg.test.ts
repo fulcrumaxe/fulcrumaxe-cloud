@@ -702,6 +702,35 @@ describe("JobIssuer [pg]", () => {
       expect(await stored(run.id)).toBeNull();
     });
 
+    // D#845 ON-10e1: the matrix at the issuer's gate. The survey role alone is issued for a public repo, and its signed `repo.private` is the truth (false); no role is issued for an unknown one.
+    it("every role against public: only the survey is issued (signed private: false); the rest are public_repo with nothing recorded", async () => {
+      const w = await world();
+      for (const role of RUNNER_ELIGIBLE_ROLES) {
+        const head = freshHead();
+        const run = await runnerRun(w, role, null, role === "project-surveyor" ? { headSha: head, prompt: `Survey commit ${head}.\n` } : {});
+        const code = await codeOf(issuer({ visibility: "public" }).issuer.issue({ run }));
+        if (role === "project-surveyor") {
+          expect(code, role).toBe("returned");
+          const job = verifyJob(await stored(run.id), { "job-key-1": publicKey }, { now: NOW });
+          expect(job.repo.private).toBe(false);
+          expect(job.task.kind).toBe("survey");
+          expect(Object.keys(job).filter((k) => /token|credential|secret/i.test(k))).toEqual([]);
+        } else {
+          expect(code, role).toBe("public_repo");
+          expect(await stored(run.id), role).toBeNull();
+        }
+      }
+    });
+
+    it("every role against unknown: repo_visibility_unknown, nothing recorded", async () => {
+      const w = await world();
+      for (const role of RUNNER_ELIGIBLE_ROLES) {
+        const run = await runnerRun(w, role);
+        expect(await codeOf(issuer({ visibility: "unknown" }).issuer.issue({ run })), role).toBe("repo_visibility_unknown");
+        expect(await stored(run.id), role).toBeNull();
+      }
+    });
+
     it.each(["unknown", "throw"] as const)("a repo the port cannot read (%s): repo_visibility_unknown, nothing recorded", async (answer) => {
       const w = await world();
       const run = await runnerRun(w);

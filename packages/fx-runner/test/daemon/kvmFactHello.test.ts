@@ -3,10 +3,12 @@ import { BROWSER_CHROME_CAPABILITY, BROWSER_PLAYWRIGHT_CAPABILITY, DEPLOY_ORDER_
 import { createRunnerClient } from "../../src/daemon/client.js";
 import { generateRunnerKey } from "../../src/keys.js";
 import { RUNNER_BUILD_CAPABILITIES, RUNNER_PROTOCOL_VERSION, RUNNER_VERSION } from "../../src/version.js";
+// D#845 ON-10e1: `survey_public_v1` is the newest capability of all and is dropped before everything on the ladder (pinned in surveyPublic.test.ts); these tests pin the ladder behind it.
+const BUILD_BEHIND_PUBLIC = RUNNER_BUILD_CAPABILITIES.filter((c) => c !== "survey_public_v1");
 
 /** D#845 ON-6c: the hello's drop ladder tries `kvm_fact_v1` first, so an old cloud costs one retry and keeps every other capability. */
 const base: HelloMessage = { protocol_version: RUNNER_PROTOCOL_VERSION, binary_version: RUNNER_VERSION, model_auth_present: false, isolation: "host_sandbox" };
-const common = [...RUNNER_BUILD_CAPABILITIES, SANDBOX_COMMAND_CAPABILITY];
+const common = [...BUILD_BEHIND_PUBLIC, SANDBOX_COMMAND_CAPABILITY];
 
 /** A cloud that refuses `kvm_fact_v1` with 400 invalid_message; when `listsKvm`, its replies list `kvm_fact` (even to a hello that was retried without it). */
 function cloud(refusesKvm: boolean, listsKvm: boolean) {

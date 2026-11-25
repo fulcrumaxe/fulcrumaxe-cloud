@@ -35,9 +35,16 @@ export interface EngineStep {
   engines?: { quantity: number; live: number };
   /** D#845 ON-21b, machine step only: the preflight codes the machine's latest hello reported that are not ok, each with its one fixed line, only members of the closed set. Left out when the machine did not say; an empty list says every check passed. */
   preflight?: Array<{ code: string; fix: string }>;
+  /** D#845 ON-20b, install step only: the account's active setup that has an install pull request, with that pull request's number and state. Left out when no setup has one. Derived on every read. */
+  setup_id?: string;
+  pr_number?: number;
+  pr_state?: InstallPrState;
   /** The stored failure for this step; null unless `state` is `failed`. */
   failure: { code: string; at: string } | null;
 }
+
+/** The install pull request as the setup's own rows say: `merged` once the setup is past the merge, `closed` when it was closed without one, else `open`. */
+export type InstallPrState = 'open' | 'merged' | 'closed';
 
 /** D#845 ON-11a1: the one setup the engine track's screens work on: its id and where it is. Ids and closed values only. */
 export const SETUP_PHASES = ['survey', 'plan', 'install', 'await_merge', 'finish', 'done', 'removed'] as const;
@@ -61,6 +68,8 @@ export interface EngineSources {
   /** The most recently heard machine's stored preflight codes; null when it never said. */
   preflight?: string[] | null;
   failures: Partial<Record<EngineStepKey, { code: string; at: string }>>;
+  /** D#845 ON-20b: the account's active setup that holds an install pull request; null or absent when none does. */
+  installPr?: { setup_id: string; pr_number: number; pr_state: InstallPrState } | null;
 }
 
 /** The step a stored failure belongs to, by the setup's phase. Survey failures (a mirror or a survey run) surface on the plan the survey was to produce. */
@@ -93,7 +102,8 @@ export function buildEngineSteps(src: EngineSources): EngineStep[] {
     const gate = step === 'project' && src.coverage ? planGateOf(src.coverage) : null;
     const showGate = gate !== null && (gate === 'plan_ended' || completed_at === null);
     const engines = step === 'project' && src.coverage && 'quantity' in src.coverage ? { engines: { quantity: src.coverage.quantity, live: src.coverage.live } } : {};
-    return { step, state, completed_at, tier: step === 'machine' ? src.tier : null, ...machine, ...(showGate ? { plan_gate: gate } : {}), ...engines, failure };
+    const pr = step === 'install' && src.installPr ? { setup_id: src.installPr.setup_id, pr_number: src.installPr.pr_number, pr_state: src.installPr.pr_state } : {};
+    return { step, state, completed_at, tier: step === 'machine' ? src.tier : null, ...machine, ...(showGate ? { plan_gate: gate } : {}), ...engines, ...pr, failure };
   });
 }
 
@@ -138,12 +148,22 @@ export async function readEngineSources(
     const step = FAILURE_STEP_BY_PHASE[s.phase];
     if (step && !failures[step]) failures[step] = { code: s.failure_code, at: s.failure_at.toISOString() };
   }
+  // D#845 ON-20b: the active setup is the most recently moved one of THIS account that holds an install pull request and has not been removed.
+  const pr = (
+    await client.query<{ id: string; install_pr: number; phase: string; failure_code: string | null }>(
+      `SELECT id, install_pr, phase, failure_code FROM project_setups WHERE account_id = $1 AND install_pr IS NOT NULL AND phase IN ('await_merge', 'finish', 'done') ORDER BY updated_at DESC, id LIMIT 1`,
+      [accountId],
+    )
+  ).rows[0];
+  const installPr: EngineSources['installPr'] = pr
+    ? { setup_id: pr.id, pr_number: pr.install_pr, pr_state: pr.phase !== 'await_merge' ? 'merged' : pr.failure_code === 'pr_closed' ? 'closed' : 'open' }
+    : null;
   // D#845 Ruling 102.1: the one live setup (any phase but done or removed, the newest), else null. After `done` the track's own step states carry the history.
   const setup = (await client.query<EngineSetup>(`SELECT id, phase, state FROM project_setups WHERE account_id = $1 AND phase NOT IN ('done', 'removed') ORDER BY created_at DESC, id LIMIT 1`, [accountId])).rows[0] ?? null;
   const tier = rn[0]?.sandbox_engine === 'microvm' ? 'microvm' : rn[0]?.sandbox_engine === 'os_sandbox' ? 'standard' : null;
   const runners = rn.map((r) => ({ id: r.id, heardAt: r.last_seen_at.toISOString() }));
   const read: { sources: EngineSources; runners: { id: string; heardAt: string }[] } = {
-    sources: { setup, ...(enginePlanOffered === undefined ? {} : { coverage: await readEngineCoverage(client, accountId, enginePlanOffered) }), done: { machine: iso(rn[0]?.last_seen_at), claude: null, github_app: githubAppAt, project, plan, install, live }, tier, kvm: rn[0]?.kvm === 'present' || rn[0]?.kvm === 'absent' ? rn[0].kvm : null, failures },
+    sources: { setup, ...(enginePlanOffered === undefined ? {} : { coverage: await readEngineCoverage(client, accountId, enginePlanOffered) }), done: { machine: iso(rn[0]?.last_seen_at), claude: null, github_app: githubAppAt, project, plan, install, live }, tier, kvm: rn[0]?.kvm === 'present' || rn[0]?.kvm === 'absent' ? rn[0].kvm : null, failures, installPr },
     runners,
   };
   read.sources.preflight = rn[0]?.preflight ?? null;

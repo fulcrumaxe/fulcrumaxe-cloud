@@ -3,6 +3,7 @@ import { reportError } from "@fx/telemetry";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { RunnerHttpError, type RunnerCloudDeps, type RunnerHttpResponse, type SessionPrincipal } from "./http.js";
 import { requireMemberRole } from "./memberRole.js";
+import { SURVEY_PUBLIC_CAPABILITY } from "@fulcrumaxe/runner-protocol";
 import { blockError, blockFor, readRepoVisibility } from "./repoPrivacy.js";
 import { RunPullRequestError } from "./runPullRequest.js";
 
@@ -16,6 +17,14 @@ import { RunPullRequestError } from "./runPullRequest.js";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const refuse = (status: number, code: string, message: string, extra: Record<string, unknown> = {}): RunnerHttpError => new RunnerHttpError(status, code, message, extra);
 
+/** The consent the start and retry bodies may carry. No body is no consent; any other shape is 400; a wrong value is no consent. */
+const PUBLIC_SURVEY_CONSENT = "public_repo_v1";
+function consentOf(body: unknown): boolean {
+  if (body === null || body === undefined) return false;
+  if (typeof body !== "object" || Array.isArray(body) || Object.keys(body).some((key) => key !== "consent")) throw refuse(400, "invalid_message", "this request takes only {consent}");
+  return (body as { consent?: unknown }).consent === PUBLIC_SURVEY_CONSENT;
+}
+
 interface FirstLook {
   repoId: string;
   priorRunId: string | null;
@@ -25,6 +34,8 @@ interface FirstLook {
   credentialMode: string;
   registeredBy: string;
   engine: string | null;
+  capabilities: string[];
+  machine: string;
 }
 
 async function firstLook(client: PoolClient, accountId: string, setupId: string): Promise<FirstLook> {
@@ -33,19 +44,24 @@ async function firstLook(client: PoolClient, accountId: string, setupId: string)
   const setup = (await client.query<{ repo_id: string; phase: string; survey_run_id: string | null }>("SELECT repo_id, phase, survey_run_id FROM project_setups WHERE account_id = $1 AND id = $2", [accountId, setupId])).rows[0];
   if (!setup) throw refuse(404, "not_found", "no such setup");
   if (setup.phase !== "survey") throw refuse(409, "setup_phase", "the setup is not at the survey step");
+  // A private twin (ON-27a) is surveyed only once it is ready: before that its repo is empty or still being copied.
+  const twin = (await client.query<{ state: string }>("SELECT state FROM repo_twins WHERE account_id = $1 AND private_repo_id = $2 AND state <> 'removed'", [accountId, setup.repo_id])).rows[0];
+  if (twin && twin.state !== "ready") throw refuse(409, "twin_not_ready", "the private twin is not ready for a survey yet");
   const placed = (
-    await client.query<{ runner_id: string; credential_mode: string; registered_by: string; sandbox_engine: string | null; gh_owner: string | null; gh_name: string | null }>(
-      `SELECT pp.runner_id, rn.credential_mode, rn.registered_by, f.sandbox_engine, r.gh_owner, r.gh_name
+    await client.query<{ runner_id: string; credential_mode: string; registered_by: string; sandbox_engine: string | null; gh_owner: string | null; gh_name: string | null; capabilities: string[] | null; machine: string | null }>(
+      `SELECT pp.runner_id, rn.credential_mode, rn.registered_by, f.sandbox_engine, r.gh_owner, r.gh_name, cap.capabilities, st.name AS machine
          FROM project_placements pp
          JOIN runners rn ON rn.account_id = pp.account_id AND rn.id = pp.runner_id AND rn.revoked_at IS NULL
          JOIN repos r ON r.account_id = pp.account_id AND r.id = pp.repo_id
          LEFT JOIN runner_facts f ON f.account_id = pp.account_id AND f.runner_id = pp.runner_id
+         LEFT JOIN runner_capabilities cap ON cap.account_id = pp.account_id AND cap.runner_id = pp.runner_id
+         LEFT JOIN runner_settings st ON st.account_id = pp.account_id AND st.runner_id = pp.runner_id
         WHERE pp.account_id = $1 AND pp.repo_id = $2`,
       [accountId, setup.repo_id],
     )
   ).rows[0];
   if (!placed) throw refuse(409, "setup_not_placed", "the project is not placed on a machine");
-  return { repoId: setup.repo_id, priorRunId: setup.survey_run_id, runnerId: placed.runner_id, owner: placed.gh_owner, name: placed.gh_name, credentialMode: placed.credential_mode, registeredBy: placed.registered_by, engine: placed.sandbox_engine };
+  return { repoId: setup.repo_id, priorRunId: setup.survey_run_id, runnerId: placed.runner_id, owner: placed.gh_owner, name: placed.gh_name, credentialMode: placed.credential_mode, registeredBy: placed.registered_by, engine: placed.sandbox_engine, capabilities: placed.capabilities ?? [], machine: placed.machine ?? "this machine" };
 }
 
 export interface StartedSurvey {
@@ -54,7 +70,7 @@ export interface StartedSurvey {
 }
 
 /** Starts the survey of a setup. Used by the confirm route and the retry route (ON-10b2) and, later, Start over (ON-11). */
-export async function startSurvey(deps: RunnerCloudDeps, principal: SessionPrincipal, setupId: string): Promise<StartedSurvey> {
+export async function startSurvey(deps: RunnerCloudDeps, principal: SessionPrincipal, setupId: string, opts: { publicConsented?: boolean } = {}): Promise<StartedSurvey> {
   if (!UUID.test(setupId)) throw refuse(404, "not_found", "no such setup");
   const runs = (await deps.surveyRuns?.()) ?? null;
   const github = deps.pullRequests ?? null;
@@ -64,7 +80,12 @@ export async function startSurvey(deps: RunnerCloudDeps, principal: SessionPrinc
   const first = await withTenant(deps.appUserPool, principal.accountId, principal.userId, (client) => firstLook(client, principal.accountId, id));
   // A subscription machine takes only runs its registrant started (the claim would never offer this one to anyone else), so refuse now rather than let a survey wait 22 minutes and time out.
   if (first.credentialMode === "subscription" && first.registeredBy !== principal.userId) throw refuse(409, "survey_needs_machine_owner", "this machine's Claude login belongs to someone else on the team");
-  const block = blockFor(await readRepoVisibility(deps, principal.accountId, first.repoId));
+  // D#845 ON-10e1: a public repo's survey needs a runner that lists survey_public_v1 (read first, so an old runner is told to update and is never handed a job it would refuse), then the person's consent
+  // (`publicConsented`, set only by the start and retry routes from the person's `consent`; a private repo ignores it). An `unknown` visibility is never public: it refuses as before.
+  const seen = await readRepoVisibility(deps, principal.accountId, first.repoId);
+  if (seen === "public" && !first.capabilities.includes(SURVEY_PUBLIC_CAPABILITY)) throw refuse(409, "survey_needs_runner_update", `Update fx-runner on ${first.machine} to survey a public repo`);
+  if (seen === "public" && opts.publicConsented !== true) throw refuse(409, "public_survey_consent_required", "A public repo's survey needs your consent first");
+  const block = seen === "public" ? null : blockFor(seen);
   if (block !== null) throw blockError(block);
   if (first.owner === null || first.name === null) throw refuse(409, "survey_not_started", "the repository has no name on record", { reason: "survey_prompt_input" });
   const repo = { id: first.repoId, owner: first.owner, name: first.name };
@@ -90,6 +111,7 @@ export async function startSurvey(deps: RunnerCloudDeps, principal: SessionPrinc
     headSha: head,
     priorRunId: first.priorRunId,
     ...(first.engine === "microvm" ? { requiresEngine: "microvm" as const } : {}),
+    ...(seen === "public" ? { publicConsented: true as const } : {}),
   });
   if (result.ok) {
     try {
@@ -111,9 +133,10 @@ export async function startSurvey(deps: RunnerCloudDeps, principal: SessionPrinc
 /**
  * POST /api/v1/setups/:id/survey/retry. An owner or admin, a session, no body. Allowed only at the survey step and only when nothing is running: the survey failed, or it has no run, or its run is over. Anything else is 409
  * `not_retryable`. It is `startSurvey`, so two clicks make one run (the second answers 409 `survey_running`).
+ * D#845 ON-10e2a: the body is optional, `{consent: "public_repo_v1"}`. A private repo ignores it; a public repo's survey starts only with it (409 `public_survey_consent_required` otherwise, and nothing is written).
  */
 export async function retrySurvey(deps: RunnerCloudDeps, principal: SessionPrincipal, setupId: string, body: unknown): Promise<RunnerHttpResponse> {
-  if (body !== null && body !== undefined) throw refuse(400, "invalid_message", "this request takes no body");
+  const publicConsented = consentOf(body);
   if (!UUID.test(setupId)) throw refuse(404, "not_found", "no such setup");
   const id = setupId.toLowerCase();
   await withTenant(deps.appUserPool, principal.accountId, principal.userId, async (client) => {
@@ -127,5 +150,11 @@ export async function retrySurvey(deps: RunnerCloudDeps, principal: SessionPrinc
     const run = (await client.query<{ status: string }>("SELECT status FROM agent_runs WHERE account_id = $1 AND id = $2", [principal.accountId, setup.survey_run_id])).rows[0];
     if (run && (run.status === "pending" || run.status === "running" || run.status === "paused")) throw notRetryable();
   });
-  return { status: 200, body: await startSurvey(deps, principal, id), headers: { "cache-control": "no-store" } };
+  return { status: 200, body: await startSurvey(deps, principal, id, { publicConsented }), headers: { "cache-control": "no-store" } };
+}
+
+/** POST /api/v1/setups/:id/survey/start. An owner or admin; the same start as the retry route (so two clicks make one run), without the retry's state rule: the first start of a public repo, after the person's consent. */
+export async function startSurveyRoute(deps: RunnerCloudDeps, principal: SessionPrincipal, setupId: string, body: unknown): Promise<RunnerHttpResponse> {
+  const publicConsented = consentOf(body);
+  return { status: 200, body: await startSurvey(deps, principal, setupId, { publicConsented }), headers: { "cache-control": "no-store" } };
 }

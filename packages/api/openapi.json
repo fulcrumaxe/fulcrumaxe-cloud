@@ -14744,6 +14744,7 @@
       "delete": {
         "operationId": "removeHetznerCredential",
         "summary": "Remove the stored Hetzner token (its servers stay)",
+        "description": "Refused with 409 `credential_in_use` while a server of the account is being deleted: wait for the delete to finish, then remove the token.",
         "security": [
           {
             "session": []
@@ -14837,10 +14838,21 @@
       "get": {
         "operationId": "listHetznerServers",
         "summary": "The Hetzner Cloud servers of this account that have not been deleted, newest first",
-        "description": "Session only, owner or admin. Each entry has the same fields as one server (`runner_id`, `status_at`, `kept`, `last_seen_at`, and `placed_projects`, the projects placed on its runner, which only an owner or admin is sent). Reads the account's own rows only; it does not open the token and does not call Hetzner.",
+        "description": "Session only, owner or admin. Each entry has the same fields as one server (`runner_id`, `status_at`, `kept`, `last_seen_at`, and `placed_projects`, the projects placed on its runner, which only an owner or admin is sent). Reads the account's own rows only; it does not open the token and does not call Hetzner. With `repo_id`, only the server (not being deleted) whose runner holds that repo's placement: none, or one.",
         "security": [
           {
             "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "repo_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            }
           }
         ],
         "responses": {
@@ -16080,7 +16092,7 @@
       "delete": {
         "operationId": "deleteHetznerServer",
         "summary": "Delete a Hetzner Cloud server of this account: its runner and token are revoked, the server and then its firewall are deleted at Hetzner",
-        "description": "Session only, owner or admin. Safe to repeat: a repeat finishes what an earlier call left, and a server already deleted answers `already_deleted: true` without calling Hetzner. Refused with 409 `projects_placed` while projects are placed on the server's runner, unless `remove_projects=true` (then 409 `project_removal_unavailable` until project removal is available). A server or firewall Hetzner no longer has counts as deleted. A malformed id is 400 `invalid_request`; an id that is not this account's is 404.",
+        "description": "Session only, owner or admin. Safe to repeat: a repeat finishes what an earlier call left, and a server already deleted answers `already_deleted: true` without calling Hetzner. Refused with 409 `projects_placed` while projects are placed on the server's runner, unless `remove_projects=true`, which first removes them (their cloud parts only: the server's disk takes the sandbox and snapshots with it). A server or firewall Hetzner no longer has counts as deleted. A malformed id is 400 `invalid_request`; an id that is not this account's is 404.",
         "security": [
           {
             "session": []
@@ -16171,7 +16183,7 @@
             }
           },
           "409": {
-            "description": "Error `server_creating` (the create is still running; try again), `projects_placed`, `project_removal_unavailable`, `credential_changed` (the token that made the server is no longer the connected one) or a `hetzner_*` code. Nothing past the failed step was done; repeat the call to finish.",
+            "description": "Error `server_creating` (the create is still running; try again), `server_deleting` (a delete of this server is already running, or the server changed meanwhile; try again later), `projects_placed`, `credential_changed` (no Hetzner token is connected), `server_not_in_token_project` (the connected token's Hetzner project does not hold this server) or a `hetzner_*` code. Nothing past the failed step was done; repeat the call to finish.",
             "content": {
               "application/json": {
                 "schema": {
@@ -16628,6 +16640,177 @@
           },
           "500": {
             "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machine-servers/{id}/delete-with-project": {
+      "post": {
+        "operationId": "deleteHetznerServerWithProject",
+        "summary": "Remove a project from fulcrumaxe and delete the Hetzner Cloud server it is placed on, in one queued run",
+        "description": "Session only, owner or admin. Checks and starts, then answers 202: one queued run removes the project's cloud parts (the machine's own parts are skipped: deleting the server deletes its disk, with the sandbox and snapshots), opens the removal PR when `removal_pr` is true, and then deletes the server as `DELETE /api/v1/machine-servers/{id}` does. The server reads `deleting` once the run reaches the delete; deleting it again finishes what a failed run left. A malformed id is 400 `invalid_request`; a server that is not this account's is 404.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "repo_id": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                  },
+                  "removal_pr": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "repo_id",
+                  "removal_pr"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Remove a project from fulcrumaxe and delete the Hetzner Cloud server it is placed on, in one queued run",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "repo_id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "status": {
+                      "type": "string",
+                      "const": "deleting"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "repo_id",
+                    "status"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error `project_not_on_server` (that project is not placed on this server), `server_deleting` (a delete is already running), `credential_changed` (no Hetzner token is connected), `server_not_in_token_project` (the connected token's Hetzner project does not hold this server) or `setup_running` (an install of the project is running). Nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error `not_configured`: the queued run cannot be started here. Nothing was done.",
             "content": {
               "application/json": {
                 "schema": {
@@ -17679,6 +17862,16 @@
               }
             }
           },
+          "409": {
+            "description": "`twin_exists`: either repo belongs to a live private twin, which publishes the repo itself.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "422": {
             "description": "`code_repo_not_public` (private or missing: the same answer for both), `code_repo_renamed` (use the repo's current name), or `public_default_branch_not_main` (`data.branch` is the branch name, null when it is not a plain branch name). Other 422s are `invalid_role_settings_input` with the field in `details`.",
             "content": {
@@ -17975,6 +18168,1038 @@
           },
           "503": {
             "description": "`github_unavailable` or `github_app_not_configured`: GitHub could not be asked, so no list is given.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/repos/{id}/twin": {
+      "post": {
+        "operationId": "createRepoTwinIntent",
+        "summary": "Start making the private twin of a public repo with the caller's own GitHub authority",
+        "description": "Session only, owner or admin; `{id}` is the public repo. Returns GitHub's user-authorization URL with a signed state. The twin's repo is created (private, empty, Discussions on, under the public repo's owner) only when the browser comes back through the web callback. `name` defaults to `<name>-private`.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Start making the private twin of a public repo with the caller's own GitHub authority",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "authorize_url": {
+                      "type": "string",
+                      "format": "uri"
+                    }
+                  },
+                  "required": [
+                    "authorize_url"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`twin_exists`, `pairing_exists`, `account_not_active` or `install_first`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`validation_failed` for a bad name, or `twin_repo_not_public` when the repo is not public.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`rate_limited`: the account's repo creations for the hour or day are used.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`not_configured` (private twins are not on yet), `github_app_not_configured` or `github_unavailable`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "getRepoTwin",
+        "summary": "A public repo's live private twin, or null",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A public repo's live private twin, or null",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "twin": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "id": {
+                              "type": "string"
+                            },
+                            "public_repo_id": {
+                              "type": "string"
+                            },
+                            "private_repo_id": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "private_name": {
+                              "type": "string"
+                            },
+                            "state": {
+                              "type": "string",
+                              "enum": [
+                                "creating",
+                                "not_connected",
+                                "seeding",
+                                "ready",
+                                "paused",
+                                "conflict",
+                                "refused",
+                                "failed",
+                                "removed"
+                              ]
+                            },
+                            "overlay_globs": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
+                            },
+                            "published_private_sha": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "synced_public_sha": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "publish_pr": {
+                              "anyOf": [
+                                {
+                                  "type": "integer",
+                                  "minimum": -9007199254740991,
+                                  "maximum": 9007199254740991
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "sync_pr": {
+                              "anyOf": [
+                                {
+                                  "type": "integer",
+                                  "minimum": -9007199254740991,
+                                  "maximum": 9007199254740991
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "failure_code": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "created_at": {
+                              "type": "string"
+                            },
+                            "updated_at": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "id",
+                            "public_repo_id",
+                            "private_repo_id",
+                            "private_name",
+                            "state",
+                            "overlay_globs",
+                            "published_private_sha",
+                            "synced_public_sha",
+                            "publish_pr",
+                            "sync_pr",
+                            "failure_code",
+                            "created_at",
+                            "updated_at"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "twin"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`not_configured`: private twins are not on yet.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/twins/{id}/pause": {
+      "post": {
+        "operationId": "pauseRepoTwin",
+        "summary": "Pause a twin: no publish or sync is issued while it is paused (the engine keeps working)",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Pause a twin: no publish or sync is issued while it is paused (the engine keeps working)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "public_repo_id": {
+                      "type": "string"
+                    },
+                    "private_repo_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "private_name": {
+                      "type": "string"
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "creating",
+                        "not_connected",
+                        "seeding",
+                        "ready",
+                        "paused",
+                        "conflict",
+                        "refused",
+                        "failed",
+                        "removed"
+                      ]
+                    },
+                    "overlay_globs": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "published_private_sha": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "synced_public_sha": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "publish_pr": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "sync_pr": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "failure_code": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "created_at": {
+                      "type": "string"
+                    },
+                    "updated_at": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "public_repo_id",
+                    "private_repo_id",
+                    "private_name",
+                    "state",
+                    "overlay_globs",
+                    "published_private_sha",
+                    "synced_public_sha",
+                    "publish_pr",
+                    "sync_pr",
+                    "failure_code",
+                    "created_at",
+                    "updated_at"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`twin_state`: the twin's state does not allow this (`data.state` is what it is). Nothing changed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`not_configured`: private twins are not on yet.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/twins/{id}/resume": {
+      "post": {
+        "operationId": "resumeRepoTwin",
+        "summary": "Resume a paused twin",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Resume a paused twin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "public_repo_id": {
+                      "type": "string"
+                    },
+                    "private_repo_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "private_name": {
+                      "type": "string"
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "creating",
+                        "not_connected",
+                        "seeding",
+                        "ready",
+                        "paused",
+                        "conflict",
+                        "refused",
+                        "failed",
+                        "removed"
+                      ]
+                    },
+                    "overlay_globs": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "published_private_sha": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "synced_public_sha": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "publish_pr": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "sync_pr": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "failure_code": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "created_at": {
+                      "type": "string"
+                    },
+                    "updated_at": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "public_repo_id",
+                    "private_repo_id",
+                    "private_name",
+                    "state",
+                    "overlay_globs",
+                    "published_private_sha",
+                    "synced_public_sha",
+                    "publish_pr",
+                    "sync_pr",
+                    "failure_code",
+                    "created_at",
+                    "updated_at"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`twin_state`: the twin's state does not allow this (`data.state` is what it is). Nothing changed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`not_configured`: private twins are not on yet.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/twins/{id}": {
+      "delete": {
+        "operationId": "removeRepoTwin",
+        "summary": "Stop publishing: the twin ends here and the private repo stays on GitHub (it is never deleted)",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stop publishing: the twin ends here and the private repo stays on GitHub (it is never deleted)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "public_repo_id": {
+                      "type": "string"
+                    },
+                    "private_repo_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "private_name": {
+                      "type": "string"
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "creating",
+                        "not_connected",
+                        "seeding",
+                        "ready",
+                        "paused",
+                        "conflict",
+                        "refused",
+                        "failed",
+                        "removed"
+                      ]
+                    },
+                    "overlay_globs": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "published_private_sha": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "synced_public_sha": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "publish_pr": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "sync_pr": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "failure_code": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "created_at": {
+                      "type": "string"
+                    },
+                    "updated_at": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "public_repo_id",
+                    "private_repo_id",
+                    "private_name",
+                    "state",
+                    "overlay_globs",
+                    "published_private_sha",
+                    "synced_public_sha",
+                    "publish_pr",
+                    "sync_pr",
+                    "failure_code",
+                    "created_at",
+                    "updated_at"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`twin_state`: the twin's state does not allow this (`data.state` is what it is). Nothing changed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`not_configured`: private twins are not on yet.",
             "content": {
               "application/json": {
                 "schema": {
@@ -34116,7 +35341,7 @@
       "get": {
         "operationId": "getOnboarding",
         "summary": "Where the account is in onboarding",
-        "description": "Session only; a token is refused. Always six steps in order (`model_key`, `readonly_app`, `preview`, `pay`, `write_app`, `first_pr`); `completed_at` is a server time, or null while the step is open. `skipped` is true for a step that is not open but was never done: the free `preview` once the plan is chosen without one (it then has no time; a preview that finishes later turns it into a done step with its real time). Choosing a plan does not wait for any earlier step. Works for an account that has not subscribed yet. `model_key` and `readonly_app` follow the current state, so they reopen when the model key is removed or stops working, or when the read-only GitHub App is uninstalled or suspended; the other steps are milestones that stay done. `steps` is the pipeline track and is also `tracks[0].steps`. `tracks` lists the pipeline track, then the engine track (`machine`, `claude`, `github_app`, `project`, `plan`, `install`, `live`), each with `chosen_at` (null until the person chooses it). Every engine step is derived from current rows on each read: `state` is `done`, `failed` (a stored failure for that step while its source is still false; it clears when the source turns true), `active` (the first step not done) or `pending`. `tier` is on `machine` only. `plan_gate` is on `project` only, when the Engine plan does not cover one more engine: `plan_required`, `engine_quantity`, `plan_ended` (the plan ended, payment failed past its grace, or the subscription is not paying), `account_held` (a platform hold or a partner suspension; an owner's own pause is not one) or `unavailable` (the plan cannot be bought right now); it is derived on every read. `engines` (also on `project` only) is `{ quantity, live }`: the engines the plan pays for and the engines live now, present once the plan has a quantity. The engine track also carries `setup`: `{ id, phase, state }` of the account's one live setup (any phase but `done` or `removed`), else null.",
+        "description": "Session only; a token is refused. Always six steps in order (`model_key`, `readonly_app`, `preview`, `pay`, `write_app`, `first_pr`); `completed_at` is a server time, or null while the step is open. `skipped` is true for a step that is not open but was never done: the free `preview` once the plan is chosen without one (it then has no time; a preview that finishes later turns it into a done step with its real time). Choosing a plan does not wait for any earlier step. Works for an account that has not subscribed yet. `model_key` and `readonly_app` follow the current state, so they reopen when the model key is removed or stops working, or when the read-only GitHub App is uninstalled or suspended; the other steps are milestones that stay done. `steps` is the pipeline track and is also `tracks[0].steps`. `tracks` lists the pipeline track, then the engine track (`machine`, `claude`, `github_app`, `project`, `plan`, `install`, `live`), each with `chosen_at` (null until the person chooses it). Every engine step is derived from current rows on each read: `state` is `done`, `failed` (a stored failure for that step while its source is still false; it clears when the source turns true), `active` (the first step not done) or `pending`. `tier` is on `machine` only. `plan_gate` is on `project` only, when the Engine plan does not cover one more engine: `plan_required`, `engine_quantity`, `plan_ended` (the plan ended, payment failed past its grace, or the subscription is not paying), `account_held` (a platform hold or a partner suspension; an owner's own pause is not one) or `unavailable` (the plan cannot be bought right now); it is derived on every read. `engines` (also on `project` only) is `{ quantity, live }`: the engines the plan pays for and the engines live now, present once the plan has a quantity. `install` also carries `setup_id`, `pr_number` and `pr_state` (`open`, `merged` or `closed`) from the account's active setup that holds an install pull request, and none of the three when no setup does. The engine track also carries `setup`: `{ id, phase, state }` of the account's one live setup (any phase but `done` or `removed`), else null.",
         "security": [
           {
             "session": []
@@ -34372,6 +35597,24 @@
                                       ],
                                       "additionalProperties": false
                                     }
+                                  },
+                                  "setup_id": {
+                                    "type": "string",
+                                    "format": "uuid",
+                                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                                  },
+                                  "pr_number": {
+                                    "type": "integer",
+                                    "exclusiveMinimum": 0,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "pr_state": {
+                                    "type": "string",
+                                    "enum": [
+                                      "open",
+                                      "merged",
+                                      "closed"
+                                    ]
                                   },
                                   "failure": {
                                     "anyOf": [

@@ -4,11 +4,13 @@ import { createRunnerClient } from "../../src/daemon/client.js";
 import { createInventoryReporter, type InventorySource } from "../../src/daemon/sandboxInventory.js";
 import { generateRunnerKey } from "../../src/keys.js";
 import { RUNNER_BUILD_CAPABILITIES, RUNNER_PROTOCOL_VERSION, RUNNER_VERSION } from "../../src/version.js";
+// D#845 ON-10e1: `survey_public_v1` is the newest capability of all and is dropped before everything on the ladder (pinned in surveyPublic.test.ts); these tests pin the ladder behind it.
+const BUILD_BEHIND_PUBLIC = RUNNER_BUILD_CAPABILITIES.filter((c) => c !== "survey_public_v1");
 
 const RUN = "11111111-1111-4111-8111-111111111111";
 const vm = (name: string): SandboxInventoryRow => ({ name, state: "running", created_at: "2026-11-21T10:00:00Z", last_used_at: null, disk_bytes: 1, snapshot_count: 0, snapshot_age_s: null });
 const base: HelloMessage = { protocol_version: RUNNER_PROTOCOL_VERSION, binary_version: RUNNER_VERSION, model_auth_present: false, isolation: "host_sandbox" };
-const common = [...RUNNER_BUILD_CAPABILITIES, SANDBOX_COMMAND_CAPABILITY];
+const common = [...BUILD_BEHIND_PUBLIC, SANDBOX_COMMAND_CAPABILITY];
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
 /**
