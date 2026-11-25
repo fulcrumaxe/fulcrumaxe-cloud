@@ -1,0 +1,33 @@
+{
+  "_about": "D#845 ON-16a2: one repo row for each removal state of GET /api/v1/repos (the `removal` field), the sheet's default ticks, and the answers of POST /api/runners/repos/:id/remove. Used by test/repos-remove.test.mjs and e2e/repos-remove.spec.ts.",
+  "ticks": { "delete_sandbox": true, "removal_pr": false },
+  "repos": {
+    "none": {
+      "id": "33333333-3333-4333-8333-333333333333", "product": "web", "gh_repo_id": 812345678, "install_state": "installed", "app_kind": "team", "full_name": "acme/widgets", "removal": null
+    },
+    "waiting_machine": {
+      "id": "44444444-4444-4444-8444-444444444444", "product": "docs", "gh_repo_id": 812345679, "install_state": "installed", "app_kind": "team", "full_name": "acme/docs",
+      "removal": { "state": "waiting_machine", "machine_name": "Studio box שלום", "failure_code": null }
+    },
+    "removing": {
+      "id": "55555555-5555-4555-8555-555555555555", "product": "site", "gh_repo_id": 812345680, "install_state": "installed", "app_kind": "team", "full_name": "acme/site",
+      "removal": { "state": "removing", "machine_name": "Studio box", "failure_code": null }
+    },
+    "failed": {
+      "id": "66666666-6666-4666-8666-666666666666", "product": "api", "gh_repo_id": 812345681, "install_state": "installed", "app_kind": "team", "full_name": "acme/api",
+      "removal": { "state": "failed", "machine_name": "Studio box", "failure_code": "sandbox_busy" }
+    }
+  },
+  "answers": {
+    "queued_no_pr": { "repo_id": "33333333-3333-4333-8333-333333333333", "runner_id": "77777777-7777-4777-8777-777777777777", "machine_parts": "queued", "already_removed": false, "pr": null },
+    "none_no_pr": { "repo_id": "33333333-3333-4333-8333-333333333333", "runner_id": null, "machine_parts": "none", "already_removed": true, "pr": null },
+    "pr_opened": {
+      "repo_id": "33333333-3333-4333-8333-333333333333", "runner_id": "77777777-7777-4777-8777-777777777777", "machine_parts": "queued", "already_removed": false,
+      "pr": { "outcome": "opened", "number": 41, "branch": "fx/engine-remove-1.2.3", "url": "https://github.com/acme/widgets/pull/41" }
+    },
+    "pr_code": {
+      "repo_id": "33333333-3333-4333-8333-333333333333", "runner_id": "77777777-7777-4777-8777-777777777777", "machine_parts": "queued", "already_removed": false,
+      "pr": { "code": "install_pr_not_merged" }
+    }
+  }
+}
