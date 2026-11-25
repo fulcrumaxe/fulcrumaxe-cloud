@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createGithubRepoVisibility, type RepoReadHttp } from "@fx/runner";
 import { seedF2, type F2Fixture } from "@fx/db/test/helpers/members.js";
@@ -6,9 +6,10 @@ import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
 import { ghError, strictGithubFetch } from "../../github/test/helpers/strictGithub.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { setEngineBridgeSettings } from "@fx/db/src/engineBridge.js";
+import { signMachineJob, type MachineJob } from "@fulcrumaxe/runner-protocol";
 import { firstLiveSetup } from "../src/projectConfirm.js";
 import { lockRunners } from "../src/placement.js";
-import { ENGINE_EVENTS_PATH, RunnerHttpError, ingestEngineEvents, moveProject, moveProjectRoute, placeProjectRoute, toResponse, type RunnerCloudDeps } from "../src/index.js";
+import { ENGINE_EVENTS_PATH, RunnerHttpError, ingestEngineEvents, moveProject, moveProjectRoute, placeProjectRoute, toResponse, type RunnerCloudDeps, type RunPullRequestPort } from "../src/index.js";
 import { harness, newKey, signed, type Harness, type TestKey } from "./helpers.js";
 
 /**
@@ -152,9 +153,16 @@ describe("confirming a project [pg]", () => {
     const w = await world();
     const m2 = await w.machine();
     expect((await confirm(w, w.r1, { runner_id: w.m1 })).status).toBe(201);
-    const before = await snapshot(w);
     const principal = { accountId: w.a.accountId, userId: w.a.o1 };
-    const move = () => moveProjectRoute(h.deps(), principal, w.r1, { to_runner_id: m2 });
+    // The move starts the engine on the new machine, so it needs a plan, operate on, the repo's tick, the job signer and GitHub's default branch.
+    await h.admin.query(`UPDATE accounts SET engine_quantity = 5, stripe_subscription_status = 'active' WHERE id = $1`, [w.a.accountId]);
+    await h.admin.query(`INSERT INTO engine_bridge_settings (account_id, watch_enabled, operate_enabled) VALUES ($1, true, true) ON CONFLICT (account_id) DO UPDATE SET watch_enabled = true, operate_enabled = true`, [w.a.accountId]);
+    await h.admin.query(`INSERT INTO engine_bridge_repos (account_id, repo_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [w.a.accountId, w.r1]);
+    const jobKey = generateKeyPairSync("ed25519").privateKey;
+    const github = { defaultBranch: async () => "main", branchState: async () => ({ exists: true, headOid: "a".repeat(40), aheadBy: 0, defaultBranch: "main" }) } as unknown as RunPullRequestPort;
+    const moveDeps = () => h.deps({ pullRequests: github, engineCommandSigner: async () => ({ keyId: "k1", signMachineJob: (job: MachineJob) => signMachineJob(job, "k1", jobKey) }) as never });
+    const before = await snapshot(w);
+    const move = () => moveProjectRoute(moveDeps(), principal, w.r1, { to_runner_id: m2 });
     await h.admin.query(`CREATE OR REPLACE FUNCTION on7_deadlock() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'deadlock detected' USING ERRCODE = '40P01'; END $$`);
     await h.admin.query(`CREATE TRIGGER on7_move_deadlock BEFORE UPDATE ON project_placements FOR EACH ROW WHEN (NEW.account_id = '${w.a.accountId}') EXECUTE FUNCTION on7_deadlock()`);
     try {
@@ -165,7 +173,7 @@ describe("confirming a project [pg]", () => {
     expect(await snapshot(w)).toEqual(before);
     // Retrying works, and another failure is still not mapped to a busy answer.
     expect((await move()).status).toBe(200);
-    expect(await code(moveProjectRoute(h.deps(), principal, w.r1, { to_runner_id: randomUUID() }))).toBe("404 not_found");
+    expect(await code(moveProjectRoute(moveDeps(), principal, w.r1, { to_runner_id: randomUUID() }))).toBe("404 not_found");
   });
 
   it("lock order: a confirm onto a machine takes the machine's locks before its placement, so a change holding them first cannot deadlock it", async () => {

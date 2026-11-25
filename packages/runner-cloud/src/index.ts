@@ -191,6 +191,10 @@ export {
   type IssuedSetupJob,
 } from "./setupJobs.js";
 export {
+  moveEngineProject,
+  type MovedEngine,
+} from "./engineMove.js";
+export {
   ENGINE_SESSION_NAME_PREFIX,
   issueEngineSessionDelete,
   issueEngineSessionStart,
