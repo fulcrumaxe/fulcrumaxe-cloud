@@ -1737,7 +1737,7 @@ test("wsl2 proof: dispatch only, no input, no secret, read-only, windows-2022, p
   assert.deepEqual(wslProofViolations(wslProof), []);
   const setup = jobsOf(wslProof.doc).flatMap(([, job]) => job.steps ?? []).find((s) => String(s.uses ?? "").startsWith("Vampire/setup-wsl@"));
   assert.ok(setup, "the workflow installs WSL with setup-wsl");
-  assert.equal(setup.uses, "Vampire/setup-wsl@d1da7f2c0322a5ee4f24975344f67fc0f5baf364");
+  assert.equal(setup.uses, "Vampire/setup-wsl@4c48163d9f981914dd8caa0fc335fe19cca5bff4");
   assert.equal(setup.with["wsl-version"], 2);
   assert.match(setup.with["wsl-conf"], /\[interop\]\s+enabled=false\s+appendWindowsPath=false/);
   for (const w of workflows) if (w.file !== "wsl2-proof.yml") assert.doesNotMatch(noComments(w.text), /setup-wsl|wsl2-proof/, `${w.file} refers to the proof`);
