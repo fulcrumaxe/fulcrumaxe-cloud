@@ -127,7 +127,7 @@ export interface IssuedSetupJob { job_id: string; attempt: number }
  * Issues the setup's `project_setup` job (attempt + 1; an older live job is superseded). `retry` is the retry route's: it also needs phase `install` and a failed or expired job, checked under the row lock,
  * so two clicks issue one job.
  */
-export async function issueProjectSetup(deps: RunnerCloudDeps, principal: SessionPrincipal, setupId: string, options: { retry?: boolean } = {}): Promise<IssuedSetupJob> {
+export async function issueProjectSetup(deps: RunnerCloudDeps, principal: SessionPrincipal, setupId: string, options: { retry?: boolean; fromApprove?: boolean } = {}): Promise<IssuedSetupJob> {
   const signer = (await deps.engineCommandSigner?.()) ?? null;
   const github = deps.pullRequests ?? null;
   if (signer?.signMachineJob === undefined || github === null) throw refuse(503, "not_configured", "the cloud cannot issue a setup job now");
@@ -168,6 +168,8 @@ export async function issueProjectSetup(deps: RunnerCloudDeps, principal: Sessio
   } as MachineJob);
   return asPerson(() => tenant(async (client) => {
     const again = await loadInputs(client, principal.accountId, setupId, true, options.retry === true);
+    // Approve's caller only ever issues the first job: a second approve that raced the first finds the setup already at install.
+    if (options.fromApprove === true && again.setup.phase !== "plan") throw refuse(409, "setup_phase", "the install was already issued");
     const same = buildPlanFile({ kind: again.setup.kind, owner: again.repo.owner, name: again.repo.name, login: again.login, draft: again.draft, facts });
     if (same.sha256 !== built.sha256 || again.runnerId !== first.runnerId || again.release.commit_sha !== first.release.commit_sha || again.release.tarball_sha256 !== first.release.tarball_sha256) throw refuse(409, "setup_changed", "the setup changed while the job was made; try again");
     if (options.retry === true && !again.setup.retryable) throw refuse(409, "not_retryable", "the install is not at a failed or expired step");

@@ -1,10 +1,11 @@
 import type { PoolClient } from "pg";
+import { reportError } from "@fx/telemetry";
 import { emitSetupChanged } from "@fx/core/src/onboarding/engineTrack.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { requireEngineCoverage } from "./engineSession.js";
 import { RunnerHttpError, pgCode, type RunnerCloudDeps, type RunnerHttpResponse, type SessionPrincipal } from "./http.js";
 import { requireMemberRole } from "./memberRole.js";
-import { readRepoVisibility } from "./repoPrivacy.js";
+import { blockError, blockFor, readRepoVisibility } from "./repoPrivacy.js";
 import { issueProjectSetup } from "./setupJobs.js";
 import { startSurvey } from "./surveyJobs.js";
 
@@ -114,8 +115,10 @@ async function approveInTx(client: PoolClient, p: SessionPrincipal, setup: Setup
   // An approved plan that was not installed yet is approved again without a version: nothing is written, only the issue is tried again.
   if (draft.status === "approved") return draft;
   if (b["version"] !== draft.version) throw refuse(409, "draft_conflict", "the plan changed since you opened it", { version: draft.version });
+  // The column check counts code points, not UTF-16 units.
+  const prdLength = [...draft.prd_md].length;
   const keptKeys = new Set(kept.map((r) => r.row_key));
-  const reason = kept.length === 0 ? "no_kept_rows" : draft.prd_md.length < 1 || draft.prd_md.length > MAX_PRD ? "prd_length" : kept.some((r) => r.depends_on.some((d) => !keptKeys.has(d))) ? "dependency_dropped" : null;
+  const reason = kept.length === 0 ? "no_kept_rows" : prdLength < 1 || prdLength > MAX_PRD ? "prd_length" : kept.some((r) => r.depends_on.some((d) => !keptKeys.has(d))) ? "dependency_dropped" : null;
   if (reason !== null) throw refuse(409, "plan_invalid", "the plan cannot be approved as it is", { reason });
   if (mode === "public") {
     const seen = b["reviewed_row_keys"];
@@ -125,7 +128,9 @@ async function approveInTx(client: PoolClient, p: SessionPrincipal, setup: Setup
     const missing = [...all].filter((k) => !given.has(k)).length + [...given].filter((k) => !all.has(k)).length + (b["prd_reviewed"] === true ? 0 : 1);
     if (missing > 0) throw refuse(409, "plan_not_reviewed", "read every item before you approve", { missing });
   }
-  await client.query("UPDATE project_drafts SET status = 'approved', approved_by = $3, approved_at = now(), final_at = now(), setup_id = $4 WHERE account_id = $1 AND id = $2 AND status = 'draft'", [p.accountId, draft.id, p.userId, setup.id]);
+  const moved = await client.query("UPDATE project_drafts SET status = 'approved', approved_by = $3, approved_at = now(), final_at = now(), setup_id = $4 WHERE account_id = $1 AND id = $2 AND status = 'draft'", [p.accountId, draft.id, p.userId, setup.id]);
+  // No audit row for an approval that did not land.
+  if (moved.rowCount !== 1) throw refuse(409, "setup_phase", "the plan was changed while it was approved");
   await client.query("SELECT audit_write('project.plan_approved', $1::jsonb)", [JSON.stringify({ setup_id: setup.id, repo_id: setup.repo_id, draft_id: draft.id, version: draft.version, review_mode: mode, reviewed_count: mode === "public" ? draft.roadmap.length : 0, kept_count: kept.length })]);
   await changed(client, p.accountId, setup);
   return draft;
@@ -154,10 +159,11 @@ async function approve(deps: RunnerCloudDeps, p: SessionPrincipal, setupId: stri
   let installError: { code: string; message: string } | null = null;
   if (done.gate === null) {
     try {
-      install = await issueProjectSetup(deps, p, setupId.toLowerCase());
+      install = await issueProjectSetup(deps, p, setupId.toLowerCase(), { fromApprove: true });
     } catch (error) {
-      if (!(error instanceof RunnerHttpError)) throw error;
-      installError = { code: error.code, message: error.message };
+      // Anything the issuer throws after the commit is reported next to the approval, never as a 500.
+      if (!(error instanceof RunnerHttpError)) reportError(error, { stage: "plan_draft.install", route: "/api/v1/setups/:id/draft/approve" });
+      installError = error instanceof RunnerHttpError ? { code: error.code, message: error.message } : { code: "install_error", message: "the install could not be issued now" };
     }
   }
   return ok({ approved: true, draft_id: done.draft.id, version: done.draft.version, review_mode: mode, install, gate: done.gate, install_error: installError });
@@ -187,10 +193,11 @@ async function discardOrBlank(deps: RunnerCloudDeps, p: SessionPrincipal, setupI
   });
 }
 
-/** POST .../draft/restart ("Start over"): the open draft is thrown away and a new survey starts. A public repo is refused before anything is written; a start that fails after the move puts the draft and the step back. */
+/** POST .../draft/restart ("Start over"): the open draft is thrown away and a new survey starts. A public repo, or one whose visibility cannot be read, is refused before anything is written; a start that fails after the move puts the draft and the step back. */
 async function restart(deps: RunnerCloudDeps, p: SessionPrincipal, setupId: string): Promise<RunnerHttpResponse> {
   const first = await tenant(deps, p, async (client) => (await asOwner(client), loadSetup(client, p.accountId, setupId, false)));
-  if ((await readRepoVisibility(deps, p.accountId, first.repo_id)) === "public") throw refuse(409, "public_repo", "a public repository cannot run on a runner");
+  const block = blockFor(await readRepoVisibility(deps, p.accountId, first.repo_id));
+  if (block !== null) throw blockError(block);
   const old = await tenant(deps, p, async (client) => {
     await asOwner(client);
     const setup = await loadSetup(client, p.accountId, setupId, true);
