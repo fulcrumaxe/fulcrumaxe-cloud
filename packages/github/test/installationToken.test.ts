@@ -307,7 +307,7 @@ describe("installation-wide token (WideScope)", () => {
 
 describe("no purpose ever requests repository administration (D#2 RC-1a, C64 section 3)", () => {
   // A Record keyed by MintPurpose: a new purpose fails typecheck until it is listed here.
-  const KIND: Record<MintPurpose, string> = { run: "team", preview_read: "team_readonly", sitekit_read: "sitekit", merge_gate: "team", plan_read: "team_readonly", runner_git: "team", plane_push: "team", plane_merge: "team", plane_publish_read: "team", branch_delete: "team", branch_sync: "team", pairing_read: "team_readonly", receipt_block: "team", retraction: "team", revert_pr: "team", plane_parity: "team", setup_push: "team", setup_labels: "team" };
+  const KIND: Record<MintPurpose, string> = { run: "team", preview_read: "team_readonly", sitekit_read: "sitekit", merge_gate: "team", plan_read: "team_readonly", runner_git: "team", plane_push: "team", plane_merge: "team", plane_publish_read: "team", branch_delete: "team", branch_sync: "team", pairing_read: "team_readonly", receipt_block: "team", retraction: "team", revert_pr: "team", plane_parity: "team", setup_push: "team", setup_labels: "team", setup_finish: "team" };
   const scopes = [
     { repositories: ["r"] as [string], permissions: { metadata: "write", contents: "write", issues: "write", pull_requests: "write", discussions: "write" } as const },
     { installationWide: true as const, permissions: { metadata: "read" } as const },
@@ -318,7 +318,7 @@ describe("no purpose ever requests repository administration (D#2 RC-1a, C64 sec
       // runner_git takes only metadata and contents, so both generic scopes here are refused outright: runnerProxyDecision.test.ts covers it.
       if (purpose === "runner_git") continue;
       if (purpose === "retraction") continue; // takes exactly one single-key set, not these generic scopes: retraction.test.ts covers it
-      if ((purpose === "merge_gate" || purpose === "plan_read" || purpose === "plane_push" || purpose === "plane_merge" || purpose === "plane_publish_read" || purpose === "branch_delete" || purpose === "branch_sync" || purpose === "pairing_read" || purpose === "receipt_block" || purpose === "revert_pr" || purpose === "plane_parity" || purpose === "setup_push" || purpose === "setup_labels") && "installationWide" in scope) continue; // refused outright: see the merge_gate, plan_read, plane_push, plane_publish_read and branch_delete tests
+      if ((purpose === "merge_gate" || purpose === "plan_read" || purpose === "plane_push" || purpose === "plane_merge" || purpose === "plane_publish_read" || purpose === "branch_delete" || purpose === "branch_sync" || purpose === "pairing_read" || purpose === "receipt_block" || purpose === "revert_pr" || purpose === "plane_parity" || purpose === "setup_push" || purpose === "setup_labels" || purpose === "setup_finish") && "installationWide" in scope) continue; // refused outright: see the merge_gate, plan_read, plane_push, plane_publish_read and branch_delete tests
       // A plan_read mint is refused unless GitHub's answer says the token is read-only, so the answer says so.
       const answer: { permissions: Record<string, string>; repositories?: string[] } =
         purpose === "plane_push"
@@ -333,6 +333,8 @@ describe("no purpose ever requests repository administration (D#2 RC-1a, C64 sec
                 ? { permissions: { metadata: "read", contents: "write", pull_requests: "write" }, repositories: ["r"] }
               : purpose === "setup_labels"
                 ? { permissions: { metadata: "read", issues: "write" }, repositories: ["r"] }
+              : purpose === "setup_finish"
+                ? { permissions: { metadata: "read", issues: "write", discussions: "write" }, repositories: ["r"] }
               : purpose === "receipt_block"
                 ? { permissions: { metadata: "read", checks: "read", pull_requests: "write" }, repositories: ["r"] }
               : purpose === "branch_sync"
@@ -362,6 +364,9 @@ describe("no purpose ever requests repository administration (D#2 RC-1a, C64 sec
       } else if (purpose === "revert_pr") {
         // D#7 DP7-2w: whatever the caller asked for, exactly contents write and pull requests write of the one repository.
         expect(granted).toEqual({ contents: "write", pull_requests: "write" });
+      } else if (purpose === "setup_finish") {
+        // D#845 ON-13a4: whatever the caller asked for, exactly Discussions write, issues write and metadata read of the one repository.
+        expect(granted).toEqual({ metadata: "read", issues: "write", discussions: "write" });
       } else if (purpose === "setup_labels") {
         // D#845 ON-8f2b: whatever the caller asked for, exactly issues write and metadata read of the one repository.
         expect(granted).toEqual({ metadata: "read", issues: "write" });

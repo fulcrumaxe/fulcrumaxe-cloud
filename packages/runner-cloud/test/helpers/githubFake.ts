@@ -1,4 +1,4 @@
-import { GITHUB_GRAPHQL_DOCUMENTS, SETUP_INSTALL_DOCUMENTS, type GithubClient, type GithubRequest, type GithubResponse } from "../../src/localOnlyGithub.js";
+import { GITHUB_GRAPHQL_DOCUMENTS, SETUP_FINISH_DOCUMENTS, SETUP_INSTALL_DOCUMENTS, type GithubClient, type GithubRequest, type GithubResponse } from "../../src/localOnlyGithub.js";
 
 /**
  * A fake of the part of GitHub the `done` port touches, as strict as the real service about what our code depends on, and written
@@ -18,6 +18,10 @@ import { GITHUB_GRAPHQL_DOCUMENTS, SETUP_INSTALL_DOCUMENTS, type GithubClient, t
  *     report it, GitHub's docs state the plan rule but do not quote the string). `draft: false` is accepted there. A5 closes. Pull
  *     request files are listed only through GraphQL, 100 to a page, with an opaque cursor.
  *   - repository lookups are case-insensitive, an unknown repository or pull request is 404 / a NOT_FOUND error.
+ *
+ * D#845 ON-13a4 adds the finish phase's surface, as strict as the rest: `GET` and `POST /repos/{o}/{r}/issues` (the list holds pull requests too, each with a `pull_request` key; a create needs a title of 1 to 256
+ * characters and takes labels by name), and the three Discussion documents. A Discussion is created only with the repository's own node id and one of ITS categories, a title of 1 to 256 characters and a body of at most
+ * 65536; where Discussions are off the repository reads `hasDiscussionsEnabled: false` with no categories and a create answers an UNPROCESSABLE error; discussions come newest first, 100 to a page, by an opaque cursor.
  *
  * What it cannot fake faithfully: GitHub's rate limits and secondary limits (only injected statuses), exact error wording,
  * `compare` on diverged histories (an `aheadBy` number is set directly), and whether a document is valid against GitHub's GraphQL
@@ -63,6 +67,13 @@ export interface FakeRepo {
   commits: Map<string, string[]>;
   /** D#845 ON-8f2b: the repository's labels by lower-cased name, as GitHub keeps them (names are unique case-insensitively). */
   labels: Map<string, { name: string; color: string; description: string }>;
+  /** D#845 ON-13a4: whether Discussions are on, the categories GitHub made when they were turned on (a repository's own, which no App can add), and the Discussions in the order they were made. */
+  discussionsEnabled: boolean;
+  categories: Array<{ id: string; name: string }>;
+  discussions: Array<{ number: number; title: string; body: string; categoryId: string; /** Who made it; ours (the App's bot) when absent, as every create through the fake is. */ author?: { login: string; type: "Bot" | "User" } }>;
+  /** Issues and pull requests the REST list shows (a pull request carries `pull_request`). Numbers are shared with Discussions, as on GitHub. */
+  issues: Array<{ number: number; title: string; body: string; labels: string[]; state: "open" | "closed"; pull_request?: true; /** Who made it; ours (the App's bot) when absent. */ author?: { login: string; type: "Bot" | "User" } }>;
+  nextNumber: number;
 }
 
 const ok = (body: unknown, status = 200): GithubResponse => ({ status, body });
@@ -97,8 +108,9 @@ export class FakeGithub implements GithubClient {
    */
   markReadyForbidden = false;
 
-  addRepo(owner: string, name: string, over: Partial<Pick<FakeRepo, "defaultBranch" | "supportsDrafts" | "id">> = {}): FakeRepo {
-    const repo: FakeRepo = { id: over.id ?? 1234567, owner, name, defaultBranch: over.defaultBranch ?? "main", supportsDrafts: over.supportsDrafts ?? true, branches: new Map(), pulls: [], commits: new Map(), labels: new Map() };
+  addRepo(owner: string, name: string, over: Partial<Pick<FakeRepo, "defaultBranch" | "supportsDrafts" | "id" | "discussionsEnabled">> & { categories?: string[] } = {}): FakeRepo {
+    const repo: FakeRepo = { id: over.id ?? 1234567, owner, name, defaultBranch: over.defaultBranch ?? "main", supportsDrafts: over.supportsDrafts ?? true, branches: new Map(), pulls: [], commits: new Map(), labels: new Map(), discussionsEnabled: over.discussionsEnabled ?? true, categories: [], discussions: [], issues: [], nextNumber: 100 };
+    if (repo.discussionsEnabled || over.categories !== undefined) repo.categories = (over.categories ?? ["Announcements", "General", "Ideas", "Polls", "Q&A", "Show and tell"]).map((n, i) => ({ id: `DIC_kwDOFake${repo.id}_${i}`, name: n }));
     repo.branches.set(repo.defaultBranch, { oid: "a".repeat(40), aheadBy: 0, files: [] });
     this.repos.set(`${owner}/${name}`.toLowerCase(), repo);
     return repo;
@@ -188,7 +200,39 @@ export class FakeGithub implements GithubClient {
       if (!keysAre(req.body, ["name", "color", "description"])) this.deny("A26 body");
       return { label: "A26", handler: () => this.createLabel(m![1]!, m![2]!, req.body as { name: string; color: string; description: string }) };
     }
+    if (method === "GET" && (m = /^\/repos\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/issues$/.exec(path))) {
+      noQuery(["labels", "state", "per_page"]);
+      if (req.body !== undefined) this.deny("body on GET");
+      return { label: "A28", handler: () => this.listIssues(m![1]!, m![2]!, query) };
+    }
+    if (method === "POST" && (m = /^\/repos\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/issues$/.exec(path))) {
+      noQuery([]);
+      if (!keysAre(req.body, ["title", "body", "labels"])) this.deny("A29 body");
+      return { label: "A29", handler: () => this.createIssue(m![1]!, m![2]!, req.body as { title: string; body: string; labels: string[] }) };
+    }
     return this.deny(`${method} ${path}`);
+  }
+
+  private listIssues(owner: string, name: string, query: Record<string, string | number>): GithubResponse {
+    const repo = this.repoOf(owner, name);
+    if (!repo) return notFound();
+    const state = String(query.state ?? "open");
+    if (!["open", "closed", "all"].includes(state)) throw new StrictFakeError("A28: state is open, closed or all");
+    const perPage = Number(query.per_page ?? 30);
+    if (!Number.isInteger(perPage) || perPage < 1 || perPage > 100) throw new StrictFakeError("A28: per_page is 1 to 100");
+    const wanted = query.labels === undefined ? [] : String(query.labels).split(",").map((l) => l.toLowerCase());
+    const found = repo.issues.filter((i) => (state === "all" || i.state === state) && wanted.every((l) => i.labels.some((x) => x.toLowerCase() === l))).sort((a, b) => b.number - a.number);
+    return ok(found.slice(0, perPage).map((i) => ({ number: i.number, title: i.title, body: i.body, state: i.state, labels: i.labels.map((n) => ({ name: n })), user: { login: (i.author ?? { login: FAKE_APP_LOGIN, type: "Bot" }).login, type: (i.author ?? { type: "Bot" }).type, id: 4242 }, ...(i.pull_request ? { pull_request: { url: "https://api.github.com/x" } } : {}) })));
+  }
+
+  private createIssue(owner: string, name: string, body: { title: string; body: string; labels: string[] }): GithubResponse {
+    const repo = this.repoOf(owner, name);
+    if (!repo) return notFound();
+    if (typeof body.title !== "string" || body.title.length < 1 || body.title.length > 256) throw new StrictFakeError("A29: an issue needs a title of 1 to 256 characters");
+    if (typeof body.body !== "string" || !Array.isArray(body.labels) || !body.labels.every((l) => typeof l === "string")) throw new StrictFakeError("A29: body is text and labels are names");
+    const number = repo.nextNumber++;
+    repo.issues.push({ number, title: body.title, body: body.body, labels: [...body.labels], state: "open" });
+    return ok({ number, title: body.title, state: "open", labels: body.labels.map((n) => ({ name: n })) }, 201);
   }
 
   /** GitHub's own rules for a label: a name of 1 to 50 characters, a colour of six hex digits WITHOUT a leading `#`, a description of at most 100 characters; a name that exists (in any case) is a 422 `already_exists`. */
@@ -251,8 +295,8 @@ export class FakeGithub implements GithubClient {
   private graphql(body: unknown): { label: string; handler: () => GithubResponse } {
     if (!keysAre(body, ["query", "variables"])) this.deny("graphql body keys");
     const { query, variables } = body as { query: string; variables: unknown };
-    const docs = { ...GITHUB_GRAPHQL_DOCUMENTS, ...SETUP_INSTALL_DOCUMENTS } as Record<string, string>;
-    const op = Object.keys(docs).find((k) => docs[k] === query) as keyof typeof GITHUB_GRAPHQL_DOCUMENTS | keyof typeof SETUP_INSTALL_DOCUMENTS | undefined;
+    const docs = { ...GITHUB_GRAPHQL_DOCUMENTS, ...SETUP_INSTALL_DOCUMENTS, ...SETUP_FINISH_DOCUMENTS } as Record<string, string>;
+    const op = Object.keys(docs).find((k) => docs[k] === query) as keyof typeof GITHUB_GRAPHQL_DOCUMENTS | keyof typeof SETUP_INSTALL_DOCUMENTS | keyof typeof SETUP_FINISH_DOCUMENTS | undefined;
     if (!op) return this.deny("graphql query text is not one of the fixed documents");
     // The review path's document (A9) is not part of the `done` path this fake models.
     if (op === "CommitChecks") return this.deny("CommitChecks is the review path's, not the done path's");
@@ -270,6 +314,37 @@ export class FakeGithub implements GithubClient {
       if (!fits) throw new StrictFakeError(`${op}: $${k} is not a ${d.type}`);
     }
     return { label: `A1 ${op}`, handler: () => this[`gql${op}`](given) };
+  }
+
+  private gqlSeedTarget(v: Record<string, unknown>): GithubResponse {
+    const repo = this.repoOf(String(v.owner), String(v.name));
+    if (!repo) return ok({ data: { repository: null }, errors: [{ type: "NOT_FOUND", path: ["repository"], message: "Could not resolve to a Repository." }] });
+    return ok({ data: { repository: { id: `R_kgDOFake${repo.id}`, hasDiscussionsEnabled: repo.discussionsEnabled, discussionCategories: { nodes: repo.categories.map((c) => ({ ...c })) } } } });
+  }
+
+  private gqlSeedDiscussions(v: Record<string, unknown>): GithubResponse {
+    const repo = this.repoOf(String(v.owner), String(v.name));
+    if (!repo) return ok({ data: { repository: null }, errors: [{ type: "NOT_FOUND", path: ["repository"], message: "Could not resolve to a Repository." }] });
+    const newest = [...repo.discussions].sort((a, b) => b.number - a.number);
+    const start = typeof v.cursor === "string" ? Number(Buffer.from(v.cursor, "base64url").toString()) : 0;
+    if (!Number.isInteger(start) || start < 0) throw new StrictFakeError("SeedDiscussions: cursor is not one this fake issued");
+    const page = newest.slice(start, start + 100);
+    const end = start + page.length;
+    return ok({ data: { repository: { discussions: { pageInfo: { hasNextPage: end < newest.length, endCursor: page.length ? Buffer.from(String(end)).toString("base64url") : null }, nodes: page.map((d) => ({ number: d.number, body: d.body, author: d.author === undefined ? { __typename: "Bot", login: FAKE_APP_LOGIN.replace(/\[bot\]$/, "") } : { __typename: d.author.type, login: d.author.login } })) } } } });
+  }
+
+  private gqlSeedCreateDiscussion(v: Record<string, unknown>): GithubResponse {
+    const repo = [...this.repos.values()].find((r) => `R_kgDOFake${r.id}` === v.repositoryId);
+    if (!repo) return ok({ data: { createDiscussion: null }, errors: [{ type: "NOT_FOUND", message: "Could not resolve to a node with the global id." }] });
+    if (!repo.discussionsEnabled) return ok({ data: { createDiscussion: null }, errors: [{ type: "UNPROCESSABLE", path: ["createDiscussion"], message: "Discussions are not enabled for this repository." }] });
+    const title = String(v.title);
+    const body = String(v.body);
+    if (title.length < 1 || title.length > 256) throw new StrictFakeError("SeedCreateDiscussion: a title is 1 to 256 characters");
+    if (body.length > 65536) throw new StrictFakeError("SeedCreateDiscussion: a body is at most 65536 characters");
+    if (!repo.categories.some((c) => c.id === v.categoryId)) return ok({ data: { createDiscussion: null }, errors: [{ type: "UNPROCESSABLE", path: ["createDiscussion"], message: "Category is not valid for this repository." }] });
+    const number = repo.nextNumber++;
+    repo.discussions.push({ number, title, body, categoryId: String(v.categoryId) });
+    return ok({ data: { createDiscussion: { discussion: { number } } } });
   }
 
   /** `object(oid:)` answers null for an id it has no commit of; for a commit, its id and parents (first 5, with the total). */
@@ -327,15 +402,17 @@ export class FakeGithub implements GithubClient {
  * The live installation client's exact path lists (packages/github `installationHttp.ts`), written out here WITHOUT importing them, as the kinds the install step opens:
  *   - `runner_pr`:    `POST /graphql`, `GET` the repository, `GET` and `POST` its `/pulls`, `PATCH /pulls/<digits>`. Nothing else, so no `/labels`.
  *   - `setup_labels`: `POST /repos/<o>/<r>/labels` with a body of exactly name, color and description, no query. Nothing else.
+ *   - `setup_finish`: (D#845 ON-13a4) `POST /graphql`, and `GET` and `POST` of `/repos/<o>/<r>/issues`. Nothing else: no repository read, no pulls, no labels.
  * A request outside the kind's list is rejected `path_refused` (as the live client does, before anything is sent) and counts in `denied`; one inside it is answered by the strict fake. The live lists are proven
  * against the real client in packages/github (setupLabels.test.ts) and apps/web (runnerPullRequest.test.ts); this keeps the port tests from passing on a path the live kind would refuse.
  */
-export type FakeInstallationKind = "runner_pr" | "setup_labels";
+export type FakeInstallationKind = "runner_pr" | "setup_labels" | "setup_finish";
 export function installationKindClient(fake: FakeGithub, kind: FakeInstallationKind): GithubClient {
   const repoRoot = /^\/repos\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+/;
   const allowed = (req: GithubRequest): boolean => {
     const rest = repoRoot.test(req.path) ? req.path.replace(repoRoot, "") : null;
     if (kind === "setup_labels") return req.method === "POST" && rest === "/labels" && req.query === undefined && keysAre(req.body, ["name", "color", "description"]);
+    if (kind === "setup_finish") return (req.method === "POST" && req.path === "/graphql") || (rest === "/issues" && (req.method === "GET" || req.method === "POST"));
     if (req.method === "POST" && req.path === "/graphql") return true;
     if (rest === null) return false;
     if (req.method === "GET") return rest === "" || rest === "/pulls";
@@ -352,5 +429,5 @@ export function installationKindClient(fake: FakeGithub, kind: FakeInstallationK
     },
   };
 }
-/** What `createRunPullRequestPort` is given as `open`: the pull request kind, or `setup_labels` when the port asks for it. */
-export const openInstallationKinds = (fake: FakeGithub) => async (_repo: unknown, purpose?: "setup_labels"): Promise<GithubClient> => installationKindClient(fake, purpose === "setup_labels" ? "setup_labels" : "runner_pr");
+/** What `createRunPullRequestPort` is given as `open`: the pull request kind, or `setup_labels` / `setup_finish` when the port asks for it. */
+export const openInstallationKinds = (fake: FakeGithub) => async (_repo: unknown, purpose?: "setup_labels" | "setup_finish"): Promise<GithubClient> => installationKindClient(fake, purpose ?? "runner_pr");

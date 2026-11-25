@@ -132,3 +132,75 @@ describe("ensureLabels through the live installation kinds", () => {
     expect(t.minted[0]!.permissions).toEqual({ metadata: "read", contents: "read", pull_requests: "write" });
   });
 });
+
+/**
+ * D#845 ON-13a4 (FU-261): the finish port over the REAL installation client (its exact path list and token minter), behind the strict GitHub fetch. Every call opens its own `setup_finish` client with a fresh
+ * Discussions-and-Issues-write token, and that token is revoked exactly once when the call ends, whether GitHub answered or refused (CWE-613).
+ */
+describe("the finish port over the live setup_finish kind", () => {
+  let pem: string;
+  beforeAll(() => {
+    pem = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } }).privateKey;
+  });
+  const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  const SETUP = "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e";
+
+  function live(answer: (method: string, path: string, body: unknown) => Response, appLogin: () => Promise<string> = async () => "fulcrumaxe-runner[bot]") {
+    const minted: Array<Parameters<AccessTokenRequester>[0]> = [];
+    const revokes: string[] = [];
+    const agents: Array<string | undefined> = [];
+    const requester: AccessTokenRequester = async (p) => (minted.push(p), { token: `ghs_finish_${minted.length}`, expiresAt: new Date(Date.now() + 3_600_000).toISOString(), permissions: p.permissions as Record<string, string>, ...(p.repositories ? { repositories: p.repositories } : {}) });
+    const fetchImpl = strictGithubFetch((async (input: string | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      const method = init?.method ?? "GET";
+      const headers = init?.headers as Record<string, string> | undefined;
+      agents.push(headers?.["user-agent"]);
+      if (url.pathname === "/installation/token") return (revokes.push(`${method} ${headers?.authorization}`), new Response(null, { status: 204 }));
+      return answer(method, url.pathname, init?.body === undefined ? undefined : (JSON.parse(String(init.body)) as unknown));
+    }) as unknown as typeof fetch);
+    const open = createInstallationHttp({ resolveInstallation: async () => ({ installationId: 9, appKind: "team" }), appCredentials: () => ({ appId: "app-1", privateKeyPem: pem, webhookSecret: "unused" }), requester, cache: new InstallationTokenCache(), fetchImpl });
+    return { port: createAppRunPullRequestPort({ open, appLogin }), minted, revokes, agents };
+  }
+  const target = { data: { repository: { id: "R_1", hasDiscussionsEnabled: true, discussionCategories: { nodes: [{ id: "C_1", name: "Ideas" }] } } } };
+  const page = { data: { repository: { discussions: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } } };
+  const created = { data: { createDiscussion: { discussion: { number: 3 } } } };
+  const refuse = () => json(403, { message: "Resource not accessible by integration", documentation_url: "https://docs.github.com/rest", status: "403" });
+
+  it("each call mints its own token with Discussions write, issues write and metadata read, and revokes it once on success", async () => {
+    const t = live((_m, path) => (path === "/graphql" ? json(200, target) : json(200, [])));
+    await t.port.discussionTarget(REPO);
+    expect(t.minted).toHaveLength(1);
+    expect(t.minted[0]).toMatchObject({ repositories: ["widgets"], permissions: { metadata: "read", issues: "write", discussions: "write" } });
+    expect(t.revokes).toEqual(["DELETE Bearer ghs_finish_1"]);
+    expect(await t.port.findTeamLog(REPO)).toBeNull();
+    expect(t.minted).toHaveLength(2);
+    expect(t.revokes).toEqual(["DELETE Bearer ghs_finish_1", "DELETE Bearer ghs_finish_2"]);
+    for (const a of t.agents) expect(a).toBe("fulcrumaxe-cloud");
+  });
+
+  it("revokes exactly once for every call of the port, whether GitHub answered or refused", async () => {
+    const calls: Array<(p: ReturnType<typeof live>["port"]) => Promise<unknown>> = [
+      (p) => p.discussionTarget(REPO),
+      (p) => p.findSeeded({ repo: REPO, setupId: SETUP }),
+      (p) => p.createDiscussion({ repo: REPO, repositoryId: "R_1", categoryId: "C_1", title: "t", body: `b\n\n<!-- fx-seed:${SETUP}:A1 -->` }),
+      (p) => p.findTeamLog(REPO),
+      (p) => p.createTeamLog({ repo: REPO, title: "t", body: `b\n\n<!-- fx-team-log:${SETUP} -->` }),
+    ];
+    for (const [i, call] of calls.entries()) {
+      const refused = live(refuse);
+      expect(await call(refused.port).catch((e: unknown) => e), `refused ${i}`).toBeInstanceOf(RunPullRequestError);
+      expect(refused.revokes, `refused ${i}`).toEqual(["DELETE Bearer ghs_finish_1"]);
+      const ok = live((_m, path, body) => (path === "/graphql" ? json(200, (body as { query: string }).query.includes("SeedTarget") ? target : (body as { query: string }).query.includes("mutation") ? created : page) : json(path.endsWith("/issues") && _m === "POST" ? 201 : 200, _m === "POST" ? { number: 7 } : [])));
+      await call(ok.port);
+      expect(ok.revokes, `answered ${i}`).toEqual(["DELETE Bearer ghs_finish_1"]);
+    }
+  });
+
+  it("a failure to learn our own login still releases the token: nothing is left to lapse", async () => {
+    const t = live(() => json(200, page), async () => {
+      throw new Error("down");
+    });
+    await expect(t.port.findSeeded({ repo: REPO, setupId: SETUP })).rejects.toBeInstanceOf(RunPullRequestError);
+    expect(t.revokes).toEqual(["DELETE Bearer ghs_finish_1"]);
+  });
+});

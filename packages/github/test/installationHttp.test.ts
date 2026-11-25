@@ -260,6 +260,50 @@ describe("createInstallationHttp", () => {
     });
   });
 
+  describe("setup_finish (D#845 ON-13a4)", () => {
+    it("mints a one-repository token that writes Discussions and issues and reads no contents, and reaches /graphql and the issue list and create", async () => {
+      const t = setup((u, init) => (u.pathname === "/graphql" || (u.pathname === "/repos/acme/widgets/issues" && ["GET", "POST"].includes(init?.method ?? "GET")) ? json(200, { ok: true }) : undefined));
+      const http = await t.open("setup_finish", TARGET);
+      await http.request({ method: "POST", path: "/graphql", body: { query: "query X { __typename }", variables: {} } });
+      await http.request({ method: "GET", path: "/repos/acme/widgets/issues", query: { labels: "team-log", state: "open", per_page: 30 } });
+      await http.request({ method: "POST", path: "/repos/acme/widgets/issues", body: { title: "t", body: "b", labels: ["team-log"] } });
+      expect(t.minted).toHaveLength(1);
+      expect(t.minted[0]).toMatchObject({ repositories: ["widgets"], permissions: { metadata: "read", issues: "write", discussions: "write" } });
+      expect(Object.keys(t.minted[0]!.permissions as object).sort()).toEqual(["discussions", "issues", "metadata"]);
+      expect(t.calls.map((c) => [c.method, new URL(c.url).pathname])).toEqual([["POST", "/graphql"], ["GET", "/repos/acme/widgets/issues"], ["POST", "/repos/acme/widgets/issues"]]);
+    });
+
+    it.each([
+      ["GET", "/repos/acme/widgets"],
+      ["GET", "/repos/acme/widgets/contents/src/a.ts"],
+      ["GET", "/repos/acme/widgets/pulls"],
+      ["POST", "/repos/acme/widgets/pulls"],
+      ["POST", "/repos/acme/widgets/labels"],
+      ["POST", "/repos/acme/widgets/issues/3/comments"],
+      ["PATCH", "/repos/acme/widgets/issues/3"],
+      ["PATCH", "/repos/acme/widgets/pulls/3"],
+      ["PUT", "/repos/acme/widgets/issues"],
+      ["DELETE", "/repos/acme/widgets/issues"],
+      ["POST", "/repos/acme/other/issues"],
+      ["GET", "/graphql"],
+      ["POST", "/graphql?x=1"],
+      ["POST", "/app/installations/9/access_tokens"],
+    ] as const)("refuses %s %s, before any request", async (method, path) => {
+      const t = setup(() => undefined);
+      const http = await t.open("setup_finish", TARGET);
+      await expect(http.request({ method, path, body: {} })).rejects.toThrow();
+      expect(t.calls).toEqual([]);
+    });
+
+    it("keeps the issue and Discussion writes to this kind: the pull request client cannot create an issue, and needs the write App", async () => {
+      const t = setup(() => undefined);
+      const pr = await t.open("runner_pr", TARGET);
+      await expect(pr.request({ method: "POST", path: "/repos/acme/widgets/issues", body: {} })).rejects.toThrow("path_refused");
+      await expect(setup(() => undefined, { appKind: "team_readonly" }).open("setup_finish", TARGET)).rejects.toThrow();
+      expect(t.calls).toEqual([]);
+    });
+  });
+
   describe("receipt_block (D#7 DP6a, C22 B4)", () => {
     const SHA = "c".repeat(40);
     const PR = { ...TARGET, prNumber: 7 };

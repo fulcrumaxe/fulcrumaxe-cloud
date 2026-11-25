@@ -273,8 +273,41 @@ export const SETUP_INSTALL_LABELS: readonly Readonly<{ name: string; color: stri
     { name: "verification-substance-absent", color: "FBCA04", description: "Backend PR has no verification substance of any recognised shape — flags, does not block (D#2008)" },
   ].map((row) => Object.freeze(row)),
 );
-const ALL_DOCUMENTS: Readonly<Record<string, string>> = Object.freeze({ ...GITHUB_GRAPHQL_DOCUMENTS, ...MERGE_QUEUE_READ_DOCUMENTS, ...GATE1_ATTEST_DOCUMENTS, ...GATE1_STATUS_DOCUMENTS, ...GATE1_QUEUE_DOCUMENTS, ...SETUP_INSTALL_DOCUMENTS });
-export type GithubGraphqlOperation = keyof typeof GITHUB_GRAPHQL_DOCUMENTS | keyof typeof MERGE_QUEUE_READ_DOCUMENTS | keyof typeof GATE1_ATTEST_DOCUMENTS | keyof typeof GATE1_STATUS_DOCUMENTS | keyof typeof GATE1_QUEUE_DOCUMENTS | keyof typeof SETUP_INSTALL_DOCUMENTS;
+
+/**
+ * D#845 ON-13a4 (A27): the finish phase's Discussion calls, on a client built with `setupFinish` only. Three fixed documents: the repository's node id, whether Discussions are on and its categories (names and ids);
+ * the newest Discussions, of which the step reads only the number of one whose body carries our own marker (`<!-- fx-seed:<setup>:<row key> -->`) AND whose author is our own App (the author's type and login are all it
+ * reads of a person), and drops everything else it sees; and the one write, creating a
+ * Discussion. The write's body must end with that marker, so a runner, a job or a person can never choose what is posted, and it names no repository: only a node id this step just read.
+ */
+export const SETUP_FINISH_DOCUMENTS = Object.freeze({
+  SeedTarget: `query SeedTarget($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    id
+    hasDiscussionsEnabled
+    discussionCategories(first: 25) { nodes { id name } }
+  }
+}`,
+  SeedDiscussions: `query SeedDiscussions($owner: String!, $name: String!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    discussions(first: 100, after: $cursor, orderBy: { field: CREATED_AT, direction: DESC }) {
+      pageInfo { hasNextPage endCursor }
+      nodes { number body author { __typename login } }
+    }
+  }
+}`,
+  SeedCreateDiscussion: `mutation SeedCreateDiscussion($repositoryId: ID!, $categoryId: ID!, $title: String!, $body: String!) {
+  createDiscussion(input: { repositoryId: $repositoryId, categoryId: $categoryId, title: $title, body: $body }) {
+    discussion { number }
+  }
+}`,
+});
+/** The hidden marker that ends every seeded Discussion's body, and the one the team-log issue carries: ids of our own rows only. */
+export const SEED_MARKER = /<!-- fx-seed:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:[A-Z][A-Z0-9-]{0,15} -->$/;
+export const TEAM_LOG_MARKER = /<!-- fx-team-log:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12} -->$/;
+export const TEAM_LOG_LABEL = "team-log";
+const ALL_DOCUMENTS: Readonly<Record<string, string>> = Object.freeze({ ...GITHUB_GRAPHQL_DOCUMENTS, ...SETUP_FINISH_DOCUMENTS, ...MERGE_QUEUE_READ_DOCUMENTS, ...GATE1_ATTEST_DOCUMENTS, ...GATE1_STATUS_DOCUMENTS, ...GATE1_QUEUE_DOCUMENTS, ...SETUP_INSTALL_DOCUMENTS });
+export type GithubGraphqlOperation = keyof typeof GITHUB_GRAPHQL_DOCUMENTS | keyof typeof MERGE_QUEUE_READ_DOCUMENTS | keyof typeof GATE1_ATTEST_DOCUMENTS | keyof typeof GATE1_STATUS_DOCUMENTS | keyof typeof GATE1_QUEUE_DOCUMENTS | keyof typeof SETUP_INSTALL_DOCUMENTS | keyof typeof SETUP_FINISH_DOCUMENTS;
 
 /** D#6 CLOUD-POSTS-FX-GATE1 PR 0: the one label A14 may add, the one extra status context A7 takes on the attester's client, and its only descriptions. */
 export const FX_GATE1_LABEL = "ci:full";
@@ -296,7 +329,7 @@ export interface LocalOnlyAllowlistEntry {
   query: readonly string[];
   body: string;
   /** Present on an opt-in entry: it holds only on a client built with that option, and every other client refuses it. */
-  only?: "gate1Attest" | "engineRemove" | "setupInstall";
+  only?: "gate1Attest" | "engineRemove" | "setupInstall" | "setupFinish";
   /** An opt-in entry that ALSO holds on a client built with this read-only option (A17 alone). */
   alsoOn?: "gate1Status";
 }
@@ -332,6 +365,10 @@ export const LOCAL_ONLY_ALLOWLIST: readonly LocalOnlyAllowlistEntry[] = Object.f
     { id: "A25", method: "POST", paths: ["/graphql"], query: [], body: "{ query: CommitParents, variables: exactly owner, name, sha }", only: "setupInstall" },
     // D#845 ON-8f2b: the engine's labels, on the same opt-in client.
     { id: "A26", method: "POST", paths: ["/repos/{owner}/{repo}/labels"], query: [], body: "{ name, color, description }: exactly one row of SETUP_INSTALL_LABELS", only: "setupInstall" },
+    // D#845 ON-13a4: the finish phase, on a client built with `setupFinish` only.
+    { id: "A27", method: "POST", paths: ["/graphql"], query: [], body: "{ query: SeedTarget, SeedDiscussions or SeedCreateDiscussion, variables: that document's schema; a create body ends with the fx-seed marker }", only: "setupFinish" },
+    { id: "A28", method: "GET", paths: ["/repos/{owner}/{repo}/issues"], query: ["labels", "state", "per_page"], body: "none; labels is required and is exactly team-log", only: "setupFinish" },
+    { id: "A29", method: "POST", paths: ["/repos/{owner}/{repo}/issues"], query: [], body: '{ title, body ending with the fx-team-log marker, labels: ["team-log"] }', only: "setupFinish" },
   ].map((entry) => Object.freeze(entry) as LocalOnlyAllowlistEntry),
 );
 
@@ -449,6 +486,16 @@ const GATE1_STATUS_VARIABLES: Readonly<Record<keyof typeof GATE1_STATUS_DOCUMENT
 const SETUP_INSTALL_VARIABLES: Readonly<Record<keyof typeof SETUP_INSTALL_DOCUMENTS, (v: Record<string, unknown>) => boolean>> = {
   CommitParents: (v) => hasExactKeys(v, ["owner", "name", "sha"]) && ownerOrName(v.owner) && ownerOrName(v.name) && typeof v.sha === "string" && SHA.test(v.sha),
 };
+const SETUP_FINISH_VARIABLES: Readonly<Record<keyof typeof SETUP_FINISH_DOCUMENTS, (v: Record<string, unknown>) => boolean>> = {
+  SeedTarget: (v) => hasExactKeys(v, ["owner", "name"]) && ownerOrName(v.owner) && ownerOrName(v.name),
+  SeedDiscussions: (v) => hasExactKeys(v, ["owner", "name"], ["cursor"]) && ownerOrName(v.owner) && ownerOrName(v.name) && optionalCursor(v),
+  SeedCreateDiscussion: (v) =>
+    hasExactKeys(v, ["repositoryId", "categoryId", "title", "body"]) && str(v.repositoryId, NODE_ID) && str(v.categoryId, NODE_ID) &&
+    typeof v.title === "string" && seedTitleFits(v.title) && typeof v.body === "string" && seedBodyFits(v.body, SEED_MARKER),
+};
+/** A title of 1 to 256 characters with no control character; a body of at most 4000 characters ending with the marker the caller names (and holding no other comment). */
+const seedTitleFits = (t: string): boolean => t.length >= 1 && t.length <= 256 && !/[\u0000-\u001f\u007f]/.test(t);
+const seedBodyFits = (b: string, marker: RegExp): boolean => b.length <= 4000 && marker.test(b) && (b.match(/<!--/g) ?? []).length === 1;
 const GATE1_QUEUE_VARIABLES: Readonly<Record<keyof typeof GATE1_QUEUE_DOCUMENTS, (v: Record<string, unknown>) => boolean>> = {
   Gate1QueueEntries: (v) => hasExactKeys(v, ["owner", "name", "branch"]) && ownerOrName(v.owner) && ownerOrName(v.name) && str(v.branch, REF_NAME),
 };
@@ -499,6 +546,10 @@ function bodyFits(entry: LocalOnlyAllowlistEntry, body: unknown, gate1Attest: bo
       return documentBodyFits(body, GATE1_QUEUE_DOCUMENTS, GATE1_QUEUE_VARIABLES, "Gate1QueueEntries");
     case "A25":
       return documentBodyFits(body, SETUP_INSTALL_DOCUMENTS, SETUP_INSTALL_VARIABLES, "CommitParents");
+    case "A27":
+      return documentBodyFits(body, SETUP_FINISH_DOCUMENTS, SETUP_FINISH_VARIABLES);
+    case "A29":
+      return isPlainObject(body) && hasExactKeys(body, ["title", "body", "labels"]) && typeof body.title === "string" && seedTitleFits(body.title) && typeof body.body === "string" && seedBodyFits(body.body, TEAM_LOG_MARKER) && Array.isArray(body.labels) && body.labels.length === 1 && body.labels[0] === TEAM_LOG_LABEL;
     case "A26":
       return isPlainObject(body) && hasExactKeys(body, ["name", "color", "description"]) && SETUP_INSTALL_LABELS.some((row) => row.name === body.name && row.color === body.color && row.description === body.description);
     case "A22":
@@ -545,20 +596,22 @@ const QUERY_VALUES: Readonly<Record<string, (value: string) => boolean>> = {
   base: (v) => REF_NAME.test(v) && !v.includes(".."),
   recursive: (v) => v === "1",
   state: (v) => v === "open" || v === "closed" || v === "all",
+  labels: (v) => v === TEAM_LOG_LABEL,
   per_page: (v) => /^\d{1,3}$/.test(v) && Number(v) >= 1 && Number(v) <= 100,
   page: (v) => /^\d{1,3}$/.test(v) && Number(v) >= 1 && Number(v) <= 100,
 };
 
 /** The rule a call breaks, or null when it is on the allowlist. `not_allowlisted` for anything the list does not hold; `accept` for a media type other than JSON. */
-export function localOnlyViolation(req: Pick<GithubRequest, "method" | "path" | "query" | "headers" | "body">, exclude: readonly string[] = [], options: { gate1Attest?: boolean; gate1Status?: boolean; engineRemove?: boolean; setupInstall?: boolean } = {}): string | null {
+export function localOnlyViolation(req: Pick<GithubRequest, "method" | "path" | "query" | "headers" | "body">, exclude: readonly string[] = [], options: { gate1Attest?: boolean; gate1Status?: boolean; engineRemove?: boolean; setupInstall?: boolean; setupFinish?: boolean } = {}): string | null {
   const engineRemove = options.engineRemove === true;
   const gate1Attest = options.gate1Attest === true;
   const gate1Status = options.gate1Status === true;
   const setupInstall = options.setupInstall === true;
+  const setupFinish = options.setupFinish === true;
   if (typeof req.method !== "string" || typeof req.path !== "string") return NOT_ALLOWLISTED;
   const where = canonical(foldContinuationBranchPath(req.path));
   if (where === null) return NOT_ALLOWLISTED;
-  const entry = LOCAL_ONLY_ALLOWLIST.find((e) => !exclude.includes(e.id) && (engineRemove ? e.only === "engineRemove" || ENGINE_REMOVE_BASE_IDS.includes(e.id) : e.only !== "engineRemove" && (e.only === undefined || (e.only === "setupInstall" ? setupInstall : gate1Attest || (gate1Status && e.alsoOn === "gate1Status")))) && e.method === req.method && e.paths.some((template) => templateMatches(template, where.segments)) && bodyFits(e, req.body, gate1Attest, engineRemove));
+  const entry = LOCAL_ONLY_ALLOWLIST.find((e) => !exclude.includes(e.id) && (engineRemove ? e.only === "engineRemove" || ENGINE_REMOVE_BASE_IDS.includes(e.id) : e.only !== "engineRemove" && (e.only === undefined || (e.only === "setupInstall" ? setupInstall : e.only === "setupFinish" ? setupFinish : gate1Attest || (gate1Status && e.alsoOn === "gate1Status")))) && e.method === req.method && e.paths.some((template) => templateMatches(template, where.segments)) && bodyFits(e, req.body, gate1Attest, engineRemove));
   if (!entry) return NOT_ALLOWLISTED;
 
   const given = Object.entries(req.query ?? {});
@@ -566,6 +619,8 @@ export function localOnlyViolation(req: Pick<GithubRequest, "method" | "path" | 
   for (const [key, value] of given) if (!QUERY_VALUES[key]?.(String(value))) return NOT_ALLOWLISTED;
   // A key written in the path carries a value too; it is held to the same shape.
   const cut = req.path.search(/[?#]/);
+  // A28 lists issues: without the label it would list every issue of the repository, so the label is REQUIRED, and as a query key (never written in the path).
+  if (entry.id === "A28" && (cut >= 0 || (req.query ?? {}).labels !== TEAM_LOG_LABEL)) return NOT_ALLOWLISTED;
   if (cut >= 0 && req.path[cut] === "?") {
     for (const pair of req.path.slice(cut + 1).split("#")[0]!.split("&").filter((p) => p.length > 0)) {
       const [rawKey, ...rest] = pair.split("=");
@@ -595,14 +650,15 @@ export interface LocalOnlyGithub extends GithubClient {
  * cloud cannot call merge on it at all and a runner or a person merges there. `gate1Attest` turns on the opt-in entries (A14 to A16, and A7's
  * `fx-gate1` shape) for this client only. `gate1Status` turns on A17 alone (a read), and nothing that writes.
  */
-export function localOnlyGithub(inner: GithubClient, options: { exclude?: readonly string[]; gate1Attest?: boolean; gate1Status?: boolean; engineRemove?: boolean; setupInstall?: boolean } = {}): LocalOnlyGithub {
+export function localOnlyGithub(inner: GithubClient, options: { exclude?: readonly string[]; gate1Attest?: boolean; gate1Status?: boolean; engineRemove?: boolean; setupInstall?: boolean; setupFinish?: boolean } = {}): LocalOnlyGithub {
   const exclude = options.exclude ?? [];
   const gate1Attest = options.gate1Attest === true;
   const gate1Status = options.gate1Status === true;
   const engineRemove = options.engineRemove === true;
   const setupInstall = options.setupInstall === true;
+  const setupFinish = options.setupFinish === true;
   const send = (req: GithubRequest): Promise<GithubResponse> => {
-    const rule = localOnlyViolation(req, exclude, { gate1Attest, gate1Status, engineRemove, setupInstall });
+    const rule = localOnlyViolation(req, exclude, { gate1Attest, gate1Status, engineRemove, setupInstall, setupFinish });
     if (rule !== null) return Promise.reject(new LocalOnlyGithubError(rule));
     const hasAccept = Object.keys(req.headers ?? {}).some((name) => name.toLowerCase() === "accept");
     return inner.request(hasAccept ? req : { ...req, headers: { ...req.headers, accept: JSON_ACCEPT } });

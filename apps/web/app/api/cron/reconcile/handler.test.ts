@@ -79,6 +79,7 @@ describe("GET /api/cron/reconcile: the tick", () => {
       "machine_server_sweep",
       "engine_session_stops",
       "setup_install_pr",
+      "setup_finish",
       "github_installations",
       "github_repos",
       "stripe_subscriptions",

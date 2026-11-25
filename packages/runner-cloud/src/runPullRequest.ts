@@ -2,7 +2,7 @@ import { COPY } from "@fulcrumaxe/runner-protocol";
 import { safeChildTitle } from "@fx/core/src/work-items/childTitle.js";
 import { cleanWorkItemTitle } from "@fx/core/src/work-items/title.js";
 import type { TenantQueryable } from "./acceptanceScope.js";
-import { LocalOnlyGithubError, SETUP_INSTALL_LABELS, localOnlyGithub, type GithubClient, type GithubGraphqlOperation, type GithubResponse, type LocalOnlyGithub } from "./localOnlyGithub.js";
+import { LocalOnlyGithubError, SETUP_INSTALL_LABELS, TEAM_LOG_LABEL, localOnlyGithub, type GithubClient, type GithubGraphqlOperation, type GithubResponse, type LocalOnlyGithub } from "./localOnlyGithub.js";
 
 /**
  * D#6 R2b-3e (C21 section 5, C22 section 6): the GitHub port the `done` route will use for a `runner_local` repo. There is no
@@ -127,6 +127,24 @@ export interface SetupInstallPort extends RunPullRequestPort {
   ensureLabels(input: { repo: PullRequestRepo }): Promise<void>;
 }
 
+/** D#845 ON-13a4: what the finish phase reads about a repository before it seeds: its node id, whether Discussions are on, and the categories (names and ids only). */
+export interface SeedTarget {
+  repositoryId: string;
+  discussionsEnabled: boolean;
+  categories: Array<{ id: string; name: string }>;
+}
+
+/** D#845 ON-13a4: the finish phase's calls (A27 to A29, a client of their own): Discussions and the team-log issue. */
+export interface SetupFinishPort extends SetupInstallPort {
+  discussionTarget(repo: PullRequestRepo): Promise<SeedTarget>;
+  /** The seeded Discussions of this setup that exist: row key to Discussion number, found by our hidden marker in the newest 300 Discussions, and only in one OUR App made (the oldest wins when a row key appears twice). */
+  findSeeded(input: { repo: PullRequestRepo; setupId: string }): Promise<Map<string, number>>;
+  createDiscussion(input: { repo: PullRequestRepo; repositoryId: string; categoryId: string; title: string; body: string }): Promise<number>;
+  /** The number of an open `team-log` issue of the repository made by OUR App (not a pull request, not a person's), or null. */
+  findTeamLog(repo: PullRequestRepo): Promise<number | null>;
+  createTeamLog(input: { repo: PullRequestRepo; title: string; body: string }): Promise<number>;
+}
+
 export interface RunPullRequestPort {
   defaultBranch(repo: PullRequestRepo): Promise<string>;
   branchState(input: { repo: PullRequestRepo; branch: string; base: string }): Promise<BranchState>;
@@ -196,6 +214,9 @@ export function pullRequestBody(input: { runId: string; workItemId: string; issu
 ${READY_FALLBACK_LINE}` : body;
 }
 
+/** How many pages of 100 Discussions the lookup before a create reads: the ones this step made are among the newest 300. */
+const SEED_LOOKUP_PAGES = 3;
+const stripBot = (login: string): string => login.toLowerCase().replace(/\[bot\]$/, "");
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const isCount = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
 const malformed = (): never => {
@@ -284,8 +305,9 @@ export function createRunPullRequestPort(deps: {
   /**
    * A client for one repository. With no `purpose` it is the pull request client (find, open, read, close, GraphQL). `"setup_labels"` asks for the one that may create labels: the pull request
    * client's token and path list hold no `issues` write and no `/labels`, so `ensureLabels` must NOT go through it (a fake that did not model the live path list hid exactly that).
+   * `"setup_finish"` (D#845 ON-13a4) asks for the one that may make Discussions and the team-log issue (Discussions and Issues write, no contents).
    */
-  open(repo: PullRequestRepo, purpose?: "setup_labels"): Promise<GithubClient>;
+  open(repo: PullRequestRepo, purpose?: "setup_labels" | "setup_finish"): Promise<GithubClient>;
   /** Waits between looks at a pull request GitHub cannot show yet. Tests inject an instant one. */
   sleep?: (ms: number) => Promise<void>;
   /**
@@ -294,8 +316,8 @@ export function createRunPullRequestPort(deps: {
    * kept and no second pull request is attempted). A throw is a failure to find out, so it is `unavailable`; an empty answer is `rejected`.
    */
   appLogin(repo: PullRequestRepo): Promise<string>;
-}): SetupInstallPort {
-  const client = async (repo: PullRequestRepo, options: { setupInstall?: boolean; purpose?: "setup_labels" } = {}): Promise<LocalOnlyGithub> => {
+}): SetupFinishPort {
+  const client = async (repo: PullRequestRepo, options: { setupInstall?: boolean; setupFinish?: boolean; purpose?: "setup_labels" | "setup_finish" } = {}): Promise<LocalOnlyGithub> => {
     let inner: GithubClient;
     try {
       inner = await (options.purpose === undefined ? deps.open(repo) : deps.open(repo, options.purpose));
@@ -335,6 +357,19 @@ export function createRunPullRequestPort(deps: {
     return mine.map((item) => pullRequestRef(item, branch, repo, true)).sort((a, b) => a.number - b.number)[0]!;
   }
 
+  /** Our own App's login for the repository, lower-cased and without GitHub's `[bot]` suffix (GraphQL names a bot by its slug, REST by `<slug>[bot]`). A failure to learn it is retried; an empty one is refused. */
+  async function ownSlug(repo: PullRequestRepo): Promise<string> {
+    let login: string;
+    try {
+      login = await deps.appLogin(repo);
+    } catch {
+      // fx-swallow-ok: the cause can carry a name or a token; a failure to learn our own login is a failure to ask GitHub, so it is retried
+      throw new RunPullRequestError("unavailable");
+    }
+    if (typeof login !== "string" || login.length === 0) throw new RunPullRequestError("rejected");
+    return stripBot(login);
+  }
+
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   /**
    * `changedFiles` and `markReady` ask GraphQL about a pull request the REST call created a moment ago. GraphQL can answer NOT_FOUND (or a
@@ -355,7 +390,7 @@ export function createRunPullRequestPort(deps: {
     }
   }
 
-  const port: SetupInstallPort = {
+  const port: SetupFinishPort = {
     async defaultBranch(repo) {
       const gh = await client(repo);
       const res = await guarded(() => gh.request({ method: "GET", path: repoPath(repo) }));
@@ -435,6 +470,97 @@ export function createRunPullRequestPort(deps: {
       }
     },
 
+    async discussionTarget(repo) {
+      const gh = await client(repo, { setupFinish: true, purpose: "setup_finish" });
+      try {
+        const data = await query(gh, "SeedTarget", { owner: repo.owner, name: repo.name });
+        const r = need(isObject(data.repository) && data.repository);
+        const cats = isObject(r.discussionCategories) && Array.isArray(r.discussionCategories.nodes) ? (r.discussionCategories.nodes as unknown[]) : malformed();
+        if (typeof r.id !== "string" || r.id.length === 0 || typeof r.hasDiscussionsEnabled !== "boolean") return malformed();
+        return { repositoryId: r.id, discussionsEnabled: r.hasDiscussionsEnabled, categories: cats.map((n) => (isObject(n) && typeof n.id === "string" && typeof n.name === "string" ? { id: n.id, name: n.name } : malformed())) };
+      } finally {
+        // The `setup_finish` token holds Discussions and Issues write: it is revoked as soon as the call ends, whatever its answer (FU-261).
+        await gh.close?.();
+      }
+    },
+
+    async findSeeded({ repo, setupId }) {
+      if (!UUID.test(setupId)) return malformed();
+      const gh = await client(repo, { setupFinish: true, purpose: "setup_finish" });
+      try {
+        const ours = await ownSlug(repo);
+        const marker = new RegExp(`<!-- fx-seed:${setupId}:([A-Z][A-Z0-9-]{0,15}) -->\\s*$`);
+        const found = new Map<string, number>();
+        let cursor: string | null = null;
+        for (let page = 0; page < SEED_LOOKUP_PAGES; page++) {
+          const data = await query(gh, "SeedDiscussions", { owner: repo.owner, name: repo.name, ...(cursor === null ? {} : { cursor }) });
+          const list = need(isObject(data.repository) && isObject(data.repository.discussions) && data.repository.discussions);
+          const info = need(isObject(list.pageInfo) && list.pageInfo);
+          if (!Array.isArray(list.nodes) || typeof info.hasNextPage !== "boolean") return malformed();
+          // Only the number of a Discussion that carries our marker is kept; every other body is dropped here.
+          for (const node of list.nodes as unknown[]) {
+            if (!isObject(node) || !isCount(node.number) || typeof node.body !== "string") return malformed();
+            // A marker is only a claim anybody can type: it counts only on a Discussion OUR App made (a Bot whose login is the App's), or a person could stand in for a row and have it never created.
+            const author = node.author;
+            const mine = isObject(author) && author.__typename === "Bot" && typeof author.login === "string" && stripBot(author.login) === ours;
+            const m = mine ? marker.exec(node.body) : null;
+            if (m !== null && node.number >= 1 && (!found.has(m[1]!) || node.number < found.get(m[1]!)!)) found.set(m[1]!, node.number);
+          }
+          if (!info.hasNextPage) break;
+          if (typeof info.endCursor !== "string" || info.endCursor === cursor) return malformed();
+          cursor = info.endCursor;
+        }
+        return found;
+      } finally {
+        // The `setup_finish` token holds Discussions and Issues write: it is revoked as soon as the call ends, whatever its answer (FU-261).
+        await gh.close?.();
+      }
+    },
+
+    async createDiscussion({ repo, repositoryId, categoryId, title, body }) {
+      const gh = await client(repo, { setupFinish: true, purpose: "setup_finish" });
+      try {
+        const data = await query(gh, "SeedCreateDiscussion", { repositoryId, categoryId, title, body });
+        const made = need(isObject(data.createDiscussion) && isObject(data.createDiscussion.discussion) && data.createDiscussion.discussion);
+        return isCount(made.number) && made.number >= 1 ? made.number : malformed();
+      } finally {
+        // The `setup_finish` token holds Discussions and Issues write: it is revoked as soon as the call ends, whatever its answer (FU-261).
+        await gh.close?.();
+      }
+    },
+
+    async findTeamLog(repo) {
+      const gh = await client(repo, { setupFinish: true, purpose: "setup_finish" });
+      try {
+        const ours = await ownSlug(repo);
+        const res = await guarded(() => gh.request({ method: "GET", path: `${repoPath(repo)}/issues`, query: { labels: TEAM_LOG_LABEL, state: "open", per_page: 30 } }));
+        checkStatus(res, [200]);
+        if (!Array.isArray(res.body)) return malformed();
+        // The list holds pull requests too (each has a `pull_request` key); the first issue is the newest one.
+        // Only an issue OUR App made is ours to reuse: one a person opened with the label is theirs, and the finish phase makes its own beside it.
+        for (const item of res.body as unknown[]) {
+          const user = isObject(item) ? item.user : undefined;
+          if (isObject(item) && item.pull_request === undefined && isCount(item.number) && item.number >= 1 && isObject(user) && user.type === "Bot" && typeof user.login === "string" && stripBot(user.login) === ours) return item.number;
+        }
+        return null;
+      } finally {
+        // The `setup_finish` token holds Discussions and Issues write: it is revoked as soon as the call ends, whatever its answer (FU-261).
+        await gh.close?.();
+      }
+    },
+
+    async createTeamLog({ repo, title, body }) {
+      const gh = await client(repo, { setupFinish: true, purpose: "setup_finish" });
+      try {
+        const res = await guarded(() => gh.request({ method: "POST", path: `${repoPath(repo)}/issues`, body: { title, body, labels: [TEAM_LOG_LABEL] } }));
+        checkStatus(res, [201]);
+        return isObject(res.body) && isCount(res.body.number) && res.body.number >= 1 ? res.body.number : malformed();
+      } finally {
+        // The `setup_finish` token holds Discussions and Issues write: it is revoked as soon as the call ends, whatever its answer (FU-261).
+        await gh.close?.();
+      }
+    },
+
     changedFiles: ({ repo, number }) => settle(() => readChangedFiles(repo, number)),
     markReady: ({ repo, pullRequest }) => (pullRequest.draft ? settle(() => markReadyOnce(repo, pullRequest)) : Promise.resolve()),
 
@@ -493,5 +619,5 @@ export function createRunPullRequestPort(deps: {
         }
       },
     ]),
-  ) as unknown as SetupInstallPort;
+  ) as unknown as SetupFinishPort;
 }

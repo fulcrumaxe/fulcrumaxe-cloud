@@ -224,7 +224,7 @@ export class InstallationTokenCache {
  * permission set no other purpose may ask for (see MERGE_GATE_PERMISSIONS). It exists so the check-run, status and
  * branch-protection reads, and the commit-status write, are NOT in the allowlist of every other purpose.
  */
-export const MINT_PURPOSES = ["run", "preview_read", "sitekit_read", "merge_gate", "plan_read", "runner_git", "plane_push", "plane_merge", "plane_publish_read", "branch_delete", "branch_sync", "pairing_read", "receipt_block", "retraction", "revert_pr", "plane_parity", "setup_push", "setup_labels"] as const;
+export const MINT_PURPOSES = ["run", "preview_read", "sitekit_read", "merge_gate", "plan_read", "runner_git", "plane_push", "plane_merge", "plane_publish_read", "branch_delete", "branch_sync", "pairing_read", "receipt_block", "retraction", "revert_pr", "plane_parity", "setup_push", "setup_labels", "setup_finish"] as const;
 export type MintPurpose = (typeof MINT_PURPOSES)[number];
 
 /**
@@ -302,6 +302,22 @@ export const BRANCH_SYNC_PERMISSIONS: Readonly<Record<string, "read" | "write">>
  * it (`installationHttp.ts` kind `setup_labels`: `POST /labels` with one label row, and nothing else).
  */
 export const SETUP_LABELS_PERMISSIONS: Readonly<Record<string, "read" | "write">> = Object.freeze({ metadata: "read", issues: "write" });
+
+/**
+ * D#845 ON-13a4 (FU-261): the only permissions a `setup_finish` token asks for: `issues: write` and `discussions: write` (the first Discussions and the team-log issue) and `metadata: read` of ONE customer repository.
+ * Not `contents`, not `pull_requests`. Minted fresh for one client and revoked by its `close()`, never cached; what narrows it further is the client built on it (`installationHttp.ts` kind `setup_finish`).
+ */
+export const SETUP_FINISH_PERMISSIONS: Readonly<Record<string, "read" | "write">> = Object.freeze({ metadata: "read", issues: "write", discussions: "write" });
+
+/** D#845 ON-13a4: a `setup_finish` mint must cover exactly the one repository and say `issues: write`, `discussions: write` and `metadata: read` and nothing else; a response that does not say is refused. */
+export function assertSetupFinishToken(minted: Pick<MintedAccessToken, "permissions" | "repositories">, repo: string): void {
+  const perms = minted.permissions;
+  if (perms === undefined || perms === null || typeof perms !== "object" || Array.isArray(perms)) throw new InstallationTokenError("token_scope_mismatch");
+  const repos = minted.repositories;
+  const coversOnly = Array.isArray(repos) && repos.length === 1 && repos[0]!.toLowerCase() === repo.toLowerCase();
+  const keys = Object.keys(perms);
+  if (perms.issues !== "write" || perms.discussions !== "write" || (perms.metadata !== undefined && perms.metadata !== "read") || keys.some((k) => k !== "issues" && k !== "discussions" && k !== "metadata") || !coversOnly) throw new InstallationTokenError("token_scope_mismatch");
+}
 
 /** D#845 ON-8f2b: a `setup_labels` mint must cover exactly the one repository and say `issues: write` and `metadata: read` and nothing else; a response that does not say is refused. */
 export function assertSetupLabelsToken(minted: Pick<MintedAccessToken, "permissions" | "repositories">, repo: string): void {
@@ -599,6 +615,14 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
     allowed = Object.keys(SETUP_LABELS_PERMISSIONS);
     appKind = params.appKind;
     namespace = "setup_labels:";
+  } else if (params.purpose === "setup_finish") {
+    // D#845 ON-13a4 (FU-261): the write App, ONE repository and exactly the fixed set. Fresh every time.
+    assertWriteInstallation(params.appKind);
+    if (isWide(params.scope)) throw new InstallationTokenError("purpose_not_allowed");
+    scope = { repositories: params.scope.repositories, permissions: SETUP_FINISH_PERMISSIONS };
+    allowed = Object.keys(SETUP_FINISH_PERMISSIONS);
+    appKind = params.appKind;
+    namespace = "setup_finish:";
   } else if (params.purpose === "branch_sync") {
     // FIXROUND-BASE-SYNC: the write App, ONE repository (the private repository whose pull request branch is brought up to date), a fixed set. Fresh every time.
     assertWriteInstallation(params.appKind);
@@ -675,7 +699,7 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
     throw new InstallationTokenError("permission_not_allowed");
   }
 
-  const neverCached = params.purpose === "plane_push" || params.purpose === "plane_merge" || params.purpose === "plane_publish_read" || params.purpose === "branch_delete" || params.purpose === "branch_sync" || params.purpose === "pairing_read" || params.purpose === "retraction" || params.purpose === "revert_pr" || params.purpose === "plane_parity" || params.purpose === "setup_push" || params.purpose === "setup_labels";
+  const neverCached = params.purpose === "plane_push" || params.purpose === "plane_merge" || params.purpose === "plane_publish_read" || params.purpose === "branch_delete" || params.purpose === "branch_sync" || params.purpose === "pairing_read" || params.purpose === "retraction" || params.purpose === "revert_pr" || params.purpose === "plane_parity" || params.purpose === "setup_push" || params.purpose === "setup_labels" || params.purpose === "setup_finish";
   if (params.fresh === true && !neverCached) throw new InstallationTokenError("purpose_not_allowed");
   // D#598 C4: a plane_push token is never cached on any path, so it is fresh whatever the caller passes. Nothing is read from or written to the cache for it.
   // The same holds for a plane_publish_read token, which is minted and revoked for one proxied request.
@@ -758,6 +782,14 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
   if (params.purpose === "setup_labels") {
     try {
       assertSetupLabelsToken(minted, (scope as MergeGateScope).repositories[0]);
+    } catch (error) {
+      await params.revoke?.(minted.token).catch(() => undefined);
+      throw error;
+    }
+  }
+  if (params.purpose === "setup_finish") {
+    try {
+      assertSetupFinishToken(minted, (scope as MergeGateScope).repositories[0]);
     } catch (error) {
       await params.revoke?.(minted.token).catch(() => undefined);
       throw error;

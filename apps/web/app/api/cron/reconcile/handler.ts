@@ -28,6 +28,9 @@ import {
   createMachineServerSweep,
   createSetupInstallPrJob,
   type EngineSessionStopsPass,
+  createSetupFinishJob,
+  type SetupFinishStep,
+  setupFinishPending,
   type SetupInstallStep,
   setupInstallPending,
   type MachineSweepStart,
@@ -40,13 +43,13 @@ import {
   type TickDeps,
   type TickSummary,
 } from "@fx/reconcile";
-import { claimSetupInstall, completeSetupInstall, type SetupInstallPort } from "@fx/runner-cloud";
+import { claimSetupFinish, claimSetupInstall, completeSetupFinish, completeSetupInstall, type SetupFinishPort, type SetupInstallPort } from "@fx/runner-cloud";
 import { createAppRunPullRequestPort } from "../../../../lib/github/runnerPullRequest";
 import { getWorker } from "../../../../lib/worker";
 import { startMachineSweep } from "../../../../lib/machineServers";
 import { cronAuthorized } from "../../../../lib/cronAuth";
 
-const [TERMINAL_JOB, CREDITS_JOB, INSTALL_JOB] = FAST_RECONCILE_JOBS;
+const [TERMINAL_JOB, CREDITS_JOB, INSTALL_JOB, FINISH_JOB] = FAST_RECONCILE_JOBS;
 
 /** How far ahead the gate looks again when the 15-minute jobs' state could not be read: their own cadence, so a read failure never lets work wait. */
 const FAST_JOB_RETRY_MS = 15 * 60_000;
@@ -85,6 +88,8 @@ async function fastJobsNextDueAt(pool: Pick<TickDeps["pool"], "query">, summary:
   if (credits.broken) pending.push(CREDITS_JOB);
   // D#845 ON-8f2a: a pushed install whose pull request is not yet opened (the pass failed to reach GitHub, or has not run since the push report marked us).
   if (await setupInstallPending(pool)) pending.push(INSTALL_JOB);
+  // D#845 ON-13a4: a merged install whose Discussions and team-log issue are not made yet (or a seed failure inside its retry window).
+  if (await setupFinishPending(pool)) pending.push(FINISH_JOB);
   if (pending.length === 0) return null;
   const { rows } = await pool.query<{ name: string; due: number }>(
     "SELECT name, (EXTRACT(EPOCH FROM next_due_at) * 1000)::float8 AS due FROM reconcile_jobs WHERE name = ANY($1::text[])",
@@ -132,6 +137,8 @@ export interface ReconcileHandlerDeps {
    * supplies it over the platform_ops pool and the worker's job signer, which answers null while that key is not configured.
    */
   engineSystemStops?: ((scope: { msLeft: () => number }) => Promise<EngineSessionStopsPass>) | undefined;
+  /** D#845 ON-13a4: the GitHub port of the finish step, built when a setup is due. Absent: the app port. */
+  setupFinishPort?: (() => SetupFinishPort) | undefined;
   /** The raw FX_SANDBOX_REAP_MODE: unset is dry_run, off | dry_run | on are themselves, anything else is off (and reported). */
   sandboxReapMode?: string | undefined;
   /**
@@ -311,6 +318,22 @@ export function setupInstallStep(deps: Pick<ReconcileHandlerDeps, "reportError" 
   };
 }
 
+/** D#845 ON-13a4 (Ruling 93): one pass of the finish phase for the reconcile job: claims the oldest due setup (platform_ops, under its lease) and does it. The port is built the first time a setup is due. */
+export function setupFinishStep(deps: Pick<ReconcileHandlerDeps, "reportError" | "setupFinishPort">): SetupFinishStep {
+  let port: SetupFinishPort | undefined;
+  return async (pool) => {
+    const claim = await claimSetupFinish(pool);
+    if (claim === null) return "none";
+    if (claim === "malformed") {
+      deps.reportError(new Error("setup finish claim malformed"), { stage: "reconcile.setup_finish", route: RECONCILE_ROUTE, code: "internal_error" });
+      return "done";
+    }
+    port ??= (deps.setupFinishPort ?? createAppRunPullRequestPort)();
+    const outcome = await completeSetupFinish({ pool, port }, claim);
+    return outcome === "retry" ? "retry" : "done";
+  };
+}
+
 export async function reconcileHandler(
   req: NextRequest,
   injected?: ReconcileHandlerDeps,
@@ -348,6 +371,7 @@ export async function reconcileHandler(
         modelCreditsRevalidate: modelCreditsRevalidateJobFromEnv(deps.platformOpsPool, deps.reportError),
         machine: [createMachineServerSweep(deps.startMachineSweep ?? null), createEngineSessionStops(deps.engineSystemStops ?? null)],
         setupInstall: createSetupInstallPrJob(setupInstallStep(deps)),
+        setupFinish: createSetupFinishJob(setupFinishStep(deps)),
         sandbox: [...sandboxReapJobs(worker, sandboxDeps), sandboxInventoryJob(worker, sandboxDeps)],
       }),
       enabled: deps.enabled,

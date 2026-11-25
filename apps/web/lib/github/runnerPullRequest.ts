@@ -1,6 +1,6 @@
 import type { PrCloseHttp } from "@fx/worker";
 import { fenceForPrClose } from "./localOnlyHttp";
-import { createRunPullRequestPort, type GithubRequest, type PullRequestRepo, type RunPullRequestPort, type SetupInstallPort } from "@fx/runner-cloud";
+import { createRunPullRequestPort, type GithubRequest, type PullRequestRepo, type RunPullRequestPort, type SetupFinishPort } from "@fx/runner-cloud";
 import type { ContinuationBasePort } from "@fx/runner";
 import { createBranchSyncPort, type BranchSyncPort, type InstallationHttpRequest } from "@fx/github";
 import { openInstallationHttp, readRepoAppLogin } from "./installationHttp";
@@ -28,15 +28,16 @@ export async function openFencedPrCloseClient(open: typeof openInstallationHttp,
   return fenceForPrClose(await openRunnerPrHttp(open, repo));
 }
 
-export function createAppRunPullRequestPort(deps: { open?: typeof openInstallationHttp; appLogin?: (repo: PullRequestRepo) => Promise<string> } = {}): SetupInstallPort {
+export function createAppRunPullRequestPort(deps: { open?: typeof openInstallationHttp; appLogin?: (repo: PullRequestRepo) => Promise<string> } = {}): SetupFinishPort {
   const open = deps.open ?? openInstallationHttp;
   const appLogin = deps.appLogin ?? ((repo: PullRequestRepo) => readRepoAppLogin(repo.id));
   return createRunPullRequestPort({
     appLogin,
     async open(repo, purpose) {
       // D#845 ON-8f2b: the install step's labels need `issues: write` and `POST /labels`, which the pull request kind holds neither of; they go through the `setup_labels` kind (the one write, exact list).
+      // D#845 ON-13a4: the finish phase's Discussions and issues go through the `setup_finish` kind (Discussions and Issues write, no contents), never the pull request token.
       const target = { repoId: repo.id, owner: repo.owner, name: repo.name };
-      const http = purpose === "setup_labels" ? await open("setup_labels", target) : await openRunnerPrHttp(open, target);
+      const http = purpose === "setup_labels" ? await open("setup_labels", target) : purpose === "setup_finish" ? await open("setup_finish", target) : await openRunnerPrHttp(open, target);
       return {
         request(req: GithubRequest) {
           if (!METHODS.has(req.method)) return Promise.reject(new Error("method_refused"));
