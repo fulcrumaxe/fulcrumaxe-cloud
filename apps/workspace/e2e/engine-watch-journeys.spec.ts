@@ -233,9 +233,13 @@ test.describe("engine watch journeys", () => {
       requestAnimationFrame(tick);
     });
     const [list, rows, older] = [t(page, "tm-log-list"), t(page, "tm-log-line"), t(page, "tm-log-older")];
-    let most = 0, pages = 0;
+    // Ids count up with time (see Engine.page), so the oldest row on screen says how many of the 10,000 events were scrolled through. That is a count of events
+    // the test controls; the number of scroll steps it took is not (a loaded host can fold several 100-line pages into one step).
+    const TOTAL = 10_000;
+    let most = 0, pages = 0, oldest = TOTAL;
     for (let i = 0; i < 400; i++) {
       most = Math.max(most, await rows.count());
+      oldest = Math.min(oldest, Number((await rows.last().getAttribute("data-id"))!.slice(1)));
       if ((await older.getAttribute("aria-disabled")) === "true" && i > 2) break;
       const last = await rows.last().getAttribute("data-id");
       await list.evaluate((el) => { el.scrollTop = el.scrollHeight; });
@@ -244,7 +248,8 @@ test.describe("engine watch journeys", () => {
     }
     const gap = Math.round(await page.evaluate(() => (window as unknown as { __gap: number }).__gap));
     expect(most).toBeLessThanOrEqual(400);
-    expect(pages).toBeGreaterThan(50);
+    expect(oldest).toBe(0); // the first event ever logged was reached, so all 10,000 passed through the 400-row window
+    expect(pages).toBeGreaterThan(0);
     if (LIVE) expect(gap).toBeLessThanOrEqual(200); // a shared test machine stalls frames for reasons of its own, so the dry run records the figure and the live run holds it
     record(test, "W10", "gap banner shown, most log rows drawn, longest frame gap ms", `5 events, ${most}, ${gap}`);
     await clean(page, errors);
