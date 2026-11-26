@@ -37,10 +37,10 @@ export interface SetRepoPairingInput {
 // These three mirror the CHECK constraints in migration 0799, so a bad value is a 422 with its field instead of a database error.
 const CODE_REPO_RE = /^[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?\/[A-Za-z0-9._-]{1,100}$/;
 const PATH_RE = /^[A-Za-z0-9._/*?{},@+=~-]{1,200}$/;
-const GLOB_CHARS_RE = /[*?{},]/;
+export const GLOB_CHARS_RE = /[*?{},]/;
 export const MAX_OVERLAY_GLOBS = 100;
 
-function pathOk(p: unknown): p is string {
+export function pathOk(p: unknown): p is string {
   return typeof p === 'string' && PATH_RE.test(p) && !p.startsWith('/') && !p.includes('//') && !/(^|\/)\.\.(\/|$)/.test(p);
 }
 

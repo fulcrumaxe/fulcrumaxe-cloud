@@ -245,7 +245,8 @@ describe('survey draft definers [pg]', () => {
         expect((await admin.query(`SELECT has_table_privilege('project_drafts_owner', $1, 'SELECT') AS s`, [table])).rows[0].s, table).toBe(false);
       }
       expect((await admin.query(`SELECT has_column_privilege('project_drafts_owner', 'agent_runs', 'envelope', 'SELECT') AS s`)).rows[0].s).toBe(false);
-      expect((await admin.query(`SELECT has_column_privilege('project_drafts_owner', 'project_drafts', 'prd_md', 'SELECT') AS s`)).rows[0].s).toBe(false);
+      // 1103 (twin_adopt_draft) lets it read the draft text to copy a public repo's plan to its twin; it still holds no UPDATE or DELETE on a draft.
+      expect((await admin.query(`SELECT has_column_privilege('project_drafts_owner', 'project_drafts', 'prd_md', 'UPDATE') AS s`)).rows[0].s).toBe(false);
     });
   });
 });
