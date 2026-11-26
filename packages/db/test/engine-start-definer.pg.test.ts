@@ -74,6 +74,8 @@ describe('engine_start_definer [pg]', () => {
       { proname: 'engine_start_covered', prosecdef: true, proconfig: pinned, app: false, ops: true, pub: false },
       { proname: 'engine_system_start_issue', prosecdef: true, proconfig: pinned, app: false, ops: true, pub: false },
       { proname: 'engine_system_starts_due', prosecdef: true, proconfig: pinned, app: false, ops: true, pub: false },
+      // 1109: the lister of the restart that follows a merged engine update.
+      { proname: 'engine_update_starts_due', prosecdef: true, proconfig: pinned, app: false, ops: true, pub: false },
     ]);
     for (const fn of ['engine_plan_ended(uuid)', 'engine_repo_operated(uuid, uuid)']) {
       const r = (await admin.query(`SELECT has_function_privilege('engine_start_definer', $1::regprocedure, 'EXECUTE') AS start, has_function_privilege('machine_jobs_owner', $1::regprocedure, 'EXECUTE') AS jobs, has_function_privilege('app_user', $1::regprocedure, 'EXECUTE') AS app, has_function_privilege('platform_ops', $1::regprocedure, 'EXECUTE') AS ops, has_function_privilege('public', $1::regprocedure, 'EXECUTE') AS pub`, [fn])).rows[0];

@@ -45,7 +45,7 @@ import {
   type TickDeps,
   type TickSummary,
 } from "@fx/reconcile";
-import { claimSetupFinish, claimSetupInstall, completeSetupFinish, completeSetupInstall, type SetupFinishPort, type SetupInstallPort } from "@fx/runner-cloud";
+import { claimEngineUpdate, claimSetupFinish, claimSetupInstall, completeEngineUpdatePr, completeSetupFinish, completeSetupInstall, type SetupFinishPort, type SetupInstallPort } from "@fx/runner-cloud";
 import { createAppRunPullRequestPort } from "../../../../lib/github/runnerPullRequest";
 import { getWorker } from "../../../../lib/worker";
 import { startMachineSweep } from "../../../../lib/machineServers";
@@ -302,7 +302,9 @@ export function defaultReconcileDeps(): ReconcileHandlerDeps {
       const deps = { pool: cachedPlatformOpsPool!, engineCommandSigner: async () => (await getWorker())?.engineCommandSigner ?? null, pullRequests: createAppRunPullRequestPort, reportError };
       const queued = await drainOperateQueue(deps, scope);
       const first = await issueSystemStarts(deps, scope);
-      return { not_configured: queued.not_configured && first.not_configured, issued: queued.issued + first.issued, results: [...queued.results, ...first.results] };
+      // D#845 ON-15c: the restart of a session whose engine update merged.
+      const restarted = await issueSystemStarts(deps, { ...scope, cause: "engine_update" });
+      return { not_configured: queued.not_configured && first.not_configured && restarted.not_configured, issued: queued.issued + first.issued + restarted.issued, results: [...queued.results, ...first.results, ...restarted.results] };
     },
     getWorker,
     readSandboxReapDbMode: () => readSandboxReapDbMode(cachedPlatformOpsPool!),
@@ -318,7 +320,17 @@ export function setupInstallStep(deps: Pick<ReconcileHandlerDeps, "reportError" 
   let port: SetupInstallPort | undefined;
   return async (pool) => {
     const claim = await claimSetupInstall(pool);
-    if (claim === null) return "none";
+    if (claim === null) {
+      // D#845 ON-15c: after the installs, the pull request of an engine update whose runner pushed its branch.
+      const update = await claimEngineUpdate(pool);
+      if (update === null) return "none";
+      if (update === "malformed") {
+        deps.reportError(new Error("engine update claim malformed"), { stage: "reconcile.engine_update_pr", route: RECONCILE_ROUTE, code: "internal_error" });
+        return "done";
+      }
+      port ??= (deps.setupInstallPort ?? createAppRunPullRequestPort)();
+      return (await completeEngineUpdatePr({ pool, port }, update)) === "retry" ? "retry" : "done";
+    }
     if (claim === "malformed") {
       deps.reportError(new Error("setup install claim malformed"), { stage: "reconcile.setup_install_pr", route: RECONCILE_ROUTE, code: "internal_error" });
       return "done";

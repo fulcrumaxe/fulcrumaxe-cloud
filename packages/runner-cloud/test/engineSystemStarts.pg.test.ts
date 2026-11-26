@@ -250,7 +250,7 @@ describe("system engine first start [pg]", () => {
     });
     it("refuses a cause outside the closed set, and a missing argument, with 22023 and writes nothing", async () => {
       const r = await rig();
-      for (const cause of ["engine_update", "plan", "", "FIRST_START", null]) expect(await code(issue(r, { cause })), String(cause)).toBe("22023");
+      for (const cause of ["engine_updated", "plan", "", "FIRST_START", null]) expect(await code(issue(r, { cause })), String(cause)).toBe("22023");
       expect(await code(issue(r, { noJob: true }))).toBe("22023");
       await untouched(r);
     });

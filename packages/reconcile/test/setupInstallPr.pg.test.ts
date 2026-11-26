@@ -55,4 +55,12 @@ describe('setup_install_pr reconcile job', () => {
     expect((await jobsWithWork(ops)).has(SETUP_INSTALL_PR_JOB)).toBe(false);
     expect(await setupInstallPending({ query: async () => { throw new Error('down'); } })).toBe(false);
   });
+
+  it('the work probe asks for an engine update with a pushed commit and no pull request as well as for a setup (D#845 ON-15c)', async () => {
+    const sql: string[] = [];
+    const probe = { query: async (text: string) => (sql.push(text), { rows: [{ pending: true }] }) } as never;
+    expect(await setupInstallPending(probe)).toBe(true);
+    expect(sql).toHaveLength(1);
+    expect(sql[0]).toMatch(/setup_install_pr_pending\(\)\s+OR\s+engine_update_pr_pending\(\)/);
+  });
 });

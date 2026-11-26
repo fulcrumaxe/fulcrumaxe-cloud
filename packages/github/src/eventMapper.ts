@@ -145,6 +145,8 @@ export interface CreateWorkItemEvent {
 
 /** D#845 ON-8f2b: the head branch of a project setup's install pull request (the engine version in its name). */
 const SETUP_INSTALL_BRANCH = /^fx\/engine-install-[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}$/;
+/** D#845 ON-15c: the head branch of an engine update's pull request (the release it brings in its name). */
+const ENGINE_UPDATE_BRANCH = /^fx\/engine-update-[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}$/;
 
 /** pull_request.opened / .closed: transitions an existing, linked work item. */
 export interface TransitionPrEvent {
@@ -658,6 +660,7 @@ export type ApplyResult =
   | { applied: 'proposal_changed'; count: number }
   | { applied: 'pr_push_recorded'; workItemId: string; recorded: boolean }
   | { applied: 'setup_install_pr_closed'; outcome: 'finished' | 'failed' | 'recorded' }
+  | { applied: 'engine_update_pr_closed'; outcome: 'finished' | 'failed' | 'recorded' }
   | { applied: 'queue_event_recorded'; workItemId: string; recorded: boolean }
   | { applied: 'mcp_config_routed' }
   | { applied: 'repo_names_written'; count: number }
@@ -969,6 +972,12 @@ export async function applyMappedEvent(client: PoolClient, ctx: ApplyEventCtx, m
         const { rows } = await client.query<{ r: string }>('SELECT setup_install_pr_closed($1::uuid, $2::int, $3::boolean, $4) AS r', [ctx.repoId, mapped.prNumber, mapped.toStage === 'merged', mapped.headRef]);
         const outcome = rows[0]?.r;
         if (outcome === 'finished' || outcome === 'failed' || outcome === 'recorded') return { applied: 'setup_install_pr_closed', outcome };
+      }
+      // D#845 ON-15c: the same watch for an engine update's pull request; the definer holds the branch to the update's own version and the number to the update's own record.
+      if ((mapped.toStage === 'merged' || mapped.toStage === 'closed_unmerged') && !mapped.isFork && mapped.baseIsDefault === true && typeof mapped.headRef === 'string' && ENGINE_UPDATE_BRANCH.test(mapped.headRef)) {
+        const { rows } = await client.query<{ r: string }>('SELECT engine_update_pr_closed($1::uuid, $2::int, $3::boolean, $4) AS r', [ctx.repoId, mapped.prNumber, mapped.toStage === 'merged', mapped.headRef]);
+        const outcome = rows[0]?.r;
+        if (outcome === 'finished' || outcome === 'failed' || outcome === 'recorded') return { applied: 'engine_update_pr_closed', outcome };
       }
       // D#483 P1: a close or merge also finds the item a runner run opened this pull request for (its body carries no "Closes #N"). An open or a push never does: those keep the body link.
       const closing = mapped.toStage === 'merged' || mapped.toStage === 'closed_unmerged';

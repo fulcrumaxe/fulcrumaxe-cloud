@@ -11,7 +11,7 @@ import { RunPullRequestError, type RunPullRequestPort } from "./runPullRequest.j
  * on every call. The default branch head is read through the App port outside any transaction, once per repo; a GitHub that cannot be asked leaves the repo due. The spend guard runs once per account's batch before anything is read or signed.
  */
 
-export type SystemStartCause = "first_start" | "operate_on";
+export type SystemStartCause = "first_start" | "operate_on" | "engine_update";
 export type SystemStartResult =
   | "issued" | "cause_gone" | "plan" | "busy" | "epoch_moved" | "not_placed"
   | "github_unavailable" | "github_refused" | "default_branch_empty" | "hosted_engine_unavailable" | "error";
@@ -49,9 +49,10 @@ interface DueRow { o_account: string; o_repo: string; o_runner: string; o_repo_g
 const ROUTE = "reconcile.engine_session_starts";
 const SHA40 = /^[0-9a-f]{40}$/;
 
-/** `first_start` lists the finished installs that still hold `start_pending`; `operate_on` lists the repos whose queue row (ON-13c2) the drain has claimed. */
+/** `first_start` lists the finished installs that still hold `start_pending`; `operate_on` lists the repos whose queue row (ON-13c2) the drain has claimed; `engine_update` lists the repos whose merged update waits for its restart (ON-15c). */
+const LISTERS: Record<SystemStartCause, string> = { first_start: "engine_system_starts_due", operate_on: "engine_operate_on_starts_due", engine_update: "engine_update_starts_due" };
 const listDue = async (pool: Pool, cause: SystemStartCause, accountId: string | null, repoId: string | null, limit: number): Promise<DueRow[]> =>
-  (await pool.query<DueRow>(`SELECT * FROM ${cause === "operate_on" ? "engine_operate_on_starts_due" : "engine_system_starts_due"}($1::uuid, $2::uuid, $3::integer)`, [accountId, repoId, limit])).rows;
+  (await pool.query<DueRow>(`SELECT * FROM ${LISTERS[cause]}($1::uuid, $2::uuid, $3::integer)`, [accountId, repoId, limit])).rows;
 
 /** The head of the default branch, or the reason it could not be read. */
 async function readHead(port: HeadReader, row: DueRow): Promise<{ head: string } | { refused: SystemStartResult }> {

@@ -223,6 +223,7 @@ export async function githubWebhookHandler(
 
   const result: HandleWebhookResult = await handle(deps, eventName, payload as GithubWebhookPayload, deliveryId, app.kind);
   // D#845 ON-13a4: a merged install pull request moves its setup to the finish phase; wake the reconciler so the Discussions and the team-log issue are made on the next tick.
-  if (result.handled && result.result.applied === "setup_install_pr_closed" && result.result.outcome === "finished") void markWorkPending("reconcile");
+  // D#845 ON-15c: a merged engine update is waiting for its restart: the same wake.
+  if (result.handled && (result.result.applied === "setup_install_pr_closed" || result.result.applied === "engine_update_pr_closed") && result.result.outcome === "finished") void markWorkPending("reconcile");
   return NextResponse.json(result, { status: 200 });
 }
