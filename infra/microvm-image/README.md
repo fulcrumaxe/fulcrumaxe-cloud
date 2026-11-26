@@ -7,6 +7,7 @@ The guest side of the Firecracker microVM engine: what runs inside the VM, and t
 | `lock.json` | Every download (guest kernel, Firecracker, the agent CLI, node, pnpm, and the build tools), by URL and sha256, for amd64 and arm64. |
 | `Dockerfile` | The template image: the sandbox image's user and home, plus pnpm, Postgres 18, Chromium (Playwright, with its own sandbox on), Python, jq, bubblewrap, socat (both are needed by the CLI's own Bash sandbox, which refuses to start without them) and iproute2. It reads `lock.json`; it holds no URL of its own. |
 | `guest/init` | PID 1 of the guest. Mounts the pseudo file systems, writes `/etc/hosts`, brings up loopback, starts the agent. The guest has no network device. |
+| `guest/engine-bridge.py`, `guest/engine-supervisor.entry.mjs` | The engine session's supervisor and the bridge from vsock port 5255 to it (below). |
 | `guest/agent.py` | The in-guest agent: ping, exec, put, get and counters over vsock, for the host only; plus `exec_stream` and `kill` (below). |
 
 ## Streaming exec and kill
@@ -50,6 +51,21 @@ nothing). `/proc/<pid>/environ` is read only into one buffer that is zeroed afte
 hides `/proc/<cli>/environ` from the Bash sandbox, but not the environment the CLI's children inherit (the engine gate must scrub the CLI's
 subprocess environment; that is a separate follow-up, FU-120), and a copy a holder deliberately writes somewhere (tmpfs, the root disk, the
 network) is outside what the wipe can undo; the snapshot grep in the real-VM test is the check on the disk side.
+
+## The engine session's supervisor
+
+`guest/engine-bridge.py` and `/usr/lib/fx/fx-engine-supervisor.mjs` (D#845 ON-13b1). The supervisor is the runner's own `engineHost/supervisor.ts` (EB-12a's restarts at 1, 2 and 5 minutes, `crash_loop`, no permission-skipping flag) wrapped by `engineHost/guestSession.ts`, bundled for the image's node by
+`fx-runner vm build-image` (through `scripts/vm-main.mjs`, whose esbuild bundles `guest/engine-supervisor.entry.mjs`). `guest/init` starts the bridge in a restart loop; the bridge starts the supervisor as the unprivileged user (state under `/vercel/sandbox/.fx-engine`, the
+root disk being read-only), listens on vsock port 5255 (host only) and copies each connection to the supervisor's unix socket, `/run/fx-engine/channel.sock`. It reads nothing of the channel: one request per connection, a 4-byte length and JSON, five operations (`tick`, `command`,
+`stop`, `events_read`, `token_put`), every reply `{ok:true,...}` or `{ok:false,code}`. The header of `guestSession.ts` is the contract.
+
+- **The credential.** `token_put` carries 1..4096 printable ASCII bytes after the frame. They sit in one buffer that the next `token_put` and every `stop` zero; the host gets them in its environment at launch and nowhere else, and they are never logged, spooled or in an event.
+  `stop` wipes first, then ends the host, and then **the supervisor program exits** (as it does after `crash_loop`): Node cannot zero the copies a launch makes (the latin1 string, the merged environment object, libuv's envp copy), so zeroing the buffer is not enough on its own. The bridge sees the supervisor end and kills the group, the guest kernel's `init_on_free=1` zeroes the freed pages, and init starts a fresh supervisor that holds no credential. A snapshot is only ever taken after a channel `stop` (ON-13b2 sends one before every snapshot). The real-VM test greps the state after the wipe AND a RAM snapshot taken after the channel `stop`, the way `vmToken.real.test.ts` does for the agent's token.
+  The 20 MB host log redacts exact copies of the token (including one split across two chunks), so a tool output that echoes it never reaches the disk.
+  The host runs with `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1` (the guest's pinned environment), so a tool the host starts does not inherit it; a copy a tool writes on purpose is outside what the wipe can undo (FU-120).
+- **Usage and events.** Every `result` line with all four token totals is one `usage_tick` event of raw counts; the cloud prices them. `events_read` returns whole lines of the event spool from a byte offset. The guest log is 20 MB (rotating to `.1`).
+- **Secrets on GitHub writes (S-8).** Neither place for an exact-match filter exists here: the guest reaches GitHub only through the host's egress proxy (a CONNECT tunnel and the reverse endpoint's plain-HTTP rewrite for git), which never sees a decrypted request body on the tunnel (the reverse endpoint does see git's plain HTTP, but a push's objects are zlib-compressed, so an exact-match over the bytes cannot find a secret in them), and the tools the host runs share its uid, so a
+  secret kept under another uid cannot be handed to the one process that needs it. J12 (planted injection text, sentinel secrets in every GitHub write) is the guard, as the Spec says.
 
 ## Building a root disk
 

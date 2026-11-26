@@ -34,6 +34,8 @@ ip link set lo up
 for pair in "5253 5253" "80 5254"; do
   ( while :; do /usr/bin/python3 -I /usr/lib/fx/relay.py $pair; sleep 1; done ) &
 done
+# D#845 ON-13b1: the engine session's supervisor and the bridge that carries the host's vsock port 5255 to it. engine-bridge.py starts the supervisor as the unprivileged user and ends with it; this loop starts both again.
+( while :; do /usr/bin/python3 -I /usr/lib/fx/engine-bridge.py; sleep 1; done ) &
 echo "FXMARK init_done uptime=$(cut -d' ' -f1 /proc/uptime)"
 /usr/bin/python3 -I /usr/lib/fx/agent.py &
 agent=$!

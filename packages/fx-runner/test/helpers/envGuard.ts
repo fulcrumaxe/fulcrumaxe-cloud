@@ -87,6 +87,7 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/engineHost/hostConfig.ts": ["fs", "path"], // EB-12c: the host's settings read: lstat, a no-follow open judged by the open handle, one bounded read
   "src/engineHost/hostFeeds.ts": ["crypto", "fs", "path"], // EB-12c: the feeds the host reads: lstat, no-follow opens judged by the handle, bounded reads, a random id
   "src/engineHost/hostInbox.ts": ["crypto", "fs", "path"], // EB-12c: the host's inbox writes: lstat, no-follow opens, a random temp-file name, an exclusive create, one rename
+  "src/engineHost/guestSession.ts": ["fs", "net", "path"], // ON-13b1: the engine session's channel (a private unix socket, no-follow reads of its own spool); it starts no program, the runtime hands in `launch`
   "src/engineHost/hostFiles.ts": ["fs", "path", "crypto"], // EB-12a: the host stream log (O_NOFOLLOW append at 0600, rotated at 20 MB) and the read of the bridge state file; no process is started
   "src/assistant/cloudCall.ts": [], // the one cloud call: the injected fetch, a fixed User-Agent, no redirect
   "src/assistant/fence.ts": [], // pure text work: the untrusted-content fence over a reply

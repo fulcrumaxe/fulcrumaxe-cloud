@@ -1,0 +1,294 @@
+/**
+ * D#845 ON-13b1: the engine session's supervisor and its channel. The same module runs in two places: as `fx-engine-supervisor` inside a microVM (started by the guest's `engine-bridge.py`, which carries vsock port 5255 to the
+ * unix socket below) and as the program held in an engine session's systemd unit on the standard tier (`fx-runner __engine-supervise`, which replaces the idle holder). It wraps EB-12a's `createSupervisor` and adds only:
+ *  - the channel: ONE request per connection on a private unix socket, the frame being a 4-byte big-endian length and that many bytes of JSON (the guest agent's own frame; at most `FRAME_MAX`), and for `token_put` `size` raw bytes
+ *    after it. The operations are a closed list, an unknown one or a key outside its shape is `bad_request`, and every reply is `{ok:true,...}` or `{ok:false,code}` with a code of `ChannelCode`: never text of the stream, a path or an error.
+ *      - `tick {text}`: starts the host on the first one (the session config is read, every EB-12a refusal still applies) and sends it one user message. Single flight and the tick kinds are ON-13b2's.
+ *      - `command {command}`: refused `command_unverified` until `verifyCommand` is given (ON-13b2 re-verifies the signed command with the pinned key); never forwarded unverified.
+ *      - `stop {reason?}`: wipes the credential FIRST, then ends the host through the supervisor's own stop (close stdin, then the kill path). A stopped session takes no further tick: the next start is a new supervisor.
+ *      - `events_read {after}`: the engine events the supervisor wrote (`engine-host-events.jsonl`), whole lines from byte `after`, at most `EVENTS_READ_MAX` bytes; `reset` when the file is shorter than `after` (it rotated).
+ *      - `token_put {name:"claude", size}`: 1..4096 printable ASCII bytes follow the frame (no JSON field carries them). They are held in ONE buffer that is zeroed by the next `token_put` and by every `stop`, handed to the host's
+ *        environment at launch as the subscription variable and nowhere else, and never logged, echoed, spooled or put in an event. Node cannot zero the copies it makes (the latin1 string, the merged environment object and libuv's envp copy), so zeroing the buffer is NOT enough on its own. The guarantee the snapshot needs is that the PROGRAM ENDS:
+ *        after a channel `stop` and after `crash_loop` the supervisor exits (`finished()`, which `runEngineSupervise` waits for), the bridge kills the group, the guest kernel's `init_on_free=1` zeroes the pages and init starts a fresh
+ *        supervisor with no credential. The real-VM test greps a RAM snapshot taken after the channel `stop` for the token.
+ *  - `usage_tick`: every `result` line with all four token totals becomes one `usage_tick` engine event (raw counts only; the cloud prices them, never the engine). A turn with no usage is not a tick ("not recorded", never zero).
+ *  - the 20 MB rotating log (`openHostLog`) and the event spool, in the session's state directory (the guest root is read-only: `/vercel/sandbox/...` is the writable place).
+ * Restarts (1, 2, 5 minutes) and `crash_loop` are the supervisor's. Nothing here starts a program: the runtime hands in `launch`, the kill path and the clock.
+ */
+import { chmodSync, closeSync, constants, fstatSync, lstatSync, openSync, readSync, unlinkSync } from "node:fs";
+import net from "node:net";
+import path from "node:path";
+import { ENGINE_DURATION_S_MAX, MODEL_TIER_PATTERN } from "@fulcrumaxe/runner-protocol";
+import { SUBSCRIPTION_TOKEN_VAR } from "../job/cleanEnv.js";
+import type { EngineHostHandle } from "../engineBridge/halt.js";
+import { ensurePrivateDir, readJsonNoFollow } from "../engineBridge/stateFiles.js";
+import { createEventSpool, SPOOL_FILE } from "./hostFeeds.js";
+import { acquireHostLock, isRepoGhId, openHostLog, type BridgeState } from "./hostFiles.js";
+import { openSessionStore } from "./session.js";
+import { createSupervisor, type HostChild, type HostSpawnSpec, type StopReason, type Supervisor, type TurnResult } from "./supervisor.js";
+
+/** The guest vsock port `engine-bridge.py` listens on (the agent's is 5252, the two relays' 5253 and 5254). */
+export const CHANNEL_PORT = 5255;
+export const CHANNEL_OPS = ["tick", "command", "stop", "events_read", "token_put"] as const;
+export type ChannelOp = (typeof CHANNEL_OPS)[number];
+export const FRAME_MAX = 128 * 1024;
+export const TICK_TEXT_MAX = 64 * 1024;
+export const TOKEN_MAX = 4096;
+export const EVENTS_READ_MAX = 64 * 1024;
+export const CONNECTION_IDLE_MS = 30_000;
+/** The one line the program prints once it listens; the standard tier's unit waits for it (it said the same while it was an idle holder). */
+export const SESSION_READY_LINE = "fx-engine-session-ready";
+export const SESSION_CONFIG_FILE = "session.json";
+export const CHANNEL_SOCKET = "channel.sock";
+
+export type ChannelCode = "bad_request" | "command_unverified" | "no_session_config" | "stopped" | "refused" | "host_not_running" | "host_ended" | "internal";
+export type ChannelReply = { ok: true; [key: string]: unknown } | { ok: false; code: ChannelCode; reason?: string };
+
+/** What the machine gives the module; `scripts/engine-supervise-host.mjs` is the one real implementation (src/ never names a child-spawning module). */
+export interface GuestRuntime {
+  uid: number;
+  ownPid: number;
+  claudePath: string;
+  /** A fixed allowlist, never a credential. */
+  env: Record<string, string>;
+  launch: (spec: HostSpawnSpec) => HostChild;
+  isAlive: (pid: number) => boolean;
+  startOf: (pid: number) => string | undefined;
+  killHost: (handle: EngineHostHandle) => Promise<unknown>;
+  killScope: (unit: string) => Promise<void>;
+  now: () => number;
+  after: (ms: number, fn: () => void) => () => void;
+}
+
+export interface GuestSessionOptions {
+  /** The session's state directory (0700, owned by `runtime.uid`). */
+  dir: string;
+  runtime: GuestRuntime;
+  /** ON-13b2: the signed command's in-guest re-verification. Returns the text to send the host, or undefined to refuse. Left out, every `command` is refused. */
+  verifyCommand?: ((command: unknown) => string | undefined) | undefined;
+}
+
+export interface GuestSession {
+  request(header: unknown, body?: Buffer): Promise<ChannelReply>;
+  /** Listens on `socketPath` (0600, one request per connection). */
+  serve(socketPath: string): Promise<{ close(): Promise<void> }>;
+  /** The supervisor ended (a stop, `crash_loop`, a refusal while restarting); undefined while it runs or before it started. */
+  ended(): StopReason | undefined;
+  /** Settles once a channel `stop` has been answered or the supervisor has ended on its own (`crash_loop`): the credential is wiped and the PROGRAM must now exit, so no copy of the token survives in its memory. */
+  finished(): Promise<void>;
+}
+
+const KEYS: Record<ChannelOp, readonly string[]> = { tick: ["text"], command: ["command"], stop: ["reason"], events_read: ["after"], token_put: ["name", "size"] };
+const PRINTABLE = /^[\x21-\x7e]+$/;
+const fail = (code: ChannelCode, reason?: string): ChannelReply => (reason === undefined ? { ok: false, code } : { ok: false, code, reason });
+const isInt = (v: unknown, min: number, max: number): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= min && v <= max;
+
+export function createGuestSession(options: GuestSessionOptions): GuestSession {
+  const { dir, runtime: rt } = options;
+  ensurePrivateDir(dir, rt.uid);
+  const log = openHostLog(dir, rt.uid);
+  const spool = createEventSpool({ dir, uid: rt.uid, now: rt.now });
+  let secret: Buffer | undefined;
+  let operating = true;
+  let started = false;
+  let ended: StopReason | undefined;
+  let windowStart = rt.now();
+  let finish: () => void = () => undefined;
+  const finished = new Promise<void>((resolve) => void (finish = resolve));
+  const wipe = (): void => {
+    secret?.fill(0);
+    secret = undefined;
+  };
+  const config = (): { repo_gh_id: string; repo_checkout: string } | undefined => {
+    try {
+      const raw = readJsonNoFollow(dir, SESSION_CONFIG_FILE, rt.uid) as { repo_gh_id?: unknown; repo_checkout?: unknown } | null | undefined;
+      const id = raw?.repo_gh_id;
+      const checkout = raw?.repo_checkout;
+      return typeof id === "string" && isRepoGhId(id) && typeof checkout === "string" && path.isAbsolute(checkout) && path.normalize(checkout) === checkout ? { repo_gh_id: id, repo_checkout: checkout } : undefined;
+    } catch {
+      // fx-swallow-ok: a config that cannot be read safely is no config; the tick answers `no_session_config` and nothing is started
+      return undefined;
+    }
+  };
+  /** Raw counts of one window of the host's model use; the window is the time since the previous `result`. */
+  const usageTick = (turn: TurnResult): void => {
+    const at = rt.now();
+    const seconds = Math.min(ENGINE_DURATION_S_MAX, Math.max(0, Math.round((at - windowStart) / 1000)));
+    windowStart = at;
+    if (turn.usage === undefined) return;
+    const tier = turn.model !== undefined && MODEL_TIER_PATTERN.test(turn.model) ? turn.model : "unknown";
+    spool.write({ kind: "usage_tick", model_tier: tier, input_tokens: turn.usage.input, output_tokens: turn.usage.output, cache_read_tokens: turn.usage.cache_read, cache_write_tokens: turn.usage.cache_write, window_s: seconds });
+  };
+  const supervisor: Supervisor = createSupervisor({
+    stateDir: dir,
+    uid: rt.uid,
+    platform: "linux",
+    claudePath: rt.claudePath,
+    // The VM (or the unit) is the boundary: the host is started directly, and the kill path is its group of programs.
+    scopeAvailable: async () => true,
+    wrapLaunch: (program, args) => ({ file: program, args }),
+    readBridgeState: (): BridgeState | undefined => {
+      const c = config();
+      return c === undefined ? undefined : { ...c, bridge_enabled: true, operate_enabled: operating, written_at: rt.now() };
+    },
+    launch: rt.launch,
+    env: rt.env,
+    secretEnv: () => (secret === undefined ? undefined : { [SUBSCRIPTION_TOKEN_VAR]: secret.toString("latin1") }),
+    log,
+    emit: (e) => void spool.write(e),
+    now: rt.now,
+    after: rt.after,
+    isAlive: rt.isAlive,
+    startTimeOf: rt.startOf,
+    isOurHost: (h) => rt.isAlive(h.pid) && h.start_time !== undefined && rt.startOf(h.pid) === h.start_time,
+    claimer: { pid: rt.ownPid, start: rt.startOf(rt.ownPid) },
+    acquireLock: () => acquireHostLock(dir, rt.uid, { ownPid: rt.ownPid, isAlive: rt.isAlive, startOf: rt.startOf }),
+    killHost: rt.killHost,
+    killScope: rt.killScope,
+    sessionStore: openSessionStore(dir, rt.uid),
+    observer: { onTurn: usageTick, onExit: () => undefined },
+  });
+  void supervisor.stopped.then((reason) => {
+    ended = reason;
+    wipe();
+    finish();
+  });
+
+  async function tick(text: string): Promise<ChannelReply> {
+    if (!operating) return fail("stopped");
+    if (ended !== undefined) return fail("host_ended", ended);
+    let first = false;
+    if (!started) {
+      if (config() === undefined) return fail("no_session_config");
+      const result = await supervisor.start();
+      if (!result.ok) return fail("refused", result.reason);
+      started = first = true;
+    }
+    return supervisor.send(text) ? { ok: true, started: first } : fail("host_not_running");
+  }
+
+  async function stop(reason: "stopped_by_person" | "machine_shutdown"): Promise<ChannelReply> {
+    operating = false;
+    wipe(); // before the host is touched: nothing that can still launch it holds the credential
+    if (started) await supervisor.stop(reason);
+    else supervisor.cleanup();
+    finish();
+    return { ok: true, survivors: supervisor.survivors(), token_wiped: secret === undefined };
+  }
+
+  function eventsRead(after: number): ChannelReply {
+    let fd = -1;
+    try {
+      fd = openSync(path.join(dir, SPOOL_FILE), constants.O_RDONLY | constants.O_NOFOLLOW);
+      const st = fstatSync(fd);
+      if (!st.isFile() || st.uid !== rt.uid || (st.mode & 0o022) !== 0) return { ok: true, lines: [], next: 0, reset: false };
+      const reset = after > st.size;
+      const from = reset ? 0 : after;
+      const buf = Buffer.alloc(Math.min(st.size - from, EVENTS_READ_MAX));
+      const got = readSync(fd, buf, 0, buf.length, from);
+      const whole = buf.subarray(0, buf.subarray(0, got).lastIndexOf(0x0a) + 1);
+      return { ok: true, lines: whole.toString("utf8").split("\n").slice(0, -1), next: from + whole.length, reset };
+    } catch {
+      // fx-swallow-ok: no spool yet (nothing has happened) or one that cannot be read safely reads as no events; the caller asks again from where it was
+      return { ok: true, lines: [], next: after, reset: false };
+    } finally {
+      if (fd !== -1) closeSync(fd);
+    }
+  }
+
+  async function request(header: unknown, body?: Buffer): Promise<ChannelReply> {
+    if (typeof header !== "object" || header === null || Array.isArray(header)) return fail("bad_request");
+    const h = header as Record<string, unknown>;
+    const op = h["op"];
+    if (typeof op !== "string" || !(CHANNEL_OPS as readonly string[]).includes(op)) return fail("bad_request");
+    if (Object.keys(h).some((k) => k !== "op" && !KEYS[op as ChannelOp].includes(k))) return fail("bad_request");
+    try {
+      switch (op as ChannelOp) {
+        case "tick":
+          return typeof h["text"] === "string" && h["text"].length > 0 && h["text"].length <= TICK_TEXT_MAX ? await tick(h["text"]) : fail("bad_request");
+        case "command": {
+          if (options.verifyCommand === undefined) return fail("command_unverified");
+          const text = options.verifyCommand(h["command"]);
+          return text === undefined ? fail("command_unverified") : await tick(text);
+        }
+        case "stop": {
+          const reason = h["reason"] ?? "stopped_by_person";
+          return reason === "stopped_by_person" || reason === "machine_shutdown" ? await stop(reason) : fail("bad_request");
+        }
+        case "events_read":
+          return isInt(h["after"], 0, Number.MAX_SAFE_INTEGER) ? eventsRead(h["after"]) : fail("bad_request");
+        case "token_put": {
+          const size = h["size"];
+          if (h["name"] !== "claude" || !isInt(size, 1, TOKEN_MAX) || body === undefined || body.length !== size || !PRINTABLE.test(body.toString("latin1"))) return fail("bad_request");
+          if (!operating) return fail("stopped");
+          wipe();
+          secret = Buffer.from(body);
+          return { ok: true };
+        }
+      }
+    } catch {
+      // fx-swallow-ok: nothing a handler throws may reach the peer as text; the fixed code is the whole answer
+      return fail("internal");
+    }
+  }
+
+  async function serve(socketPath: string): Promise<{ close(): Promise<void> }> {
+    // A socket a dead supervisor left is replaced; anything else at the name (a link, a file) is refused by the listen below.
+    if (lstatSync(socketPath, { throwIfNoEntry: false })?.isSocket() === true) unlinkSync(socketPath);
+    const server = net.createServer((sock) => void connection(sock));
+    server.on("error", () => undefined);
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen({ path: socketPath }, () => {
+        chmodSync(socketPath, 0o600);
+        resolve();
+      });
+    });
+    return { close: () => new Promise<void>((resolve) => server.close(() => resolve())) };
+  }
+
+  /** One request: frame, optional raw bytes (token_put), one reply frame, close. Every buffer a token passed through is zeroed. */
+  async function connection(sock: net.Socket): Promise<void> {
+    sock.setTimeout(CONNECTION_IDLE_MS, () => sock.destroy());
+    sock.on("error", () => undefined);
+    let buf = Buffer.alloc(0);
+    const iterator = sock[Symbol.asyncIterator]();
+    const take = async (n: number): Promise<Buffer> => {
+      while (buf.length < n) {
+        const next = await iterator.next();
+        if (next.done === true) throw new Error("closed");
+        const old = buf;
+        buf = Buffer.concat([old, next.value as Buffer]);
+        old.fill(0);
+        (next.value as Buffer).fill(0);
+      }
+      const out = Buffer.from(buf.subarray(0, n));
+      buf.fill(0, 0, n);
+      buf = buf.subarray(n);
+      return out;
+    };
+    let reply: ChannelReply = fail("bad_request");
+    let body: Buffer | undefined;
+    try {
+      const length = (await take(4)).readUInt32BE(0);
+      if (length > 0 && length <= FRAME_MAX) {
+        const header = JSON.parse((await take(length)).toString("utf8")) as unknown;
+        const size = (header as { size?: unknown } | null)?.size;
+        if ((header as { op?: unknown } | null)?.op === "token_put" && isInt(size, 1, TOKEN_MAX)) body = await take(size);
+        reply = await request(header, body);
+      }
+    } catch {
+      // fx-swallow-ok: a frame that does not parse, or a peer that went away, is `bad_request` (or nothing to answer to)
+    } finally {
+      body?.fill(0);
+      buf.fill(0);
+    }
+    const out = Buffer.from(JSON.stringify(reply));
+    const frame = Buffer.alloc(4 + out.length);
+    frame.writeUInt32BE(out.length, 0);
+    out.copy(frame, 4);
+    sock.end(frame);
+  }
+
+  return { request, serve, ended: () => ended, finished: () => finished };
+}

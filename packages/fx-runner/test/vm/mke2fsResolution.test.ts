@@ -151,7 +151,7 @@ describe("vm build-image --mke2fs", () => {
   const run = async (extra: string[], host: BuildHost) => {
     const out = tmp();
     const lines: string[] = [];
-    const code = await vmCommand([...base, ...extra].map((a) => (a === "OUT" ? out : a)), host, (l) => lines.push(l));
+    const code = await vmCommand([...base, ...extra].map((a) => (a === "OUT" ? out : a)), { ...host, bundleSupervisor: async () => "export {};\n" }, (l) => lines.push(l));
     return { code, lines };
   };
 

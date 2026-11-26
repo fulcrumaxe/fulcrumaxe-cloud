@@ -152,6 +152,8 @@ export interface RunHost {
   askTimed?: ((question: string, timeoutMs: number, signal?: AbortSignal) => Promise<string | undefined>) | undefined;
   /** `XDG_RUNTIME_DIR`, looked up by name by the caller: where the user's systemd manager listens (per-job limits, D#6 C43-5). */
   xdgRuntimeDir?: string | undefined;
+  /** D#845 ON-13b1 (Ruling 115): hold the engine session's supervisor in the standard tier's unit (`FX_ENGINE_SUPERVISE=1`). Off by default: the idle holder stays until a real bwrap run proves the supervisor can start the CLI inside the host guest's sandbox (`dirname(binaryPath)` is no-access there). */
+  engineSupervise?: boolean | undefined;
   /** D#749 V2b: the user name the machine's Chrome bridge directory is named for, and the daemon's environment, of which a deploy command gets a short allowlist (deployOrder.ts). Absent: no browser job and no deploy order is served. */
   username?: string | undefined;
   env?: Readonly<Record<string, string | undefined>> | undefined;
@@ -839,7 +841,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
         guestDeps === undefined || sessionCommon === undefined || scopes?.ok !== true
           ? undefined
           : (() => {
-              const parts = createStandardSessionParts({ guest: { ...guestDeps, jobsRoot: path.join(path.dirname(mirrorsRoot), "engine-sessions", "roots"), cacheDir: path.dirname(mirrorsRoot), scope: { tools: scopes.tools, runtimeDir: scopes.runtimeDir, budget: budgets().heavy } }, xdgRuntimeDir: host.xdgRuntimeDir, capture: host.engine.capture });
+              const parts = createStandardSessionParts({ guest: { ...guestDeps, jobsRoot: path.join(path.dirname(mirrorsRoot), "engine-sessions", "roots"), cacheDir: path.dirname(mirrorsRoot), scope: { tools: scopes.tools, runtimeDir: scopes.runtimeDir, budget: budgets().heavy } }, xdgRuntimeDir: host.xdgRuntimeDir, capture: host.engine.capture, supervise: host.engineSupervise === true ? { claudePath: binaryPath } : undefined });
               return createEngineSessionHandlers({ vm: parts.vm, port: () => parts.port, state: parts.state, wipeToken: parts.wipeToken, minGuestMb: 1, get paths() { return parts.paths(); }, ...sessionCommon });
             })();
       const sessionHandlers = sessionHandlersFor({ microvm: microvmSessions, standard: standardSessions }, () => effectiveEngine(engine, loadSettings(stateDir).sandboxEngine));

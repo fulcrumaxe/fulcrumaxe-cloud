@@ -19,6 +19,8 @@ export interface BuildHost {
   run(file: string, args: readonly string[], env?: Readonly<Record<string, string>>): Promise<{ code: number | null; output: string }>;
   /** The absolute path of the program `name` on the caller's own PATH, or undefined when none is there. A host without it starts programs by name. */
   resolve?(name: string): string | undefined;
+  /** D#845 ON-13b1: the one JavaScript file `entry` and everything it imports (the runner's supervisor and its channel), bundled for the guest's node. The `vm build-image` command refuses a host without it (a disk with no supervisor is never made by the command); `buildImage` itself leaves the file out. */
+  bundleSupervisor?(entry: string): Promise<string>;
 }
 
 export interface BuiltRootfs {
@@ -170,7 +172,9 @@ export async function buildImage(input: BuildInput): Promise<BuiltRootfs[]> {
   const answered = (await must(host, crane, ["digest", input.image])).trim();
   if (answered !== `sha256:${ref[1]}`) throw new CliError("the registry answered with a different digest than the one pinned; refusing to build", 1);
 
-  const guest = { init: path.join(input.guestDir, "init"), agent: path.join(input.guestDir, "agent.py"), relay: path.join(input.guestDir, "relay.py") };
+  const guest = { init: path.join(input.guestDir, "init"), agent: path.join(input.guestDir, "agent.py"), relay: path.join(input.guestDir, "relay.py"), bridge: path.join(input.guestDir, "engine-bridge.py") };
+  // the supervisor bundle is made once and goes into every arch's disk (the bytes are the same: the guest's node runs them)
+  const supervisor = host.bundleSupervisor === undefined ? undefined : await host.bundleSupervisor(path.join(input.guestDir, "engine-supervisor.entry.mjs"));
   const guestSha = { init: await sha256File(guest.init), agent: await sha256File(guest.agent) };
   const epoch = String(lock.rootfs.sourceDateEpoch);
   const built: BuiltRootfs[] = [];
@@ -184,7 +188,9 @@ export async function buildImage(input: BuildInput): Promise<BuiltRootfs[]> {
     copyFileSync(guest.init, path.join(stage, GUEST_DIR, "init"));
     copyFileSync(guest.agent, path.join(stage, GUEST_DIR, "agent.py"));
     copyFileSync(guest.relay, path.join(stage, GUEST_DIR, "relay.py")); // part of the disk, so of its digest; the release lists init and agent.py by their own digests
-    for (const name of ["init", "agent.py", "relay.py"]) chmodSync(path.join(stage, GUEST_DIR, name), 0o755);
+    copyFileSync(guest.bridge, path.join(stage, GUEST_DIR, "engine-bridge.py"));
+    if (supervisor !== undefined) writeFileSync(path.join(stage, GUEST_DIR, "fx-engine-supervisor.mjs"), supervisor);
+    for (const name of supervisor === undefined ? ["init", "agent.py", "relay.py", "engine-bridge.py"] : ["init", "agent.py", "relay.py", "engine-bridge.py", "fx-engine-supervisor.mjs"]) chmodSync(path.join(stage, GUEST_DIR, name), 0o755);
     chmodSync(path.join(stage, GUEST_DIR), 0o755);
     await must(host, "tar", ["--append", "--file", tar, "--owner=0", "--group=0", "--numeric-owner", `--mtime=@${epoch}`, "--sort=name", "-C", stage, GUEST_DIR]);
     const { bytes, entries } = estimateImageBytes(await must(host, "tar", ["--list", "--verbose", "--numeric-owner", "--file", tar]));
