@@ -74,7 +74,7 @@ export const jobCarriesPinnedCommit = (role: string): boolean => PINNED_COMMIT_J
  * role out for a runner that did not advertise the capability on its latest hello. A role not named here needs none.
  * D#6 RUNNER-WAKE R3a: `wake_v1` gates no role. It tells the cloud the runner can read a `wake` grant on its hello and claim replies (wake.ts).
  */
-export const RUNNER_CAPABILITIES = ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", BROWSER_CHROME_CAPABILITY, DEPLOY_ORDER_CAPABILITY, BROWSER_PLAYWRIGHT_CAPABILITY, "overlap_facts_v1", "engine_bridge_v1", "sandbox_commands_v1", "device_register_v1", "project_setup_v1", "survey_v1", "engine_session_v1", "machine_login_v1", "repo_token_refresh_v1", "watch_mode_v1", "kvm_fact_v1", "preflight_v1", "heartbeat_inventory_v1", "engine_lease_v1", "survey_public_v1"] as const;
+export const RUNNER_CAPABILITIES = ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", BROWSER_CHROME_CAPABILITY, DEPLOY_ORDER_CAPABILITY, BROWSER_PLAYWRIGHT_CAPABILITY, "overlap_facts_v1", "engine_bridge_v1", "sandbox_commands_v1", "device_register_v1", "project_setup_v1", "survey_v1", "engine_session_v1", "machine_login_v1", "repo_token_refresh_v1", "watch_mode_v1", "kvm_fact_v1", "preflight_v1", "heartbeat_inventory_v1", "engine_lease_v1", "survey_public_v1", "twin_v1"] as const;
 /** D#587 B-7b: a runner that lists it can receive signed sandbox commands on its claim reply and ack them on its next claim (sandboxCommands.ts). It gates no role and needs protocol 21. */
 export const SANDBOX_COMMAND_CAPABILITY = "sandbox_commands_v1" as const;
 /**
@@ -94,6 +94,11 @@ export const SURVEY_CAPABILITY = "survey_v1" as const;
  * true only for the survey role on a survey task. There is no allow list and no setting; an unknown visibility is never "public" here, each gate refuses it on its own.
  */
 export const SURVEY_PUBLIC_CAPABILITY = "survey_public_v1" as const;
+/**
+ * D#845 ON-27b: a runner that lists `twin_v1` accepts the private twin's machine jobs (`twin_seed` now; publish and sync later), which read a public repo anonymously and push to the twin alone. It gates no role and needs
+ * protocol 22. A build lists it only when ON-27d turns the twin on, so no runner is offered a twin job before then.
+ */
+export const TWIN_CAPABILITY = "twin_v1" as const;
 export const publicRepoAllowed = (role: string, taskKind: string): boolean => role === SURVEY_ROLE && taskKind === "survey";
 export const ENGINE_SESSION_CAPABILITY = "engine_session_v1" as const;
 export const MACHINE_LOGIN_CAPABILITY = "machine_login_v1" as const;

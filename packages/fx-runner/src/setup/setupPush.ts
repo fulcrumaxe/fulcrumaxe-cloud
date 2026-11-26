@@ -140,11 +140,11 @@ async function rootCommit(git: Git, mirrorDir: string, tip: string, job: Machine
   return root;
 }
 
-/** A git whose every network command carries the hardening and, for https, the credential in the environment of that one child. */
-function withCredential(git: Git, token: string, target: URL): Git {
+/** A git whose every network command carries the hardening and, for https, the credential in the environment of that one child. With no token it is the same git, anonymous (D#845 ON-27b: the twin seed's read of a public repository). */
+export function withCredential(git: Git, token: string | undefined, target: URL): Git {
   const hardening: Array<readonly [string, string]> = [
     ["protocol.allow", "never"], [`protocol.${target.protocol.slice(0, -1)}.allow`, "always"], ["http.followRedirects", "false"], ["http.sslVerify", "true"], ["credential.helper", ""], ["core.askPass", ""],
-    [`http.${target.origin}/.extraHeader`, `Authorization: Basic ${Buffer.from(`x-access-token:${token}`, "utf8").toString("base64")}`],
+    ...(token === undefined ? [] : [[`http.${target.origin}/.extraHeader`, `Authorization: Basic ${Buffer.from(`x-access-token:${token}`, "utf8").toString("base64")}`] as const]),
   ];
   return { run: (code, args, config, timeoutMs, extraEnv) => git.run(code, args, [...hardening, ...(config ?? [])], timeoutMs, { ...NO_PROMPT, ...extraEnv }) };
 }

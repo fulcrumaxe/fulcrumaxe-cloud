@@ -25,8 +25,9 @@ const ARGS: Record<string, unknown> = {
   engine_session_stop: { reason: "person", operate_epoch: 0 },
   engine_session_delete: { operate_epoch: 0 },
   project_remove: { delete_sandbox: true, removal_pr: false },
+  twin_seed: { twin_id: ID, public: { owner: "acme", name: "widgets", gh_id: 78, default_branch: "main", head_sha: SHA }, private: { owner: "acme", name: "widgets-private", gh_id: 77 } },
 };
-const jobOf = (kind: string, over: Record<string, unknown> = {}): Job => ({ ...base, kind, args: ARGS[kind], ...over }) as Job;
+const jobOf = (kind: string, over: Record<string, unknown> = {}): Job => ({ ...base, ...(kind === "twin_seed" ? { setup_id: ID } : {}), kind, args: ARGS[kind], ...over }) as Job;
 const failsWith = (run: () => unknown, code: string): void => {
   try {
     run();
@@ -46,6 +47,28 @@ describe("machine job schema", () => {
       for (const wrong of MACHINE_JOB_KINDS) if (wrong !== kind && JSON.stringify(ARGS[wrong]) !== JSON.stringify(ARGS[kind])) expect(ok(jobOf(kind, { args: ARGS[wrong] })), `${kind} with ${wrong} args`).toBe(false);
     }
     expect(ok(jobOf("project_setup", { setup_id: ID }))).toBe(true);
+  });
+  it("holds a twin seed to its one target: the private twin, through the twin's setup, on no engine", () => {
+    const args = ARGS["twin_seed"] as { public: Record<string, unknown>; private: Record<string, unknown> };
+    // the job names the PUBLIC repository as its own repository, or the twin's gh id is not the job's
+    expect(ok(jobOf("twin_seed", { repo_gh_id: 78 }))).toBe(false);
+    expect(ok(jobOf("twin_seed", { repo_gh_id: 99 }))).toBe(false);
+    expect(ok(jobOf("twin_seed", { args: { ...args, public: { ...args.public, gh_id: 77 } } }))).toBe(false);
+    expect(ok(jobOf("twin_seed", { setup_id: undefined }))).toBe(false);
+    expect(ok(jobOf("twin_seed", { requires_engine: "microvm" }))).toBe(false);
+    // the closed shapes: owner, name, branch and commit are held to GitHub's, nothing else is carried
+    for (const bad of [{ owner: "-acme" }, { owner: "a/b" }, { name: ".." }, { name: "a b" }, { default_branch: "../main" }, { default_branch: "main.lock" }, { default_branch: "-x" }, { head_sha: "abc" }, { head_sha: SHA.toUpperCase() }, { token: "x" }]) expect(ok(jobOf("twin_seed", { args: { ...args, public: { ...args.public, ...bad } } })), JSON.stringify(bad)).toBe(false);
+    expect(ok(jobOf("twin_seed", { args: { ...args, private: { ...args.private, owner: "a b" } } }))).toBe(false);
+    expect(ok(jobOf("twin_seed", { args: { ...args, private: { ...args.private, default_branch: "main" } } }))).toBe(false);
+    expect(ok(jobOf("twin_seed", { args: { ...args, repo: "acme/other" } }))).toBe(false);
+    expect(ok(jobOf("twin_seed", { args: { ...args, public: { ...args.public, default_branch: "release/1.x" } } }))).toBe(true);
+  });
+  it("gives the seed its own steps and codes, and the seed's capability goes to no build yet", () => {
+    expect(SETUP_RUNNER_STEPS.indexOf("twin_fetch")).toBeLessThan(SETUP_RUNNER_STEPS.indexOf("push"));
+    expect(SETUP_RUNNER_STEPS[0]).toBe("engine_fetch");
+    for (const code of ["twin_head_moved", "twin_too_large", "twin_not_empty", "twin_fetch_failed"]) expect(SETUP_FAILURE_CODES).toContain(code);
+    expect(MACHINE_JOB_FINAL_STEP["twin_seed"]).toBeUndefined();
+    expect(RUNNER_CAPABILITIES).toContain("twin_v1");
   });
   it("refuses an extra key at every depth", () => {
     expect(ok(jobOf("project_setup", { extra: 1 }))).toBe(false);
@@ -131,7 +154,7 @@ describe("what a runner is offered", () => {
     const six = [DEVICE_REGISTER_CAPABILITY, PROJECT_SETUP_CAPABILITY, SURVEY_CAPABILITY, ENGINE_SESSION_CAPABILITY, MACHINE_LOGIN_CAPABILITY, REPO_TOKEN_REFRESH_CAPABILITY];
     expect(six).toEqual(["device_register_v1", "project_setup_v1", "survey_v1", "engine_session_v1", "machine_login_v1", "repo_token_refresh_v1"]);
     for (const capability of six) expect(RUNNER_CAPABILITIES).toContain(capability);
-    expect(MACHINE_JOB_CAPABILITY).toEqual({ project_setup: "project_setup_v1", engine_update: "project_setup_v1", project_remove: "project_setup_v1", engine_session_start: "engine_session_v1", engine_session_stop: "engine_session_v1", engine_session_delete: "engine_session_v1" });
+    expect(MACHINE_JOB_CAPABILITY).toEqual({ project_setup: "project_setup_v1", engine_update: "project_setup_v1", project_remove: "project_setup_v1", engine_session_start: "engine_session_v1", engine_session_stop: "engine_session_v1", engine_session_delete: "engine_session_v1", twin_seed: "twin_v1" });
     expect(TASK_KIND_CAPABILITY).toEqual({ survey: "survey_v1" });
   });
   it("offers each kind of work to a runner with its capability and to no other", () => {
