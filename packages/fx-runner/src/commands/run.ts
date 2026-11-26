@@ -35,6 +35,7 @@ import { completeCaps, engineLineOf, engineMismatchClaimBlock, limitsClaimBlock,
 import { createLiveMicrovm, type LiveMicrovm, type LiveMicrovmParts } from "../vm/sandboxd/live.js";
 import { createSetupVmParts, createVmClaimGuard, createVmJobDeps, runEventHooks, type VmRunBlock } from "../daemon/vmJobDeps.js";
 import { createEngineUpdateHandler } from "../setup/engineUpdate.js";
+import { createTwinSeedHandler } from "../setup/twinSeed.js";
 import { createProjectSetupHandler, setupHandlerFor } from "../setup/projectSetup.js";
 import { createHostSetupVm, type HostGuestDeps } from "../setup/hostGuest.js";
 import { createEngineLeaseGuard, createEngineSessionHandlers, createSessionLock, lockSessionHandlers, sessionStopperOf } from "../engineSession/lifecycle.js";
@@ -845,11 +846,13 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       // D#845 ON-13c3: the same stop path a signed stop job takes, for the guard's own stop of a session whose lease ran out.
       // Only a machine that reports its sandbox inventory (the microVM tier) can ever be renewed, so only it advertises `engine_lease_v1` and arms the guard; a standard-tier machine says nothing and is never self-stopped.
       // The runner's own stop and the dispatcher's three handlers share one lock per session name, so the stop never overlaps a cloud stop, start or delete of the same session.
+      // D#845 ON-27b: `twin_seed` needs no guest: it reads a public repository anonymously and pushes it to the empty twin with the job's own one-use credential. It is offered only to a runner that lists `twin_v1`, which no build does yet.
+      const twinSeedHandler = createTwinSeedHandler({ git: setupParts.git, client, revoke: (token) => setupRevoker.revokeToken(token), scratchRoot: workspaceRoot });
       const sessionLock = createSessionLock();
       const leaseOn = sessionHandlers !== undefined && inventoryReporter !== undefined;
       leaseGuard.bind(leaseOn ? sessionStopperOf(sessionHandlers.engine_session_stop, sessionLock) : undefined);
       engineLeaseArmed = leaseOn;
-      const machineJobs = (machineJobDispatcher = createMachineJobDispatcher({ client, keyring, runnerId: registration.runner_id, now: ctx.now, handlers: { ...(setupHandler === undefined ? {} : { project_setup: setupHandler }), ...(updateHandler === undefined ? {} : { engine_update: updateHandler }), ...(sessionHandlers === undefined ? {} : lockSessionHandlers(sessionHandlers, sessionLock)) },sandboxEngine: () => effectiveEngine(engine, loadSettings(stateDir).sandboxEngine), signal: stopped.signal, log: (event) => ctx.out(`fx-runner: machine job ${event.event}`) }));
+      const machineJobs = (machineJobDispatcher = createMachineJobDispatcher({ client, keyring, runnerId: registration.runner_id, now: ctx.now, handlers: { ...(setupHandler === undefined ? {} : { project_setup: setupHandler }), ...(updateHandler === undefined ? {} : { engine_update: updateHandler }), twin_seed: twinSeedHandler, ...(sessionHandlers === undefined ? {} : lockSessionHandlers(sessionHandlers, sessionLock)) },sandboxEngine: () => effectiveEngine(engine, loadSettings(stateDir).sandboxEngine), signal: stopped.signal, log: (event) => ctx.out(`fx-runner: machine job ${event.event}`) }));
       // D#842 EB-3c: the engine bridge runs beside the claim loop, never under it: it is started here, nothing below awaits it, and it ends only when `finally` stops it.
       if (host.engineBridge !== undefined) {
         const cloud = { origin: registration.cloud_origin, key, now: ctx.now, fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass) };

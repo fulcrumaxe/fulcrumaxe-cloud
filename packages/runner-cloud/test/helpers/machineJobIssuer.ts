@@ -22,6 +22,8 @@ const ARGS: Record<MachineJobKind, Record<string, unknown>> = {
   engine_session_stop: { reason: "person", operate_epoch: 0 },
   engine_session_delete: { operate_epoch: 0 },
   project_remove: { delete_sandbox: true, removal_pr: false },
+  // a seed's schema binds `private.gh_id` to the job's own repository: a test that issues one passes it (and its setup) through `args`
+  twin_seed: { twin_id: randomUUID(), public: { owner: "acme", name: "widgets", gh_id: 1, default_branch: "main", head_sha: SHA }, private: { owner: "acme", name: "widgets-private", gh_id: 2 } },
 };
 
 export interface IssueOptions {

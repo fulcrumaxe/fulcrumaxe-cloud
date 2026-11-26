@@ -6,6 +6,9 @@ import { verifyRunnerRequest, withRunnerSession } from "./verifyRunnerRequest.js
 /**
  * D#845 ON-8f: POST /api/runner/setup/:setup_id/push-token. The runner running a setup job asks for the one credential it pushes with. Signed like every runner route (a single-use nonce), strict message `{job_id}`.
  *
+ * D#845 ON-27b: the same route serves a `twin_seed` job (the definer is chosen by the job's kind, `engineUpdateDefiners.ts`). Its repository is the twin's private repository, which the job is bound to and the definer returns; the
+ * public repository is never a target, so no token is ever minted for it. Its fence is the seed's own: fetched first, push step started, once per job.
+ *
  * It answers only for this runner's own delivered, current `project_setup` job of this setup whose setup reported the `push` step started (so after the verified bundle was applied), and once per job: the fence and the
  * once-marker are one definer (`setup_push_grant`, migration 1071), committed BEFORE the mint, so a second ask mints nothing (the same order as the merge order's credential). The repository is read from our own rows and
  * never from the message. The token is a `setup_push` installation token: one repository, `contents: write` and `metadata: read`. The cloud keeps no copy; a token it minted and could not hand out is revoked first.

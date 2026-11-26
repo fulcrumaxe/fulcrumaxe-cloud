@@ -523,6 +523,8 @@ describe('audit_write / audit_write_system: append-only, unforgeable audit_log (
         '1100_engine_system_start.sql',
         // 1105 (D#845 ON-13c2) restates 1100's issuer and owns 1100's role's new queue, so it goes with it.
         '1105_engine_operate_queue.sql',
+        // 1108 (D#845 ON-27b) replaces 1093's machine_job_expire (which reads engine_updates) and reads 1097's repo_twins, so it goes with them.
+        '1108_twin_seed.sql',
       ];
       const AUDIT_WRITE_MIGRATIONS = allFiles.filter(
         (f) => BUILDS_ON_HELD_BACK.includes(f) || isAuditWriteMigration(readFileSync(path.join(DEFAULT_MIGRATIONS_DIR, f), 'utf8')),

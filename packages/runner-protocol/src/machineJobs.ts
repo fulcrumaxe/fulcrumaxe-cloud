@@ -10,14 +10,14 @@ import { createPublicKey, sign, verify, type KeyObject } from "node:crypto";
 import { z } from "zod";
 import { SHA40_PATTERN, ENGINE_VERSION_PATTERN } from "./engineEvents.js";
 import { canonicalJson, JobSignatureError, type JobKeyring } from "./jobSignature.js";
-import { DEVICE_REGISTER_CAPABILITY, ENGINE_SESSION_CAPABILITY, MACHINE_LOGIN_CAPABILITY, PROJECT_SETUP_CAPABILITY, TASK_KIND_CAPABILITY, type RunnerCapability, type TASK_KINDS } from "./job.js";
+import { DEVICE_REGISTER_CAPABILITY, ENGINE_SESSION_CAPABILITY, MACHINE_LOGIN_CAPABILITY, PROJECT_SETUP_CAPABILITY, TASK_KIND_CAPABILITY, TWIN_CAPABILITY, type RunnerCapability, type TASK_KINDS } from "./job.js";
 import { MACHINE_ONBOARDING_MIN_PROTOCOL } from "./messages.js";
 import { ColdstartCode, ColdstartState } from "./coldstartStatus.js";
 
 const safeInt = z.number().int().safe();
 const sha256Hex = z.string().regex(/^[0-9a-f]{64}$/);
 
-export const MACHINE_JOB_KINDS = ["project_setup", "engine_update", "engine_session_start", "engine_session_stop", "engine_session_delete", "project_remove"] as const;
+export const MACHINE_JOB_KINDS = ["project_setup", "engine_update", "engine_session_start", "engine_session_stop", "engine_session_delete", "project_remove", "twin_seed"] as const;
 export type MachineJobKind = (typeof MACHINE_JOB_KINDS)[number];
 /** The longest a machine job lives after it was issued, in seconds. */
 export const MACHINE_JOB_MAX_LIFE_S = 1800;
@@ -53,6 +53,12 @@ export const EngineReleaseRef = strict({
   tarball_url: z.string().refine(isEngineTarballUrl, { message: "the tarball is not on an allowed host" }),
   tarball_sha256: sha256Hex,
 });
+/** D#845 ON-27b: a repository of the twin job, named as GitHub names it. The runner builds the https address from these and nothing else. */
+const GH_OWNER = z.string().regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/);
+const GH_NAME = z.string().regex(/^[A-Za-z0-9._-]{1,100}$/).refine((name) => !/^\.+$/.test(name), { message: "not a repository name" });
+const GH_BRANCH = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,60}(?:\/[A-Za-z0-9][A-Za-z0-9._-]{0,60}){0,3}$/).refine((b) => !b.includes("..") && !b.endsWith(".lock"), { message: "not a branch name" });
+/** The pack the seed fetches may not pass this (GitHub refuses a push over 2 GB, and the twin is pushed in one go). */
+export const TWIN_SEED_MAX_PACK_BYTES = 1_900_000_000;
 export const PlanRef = strict({ draft_id: z.string().uuid(), version: safeInt.min(1), sha256: sha256Hex });
 
 const BASE = {
@@ -77,10 +83,20 @@ export const MachineJob = z
     job("engine_session_stop", strict({ reason: z.enum(ENGINE_STOP_REASONS), operate_epoch: safeInt.min(0) })),
     job("engine_session_delete", strict({ operate_epoch: safeInt.min(0) })),
     job("project_remove", strict({ delete_sandbox: z.boolean(), removal_pr: z.boolean() })),
+    // D#845 ON-27b: the first copy of a public repo's default branch into its empty private twin. The job is bound to the TWIN's repository (`repo_gh_id`, the only one a token is ever minted for) and to the twin's setup.
+    job("twin_seed", strict({
+      twin_id: z.string().uuid(),
+      public: strict({ owner: GH_OWNER, name: GH_NAME, gh_id: safeInt.min(1), default_branch: GH_BRANCH, head_sha: z.string().regex(SHA40_PATTERN) }),
+      private: strict({ owner: GH_OWNER, name: GH_NAME, gh_id: safeInt.min(1) }),
+    })),
   ])
   .superRefine((j, ctx) => {
     const life = Date.parse(j.expires_at) - Date.parse(j.issued_at);
     if (!(life > 0 && life <= MACHINE_JOB_MAX_LIFE_S * 1000)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a machine job lives 1 ms to 30 min", path: ["expires_at"] });
+    // A seed names the twin as its one target and has the twin's setup; one that names the public repository as its target is refused here and again at issue.
+    if (j.kind === "twin_seed" && (j.args.private.gh_id !== j.repo_gh_id || j.args.public.gh_id === j.repo_gh_id || j.setup_id === undefined || j.requires_engine !== "any")) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a twin seed targets the private twin only, through its setup", path: ["args"] });
+    }
   });
 export type MachineJob = z.infer<typeof MachineJob>;
 export type MachineJobOf<K extends MachineJobKind> = Extract<MachineJob, { kind: K }>;
@@ -126,16 +142,17 @@ export function verifyMachineJob(signed: unknown, keyring: JobKeyring, runnerId:
 export const SETUP_VM_JOB_CODES = ["vm_admission_refused", "vm_boot_failed", "vm_egress_unavailable", "vm_token_delivery_failed", "vm_workspace_failed", "vm_teardown_incomplete"] as const;
 /** What a setup may fail with besides the engine's own coldstart codes: a closed list of the runner's and the cloud's steps. */
 export const SETUP_FAILURE_CODES = [
+  "twin_head_moved", "twin_too_large", "twin_not_empty", "twin_fetch_failed",
   "engine_fetch_failed", "engine_checksum", "engine_archive_refused", "plan_fetch_failed", "plan_checksum", "plan_invalid", "setup_status_refused", "bootstrap_failed", "finalize_failed",
   "bundle_refused", "push_failed", "direct_raced", "pr_open_failed", "install_head_changed", "pr_scope_refused", "labels_failed", "kind_unsupported", "job_expired", "job_silent", "job_overran", "engine_unsupported", ...SETUP_VM_JOB_CODES,
 ] as const;
 /** The runner's own steps. None reuses a coldstart name (`bundle_out` is not `bundle`, `gh_labels` is not `labels`). */
-export const SETUP_RUNNER_STEPS = ["engine_fetch", "plan_fetch", "sandbox_boot", "workspace_in", "bootstrap", "finalize", "bundle_out", "push", "pr_open", "gh_labels"] as const;
+export const SETUP_RUNNER_STEPS = ["engine_fetch", "plan_fetch", "sandbox_boot", "workspace_in", "bootstrap", "finalize", "bundle_out", "twin_fetch", "push", "pr_open", "gh_labels"] as const;
 export type SetupRunnerStep = (typeof SETUP_RUNNER_STEPS)[number];
 /** The step whose `ok` report ends a job of that kind `done` (and frees the runner's slot). A kind with no entry is never ended by a step report. */
 export const MACHINE_JOB_FINAL_STEP: Partial<Record<MachineJobKind, SetupRunnerStep>> = { project_setup: "gh_labels" };
 /** Every sub-step a progress report may name: the runner's steps and the engine's eight coldstart steps. Closed. */
-export const SETUP_SUB_STEPS = ["engine_fetch", "plan_fetch", "sandbox_boot", "workspace_in", "bootstrap", "preflight", "interview", "wiring", "deps", "labels", "sandbox_hook", "bundle", "done", "finalize", "bundle_out", "push", "pr_open", "gh_labels"] as const;
+export const SETUP_SUB_STEPS = ["engine_fetch", "plan_fetch", "sandbox_boot", "workspace_in", "bootstrap", "preflight", "interview", "wiring", "deps", "labels", "sandbox_hook", "bundle", "done", "finalize", "bundle_out", "twin_fetch", "push", "pr_open", "gh_labels"] as const;
 export const SETUP_FAILURE_REASON_PATTERN = /^[a-z][a-z0-9_]{0,31}$/;
 
 /**
@@ -223,6 +240,7 @@ export const MACHINE_JOB_CAPABILITY: Readonly<Record<MachineJobKind, RunnerCapab
   project_setup: PROJECT_SETUP_CAPABILITY,
   engine_update: PROJECT_SETUP_CAPABILITY,
   project_remove: PROJECT_SETUP_CAPABILITY,
+  twin_seed: TWIN_CAPABILITY,
   engine_session_start: ENGINE_SESSION_CAPABILITY,
   engine_session_stop: ENGINE_SESSION_CAPABILITY,
   engine_session_delete: ENGINE_SESSION_CAPABILITY,
