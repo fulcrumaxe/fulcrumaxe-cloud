@@ -4,7 +4,7 @@ import { EventEmitter } from "node:events";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { HelloMessage } from "@fulcrumaxe/runner-protocol";
+import { ClaimMessage, HelloMessage } from "@fulcrumaxe/runner-protocol";
 import { CliError } from "../../src/cliError.js";
 import { saveRegistration } from "../../src/config.js";
 import { BRIDGE_STATUS_FILE, type EngineBridgePorts } from "../../src/engineBridge/daemon.js";
@@ -174,5 +174,23 @@ describe("the engine bridge in the composed daemon", () => {
     await clock.advance(30_000);
     expect(statusFile()).toBeUndefined();
     expect(await stop(run)).toMatchObject({ code: 0 });
+  });
+});
+
+describe("the machine's load in the composed daemon", () => {
+  const claimBodies = (): unknown[] => cloud.seen.filter((s) => s.path === "/api/runner/claim").map((s) => s.body);
+
+  it("a claim carries the machine's load although the hello does not list project_setup_v1, and a restarted daemon's first claim carries it again", async () => {
+    const first = start();
+    await until(() => claims() >= 1);
+    expect(HelloMessage.parse(hellos()[0]!.body).capabilities).not.toContain("project_setup_v1");
+    expect(ClaimMessage.parse(claimBodies()[0]).host_load).toEqual({ mem_avail_mb: 60 * 1024, disk_free_mb: 500 * 1024, setups_running: 0 });
+    expect(await stop(first)).toMatchObject({ code: 0 });
+    // A restart builds a new reporter, so its first claim is due at once: an idle machine placed 15 seconds after a restart has a fresh reading.
+    const before = claims();
+    const second = start();
+    await until(() => claims() > before);
+    expect(ClaimMessage.parse(claimBodies()[before]).host_load).toEqual({ mem_avail_mb: 60 * 1024, disk_free_mb: 500 * 1024, setups_running: 0 });
+    expect(await stop(second)).toMatchObject({ code: 0 });
   });
 });

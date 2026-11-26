@@ -466,11 +466,30 @@ const PLACE_BY_CODE = {
   operate_public_pending: [PUBLIC_OPERATE],
   placement_busy: ["The machine was busy with another change. Try again."],
 };
+// A 409 machine_not_eligible names why, beside its code, as a word from the server's closed list. Each has its own sentence; a word this build does not know falls back to the plain one above.
+// The thresholds are the placement rule's (4 GB of free memory, 10 GB of free disk).
+const NOT_ELIGIBLE_BY_REASON = {
+  not_live: "That machine is offline. Start it, or pick another machine.",
+  paused: "That machine is paused, so it takes no new project. Resume it in Runners, or pick another machine.",
+  draining: "That machine is finishing its work and takes nothing new. Pick another machine.",
+  claude_not_ready: "Claude isn't signed in on that machine yet. Sign in there, or pick another machine.",
+  load_unknown: "That machine hasn't reported its free memory and disk yet. Make sure it is running, give it a minute, and try again.",
+  low_memory: "That machine has less than 4 GB of free memory, which a project needs. Close something on it, or pick another machine.",
+  low_disk: "That machine has less than 10 GB of free disk, which a project needs. Free some space on it, or pick another machine.",
+  server_deleting: "That server is being deleted. Pick another machine.",
+};
+export const CHECKING_MACHINE = "Checking the machine…";
+/** An idle machine reports its load when the cloud wakes it, a few seconds after a refusal; so a refusal for an unknown load is asked again, this many times, this far apart. */
+export const CHECK_TRIES = 4;
+export const CHECK_WAIT_MS = 8000;
+/** True for the one refusal that is waited out: the machine is fine, the cloud has only not heard its load lately. */
+export const isLoadPending = (e) => !!e && e.code === "machine_not_eligible" && e.reason === "load_unknown";
 const PLACE_BY_STATUS = { 400: "That request wasn't accepted. Reload the list and try again.", 403: "Only an owner or admin can place a project.", 404: "That repo wasn't found. Reload the list and pick again." };
 /** `e` is anything the call threw; the text is never empty and never the server's own words. */
 export function placeRefusal(e, name) {
   const code = e && typeof e.code === "string" ? e.code : "";
   if (code === "repo_visibility_unknown") return { code, text: "GitHub didn't say whether " + (name || "this repo") + " is public or private. Try again in a minute." };
+  if (code === "machine_not_eligible" && typeof e.reason === "string" && Object.hasOwn(NOT_ELIGIBLE_BY_REASON, e.reason)) return { code, text: NOT_ELIGIBLE_BY_REASON[e.reason], reason: e.reason };
   if (Object.hasOwn(PLACE_BY_CODE, code)) return { code, text: PLACE_BY_CODE[code][0], also: PLACE_BY_CODE[code][1] || "" };
   const status = e && typeof e.status === "number" ? e.status : 0;
   return { code, text: Object.hasOwn(PLACE_BY_STATUS, status) ? PLACE_BY_STATUS[status] : "The project couldn't be placed. Try again." };
@@ -496,7 +515,7 @@ export function parseReturn(search) {
  * Nothing is sent until Confirm (or "Continue to GitHub"), and every stage has a way back.
  */
 export function mountProjectPicker(host, env) {
-  const S = { stage: "loading", err: null, note: "", data: null, machines: [], settings: null, repo: null, isNew: false, runner: "", operate: false, owner: 0, name: "", vis: "private", busy: false, loadFailed: false };
+  const S = { stage: "loading", err: null, note: "", data: null, machines: [], settings: null, repo: null, isNew: false, runner: "", operate: false, owner: 0, name: "", vis: "private", busy: false, checking: false, loadFailed: false };
   let dead = false;
   const bdi = (t) => h("bdi", null, t);
   const p = (t, id) => h("p", { class: "ob-muted", "data-testid": id }, t);
@@ -536,12 +555,25 @@ export function mountProjectPicker(host, env) {
     S.stage = S.loadFailed ? "failed" : "pick";
     draw();
   }
+  // The machine list is read again whenever a repo is picked: it was read when the panel opened, and a machine that connected (or dropped) since must not stay as it was shown.
+  async function refreshMachines() {
+    try {
+      const [runners, machines] = await Promise.all([api("GET", "/api/runners", undefined, env.signal).catch(soft), api("GET", "/api/machines", undefined, env.signal).catch(soft)]);
+      if (runners) S.machines = machineChoices(runners, machines);
+      return !!runners;
+    } catch { return false; } // fx-swallow-ok: an aborted read means the picker was closed, and a failed one keeps the list already shown
+  }
   function choose(repo, isNew) {
     S.repo = repo; S.isNew = isNew; S.operate = false; S.err = null; S.note = "";
     const first = S.machines.find((m) => m.ok);
     S.runner = first ? first.id : "";
     S.stage = "confirm"; draw();
     say("Confirm " + repo.name);
+    refreshMachines().then((fresh) => {
+      if (!fresh || dead || S.repo !== repo || S.stage !== "confirm" || S.busy) return;
+      if (!S.machines.some((m) => m.id === S.runner && m.ok)) S.runner = (S.machines.find((m) => m.ok) || {}).id || "";
+      draw();
+    });
   }
   const say = (t) => env.announce(t);
   async function reload() { S.busy = true; draw(); try { await read(); } catch { return; } S.busy = false; if (S.loadFailed) S.stage = "failed"; else if (S.stage === "failed" || S.stage === "loading") S.stage = "pick"; draw(); } // fx-swallow-ok: an aborted read means the picker was closed
@@ -571,7 +603,8 @@ export function mountProjectPicker(host, env) {
     }
     S.busy = false; draw();
   }
-  async function place() {
+  const sleep = (ms) => (env.wait ? env.wait(ms) : new Promise((resolve) => setTimeout(resolve, ms)));
+  async function place(attempt = 0) {
     const box = operateBox(S.settings, S.repo.id, S.repo.visibility);
     const ticked = !!box && !box.on && !box.blocked && S.operate;
     S.busy = true; S.err = null; draw();
@@ -579,6 +612,15 @@ export function mountProjectPicker(host, env) {
       await api("POST", "/api/runners/repos/" + S.repo.id + "/place", { kind: S.isNew ? "new" : "existing", ...(S.runner ? { runner_id: S.runner } : {}), ...(ticked ? { turn_on_operate: true, operate_others: box.others.map((o) => o.id) } : {}) }, env.signal);
     } catch (e) {
       if (e && e.name === "AbortError") return;
+      if (isLoadPending(e) && attempt < CHECK_TRIES) {
+        // The refusal woke the machine; its load arrives with its next claim. Say so and ask again, instead of sending the person back to pick.
+        S.err = null; S.note = CHECKING_MACHINE; S.checking = true; draw(); say(CHECKING_MACHINE);
+        await sleep(CHECK_WAIT_MS);
+        S.checking = false;
+        if (dead || (env.signal && env.signal.aborted)) return;
+        return place(attempt + 1);
+      }
+      S.note = ""; S.checking = false;
       S.err = placeRefusal(e, S.repo.name);
       S.busy = false;
       if (["operate_consent_stale", "machine_single_project", "machine_not_eligible", "no_eligible_machine"].includes(S.err.code)) { S.operate = false; try { await read(); } catch { return; } } // fx-swallow-ok: an aborted read means the picker was closed
@@ -588,7 +630,7 @@ export function mountProjectPicker(host, env) {
       say(S.err.text);
       return;
     }
-    S.busy = false; S.stage = "placed"; draw();
+    S.busy = false; S.note = ""; S.stage = "placed"; draw();
     say("Placed " + S.repo.name);
     env.onPlaced();
   }
@@ -628,7 +670,7 @@ export function mountProjectPicker(host, env) {
       box ? h("div", { class: "ob-operate", "data-testid": "ob-pick-operate" },
         box.on ? p(box.text, "ob-pick-operate-on")
           : h("label", { class: "ob-preset" }, h("input", { type: "checkbox", checked: S.operate && !box.blocked, disabled: !!box.blocked || S.busy, "data-focus": "operate", onChange: (ev) => { S.operate = ev.target.checked; draw("operate"); } }), h("span", { class: "ob-preset-text" }, box.text, box.blocked ? h("span", { class: "ob-preset-role" }, box.blocked) : ""))) : "",
-      btn("confirm", S.busy ? "Placing…" : "Confirm", place, { primary: true, disabled: !S.runner || !choices.some((m) => m.id === S.runner && m.ok) }),
+      btn("confirm", S.checking ? CHECKING_MACHINE : S.busy ? "Placing…" : "Confirm", () => place(), { primary: true, disabled: !S.runner || !choices.some((m) => m.id === S.runner && m.ok) }),
       btn("change", "Change repo", () => go("pick")),
     ];
   }

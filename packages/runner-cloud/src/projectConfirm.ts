@@ -191,7 +191,12 @@ export async function placeProjectRoute(deps: RunnerCloudDeps, principal: Sessio
       headers: { "cache-control": "no-store" },
     };
   } catch (error) {
-    if (error instanceof RunnerHttpError) throw error;
+    if (error instanceof RunnerHttpError) {
+      // An idle machine's load is old or missing because it claims only when woken. Waking the account's runners (the same push every other writer uses; no poll, no timer) makes the next
+      // claim carry a fresh reading, and the caller asks again. The refusal itself stands and writes nothing.
+      if (error.code === "machine_not_eligible" && error.extra.reason === "load_unknown") void markRunnerWork(accountId);
+      throw error;
+    }
     if (error instanceof EngineOperateRefusal) throw new RunnerHttpError(409, error.code, error.message);
     if (pgCode(error) === "42501") throw new RunnerHttpError(403, "forbidden", "only an owner or admin can place a project");
     // 40P01: two changes to one machine waited on each other and Postgres ended this one, which wrote nothing. Retrying is safe.

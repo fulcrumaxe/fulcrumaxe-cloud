@@ -1397,8 +1397,8 @@ describe("6. the claim gate in the composed daemon (D#6 R4a-6, C16 section 1.3)"
     fake.set("hang", "");
     const run = start({ host: { sandbox } });
     await until(() => cloud.runs.has(job.job.run_id), 20_000);
-    // An ordinary claim: no sandbox reason, and the capacity this machine could take (D#6 C43-4).
-    expect(claimBodies()[0]).toEqual({ capacity: { light: { limit: 8, in_use: 0 }, heavy: { limit: 4, in_use: 0 }, limited_by: null } });
+    // An ordinary claim: no sandbox reason, the capacity this machine could take (D#6 C43-4) and its load (D#845 ON-1b; the probe is ROOMY).
+    expect(claimBodies()[0]).toEqual({ capacity: { light: { limit: 8, in_use: 0 }, heavy: { limit: 4, in_use: 0 }, limited_by: null }, host_load: { mem_avail_mb: 61440, disk_free_mb: 512000, setups_running: 0 } });
     expect(sandbox.calls).toHaveLength(1);
     expect((await stop(run)).code).toBe(0);
   });
@@ -1450,7 +1450,7 @@ describe("6. the claim gate in the composed daemon (D#6 R4a-6, C16 section 1.3)"
     fake.set("hang", "");
     const run = start({ hooks: { jobLimits: { enforced: false, reason: "no systemd user manager is running for this user" } } });
     await until(() => cloud.runs.has(job.job.run_id), 20_000);
-    expect(claimBodies()[0]).toEqual({ capacity: { light: { limit: 2, in_use: 0 }, heavy: { limit: 1, in_use: 0 }, limited_by: null } });
+    expect(claimBodies()[0]).toEqual({ capacity: { light: { limit: 2, in_use: 0 }, heavy: { limit: 1, in_use: 0 }, limited_by: null }, host_load: { mem_avail_mb: 61440, disk_free_mb: 512000, setups_running: 0 } });
     expect(run.out).toContain("fx-runner: per-job limits not enforced on this machine; concurrency capped (heavy 1, total 2) (no systemd user manager is running for this user)");
     expect((await stop(run)).code).toBe(0);
   });
@@ -1462,7 +1462,7 @@ describe("6. the claim gate in the composed daemon (D#6 R4a-6, C16 section 1.3)"
     const tight: ResourceProbe = { read: () => ({ ...ROOMY.read(), availMemBytes: 3 * GB }) };
     const run = start({ hooks: { probe: tight } });
     await until(() => run.out.some((line) => line.includes(`refused ${job.job.run_id}`)), 20_000);
-    expect(claimBodies()[0]).toEqual({ capacity: { light: { limit: 1, in_use: 0 }, heavy: { limit: 0, in_use: 0 }, limited_by: "memory" } });
+    expect(claimBodies()[0]).toEqual({ capacity: { light: { limit: 1, in_use: 0 }, heavy: { limit: 0, in_use: 0 }, limited_by: "memory" }, host_load: { mem_avail_mb: 3072, disk_free_mb: 512000, setups_running: 0 } });
     // The agent never started and the run was never held: no heartbeat, no events.
     expect(existsSync(path.join(fake.dir, "argv.txt"))).toBe(false);
     expect(cloud.seen.some((s) => s.path.endsWith("/heartbeat") || s.path.endsWith("/events"))).toBe(false);
@@ -1878,7 +1878,7 @@ describe("D#587 B-5b-3a: the microVM engine in the composed daemon", () => {
     await until(() => claims() >= 1);
     expect(built).toBe(true);
     expect(sentHello().facts).toMatchObject({ sandbox_engine: "os_sandbox" });
-    expect(Object.keys(claimBodies()[0]!)).toEqual(["capacity"]);
+    expect(Object.keys(claimBodies()[0]!)).toEqual(["capacity", "host_load"]);
     expect(sentHello().capabilities ?? []).not.toContain("heartbeat_inventory_v1");
     // D#845 ON-13c3: a machine that reports no sandbox inventory can never be renewed, so no hello it sends ever lists `engine_lease_v1` (and it is never self-stopped)
     const hellos = cloud.seen.filter((s) => s.path === "/api/runner/hello").map((s) => HelloMessage.parse(s.body));

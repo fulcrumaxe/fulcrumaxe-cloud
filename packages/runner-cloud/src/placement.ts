@@ -13,7 +13,8 @@ import { requireMemberRole } from "./memberRole.js";
  *
  * The functions take the caller's tenant transaction, so a caller (the project setup) can make the placement one step of a larger all-or-nothing write. Every query names
  * the account itself on top of row security. A machine is judged only on what it reported: a fact it never sent is unknown, and unknown is never eligible. No real runner
- * reports its host load until a build advertises the `project_setup_v1` capability, so today every machine reads `load_unknown` and none is eligible.
+ * reports its host load on a claim at most once a minute, and an idle one claims only when woken (or once per safety slot), so a refusal for `load_unknown` is answered by waking the
+ * account's runners (`placeProjectRoute`), and the caller asks again. The refusal names its closed reason (`IneligibleReason`) beside the error code.
  */
 
 /** A machine needs at least this much free memory and free disk (megabytes) to take an engine. */
@@ -151,8 +152,9 @@ async function requireRepo(client: PoolClient, accountId: string, repoId: string
   if (rows.length === 0) throw refuse(404, "not_found", "no such repository");
 }
 
+/** `has_project` keeps its own code; every other reason is 409 `machine_not_eligible` with the closed reason beside the error (a word from `IneligibleReason`, never free text). */
 const notEligible = (m: MachineCapacity): RunnerHttpError =>
-  m.reason === "has_project" ? refuse(409, "machine_single_project", "this machine already runs a project") : refuse(409, "machine_not_eligible", "this machine cannot take a project right now");
+  m.reason === "has_project" ? refuse(409, "machine_single_project", "this machine already runs a project") : new RunnerHttpError(409, "machine_not_eligible", "this machine cannot take a project right now", { reason: m.reason });
 
 /** D#845 ON-16a1: not the same repo on a machine still removing it (its delete would wipe the new session; the sandbox name is per repo). No lock: the cleanup commits with the placement's delete. */
 async function refuseRemovalPending(client: PoolClient, accountId: string, repoId: string, machine: Pick<MachineCapacity, "runner_id" | "name">): Promise<void> {

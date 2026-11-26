@@ -28,6 +28,8 @@ const err = (status: number, code: string) => ({ status, json: { error: { code, 
 interface Mock {
   admin: boolean; picker: Json | { status: number; json: unknown }; settings: Json | null; machines: Json[]; runners: Json[]; place: { status: number; json: unknown };
   intent: { status: number; json: unknown }; places: { path: string; body: unknown }[]; intents: unknown[]; requests: string[]; settingsReads: number;
+  /** Answers handed out one per place call before `place` is used. */
+  placeSeq: { status: number; json: unknown }[];
 }
 const REPOS = [
   { id: R1, name: "acme/api", visibility: "private", active_preset: "balanced" },
@@ -42,7 +44,7 @@ const mock = (o: Partial<Mock> = {}): Mock => ({
   runners: [RUNNER(M1, "build-box-1")], machines: [{ id: M1, name: "build-box-1", tier: "microvm", live: true, running: null }],
   place: { status: 201, json: { setup_id: R4, repo_id: R1, runner_id: M1, kind: "existing", phase: "survey", operate_enabled: false } },
   intent: { status: 200, json: { authorize_url: "https://github.com/login/oauth/authorize?state=x" } },
-  places: [], intents: [], requests: [], settingsReads: 0, ...o,
+  places: [], intents: [], requests: [], settingsReads: 0, placeSeq: [], ...o,
 });
 
 async function setup(page: Page, m: Mock) {
@@ -66,7 +68,7 @@ async function setup(page: Page, m: Mock) {
   await page.route((u) => u.pathname === "/api/runners/repos/picker", (route) => route.fulfill("status" in m.picker ? { status: (m.picker as { status: number }).status, json: (m.picker as { json: unknown }).json } : { json: m.picker }));
   await page.route((u) => /^\/api\/runners\/repos\/[^/]+\/place$/.test(u.pathname), (route) => {
     m.places.push({ path: new URL(route.request().url()).pathname, body: route.request().postDataJSON() });
-    return route.fulfill(m.place);
+    return route.fulfill(m.placeSeq.shift() ?? m.place);
   });
   await page.route((u) => u.pathname === "/api/v1/repos/create-intent", (route) => { m.intents.push(route.request().postDataJSON()); return route.fulfill(m.intent); });
   await page.route((u) => u.pathname === "/api/v1/github/install-url", (route) => route.fulfill({ json: { url: "https://github.com/apps/fulcrumaxe-team/installations/new?state=s" } }));
@@ -215,6 +217,82 @@ test.describe("the project picker and confirm (D#845 ON-7b)", () => {
       await noOverflow(page);
     });
   }
+
+  const REASONS: Array<[string, RegExp]> = [
+    ["not_live", /That machine is offline/],
+    ["paused", /That machine is paused/],
+    ["draining", /finishing its work and takes nothing new/],
+    ["claude_not_ready", /Claude isn't signed in on that machine/],
+    ["low_memory", /less than 4 GB of free memory/],
+    ["low_disk", /less than 10 GB of free disk/],
+    ["server_deleting", /That server is being deleted/],
+  ];
+  for (const [reason, text] of REASONS) {
+    test(`a machine_not_eligible refusal for ${reason} says why, in the app's own words, and leaves the confirm open`, async ({ page }) => {
+      const m = mock({ place: { status: 409, json: { error: { code: "machine_not_eligible", message: "SERVER WORDS", request_id: "r" }, reason } } });
+      await boot(page, m);
+      await pickRepo(page, R1);
+      await tid(page, "confirm").click();
+      await expect(tid(page, "error")).toContainText(text);
+      await expect(tid(page, "error")).not.toContainText("SERVER WORDS");
+      await expect(tid(page, "confirm")).toBeVisible();
+      expect(m.places).toHaveLength(1);
+      await clean(page);
+    });
+  }
+
+  const UNKNOWN_LOAD = { status: 409, json: { error: { code: "machine_not_eligible", message: "SERVER WORDS", request_id: "r" }, reason: "load_unknown" } };
+
+  test("a machine whose load is not known yet shows 'Checking the machine…', asks again by itself, and places once the machine has reported", async ({ page }) => {
+    const m = mock({ placeSeq: [UNKNOWN_LOAD, UNKNOWN_LOAD] });
+    await boot(page, m);
+    await page.clock.install();
+    await pickRepo(page, R1);
+    await tid(page, "confirm").click();
+    await expect(tid(page, "note")).toHaveText("Checking the machine…");
+    await expect(tid(page, "confirm")).toHaveText("Checking the machine…");
+    await expect(tid(page, "error")).toHaveCount(0);
+    expect(m.places).toHaveLength(1);
+    await page.clock.runFor(8100);
+    await expect.poll(() => m.places.length).toBe(2);
+    await page.clock.runFor(8100);
+    await expect(tid(page, "placed")).toBeVisible();
+    expect(m.places).toHaveLength(3);
+    expect(m.places.every((p) => JSON.stringify(p.body) === JSON.stringify(m.places[0]!.body))).toBe(true);
+    await clean(page);
+  });
+
+  test("a machine that never reports its load stops being asked after a few tries and then says so", async ({ page }) => {
+    const m = mock({ place: UNKNOWN_LOAD });
+    await boot(page, m);
+    await page.clock.install();
+    await pickRepo(page, R1);
+    await tid(page, "confirm").click();
+    for (let i = 0; i < 4; i++) {
+      await expect.poll(() => m.places.length).toBe(i + 1);
+      await page.clock.runFor(8100);
+    }
+    await expect(tid(page, "error")).toContainText("hasn't reported its free memory and disk yet");
+    await expect(tid(page, "note")).toHaveCount(0);
+    await expect(tid(page, "confirm")).toBeEnabled();
+    expect(m.places).toHaveLength(5);
+  });
+
+  test("the machine list is read again when a repo is picked, so a machine that connected after the panel opened is not shown as Offline", async ({ page }) => {
+    const m = mock({ runners: [RUNNER(M1, "build-box-1", { state: "offline" })], machines: [{ id: M1, name: "build-box-1", tier: "microvm", live: false, running: null }] });
+    await boot(page, m);
+    // The machine connects while the panel is open.
+    m.runners = [RUNNER(M1, "build-box-1")];
+    m.machines = [{ id: M1, name: "build-box-1", tier: "microvm", live: true, running: null }];
+    await pickRepo(page, R1);
+    const card = ob(page).locator('[data-testid="ob-pick-machine"]').first();
+    await expect(card).not.toContainText("Offline");
+    await expect(card.locator("input")).toBeEnabled();
+    await expect(card.locator("input")).toBeChecked();
+    await expect(tid(page, "confirm")).toBeEnabled();
+    await expect(tid(page, "no-eligible")).toHaveCount(0);
+    await noOverflow(page);
+  });
 
   test("create new with one owner: the owner is preselected and create-intent is sent with it, then the browser goes to GitHub", async ({ page }) => {
     const m = mock();
