@@ -14,7 +14,7 @@ import { autoMergeAllowed } from "@fx/trust";
 import { readRecordedRunnerPullRequest } from "@fx/runner";
 import { createGitHubMergeGatePort, isLocalGitHubHttp, type GitHubHttp, type LocalGitHubHttp, type MergeQueueDocuments } from "../build/githubMergePort.js";
 import { createPullRequestAuthorTrust } from "../build/authorTrust.js";
-import { carriedRunsHead, gateReviewerReasons, loadRunsOnSha, runMergeGate, RUNNER_ADMIN_OK_SQL, SHA_PATTERN, type MergeBlockReason, type ReviewMode } from "../build/mergeGate.js";
+import { carriedRunsHead, gateReviewerReasons, loadRunsOnSha, runMergeGate, PUBLIC_REPO_CLAMP_HOLD, RUNNER_ADMIN_OK_SQL, SHA_PATTERN, type MergeBlockReason, type ReviewMode } from "../build/mergeGate.js";
 import { listChangedFiles, listChangedFilesLocal, postReviewStatus, type ListFilesResult } from "./githubReads.js";
 import type { ChangedFile } from "./securityTrigger.js";
 import { checkPublicContent, type ContentCheck } from "./publicContentMatch.js";
@@ -536,7 +536,10 @@ export async function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGa
         // D#845 ON-10e2b (Ruling 89 section 2.4): the repository's visibility, read live and outside any transaction. Anything but "private" (a failed read included) asks. `mergeDial` stays the row that was stored, so the
         // facts name its version and a hold gets a receipt only when that dial itself says ask: a hold the visibility alone causes names no dial, like one the role setting alone causes.
         const visibility: ClampVisibility = await deps.repoVisibility(accountId, ctx.repoId).catch((): ClampVisibility => "unknown");
-        return clampForVisibility(mergeDial.disposition, visibility) !== "ask" && autoMergeAllowed({ provenance: ctx.provenance }, { autoMerge: ctx.autoMerge, blockExternalAutoMerge: ctx.blockExternalAutoMerge });
+        const allowedBySettings = autoMergeAllowed({ provenance: ctx.provenance }, { autoMerge: ctx.autoMerge, blockExternalAutoMerge: ctx.blockExternalAutoMerge });
+        if (clampForVisibility(mergeDial.disposition, visibility) !== "ask") return allowedBySettings;
+        // Held. When the dial itself does not say ask and the settings allow it, the visibility alone is the cause: name it (the hold is the same either way).
+        return allowedBySettings && mergeDial.disposition !== "ask" ? PUBLIC_REPO_CLAMP_HOLD : false;
       },
       // The driver reviews the head itself; nothing is dispatched from inside the gate.
       requestReviews: async () => undefined,

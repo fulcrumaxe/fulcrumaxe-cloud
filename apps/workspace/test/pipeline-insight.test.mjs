@@ -182,6 +182,9 @@ describe("recorded pipeline steps", () => {
       expect(reasonWord("overlap_unreviewed")).toMatch(/fresh review/);
       // The queue tick's wait for a pull request ahead in GitHub's queue is a step fact, not a gate stop: it has a reason line and no blocking sentence.
       expect(reasonWord("merge_hold_expired")).toMatch(/24 hours/);
+      // D#845 ON-10e2b: a hold the repository's visibility alone causes names its cause and leaves the person to merge.
+      expect(reasonWord("public_repo_clamp")).toMatch(/public/);
+      expect(reasonWord("public_repo_clamp")).not.toMatch(/[_<>]|undefined|null/);
       expect(reasonWord("merge_hold_expired")).not.toMatch(/[_<>]|undefined|null/);
       expect(reasonWord("ordered_resource_waiting")).toBe("Waiting for a pull request ahead of it in GitHub's merge queue, so the migration numbers stay in order.");
       expect(stepView({ kind: "merge_gate", state: "done", reasons: ["ordered_resource_waiting"] }).reasons[0]).not.toMatch(/[_<>]|undefined|null/);

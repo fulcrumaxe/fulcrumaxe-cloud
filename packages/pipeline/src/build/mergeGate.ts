@@ -316,6 +316,9 @@ export interface MergeLeaseHandle {
   heldUntilOrderEnds?: true;
 }
 
+/** What `isAutoMergeAllowed` answers when the settings and the dial allow auto-merge and only the repository's visibility holds it: the gate files `public_repo_clamp` instead of `auto_merge_not_allowed`. Still not `true`: the merge is held either way. */
+export const PUBLIC_REPO_CLAMP_HOLD = "public_repo_clamp" as const;
+
 export interface MergeGateDeps {
   pool: Pool;
   github: MergeGateGitHubPort;
@@ -442,6 +445,8 @@ export type MergeBlockReason =
   | "local_review_not_enabled"
   | "local_reviews_passed_advisory"
   | "auto_merge_not_allowed"
+  /** D#845 ON-10e2b: the settings and the merge dial allow auto-merge and only the repository's visibility (not clearly private) holds the merge for a person. */
+  | "public_repo_clamp"
   | "human_merge_only"
   /** D#598 P1d-1: the pull request was opened by someone who is not an admin or maintainer of its repository, the platform's app or on the allowlist. Nothing in the product merges it. */
   | "pr_author_untrusted"
@@ -999,7 +1004,8 @@ async function runMergeGateLeased(deps: MergeGateDeps, input: MergeGateInput, le
   }
 
   const allowed = await deps.isAutoMergeAllowed({ accountId: input.accountId, workItemId: input.workItemId });
-  if (allowed !== true) reasons.push("auto_merge_not_allowed");
+  if (allowed === PUBLIC_REPO_CLAMP_HOLD) reasons.push("public_repo_clamp");
+  else if (allowed !== true) reasons.push("auto_merge_not_allowed");
   // D#6 M1G-a: the operator's lock. A reason is always added, so the merge call below is unreachable for a locked repo.
   if (input.humanMergeOnly === true) reasons.push("human_merge_only");
   for (const r of input.extraBlockReasons ?? []) if (!reasons.includes(r)) reasons.push(r);
