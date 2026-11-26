@@ -9,6 +9,7 @@
 //  - Every sentence is chosen by the closed wire code (a refusal, a 409 code), never taken from the server's text.
 //  - Nothing here counts, adds up or estimates: the lists show what the cloud sent.
 import { isRateLimited, retryWords, waitSeconds } from "../_lib/api.js";
+import { h } from "../_lib/dom.js";
 
 export const COMMAND_LIFE_MIN = 10;
 export const ENGINE_DIALS = ["engine_spawn", "engine_merge", "engine_spec_ready"];
@@ -69,7 +70,74 @@ export const HALT_WORDS = {
   gone: "That repository no longer exists.", haltRefused: "The halt was not accepted. Reload the page and try again.", clearRefused: "The halt was not cleared. Reload the page and try again.",
   haltUnknown: "The halt may not have gone through. Check the state above, then try again.", clearUnknown: "The halt may not have been cleared. Check the state above, then try again.",
 };
-export const NO_OP = { commands: null, commandsAt: "", commandsFailed: false, dials: null, dialsAt: "", dialsFailed: false, saving: false, notice: "", confirmStop: null, confirmHalt: null, haltNote: "" };
+// ── a stop that did not finish (the `stop_failed` fact on the repo list) ─────────────────────────────────────────────────────
+// The cloud sends {reason, code, at} or null; every sentence is chosen here by those closed values, never taken from the server. A person's or a halt's stop can be asked
+// again by an owner or admin; the other causes have no button: a system cause is re-issued by the cloud itself, a move or a removal by its own flow.
+export const STOP_WORDS = {
+  chipContext: "Engine stop: ", chip: "Stop failed", retry: "Try again", retrying: "Trying again…", forbidden: "Only an owner or admin can try again.",
+  other: "The engine didn't stop",
+  base: {
+    person: "The stop didn't finish. The engine may still be running",
+    halt: "The halt didn't finish stopping the engine. It may still be running, and commands stay refused",
+    operate_off: "Operate is off, but the engine didn't stop. It may still be running",
+    plan: "The Engine plan ended, but the engine didn't stop. It may still be running",
+    move: "Moving the project didn't stop the engine on its old machine",
+    remove: "Removing the project didn't stop its engine",
+  },
+  why: {
+    snapshot_failed: "the engine's state couldn't be saved", vm_teardown_incomplete: "the machine couldn't finish shutting it down", job_expired: "the machine didn't pick up the stop in time",
+    job_silent: "the machine went quiet", job_overran: "the stop took too long",
+  },
+  after: { operate_off: "We'll try again when the machine next reports in.", plan: "We'll try again when the machine next reports in.", move: "Start the move again to try once more.", remove: "Stop it on the machine itself." },
+  sent: "Asked the machine to stop the engine again.", already: "A stop is already on its way.", queued: "Asked again. The stop goes out when the machine next reports in.",
+  errors: {
+    forbidden: "Only an owner or admin can try again.", notFound: "That repository no longer exists.", signedOut: "Your session has ended. Sign in again.", other: "That didn't send. Try again.",
+    not_placed: "This project isn't on a machine.", runner_removed: "The machine was removed.", nothing_to_retry: "The stop already changed. Reload the page.", cause_gone: "That's no longer needed, so nothing was sent.",
+  },
+};
+const STOP_REASONS = ["person", "halt", "operate_off", "plan", "move", "remove"];
+/** The closed shape of the list's `stop_failed`; anything else reads as no failed stop (fail closed). */
+export function readStopFailed(raw) {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
+  return { reason: STOP_REASONS.includes(raw.reason) ? raw.reason : "", code: typeof raw.code === "string" ? raw.code : "", at: typeof raw.at === "string" ? raw.at : "" };
+}
+/** A move or a removal is not asked again from the chip; every other cause (and an unknown one) has the button. */
+const stopAskable = (sf) => sf.reason !== "move" && sf.reason !== "remove";
+/** The row under the bar for the open repo, or null when its stop did not fail. The flag is the one the Halt control reads (`canEdit`: an owner or admin). */
+export function describeStopFailed(st, repo) {
+  const sf = repo && repo.stopFailed;
+  if (!st.settings || !sf) return null;
+  const base = sf.reason !== "" ? STOP_WORDS.base[sf.reason] : STOP_WORDS.other;
+  const why = Object.hasOwn(STOP_WORDS.why, sf.code) ? " (" + STOP_WORDS.why[sf.code] + ")" : "";
+  const askable = stopAskable(sf), can = st.settings.canEdit === true;
+  return {
+    id: repo.id, chip: STOP_WORDS.chip, text: base + why + ".", after: Object.hasOwn(STOP_WORDS.after, sf.reason) ? STOP_WORDS.after[sf.reason] : "",
+    button: askable, canRetry: askable && can, busy: st.op.stopBusy === true, label: st.op.stopBusy ? STOP_WORDS.retrying : STOP_WORDS.retry,
+    forbidden: askable && !can ? STOP_WORDS.forbidden : "", note: st.op.stopNote,
+  };
+}
+/** Every refusal of Try again in words, chosen by the status and the closed 409 code. */
+export function stopFailure(e) {
+  const st = e && Number.isInteger(e.status) ? e.status : 0;
+  if (st === 401) return STOP_WORDS.errors.signedOut;
+  if (st === 403) return STOP_WORDS.errors.forbidden;
+  if (st === 404) return STOP_WORDS.errors.notFound;
+  if (st === 409 && typeof e.code === "string" && ["not_placed", "runner_removed", "nothing_to_retry", "cause_gone"].includes(e.code)) return STOP_WORDS.errors[e.code];
+  return STOP_WORDS.errors.other;
+}
+/** The row's nodes: the sentence, the button (disabled for a member, with the line that says why), what happens next, and the last answer. The click calls `retry()` with no argument. */
+export function stopFailNodes(v, retry) {
+  const btn = v.button ? h("button", { type: "button", class: "tm-btn", "data-testid": "tm-stopfail-retry", "data-focus": "stop-retry", "aria-disabled": !v.canRetry || v.busy ? "true" : "false", "aria-describedby": v.forbidden ? "tm-stopfail-why" : null, onClick: () => { if (btn.getAttribute("aria-disabled") !== "true") retry(); } }, v.label) : null;
+  return [
+    h("p", { class: "tm-stop-text", "data-testid": "tm-stopfail-text" }, v.text),
+    btn,
+    v.forbidden ? h("p", { class: "tm-muted", id: "tm-stopfail-why", "data-testid": "tm-stopfail-why" }, v.forbidden) : null,
+    v.after ? h("p", { class: "tm-muted", "data-testid": "tm-stopfail-after" }, v.after) : null,
+    v.note ? h("p", { class: "tm-halt-note", role: "note", "data-testid": "tm-stopfail-note" }, v.note) : null,
+  ];
+}
+
+export const NO_OP = { commands: null, commandsAt: "", commandsFailed: false, dials: null, dialsAt: "", dialsFailed: false, saving: false, notice: "", confirmStop: null, confirmHalt: null, haltNote: "", stopBusy: false, stopNote: "" };
 
 const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const stamp = (v) => (typeof v === "string" && Number.isFinite(Date.parse(v)) ? Date.parse(v) : null);
@@ -298,6 +366,22 @@ export function createOperate({ client, signal, get, set, refresh, aborted }) {
     cancelHalt: () => patch({ confirmHalt: null }),
     halt: () => run((id) => client.halt(id, signal), "", (e) => haltFailure(e, false), { isLocked: () => !haltable(false), refreshOnFail: true, note: "haltNote" }),
     clearHalt: () => run((id) => client.clearHalt(id, signal), "", (e) => haltFailure(e, true), { isLocked: () => !haltable(true), refreshOnFail: true, note: "haltNote" }),
+    async retryStop() {
+      const st = get();
+      const repo = st.repos.find((r) => r.id === st.selectedId);
+      if (!st.settings || st.settings.canEdit !== true || !repo || !repo.stopFailed || !stopAskable(repo.stopFailed) || st.op.stopBusy) return false;
+      patch({ stopBusy: true, stopNote: "" });
+      let r;
+      try { r = await client.retryStop(repo.id, signal); } catch (e) {
+        if (aborted(e)) return false;
+        patch({ stopBusy: false, stopNote: stopFailure(e) });
+        if (e && (e.status === 404 || e.status === 409)) await refresh(); // what was shown is out of date: show what is true now
+        return false;
+      }
+      patch({ stopBusy: false, stopNote: r && r.queued === true ? STOP_WORDS.queued : r && r.already_issued === true ? STOP_WORDS.already : STOP_WORDS.sent });
+      await refresh();
+      return true;
+    },
     stop(id) { return isAgentId(id) ? send("stop_agent", { agent_id: id }) : Promise.resolve(false); },
     cancel: (id) => run(() => client.cancel(id, signal), OP_WORDS.cancelled, cancelFailure, { isLocked: cancelLocked, refreshOn409: true }),
     saveDial: (type, value) => (ENGINE_DIALS.includes(type) && Object.hasOwn(DISPOSITION_TEXT, value) ? run((rid) => client.setDial(rid, type, value, signal), OP_WORDS.dialSaved, dialFailure) : Promise.resolve(false)),
