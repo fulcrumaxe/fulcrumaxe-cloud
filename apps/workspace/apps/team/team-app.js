@@ -6,7 +6,7 @@
 import { h } from "../_lib/dom.js";
 import { on, onRefresh } from "../../core/cloud-live.js";
 import { WORDS, createTeam, describe } from "./team-model.js";
-import { DIAL_CLASSES, HALT_WORDS, OP_WORDS, ROLES, STOP_WORDS, TTL, stopFailNodes } from "./team-operate.js";
+import { DIAL_CLASSES, HALT_WORDS, OP_WORDS, ROLES, STOP_WORDS, TTL, stopFailNodes, updateNodes } from "./team-operate.js";
 
 const FULC = window.FULC;
 if (!FULC || typeof FULC.register !== "function") {
@@ -44,7 +44,7 @@ function mountApp(contentEl) {
     }
     if (hadFocus && !parent.contains(document.activeElement)) heading.focus();
   };
-  const said = { n: "", b: "", r: "", l: "", f: "", o: "", w: "", g: "", s: "" };
+  const said = { n: "", b: "", r: "", l: "", f: "", o: "", w: "", g: "", s: "", e: "" };
   const hear = (k, v) => (said[k] === v ? "" : (said[k] = v));
   const setText = (el, value) => { if (el.textContent !== value) el.textContent = value; };
 
@@ -101,7 +101,9 @@ function mountApp(contentEl) {
   haltBox.hidden = true;
   const stopBox = h("div", { class: "tm-panel tm-stopfail", "data-testid": "tm-stopfail" });
   stopBox.hidden = true;
-  root.replaceChildren(h("div", { class: "tm-page" }, heading, bar, stopBox, watchBar, live, banner, notices, note, haltBox, sheet, body, opWrap));
+  const updateBox = h("div", { class: "tm-panel tm-update", "data-testid": "tm-update" });
+  updateBox.hidden = true;
+  root.replaceChildren(h("div", { class: "tm-page" }, heading, bar, stopBox, updateBox, watchBar, live, banner, notices, note, haltBox, sheet, body, opWrap));
 
   // A control that cannot be used right now keeps its place in the Tab order (aria-disabled, not disabled): focus stays on it through a save, and a member who tabs to it hears why.
   const box = (attrs, checked, enabled, why, set) => h("input", { type: "checkbox", checked, "aria-disabled": enabled ? null : "true", "aria-describedby": enabled ? null : why, onClick: (e) => { if (!enabled) e.preventDefault(); }, onChange: (e) => set(e.target.checked), ...attrs });
@@ -397,6 +399,14 @@ function mountApp(contentEl) {
     if (!sf && want === "stop-retry") want = null; // the row is gone (the stop was asked again): nothing to put focus back on
     swap("stopfail", stopBox, sf, () => (sf ? stopFailNodes(sf, () => retry()) : null));
   }
+  // The engine update card: the title, the progress step or the failure, the pull request link and Update / Try again. The click is `() => start()`; when the button goes (the update is under way) focus moves to the title.
+  const start = () => { want = "update-start"; ops.startUpdate(); };
+  function paintUpdate(uc) {
+    updateBox.hidden = !uc;
+    const onButton = updateBox.contains(document.activeElement) && document.activeElement.getAttribute("data-focus") === "update-start";
+    if ((want === "update-start" || onButton) && !(uc && uc.button)) want = uc ? "update-title" : null; // the button is going: focus goes to the title, not to the page heading
+    swap("update", updateBox, uc, () => (uc ? updateNodes(uc, () => start()) : null));
+  }
   // A change of state is said once; the first state of a repo is a baseline, not news.
   let haltSeen = null, haltRepo = null;
   function haltWords(hl) {
@@ -441,7 +451,7 @@ function mountApp(contentEl) {
     // Said once, when it changes: a poll that finds the same banner or the same failure says nothing. A notice is cleared when a save starts, so the same sentence again is a change.
     const o = d.operate && d.operate.show ? d.operate : null;
     const broken = hasRepos ? Object.keys(TITLE).filter((k) => d[k].failed && d.failedKeys.includes(k)).map((k) => TITLE[k] + " panel couldn't be read.").join(" ") : ""; // a panel that fails is announced too, not only drawn; only once a read has reported the failure, so a panel not yet read is not
-    const msg = [hear("n", d.sheet ? d.sheet.notice : ""), hear("o", o ? o.notice : ""), outcomeWords(o && o.commands), hear("w", d.halt ? d.halt.note : ""), haltWords(d.halt || null), hear("s", d.stopFail ? d.stopFail.note : ""), hear("b", hasRepos ? d.banner : ""), hear("r", d.refreshFailed || ""), hear("l", hasRepos ? d.log.said : ""), hear("f", broken), hear("g", hasRepos ? d.log.olderFailed : "")].filter(Boolean).join(" ");
+    const msg = [hear("n", d.sheet ? d.sheet.notice : ""), hear("o", o ? o.notice : ""), outcomeWords(o && o.commands), hear("w", d.halt ? d.halt.note : ""), haltWords(d.halt || null), hear("s", d.stopFail ? d.stopFail.note : ""), hear("e", d.updateCard ? [d.updateCard.said, d.updateCard.note].filter(Boolean).join(" ") : ""), hear("b", hasRepos ? d.banner : ""), hear("r", d.refreshFailed || ""), hear("l", hasRepos ? d.log.said : ""), hear("f", broken), hear("g", hasRepos ? d.log.olderFailed : "")].filter(Boolean).join(" ");
     if (msg) live.replaceChildren(h("span", null, msg));
     swap("body", body, d.kind === "ready" ? { k: "ready" } : { k: d.kind, c: d.sheet && d.sheet.canEdit, w: d.sheet && d.sheet.watch, s: d.sheet && d.sheet.saving, r: d.rv }, () => {
       if (d.kind === "ready") {
@@ -467,6 +477,7 @@ function mountApp(contentEl) {
     paintOperate(o);
     paintHalt(d.halt || null);
     paintStop(d.stopFail || null);
+    paintUpdate(d.updateCard || null);
     if (want) { // a control that closed a part asks for focus on one that lives in another part
       const el = [...root.querySelectorAll("[data-focus]")].find((e) => e.getAttribute("data-focus") === want);
       if (el) { el.focus(); want = null; }

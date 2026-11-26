@@ -118,3 +118,9 @@
 .tm-stop-text { margin: 6px 0; padding: 8px 10px; border: 3px double var(--accent, #1aff80); font-weight: 700; }
 .tm-stop-chip { border-width: 3px; border-style: double; }
 .tm-stop-chip[hidden], .tm-stopfail[hidden] { display: none; }
+/* The engine update card: the state is carried by the words and a frame, never by colour alone; long words and versions wrap on a phone. */
+.tm-update { margin: 8px 0; padding: 8px 10px; border: 3px double var(--accent, #1aff80); overflow-wrap: anywhere; }
+.tm-update > * + * { margin-top: 8px; }
+.tm-update-title { margin: 0; font-weight: 700; }
+.tm-update-text { margin: 0; }
+.tm-update[hidden] { display: none; }

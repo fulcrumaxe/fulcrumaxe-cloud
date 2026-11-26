@@ -216,7 +216,7 @@ export {
   type IssuedSetupJob,
 } from "./setupJobs.js";
 export { retryEngineStop } from "./engineStopRetry.js";
-export { readEngineBehind, updateEngine, type EngineBehind, type IssuedEngineUpdate } from "./engineUpdate.js";
+export { readEngineBehind, readEngineUpdateCard, updateEngine, type EngineBehind, type EngineUpdateCard, type IssuedEngineUpdate } from "./engineUpdate.js";
 export { checkTwinSeed, issueTwinSeed, type IssuedTwinSeed, type TwinSeedCheck } from "./twinSeed.js";
 export {
   moveEngineProject,

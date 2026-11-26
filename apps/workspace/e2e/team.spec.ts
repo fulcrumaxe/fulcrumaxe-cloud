@@ -69,6 +69,10 @@ interface Mock {
   retryStatus: number;
   retryCode: string;
   retryAnswer: Obj;
+  /** Every POST to a repo's update route (the repo id), and its answer: 200 (the repo then reports its update as under way), or an error status with `updateCode`. */
+  updates: string[];
+  updateStatus: number;
+  updateCode: string;
   /** The answer to GET /api/runners (the fleet read), or null for a 500. */
   runners: Obj | null;
   /** One-click Connect: the answer to GET .../bridge (a test edits it to play the runner), every POST body and DELETE sent to it, and the status a POST or DELETE answers with. */
@@ -92,7 +96,7 @@ function fresh(over: Partial<Mock> = {}): Mock {
     log: F.envelope([F.logLine({ line_id: "aaaa000000000001", pr: 7 }), F.logLine({ line_id: "aaaa000000000002", actor_role: "executor", category: "spawned", pr: null }), F.logLine({ line_id: "aaaa000000000003", discussion: null, pr: 9, category: "gate_passed" })]),
     plan: F.plan(), stats: F.stats(), usage: F.usage(), logPage: null,
     puts: [], reads: [], fail: [], putStatus: 200, putCode: "", streaming: false, streamFrame: null,
-    commands: { commands: [] }, dials: F.dials(), posts: [], deletes: [], postStatus: 201, postCode: "", dialStatus: 200, dialCode: "", halts: [], haltStatus: 200, haltCode: "", haltPends: true, retries: [], retryStatus: 200, retryCode: "", retryAnswer: { job_id: "j0000000-0000-4000-8000-000000000001", kind: "engine_session_stop", operate_epoch: 1, already_issued: false }, runners: F.fleet([F.runner()]),
+    commands: { commands: [] }, dials: F.dials(), posts: [], deletes: [], postStatus: 201, postCode: "", dialStatus: 200, dialCode: "", halts: [], haltStatus: 200, haltCode: "", haltPends: true, updates: [], updateStatus: 200, updateCode: "", retries: [], retryStatus: 200, retryCode: "", retryAnswer: { job_id: "j0000000-0000-4000-8000-000000000001", kind: "engine_session_stop", operate_epoch: 1, already_issued: false }, runners: F.fleet([F.runner()]),
     bridgePosts: [], bridgeDeletes: 0, bridgeStatus: 201, bridgeCode: "", watch: { posts: [], deletes: [], status: 200, code: "", answer: { lease_id: LEASE, expires_at: new Date(Date.now() + 90_000).toISOString(), session_ends_at: new Date(Date.now() + 4 * 3600_000).toISOString(), limits: { per_repo: 2, per_account: 4 }, command: "held", machine: "online", last_seen: new Date().toISOString(), detail_as_of: null }, streams: [], failStream: false }, ...over, bridge: { phase: "idle", plan: "send", runners: [{ id: BRIDGE_RUNNER, name: "Workshop laptop", has_name: true, online: true, protocol_ok: true, last_seen_at: F.iso(120) }], connected: null, command: null, ...(over.bridge ?? {}) },
   };
 }
@@ -217,6 +221,14 @@ async function setup(page: Page, mock: Mock, opts: { clock?: boolean; stream?: b
       if (!mock.retryAnswer.queued) mock.repos = mock.repos.map((r) => (r.repo_id === decodeURIComponent(rm[1]) ? { ...r, stop_failed: null } : r));
       return json(route, 200, mock.retryAnswer);
     }
+    const um = req.method() === "POST" ? url.pathname.match(new RegExp(`^${BASE}/repos/([^/]+)/update$`)) : null;
+    if (um) {
+      mock.updates.push(decodeURIComponent(um[1]));
+      expect(req.postData()).toBeNull(); // no body
+      if (mock.updateStatus !== 200) return json(route, mock.updateStatus, { error: { code: mock.updateCode, message: SERVER_TEXT, request_id: "r" } });
+      mock.repos = mock.repos.map((r) => (r.repo_id === decodeURIComponent(um[1]) ? { ...r, engine_update: { behind: null, update: updateRow() } } : r));
+      return json(route, 200, { update_id: "u1", job_id: "j1", attempt: 1, from_version: "1.4.0", to_version: "1.5.0", branch: "fx/engine-update-1.5.0" });
+    }
     const hm = req.method() === "POST" ? url.pathname.match(new RegExp(`^${BASE}/repos/([^/]+)/halt(/clear)?$`)) : null;
     if (hm) {
       const kind = hm[2] ? "clear" : "halt";
@@ -256,6 +268,9 @@ async function setup(page: Page, mock: Mock, opts: { clock?: boolean; stream?: b
   return { mock, errors };
 }
 
+/** An engine update row as the repo list sends it (ON-15d): by default just started, on its first step. */
+const updateRow = (over: Obj = {}): Obj => ({ from_version: "1.4.0", to_version: "1.5.0", phase: "push", sub_step: "engine_fetch", state: "started", failure_code: null, pr: null, ...over });
+const BEHIND = { from: "1.4.0", to: "1.5.0" };
 const t = (page: Page, id: string) => page.locator(`${WIN} [data-testid="${id}"]`);
 const open = async (page: Page) => {
   await page.locator('.dock-icon[data-app-id="team"]').click();
@@ -2575,6 +2590,108 @@ test.describe("Team app", () => {
     await open(page);
     await expect(t(page, "tm-stop-chip")).toBeHidden();
     await expect(t(page, "tm-stopfail")).toBeHidden();
+    await clean(page, errors);
+  });
+
+  // ── The engine update card (ON-15d) ─────────────────────────────────────────────────────────────────────────────────
+  const updatable = (engine_update: Obj | null, settingsOver: Obj = {}, over: Partial<Mock> = {}) => {
+    const F = makeFixtures(Date.now());
+    return operateOn({ settings: F.settings({ operate_enabled: true, ...settingsOver }), repos: [F.repo({ operate_enabled: true, engine_update })], ...over });
+  };
+  const UPDATE_PR = "https://github.com/acme-labs/widgets/pull/41";
+
+  test("an update is on offer: the card says both versions, Update sends one POST, the card turns to progress and focus lands on its title", async ({ page }) => {
+    const { mock, errors } = await setup(page, updatable({ behind: BEHIND, update: null }));
+    await open(page);
+    await expect(t(page, "tm-update-title")).toHaveText("Update available (v1.4.0 → v1.5.0)");
+    const btn = t(page, "tm-update-start");
+    await expect(btn).toHaveText("Update");
+    await expect(btn).toHaveAttribute("aria-disabled", "false");
+    await press(btn);
+    await expect.poll(() => mock.updates).toEqual([REPO_A]);
+    await expect(t(page, "tm-update-title")).toHaveText("Updating the engine (v1.4.0 → v1.5.0)");
+    await expect(t(page, "tm-update-text")).toHaveText("Step 1 of 4: Preparing the update (fetching the new version).");
+    await expect(t(page, "tm-update-start")).toHaveCount(0);
+    await expect.poll(() => activeId(page)).toBe("tm-update-title");
+    await expect(t(page, "tm-live")).toContainText("Step 1 of 4");
+    await noSideways(page);
+    await clean(page, errors);
+  });
+
+  test("an update under way shows its step and, once it has one, a pull request link that opens in a new tab", async ({ page }) => {
+    const { errors } = await setup(page, updatable({ behind: null, update: updateRow({ phase: "await_merge", sub_step: "pr_open", state: "ok", pr: 41 }) }));
+    await open(page);
+    await expect(t(page, "tm-update-text")).toHaveText("Step 3 of 4: Waiting for someone to merge the pull request.");
+    const a = t(page, "tm-update-pr");
+    await expect(a).toHaveAttribute("href", UPDATE_PR);
+    await expect(a).toHaveAttribute("target", "_blank");
+    await expect(a).toHaveAttribute("rel", "noopener noreferrer");
+    await expect(a).toContainText("Pull request #41");
+    await expect(t(page, "tm-update-start")).toHaveCount(0);
+    await clean(page, errors);
+  });
+
+  test("a merged update says it is restarting", async ({ page }) => {
+    const restart = { behind: null, update: updateRow({ phase: "restart", sub_step: "pr_merged", state: "ok", pr: 41 }) };
+    const { errors } = await setup(page, updatable(restart));
+    await open(page);
+    await expect(t(page, "tm-update-text")).toHaveText("Merged. Restarting the engine on v1.5.0.");
+    await clean(page, errors);
+  });
+
+  test("a failed update says why in words, keeps its pull request link and Try again sends one POST", async ({ page }) => {
+    const { mock, errors } = await setup(page, updatable({ behind: BEHIND, update: updateRow({ phase: "failed", state: "failed", failure_code: "pr_closed", pr: 41 }) }));
+    await open(page);
+    await expect(t(page, "tm-update-text")).toHaveText("The update to v1.5.0 didn't finish (the pull request was closed without merging).");
+    await expect(t(page, "tm-update-pr")).toHaveAttribute("href", UPDATE_PR);
+    await expect(t(page, "tm-update-start")).toHaveText("Try again");
+    await press(t(page, "tm-update-start"));
+    await expect.poll(() => mock.updates).toEqual([REPO_A]);
+    await expect(t(page, "tm-update-title")).toHaveText("Updating the engine (v1.4.0 → v1.5.0)");
+    await clean(page, errors);
+  });
+
+  test("a refusal is said in fixed words, never the server's, and the card stays", async ({ page }) => {
+    const mock = updatable({ behind: BEHIND, update: null });
+    mock.updateStatus = 409;
+    mock.updateCode = "update_live";
+    const { errors } = await setup(page, mock);
+    await open(page);
+    await press(t(page, "tm-update-start"));
+    await expect(t(page, "tm-update-note")).toHaveText("An update is already under way.");
+    await expect(t(page, "tm-update-title")).toHaveText("Update available (v1.4.0 → v1.5.0)");
+    await clean(page, errors);
+  });
+
+  test("a member sees the offer with the button aria-disabled and the line that says why, and a press sends nothing", async ({ page }) => {
+    const { mock, errors } = await setup(page, updatable({ behind: BEHIND, update: null }, { can_edit: false }));
+    await open(page);
+    const btn = t(page, "tm-update-start");
+    await expect(btn).toBeVisible();
+    await expect(btn).toHaveAttribute("aria-disabled", "true");
+    await expect(btn).not.toHaveAttribute("disabled", /.*/);
+    await btn.focus();
+    expect(await activeId(page)).toBe("tm-update-start");
+    await expect(t(page, "tm-update-why")).toHaveText("Only an owner or admin can update the engine.");
+    await btn.dispatchEvent("click");
+    expect(mock.updates).toEqual([]);
+    await clean(page, errors);
+  });
+
+  test("the card adds no landmark, and long copy does not scroll sideways (the phone project is the narrow one)", async ({ page }) => {
+    const { errors } = await setup(page, updatable({ behind: BEHIND, update: updateRow({ phase: "failed", state: "failed", failure_code: "vm_token_delivery_failed", pr: 41 }) }));
+    await open(page);
+    await expect(t(page, "tm-update-text")).toContainText("the sandbox couldn't be given access");
+    await expect(page.locator(`${WIN} section[aria-label], ${WIN} [role="region"]`)).toHaveCount(0);
+    await expect(t(page, "tm-update")).toBeVisible();
+    await noSideways(page);
+    await clean(page, errors);
+  });
+
+  test("a repo with nothing to update shows no card", async ({ page }) => {
+    const { errors } = await setup(page, updatable({ behind: null, update: null }));
+    await open(page);
+    await expect(t(page, "tm-update")).toBeHidden();
     await clean(page, errors);
   });
 
