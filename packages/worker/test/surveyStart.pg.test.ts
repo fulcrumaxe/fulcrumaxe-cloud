@@ -273,6 +273,40 @@ describe("the survey start [pg]", () => {
       await leftNothing(f);
     });
 
+    // D#845 ON-10e2b (Ruling 106.1): the consent rides in the run's own start fact, and the job issuer, through the real start, refuses a public survey that has none.
+    describe("the consent in the start fact, and the issuer's refusal (the flip window)", () => {
+      const startMeta = async (w: SeedRefs) => (await admin.query("SELECT e.payload -> 'meta' AS meta FROM run_events e JOIN agent_runs r ON r.id = e.run_id WHERE r.account_id = $1 AND r.role = $2 AND e.kind = 'run.input'", [w.accountId, SURVEY_ROLE])).rows.map((r) => r.meta);
+
+      it("a consented start of a public repo records the flag beside the machine, and the job is issued with repo.private false", async () => {
+        const w = await world();
+        const runId = started(await build({ visibility: "public" }).start.startSurveyRun(input(w, { publicConsented: true })));
+        expect(await startMeta(w)).toEqual([{ survey_runner_id: w.runnerId, public_survey_consent: true }]);
+        const job = verifyJob((await surveyRuns(w))[0]!.job_signed, keys, { now: new Date() });
+        expect(job.run_id).toBe(runId);
+        expect(job.repo.private).toBe(false);
+      });
+
+      it("a start without the consent records no flag, and a private repo issues as before", async () => {
+        const w = await world();
+        started(await build({ visibility: "private" }).start.startSurveyRun(input(w)));
+        expect(await startMeta(w)).toEqual([{ survey_runner_id: w.runnerId }]);
+        expect((await surveyRuns(w))[0]!.job_signed).not.toBeNull();
+      });
+
+      it("the flip: started as private (no consent), public when the issuer asks again: nothing is issued, no consent row, the setup keeps waiting and the person is asked again", async () => {
+        const w = await world();
+        const result = await build({ visibility: "public" }).start.startSurveyRun(input(w));
+        expect(result).toEqual({ ok: false, status: 409, code: "survey_not_started", reason: "public_survey_consent_required" });
+        const runs = await surveyRuns(w);
+        expect(runs.every((r) => r.job_signed === null && r.status === "failed")).toBe(true);
+        expect(await consentRows(w)).toEqual([]);
+        expect((await setupOf(w.setupId)).phase).toBe("survey");
+        // The person consents on the next start: it is issued.
+        started(await build({ visibility: "public" }).start.startSurveyRun(input(w, { publicConsented: true, priorRunId: runs[0]?.id ?? null })));
+        expect(await consentRows(w)).toHaveLength(1);
+      });
+    });
+
     it("never crosses accounts: another account's setup with the consent is refused and writes no audit row in either account", async () => {
       const w = await world();
       const other = await world();

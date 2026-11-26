@@ -131,6 +131,7 @@ export async function startQueueRepo(db: { admin: PoolClient; runWriterPool: Poo
         github: ordered ? port : withoutOrdered,
         inTenant: tenant,
         ourLogin: BOT,
+        repoVisibility: async () => "private",
         gate: async ({ entry, headSha, expectedSignals }) => {
           const out = await runMergeGate(
             { pool: db.runWriterPool, github: port, isAutoMergeAllowed: async () => autoMerge, requestReviews: async () => undefined },

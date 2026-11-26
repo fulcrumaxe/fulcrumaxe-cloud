@@ -85,7 +85,7 @@ async function world(mode: Mode): Promise<World> {
 
 const optIn = (mode: Mode): LocalReviewOptInPort => ({ enabled: async () => mode === "runner_local_on" });
 const gate = (w: World, mode: Mode) =>
-  runMergeGateForItem({ pool: h.runWriterPool, http: w.local ? fakeGitHubLocal(w.gh).http : fakeGitHubRest(w.gh), localReviewOptIn: optIn(mode) }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
+  runMergeGateForItem({ pool: h.runWriterPool, repoVisibility: async () => "private" as const, http: w.local ? fakeGitHubLocal(w.gh).http : fakeGitHubRest(w.gh), localReviewOptIn: optIn(mode) }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
 const reasonsOf = (out: Awaited<ReturnType<typeof gate>>) => (out.outcome === "ready_human_merges" ? out.reasons : []);
 
 const MODES: Mode[] = ["cloud", "runner_local_off", "runner_local_on"];

@@ -7,9 +7,12 @@ import { DEQUEUE_PULL_REQUEST_DOCUMENT, ENABLE_AUTO_MERGE_DOCUMENT, ENQUEUE_PULL
 import { mergeGateAuthorTrust } from "./github/authorTrust";
 import { openInstallationHttp, readRepoAppLogin } from "./github/installationHttp";
 import { openForRepo } from "./github/localOnlyHttp";
+import { createAppRepoVisibility } from "./github/repoVisibility";
 import { createAppRunPullRequestPort } from "./github/runnerPullRequest";
 import { createLivePlanePushPort } from "./github/planePushHosted";
 import { createPlaneMergeOps } from "./planeMerge";
+
+let appVisibility: ReturnType<typeof createAppRepoVisibility> | undefined;
 
 /**
  * D#483 P3: the review stage's pipeline pieces, as the plain-data functions the worker's `review` dependency takes
@@ -122,6 +125,8 @@ export function createReviewDeps(open: typeof openInstallationHttp = openInstall
             // D#694 B5 and B6-1: the five documents the hosted merge client pins (@fx/github); the pipeline package does not depend on it.
             queueDocuments: { read: MERGE_QUEUE_READ_DOCUMENT, enqueue: ENQUEUE_PULL_REQUEST_DOCUMENT, autoMerge: ENABLE_AUTO_MERGE_DOCUMENT, dequeue: DEQUEUE_PULL_REQUEST_DOCUMENT, entry: MERGE_QUEUE_ENTRY_DOCUMENT, enqueueJump: ENQUEUE_PULL_REQUEST_JUMP_DOCUMENT },
             queueJump,
+            // D#845 ON-10e2b: the dial repo's visibility, read live; a public or unreadable repo's merge dial reads `ask`.
+            repoVisibility: (accountId, repoId) => (appVisibility ??= createAppRepoVisibility()).visibility({ accountId, repoId }),
             localReviewOptIn: createPgLocalReviewOptIn(pool),
             // D#598 P1d-1: who the platform merges for (its own App bots, the intake allowlist); the merge queue's tick reaches the gate through here.
             authorTrust: mergeGateAuthorTrust,

@@ -83,23 +83,29 @@ export async function startSurvey(deps: RunnerCloudDeps, principal: SessionPrinc
   // D#845 ON-10e1: a public repo's survey needs a runner that lists survey_public_v1 (read first, so an old runner is told to update and is never handed a job it would refuse), then the person's consent
   // (`publicConsented`, set only by the start and retry routes from the person's `consent`; a private repo ignores it). An `unknown` visibility is never public: it refuses as before.
   const seen = await readRepoVisibility(deps, principal.accountId, first.repoId);
-  if (seen === "public" && !first.capabilities.includes(SURVEY_PUBLIC_CAPABILITY)) throw refuse(409, "survey_needs_runner_update", `Update fx-runner on ${first.machine} to survey a public repo`);
-  if (seen === "public" && opts.publicConsented !== true) throw refuse(409, "public_survey_consent_required", "A public repo's survey needs your consent first");
+  if (seen === "public" && !first.capabilities.includes(SURVEY_PUBLIC_CAPABILITY)) throw refuse(409, "survey_needs_runner_update", `Update fx-runner on ${first.machine} to survey a public repo`, { machine: first.machine });
   const block = seen === "public" ? null : blockFor(seen);
   if (block !== null) throw blockError(block);
   if (first.owner === null || first.name === null) throw refuse(409, "survey_not_started", "the repository has no name on record", { reason: "survey_prompt_input" });
   const repo = { id: first.repoId, owner: first.owner, name: first.name };
-  let head: string;
-  try {
-    const branch = await github.defaultBranch(repo);
-    const state = await github.branchState({ repo, branch, base: branch });
-    if (!state.exists || state.headOid === null) throw refuse(409, "default_branch_empty", "the default branch has no commit yet");
-    head = state.headOid;
-  } catch (error) {
-    if (error instanceof RunnerHttpError) throw error;
-    if (error instanceof RunPullRequestError) throw error.retryable ? refuse(503, "github_unavailable", "GitHub could not be read now") : refuse(502, "github_refused", "GitHub refused the read");
-    throw error;
+  const readHead = async (): Promise<string> => {
+    try {
+      const branch = await github.defaultBranch(repo);
+      const state = await github.branchState({ repo, branch, base: branch });
+      if (!state.exists || state.headOid === null) throw refuse(409, "default_branch_empty", "the default branch has no commit yet");
+      return state.headOid;
+    } catch (error) {
+      if (error instanceof RunnerHttpError) throw error;
+      if (error instanceof RunPullRequestError) throw error.retryable ? refuse(503, "github_unavailable", "GitHub could not be read now") : refuse(502, "github_refused", "GitHub refused the read");
+      throw error;
+    }
+  };
+  if (seen === "public" && opts.publicConsented !== true) {
+    // D#845 ON-10e2b: the consent card names the commit and the machine, so the refusal carries them (read-only; nothing is written). A head that cannot be read leaves `sha7` off and the card says so.
+    const sha7 = await readHead().then((oid) => oid.slice(0, 7), (): null => null);
+    throw refuse(409, "public_survey_consent_required", "A public repo's survey needs your consent first", { machine: first.machine, ...(sha7 === null ? {} : { sha7 }) });
   }
+  const head = await readHead();
   const result = await runs.startSurveyRun({
     accountId: principal.accountId,
     userId: principal.userId,

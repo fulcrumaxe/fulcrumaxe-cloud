@@ -8,6 +8,7 @@ import { humanMergeOnly } from "@fx/db/src/humanMergeOnly.js";
 import { reportError } from "@fx/telemetry";
 import { decideQueueJump, JUMP_REFUSED_REASON, JUMP_THROTTLED_REASON, QUEUE_JUMP_REASON, type QueueJumpSettings } from "./queueJump.js";
 import { readMergeDial, type MergeDial } from "@fx/db/src/mergeDial.js";
+import { clampForVisibility, type ClampVisibility } from "@fx/db/src/publicRepoClamp.js";
 import { recordMergeReceiptOn, type MergeReceiptCall, type MergeReceiptResult } from "@fx/db/src/mergeReceipt.js";
 import { autoMergeAllowed } from "@fx/trust";
 import { readRecordedRunnerPullRequest } from "@fx/runner";
@@ -253,7 +254,7 @@ export interface Gate1StatusCheck {
   attest?: boolean;
 }
 
-export type MergeGateRunDeps = { pool: Pool; http: GitHubHttp; localReviewOptIn?: LocalReviewOptInPort; publicPlane?: PublicPlanePort; mergeDelegate?: MergeDelegate; queueDocuments?: MergeQueueDocuments; authorTrust?: AuthorTrustInputs; gate1Status?: Gate1StatusCheck; /** TWO-LANE-QUEUE: the jump rule (switch, eligible repositories, throttle). Absent: no jump, as before. */ queueJump?: QueueJumpSettings };
+export type MergeGateRunDeps = { pool: Pool; http: GitHubHttp; localReviewOptIn?: LocalReviewOptInPort; publicPlane?: PublicPlanePort; mergeDelegate?: MergeDelegate; queueDocuments?: MergeQueueDocuments; authorTrust?: AuthorTrustInputs; gate1Status?: Gate1StatusCheck; /** TWO-LANE-QUEUE: the jump rule (switch, eligible repositories, throttle). Absent: no jump, as before. */ queueJump?: QueueJumpSettings; /** D#845 ON-10e2b: the live read of whether the DIAL's repo (the private one of a pair) is private. Anything but "private" (a failed read included): the merge dial reads `ask`, so a public repo never auto-merges. Required, so no caller can leave it out. */ repoVisibility: (accountId: string, repoId: string) => Promise<ClampVisibility> };
 
 export function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGateRunInput & { goPhase: { attestation: GoAttestation; orderId?: string } }): Promise<MergeGateGoResult>;
 export function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGateRunInput): Promise<MergeGateRunResult>;
@@ -532,7 +533,10 @@ export async function runMergeGateForItem(deps: MergeGateRunDeps, input: MergeGa
       isAutoMergeAllowed: async () => {
         mergeDial = await withTenant(pool, accountId, (client) => readMergeDial(client, ctx.repoId));
         dialRead = true;
-        return mergeDial.disposition !== "ask" && autoMergeAllowed({ provenance: ctx.provenance }, { autoMerge: ctx.autoMerge, blockExternalAutoMerge: ctx.blockExternalAutoMerge });
+        // D#845 ON-10e2b (Ruling 89 section 2.4): the repository's visibility, read live and outside any transaction. Anything but "private" (a failed read included) asks. `mergeDial` stays the row that was stored, so the
+        // facts name its version and a hold gets a receipt only when that dial itself says ask: a hold the visibility alone causes names no dial, like one the role setting alone causes.
+        const visibility: ClampVisibility = await deps.repoVisibility(accountId, ctx.repoId).catch((): ClampVisibility => "unknown");
+        return clampForVisibility(mergeDial.disposition, visibility) !== "ask" && autoMergeAllowed({ provenance: ctx.provenance }, { autoMerge: ctx.autoMerge, blockExternalAutoMerge: ctx.blockExternalAutoMerge });
       },
       // The driver reviews the head itself; nothing is dispatched from inside the gate.
       requestReviews: async () => undefined,

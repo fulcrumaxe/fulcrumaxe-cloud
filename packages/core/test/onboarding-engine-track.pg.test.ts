@@ -286,15 +286,15 @@ describe('engine track (pg)', () => {
       const a = await account();
       expect(await trackSetup(a)).toBeNull();
       const s = await setupOn(a, a.repoId, 'plan', `state = 'ok'`);
-      expect(await trackSetup(a)).toEqual({ id: s, phase: 'plan', state: 'ok' });
+      expect(await trackSetup(a)).toEqual({ id: s, phase: 'plan', state: 'ok', survey_run_id: null });
       await admin.query(`UPDATE project_setups SET phase = 'install', state = 'failed' WHERE id = $1`, [s]);
-      expect(await trackSetup(a)).toEqual({ id: s, phase: 'install', state: 'failed' });
+      expect(await trackSetup(a)).toEqual({ id: s, phase: 'install', state: 'failed', survey_run_id: null });
     });
 
     it('a live setup in state skipped is returned as it is', async () => {
       const a = await account();
       const s = await setupOn(a, a.repoId, 'install', `state = 'skipped'`);
-      expect(await trackSetup(a)).toEqual({ id: s, phase: 'install', state: 'skipped' });
+      expect(await trackSetup(a)).toEqual({ id: s, phase: 'install', state: 'skipped', survey_run_id: null });
     });
 
     it('a removed setup and a done setup show nothing, whether or not the install merged; a live one shows beside them', async () => {
@@ -310,7 +310,20 @@ describe('engine track (pg)', () => {
       await admin.query(`UPDATE project_setups SET install_pr_closed_merged = true WHERE id = $1`, [done]);
       expect(await trackSetup(a)).toBeNull();
       const live = await setupOn(a, a.repoId, 'survey');
-      expect(await trackSetup(a)).toEqual({ id: live, phase: 'survey', state: 'started' });
+      expect(await trackSetup(a)).toEqual({ id: live, phase: 'survey', state: 'started', survey_run_id: null });
+    });
+
+    it("D#845 ON-10e2b: the survey's run shows once there is one, and is null while a public repo's survey waits for consent", async () => {
+      const a = await account();
+      const s = await setupOn(a, a.repoId, 'survey');
+      expect(await trackSetup(a)).toEqual({ id: s, phase: 'survey', state: 'started', survey_run_id: null });
+      const run = randomUUID();
+      await admin.query(
+        `INSERT INTO agent_runs (id, account_id, role, runtime, status, execution_mode, dispatch_repo_id, initiated_by) VALUES ($1, $2, 'project-surveyor', 'runner', 'pending', 'runner_local', $3, $4)`,
+        [run, a.accountId, a.repoId, a.userId],
+      );
+      await admin.query(`UPDATE project_setups SET survey_run_id = $2 WHERE id = $1`, [s, run]);
+      expect(await trackSetup(a)).toEqual({ id: s, phase: 'survey', state: 'started', survey_run_id: run });
     });
 
     it('the newest wins among several live setups, and a newer done one does not hide an older live one', async () => {

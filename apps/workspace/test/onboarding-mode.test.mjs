@@ -264,7 +264,7 @@ describe("parseTracks: the engine track's setup", () => {
   // D#845 ON-11a1: the engine track's `setup` is kept only when its id is a UUID and its phase and state are known; anything else is "no setup" and the track still reads.
   it("keeps the engine track's setup only when it is valid", () => {
     const body = fixture("200-setup.json");
-    expect(parseTracks(body).setup).toEqual({ id: "6f1d2c3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f", phase: "plan", state: "ok" });
+    expect(parseTracks(body).setup).toEqual({ id: "6f1d2c3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f", phase: "plan", state: "ok", survey_run_id: null });
     expect(parseTracks(fixture("200-new.json")).setup).toBeNull();
     const withSetup = (setup) => parseTracks({ ...body, tracks: [body.tracks[0], { ...body.tracks[1], setup }] });
     const id = "6f1d2c3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f";
@@ -273,7 +273,7 @@ describe("parseTracks: the engine track's setup", () => {
       expect(parsed.setup, JSON.stringify(bad)).toBeNull();
       expect(parsed.engine).toHaveLength(7);
     }
-    expect(withSetup({ id, phase: "done", state: "failed", extra: "dropped" }).setup).toEqual({ id, phase: "done", state: "failed" });
+    expect(withSetup({ id, phase: "done", state: "failed", extra: "dropped" }).setup).toEqual({ id, phase: "done", state: "failed", survey_run_id: null });
     const own = parseTracks(body);
     expect(own.engine.every((s) => !("setup" in s))).toBe(true);
   });
@@ -283,7 +283,13 @@ describe("parseTracks: the engine track's setup", () => {
     const body = fixture("200-setup.json");
     const id = "6f1d2c3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f";
     const parsed = parseTracks({ ...body, tracks: [body.tracks[0], { ...body.tracks[1], setup: { id, phase: "install", state: "skipped" } }] });
-    expect(parsed.setup).toEqual({ id, phase: "install", state: "skipped" });
+    expect(parsed.setup).toEqual({ id, phase: "install", state: "skipped", survey_run_id: null });
+    // D#845 ON-10e2b: the survey's run is kept only when it is a UUID; anything else reads as "no run".
+    const run = "7a1d2c3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f";
+    for (const [given, held] of [[run, run], [null, null], ["not-a-uuid", null], [7, null], [undefined, null]]) {
+      const p = parseTracks({ ...body, tracks: [body.tracks[0], { ...body.tracks[1], setup: { id, phase: "survey", state: "started", survey_run_id: given } }] });
+      expect(p.setup).toEqual({ id, phase: "survey", state: "started", survey_run_id: held });
+    }
     expect(parsed.engine).toHaveLength(7);
   });
 });

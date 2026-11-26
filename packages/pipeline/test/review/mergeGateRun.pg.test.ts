@@ -64,7 +64,7 @@ const passBoth = async (w: World) => {
   await run(w, "code-reviewer", "pass");
   await run(w, "acceptance-tester", "pass");
 };
-const gate = (w: World) => runMergeGateForItem({ pool: h.runWriterPool, http: fakeGitHubRest(w.gh) }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
+const gate = (w: World) => runMergeGateForItem({ pool: h.runWriterPool, repoVisibility: async () => "private" as const, http: fakeGitHubRest(w.gh) }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
 const events = (w: World) => withTenant(h.runWriterPool, w.accountId, (c) => listDriverEvents(c, w.workItemId));
 const greenCheck = { name: "ci", status: "completed", conclusion: "success" };
 
@@ -114,7 +114,7 @@ describe("a repository with no CI of its own (the platform's status is the signa
     expect(after.map((e) => e.reasons)).toEqual([["merge_repo_busy"], expect.arrayContaining(["ci_not_green"])]);
     w.gh.checks[HEAD] = [];
     await h.admin.query("INSERT INTO repo_merge_leases (account_id, repo_id, holder, kind, lease_until) VALUES ($1, $2, 'other-gate', 'direct', now() + interval '5 minutes')", [w.accountId, w.repoId]);
-    const viaTick = await runMergeGateForItem({ pool: h.runWriterPool, http: fakeGitHubRest(w.gh) }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber, underQueueSlot: true });
+    const viaTick = await runMergeGateForItem({ pool: h.runWriterPool, repoVisibility: async () => "private" as const, http: fakeGitHubRest(w.gh) }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber, underQueueSlot: true });
     expect(viaTick.outcome).toBe("merged");
     const { rows } = await h.admin.query("SELECT holder FROM repo_merge_leases WHERE repo_id = $1", [w.repoId]);
     expect(rows).toEqual([{ holder: "other-gate" }]);
@@ -329,7 +329,7 @@ describe("the pull request itself", () => {
   it("D#519 MQ3-b: a head other than the one the caller checked CI on answers head_moved before CI is read or any merge call is made", async () => {
     const w = await world();
     await passBoth(w);
-    const out = await runMergeGateForItem({ pool: h.runWriterPool, http: fakeGitHubRest(w.gh) }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber, expectedHeadSha: OTHER });
+    const out = await runMergeGateForItem({ pool: h.runWriterPool, repoVisibility: async () => "private" as const, http: fakeGitHubRest(w.gh) }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber, expectedHeadSha: OTHER });
     expect(out).toMatchObject({ outcome: "head_moved" });
     expect(w.gh.merges).toEqual([]);
   });
@@ -496,7 +496,7 @@ describe("D#598 P3b: a stacked child's pull request is never merged by the gate 
 
 describe("D#694 B5: a base branch behind GitHub's merge queue", () => {
   const queueDocuments = { read: MERGE_QUEUE_READ_DOCUMENT, enqueue: ENQUEUE_PULL_REQUEST_DOCUMENT, autoMerge: ENABLE_AUTO_MERGE_DOCUMENT, dequeue: DEQUEUE_PULL_REQUEST_DOCUMENT, entry: MERGE_QUEUE_ENTRY_DOCUMENT };
-  const queued = (w: World) => runMergeGateForItem({ pool: h.runWriterPool, http: fakeGitHubRest(w.gh), queueDocuments }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
+  const queued = (w: World) => runMergeGateForItem({ pool: h.runWriterPool, repoVisibility: async () => "private" as const, http: fakeGitHubRest(w.gh), queueDocuments }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
   const withQueue = (q: Partial<NonNullable<FakeRepoState["mergeQueue"]>> = {}, rules: FakeRepoState["rulesetRules"] = [{ type: "merge_queue", enforcement: "active" }]): Partial<FakeRepoState> => ({
     mergeQueue: { exists: true, mutations: [], ...q },
     rulesetRules: rules,
@@ -524,7 +524,7 @@ describe("D#694 B5: a base branch behind GitHub's merge queue", () => {
     const jumpOf = (_w: World, env: { FX_QUEUE_JUMP?: string; FX_QUEUE_JUMP_MIN_MINUTES?: string } = {}, listed = true) =>
       parseQueueJumpSettings(env, new Set(listed ? ["acme/widgets"] : ["someone/else"]));
     const queuedJump = (w: World, queueJump: ReturnType<typeof parseQueueJumpSettings> | undefined) =>
-      runMergeGateForItem({ pool: h.runWriterPool, http: fakeGitHubRest(w.gh), queueDocuments: { ...queueDocuments, enqueueJump: ENQUEUE_PULL_REQUEST_JUMP_DOCUMENT }, ...(queueJump !== undefined ? { queueJump } : {}) }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
+      runMergeGateForItem({ pool: h.runWriterPool, repoVisibility: async () => "private" as const, http: fakeGitHubRest(w.gh), queueDocuments: { ...queueDocuments, enqueueJump: ENQUEUE_PULL_REQUEST_JUMP_DOCUMENT }, ...(queueJump !== undefined ? { queueJump } : {}) }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
     /** A second work item of the same repository (an earlier cloud pull request). */
     const seedSecondItem = async (w: World): Promise<string> => {
       const { workItemId } = await discussingItem(h.runWriterPool, w.accountId, { title: "Earlier change", body: "Something earlier.", category: "feature", repoId: w.repoId });
@@ -735,7 +735,7 @@ describe("D#694 B5: a base branch behind GitHub's merge queue", () => {
         return http.request(req);
       },
     };
-    const out = await runMergeGateForItem({ pool: h.runWriterPool, http: racing, queueDocuments }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
+    const out = await runMergeGateForItem({ pool: h.runWriterPool, repoVisibility: async () => "private" as const, http: racing, queueDocuments }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
     expect(out).toMatchObject({ outcome: "head_moved", headSha: HEAD });
     expect(w.gh.merges).toEqual([]);
     expect((await events(w)).some((e) => e.kind === "merge_enqueued")).toBe(false);
@@ -1034,6 +1034,24 @@ describe("D#7 DW-R4: the merge dial and the receipt behind a merge by policy", (
     await setDial(w, "act", 2, null);
     expect(await gate(w)).toMatchObject({ outcome: "merged" });
     expect((await receipts(w)).map((r) => [r.chosen, r.dial_version])).toEqual([["ask", 1], ["act", 2]]);
+  });
+
+  it("D#845 ON-10e2b: a repository that is not clearly private never auto-merges, whatever its dial says; the receipt still names the dial that was stored, and a private read merges again", async () => {
+    const via = (w: World, vis: () => Promise<"private" | "public" | "unknown">) => runMergeGateForItem({ pool: h.runWriterPool, repoVisibility: vis, http: fakeGitHubRest(w.gh) }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
+    const w = await world();
+    await passBoth(w);
+    await setDial(w, "act", 1, "autonomous");
+    for (const vis of [async () => "public" as const, async () => "unknown" as const, async () => Promise.reject(new Error("lookup down"))]) {
+      expect(await via(w, vis)).toMatchObject({ outcome: "ready_human_merges", reasons: ["auto_merge_not_allowed"] });
+    }
+    expect(w.gh.merges ?? []).toEqual([]);
+    // The hold names no dial (the stored one says act), so it gets no receipt; the gate's fact still names the version it read.
+    expect(await receipts(w)).toEqual([]);
+    expect(await factVersions(w)).toEqual([{ kind: "merge_gate", dial_version: 1 }]);
+    // The repository is private now: the next look follows the dial.
+    expect(await via(w, async () => "private")).toMatchObject({ outcome: "merged" });
+    expect(w.gh.merges).toEqual([{ sha: HEAD, method: "squash" }]);
+    expect(await receipts(w)).toMatchObject([{ chosen: "act", dial_version: 1 }]);
   });
 
   it("both must allow: auto-merge off with the dial on act is still a person's merge, and the dial never loosens the role setting; the hold the role setting alone causes names no dial, so it gets no receipt", async () => {

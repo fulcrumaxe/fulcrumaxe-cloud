@@ -25,7 +25,9 @@ describe("engine dials route [pg]", () => {
   let key: TestKey;
   let runnerId: string;
 
-  const deps = (pool: Pool = one): RunnerCloudDeps => h.deps({ appUserPool: pool });
+  // D#845 ON-10e2b: the repo's visibility is read live; every test but the clamp's own sees a private repo.
+  const deps = (pool: Pool = one, vis: "private" | "public" | "unknown" | "throws" = "private"): RunnerCloudDeps =>
+    h.deps({ appUserPool: pool, repoVisibility: async () => (vis === "throws" ? Promise.reject(new Error("github down")) : vis) });
   const ports = (over: Partial<EngineDialsPorts> = {}): EngineDialsPorts => ({ ...defaultEngineDialsPorts(), ...over });
   const query = (id: number = GH_REPO_ID): string => `?repo_gh_id=${id}`;
   const get = (id: number = GH_REPO_ID, k: TestKey = key) => signed(k, engineDialsTarget(id), undefined, { method: "GET", rawBody: Buffer.alloc(0) });
@@ -109,6 +111,36 @@ describe("engine dials route [pg]", () => {
           expect(catalogueResolver.resolve(t, stored)).toBe(expected);
         }
       }
+    });
+
+    describe("the public-repo clamp (D#845 ON-10e2b)", () => {
+      const dispositions = async (vis: "private" | "public" | "unknown" | "throws") => ((await ask(GH_REPO_ID, { d: deps(one, vis) })).body as { dispositions: Record<string, string> }).dispositions;
+
+      it.each(PRESETS)("%s preset: every decision type asks on a public repo, on an unreadable one and on a failed read, and answers the stored dial on a private one", async (preset) => {
+        for (const t of ENGINE_DECISION_TYPES) await setDial(t, dialUnder(t, preset), preset);
+        const own = Object.fromEntries(ENGINE_DECISION_TYPES.map((t) => [t, dialUnder(t, preset)]));
+        expect(await dispositions("private")).toEqual(own);
+        for (const vis of ["public", "unknown", "throws"] as const) expect(await dispositions(vis)).toEqual(Object.fromEntries(ENGINE_DECISION_TYPES.map((t) => [t, "ask"])));
+      });
+
+      it("an explicit act on every type is still ask on a public repo, and no repoVisibility port at all asks too", async () => {
+        for (const t of ENGINE_DECISION_TYPES) await setDial(t, "act", "autonomous");
+        expect(Object.values(await dispositions("public"))).toEqual(["ask", "ask", "ask"]);
+        const none = (await ask(GH_REPO_ID, { d: h.deps({ appUserPool: one }) })).body as { dispositions: Record<string, string> };
+        expect(Object.values(none.dispositions)).toEqual(["ask", "ask", "ask"]);
+      });
+
+      it("the clamp changes the answer only: the halt epoch, the halted flag and the catalogue version are the repo's own", async () => {
+        await tmp("INSERT INTO engine_repo_controls (account_id, repo_id, halted_at, halt_epoch) VALUES ($1, $2, now(), 5)", [A.accountId, A.repoId]);
+        expect((await ask(GH_REPO_ID, { d: deps(one, "public") })).body).toMatchObject({ halted: true, halt_epoch: 5, catalogue_version: CATALOGUE_VERSION });
+      });
+
+      it("a repo this runner does not cover is still the same 404 and asks GitHub nothing", async () => {
+        let reads = 0;
+        const d = h.deps({ appUserPool: one, repoVisibility: async () => (reads++, "public") });
+        expect((await ask(GH_REPO_ID + 1, { d })).status).toBe(404);
+        expect(reads).toBe(0);
+      });
     });
 
     it("writes nothing: no decision receipt, no audit row, no setting", async () => {

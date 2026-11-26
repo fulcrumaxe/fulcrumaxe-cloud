@@ -2,7 +2,9 @@ import { EngineDecideReply, EngineDecideRequest } from "@fulcrumaxe/runner-proto
 import { CATALOGUE_VERSION, resolveEngineDecision, type Disposition, type EngineDecisionType } from "@fx/decisions";
 import { writeEngineAudit } from "@fx/db/src/engineAudit.js";
 import { DIAL_DEFAULT_MARKER, getCurrentDialSetting } from "@fx/db/src/decisions.js";
+import { clampForVisibility, type ClampVisibility } from "@fx/db/src/publicRepoClamp.js";
 import type { PoolClient } from "pg";
+import { readRepoVisibility } from "./repoPrivacy.js";
 import { RunnerHttpError, asRunner, parseJsonBody, parseMessage, pgCode, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse } from "./http.js";
 import { verifyRunnerRequest, withRunnerSession, type VerifiedRunner } from "./verifyRunnerRequest.js";
 
@@ -137,6 +139,7 @@ const SELECT_RECEIPT = `SELECT d.id, d.disposition, d.subject, d.answered, a.cho
  *    answer under the first one's approval.
  *  - A decide that carries the `command_id` of a live `request_spawn` for this repo, role and Discussion is a person's own click: it
  *    acts, in that person's name, once per command. Any other pairing is ignored and the dial decides.
+ *  - A repo that is not clearly private (public, or a visibility read that failed) asks for every decision whatever its dial says (D#845 ON-10e2b); a person's own click on a spawn still acts.
  *  - While the repo is halted every decide answers `ask` with `halted: true`, replays included.
  *  - Every answer is audited in the same transaction as the receipt. A failed audit rolls the receipt back and answers 500.
  */
@@ -145,9 +148,12 @@ export async function engineDecide(deps: RunnerCloudDeps, req: RunnerHttpRequest
   const message = parseEngineDecide(parseJsonBody(req));
   const audit = ports.audit;
   if (audit === undefined) throw new RunnerHttpError(503, "not_configured", "engine decisions are not available yet");
+  // D#845 ON-10e2b: the repo's visibility is read live BEFORE the transaction (no network call inside it). A repo the gate would refuse is left to the transaction's own 403.
+  const target = await asRunner(() => withRunnerSession(deps.appUserPool, runner, (client) => ports.gate(client, { runnerId: runner.runnerId, repoGhId: message.repo_gh_id })));
+  const visibility: ClampVisibility = "repoId" in target ? await readRepoVisibility(deps, runner.accountId, target.repoId) : "unknown";
   let reply: EngineDecideReply;
   try {
-    reply = await asRunner(() => withRunnerSession(deps.appUserPool, runner, (client) => decideInside(client, runner, message, ports, (c, e) => audit(c, e, runner.registeredBy))));
+    reply = await asRunner(() => withRunnerSession(deps.appUserPool, runner, (client) => decideInside(client, runner, message, ports, (c, e) => audit(c, e, runner.registeredBy), visibility)));
   } catch (error) {
     if (pgCode(error) !== "HX409") throw error;
     // A halt committed between the read and the insert: nothing was written, so the refusal is recorded on its own.
@@ -162,7 +168,7 @@ export async function engineDecide(deps: RunnerCloudDeps, req: RunnerHttpRequest
   return { status: 200, body: EngineDecideReply.parse(reply), headers: { "cache-control": "no-store" } };
 }
 
-async function decideInside(client: PoolClient, runner: VerifiedRunner, message: EngineDecideRequest, ports: EngineDecidePorts, audit: (client: PoolClient, entry: EngineDecideAuditEntry) => Promise<void>): Promise<EngineDecideReply> {
+async function decideInside(client: PoolClient, runner: VerifiedRunner, message: EngineDecideRequest, ports: EngineDecidePorts, audit: (client: PoolClient, entry: EngineDecideAuditEntry) => Promise<void>, visibility: ClampVisibility): Promise<EngineDecideReply> {
   const gate = await ports.gate(client, { runnerId: runner.runnerId, repoGhId: message.repo_gh_id });
   if ("refusal" in gate) throw new RunnerHttpError(403, gate.refusal, "the engine bridge does not accept this decision");
   const repoId = gate.repoId;
@@ -189,7 +195,9 @@ async function decideInside(client: PoolClient, runner: VerifiedRunner, message:
   const dial = await getCurrentDialSetting(client, repoId, message.decision_type);
   const stored: Disposition | null = dial === null || dial.preset === DIAL_DEFAULT_MARKER ? null : (dial.disposition as Disposition);
   const resolved = resolveEngineDecision({ decisionType: message.decision_type, tag: message.subject.tag, stored });
-  let disposition = resolved.disposition;
+  // A repo that is not clearly private asks for every decision, whatever the stored dial or preset says (Ruling 89 section 2.4). A person's own click on a spawn (below) is still an answer.
+  const clamped = clampForVisibility(resolved.disposition, visibility);
+  let disposition: Disposition = clamped;
   let answeredBy: string | null = null;
   let commandId: string | null = null;
 
@@ -217,7 +225,7 @@ async function decideInside(client: PoolClient, runner: VerifiedRunner, message:
     if (raced !== null) return raced;
     answeredBy = null;
     commandId = null;
-    disposition = resolved.disposition;
+    disposition = clamped;
     inserted = await insert(null, null, null, disposition);
     if (inserted.rowCount === 0) return (await replay()) ?? HALTED_REPLY;
   }

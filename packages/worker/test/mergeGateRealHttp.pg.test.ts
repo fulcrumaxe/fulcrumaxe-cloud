@@ -153,7 +153,7 @@ describe("the merge gate of a paired item, through the real installation client 
     const w = await world({ local: false, pub: { mergeQueue: { exists: false, mutations: [] } } });
     const trace: Trace = { refused: [], sent: [] };
     const out = await runMergeGateForItem(
-      { pool: writerPool, authorTrust: BOT_TRUST, http: hostedHttp(w.priv, trace), queueDocuments: QUEUE_DOCUMENTS, publicPlane: { open: async () => hostedHttp(w.pub, trace), read: readPublicPullRequest(writerPool) } },
+      { pool: writerPool, repoVisibility: async () => "private" as const, authorTrust: BOT_TRUST, http: hostedHttp(w.priv, trace), queueDocuments: QUEUE_DOCUMENTS, publicPlane: { open: async () => hostedHttp(w.pub, trace), read: readPublicPullRequest(writerPool) } },
       { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.priv.prNumber },
     );
     expect(trace.refused).toEqual([]);
@@ -169,7 +169,7 @@ describe("the merge gate of a paired item, through the real installation client 
     const w = await world({ local: false, pub: { mergeQueue: { exists: true, mutations: [] }, rulesetRules: [{ type: "merge_queue", enforcement: "active" }] } });
     const trace: Trace = { refused: [], sent: [] };
     const out = await runMergeGateForItem(
-      { pool: writerPool, authorTrust: BOT_TRUST, http: hostedHttp(w.priv, trace), queueDocuments: QUEUE_DOCUMENTS, publicPlane: { open: async () => hostedHttp(w.pub, trace), read: readPublicPullRequest(writerPool) } },
+      { pool: writerPool, repoVisibility: async () => "private" as const, authorTrust: BOT_TRUST, http: hostedHttp(w.priv, trace), queueDocuments: QUEUE_DOCUMENTS, publicPlane: { open: async () => hostedHttp(w.pub, trace), read: readPublicPullRequest(writerPool) } },
       { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.priv.prNumber },
     );
     expect(trace.refused).toEqual([]);
@@ -187,6 +187,7 @@ describe("the merge gate of a paired item, through the real installation client 
     const out = await runMergeGateForItem(
       {
         pool: writerPool,
+        repoVisibility: async () => "private" as const,
         authorTrust: BOT_TRUST,
         http: priv.http,
         localReviewOptIn: { enabled: async () => true },

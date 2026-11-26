@@ -43,6 +43,8 @@ export interface MergeQueueTickerDeps {
   reviewPlan?: mergeQueue.QueueTickDeps["reviewPlan"];
   /** The review mode and the security flag the gate would read for an entry. Absent: read from the item, as the gate does. */
   reviewJudgement?: mergeQueue.QueueTickDeps["reviewJudgement"];
+  /** D#845 ON-10e2b: the live visibility read of the dial's repository. Absent: the app's own (GitHub, through the installation). */
+  repoVisibility?: mergeQueue.QueueTickDeps["repoVisibility"];
   /** MQ4-b: the conflict decision and round start. Absent: the real one (mergeQueueConflict.ts). */
   onConflict?: mergeQueue.QueueTickDeps["onConflict"];
   onRenumber?: mergeQueue.QueueTickDeps["onRenumber"];
@@ -129,6 +131,8 @@ export async function tickMergeQueueRepo(deps: MergeQueueTickerDeps, target: { a
             throw new Error("merge queue: gate answered an outcome this queue does not know");
         }
       },
+      // D#845 ON-10e2b: the dial repository's visibility, read live (imported on first use, so this module stays off the worker's import graph): a public or unreadable repository's plan write-back is never auto-merged.
+      repoVisibility: deps.repoVisibility ?? (async (accountId, repoId) => (await import("./github/repoVisibility")).createAppRepoVisibility().visibility({ accountId, repoId })),
       writeback: bindWritebackPort({ pool, open, github }),
       // D#694 B6-3: the rule's batch size bounds how many entries wait in the host's queue, and a queue branch is never updated by the product.
       queueInfo: (pr) => github.getMergeQueueInfo!(pr),

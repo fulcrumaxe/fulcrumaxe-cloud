@@ -2,6 +2,7 @@ import type { PoolClient } from "pg";
 import { MAX_ROADMAP_BYTES } from "@fx/core/src/plan/index.js";
 import { readPlanWritebackAutoMerge } from "@fx/db/src/planWritebackSettings.js";
 import { readMergeDial, type MergeDial } from "@fx/db/src/mergeDial.js";
+import { clampForVisibility, type ClampVisibility } from "@fx/db/src/publicRepoClamp.js";
 import { writePlanWritebackMergeFact } from "@fx/db/src/receiptWriter.js";
 import { buildWritebackText, type WritebackTruth } from "../build/planWriteback.js";
 import { createWritebackGitHub, type WritebackGitHub, type WritebackHttp } from "../build/planWritebackGitHub.js";
@@ -131,14 +132,22 @@ export async function readRepoLocks(client: PoolClient, accountId: string, repoI
   return { repoAutoMerge: autoMergeAllowed({ provenance: "internal" }, { autoMerge: r.auto_merge, blockExternalAutoMerge: true }), humanMergeOnly: humanMergeOnly(r.gh_repo_id === null ? null : String(r.gh_repo_id)) };
 }
 
-/** The setting and the locks, read now in one tenant transaction. Anything that cannot be read is off and locked. */
-export async function writebackPermission(deps: { inTenant: Tenant }, target: { accountId: string; repoId: string }): Promise<{ setting: boolean; locks: WritebackLocks; dial: MergeDial }> {
-  return deps.inTenant(target.accountId, async (c) => ({ setting: await readAutoMerge(c, target.accountId, target.repoId), locks: await readRepoLocks(c, target.accountId, target.repoId), dial: await readMergeDial(c, target.repoId) })).catch(() => ({ setting: false, locks: LOCKED, dial: { disposition: "ask" as const, version: 0 } }));
+/** D#845 ON-10e2b: the live read of whether the repository the dial belongs to is private. A read that fails is "unknown". */
+export type VisibilityRead = (accountId: string, repoId: string) => Promise<ClampVisibility>;
+
+/**
+ * The setting and the locks, read now in one tenant transaction. Anything that cannot be read is off and locked. The dial is the stored one, then clamped (D#845 ON-10e2b, Ruling 89 section 2.4):
+ * a repository that is not clearly private reads `ask`, whatever its dial says, so a plan write-back never auto-merges on a public repository. The visibility is read outside the transaction.
+ */
+export async function writebackPermission(deps: { inTenant: Tenant; repoVisibility: VisibilityRead }, target: { accountId: string; repoId: string }): Promise<{ setting: boolean; locks: WritebackLocks; dial: MergeDial }> {
+  const read = await deps.inTenant(target.accountId, async (c) => ({ setting: await readAutoMerge(c, target.accountId, target.repoId), locks: await readRepoLocks(c, target.accountId, target.repoId), dial: await readMergeDial(c, target.repoId) })).catch(() => ({ setting: false, locks: LOCKED, dial: { disposition: "ask" as const, version: 0 } }));
+  const visibility = await deps.repoVisibility(target.accountId, target.repoId).catch((): ClampVisibility => "unknown");
+  return { ...read, dial: { ...read.dial, disposition: clampForVisibility(read.dial.disposition, visibility) } };
 }
 
 /** The gate for a `plan_writeback` entry that holds the slot with green CI on `headSha`. Makes at most one merge call. */
 export async function runWritebackGate(
-  deps: { inTenant: Tenant; writeback: WritebackTickPort },
+  deps: { inTenant: Tenant; writeback: WritebackTickPort; repoVisibility: VisibilityRead },
   input: { accountId: string; repoId: string; planWritebackId: string; pr: PullRequestRef; headSha: string },
 ): Promise<WritebackGateResult> {
   const target = { accountId: input.accountId, repoId: input.repoId };

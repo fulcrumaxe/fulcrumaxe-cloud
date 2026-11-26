@@ -12,7 +12,7 @@ import { clearOrderedStops, orderedStep, type OrderedDeps, type OrderedOutcome }
 import { MERGE_QUEUE_CI_WAIT_MINUTES } from "./policy.js";
 import { runRefreshStep, refreshTip, type RefreshGitHubPort, type StartDeltaReview } from "./refresh.js";
 import { adoptParkedSlot, listConflictRounds, listHeadRefreshes, listWritebackNeedsYou, markMerged, PARKED_PHASE, readHaltedEntries, readHostQueued, readQueue, reclaimExpiredLeases, releaseToQueue, renewSlot, requeueReadyWritebacks, returnToReview, stopEntry, stopOnRemovals, takeSlot } from "./store.js";
-import { runWritebackGate, writebackPermission, type WritebackTickPort } from "./writeback.js";
+import { runWritebackGate, writebackPermission, type VisibilityRead, type WritebackTickPort } from "./writeback.js";
 import type { MergeDial } from "@fx/db/src/mergeDial.js";
 import { recordWritebackReceiptOn } from "@fx/db/src/mergeReceipt.js";
 import { handToPerson } from "./events.js";
@@ -63,6 +63,8 @@ export interface QueueTickDeps {
    * `maxEntries` entries of the repository in the host's queue at a time.
    */
   queueInfo?(pr: PullRequestRef): Promise<{ mode: "queue" | "direct" | "unknown"; maxEntries: number }>;
+  /** D#845 ON-10e2b: whether the repository the dial belongs to is private, read live. A public or unreadable one never auto-merges a plan write-back. */
+  repoVisibility: VisibilityRead;
   /** D#598 P5c-b: the ports a plan write-back needs (locks, GitHub reads for the byte comparison, the merge call). Absent: write-back entries are left alone. */
   writeback?: WritebackTickPort;
   /** MQ3-a's port, bound by the caller to the real reviewer start. */
@@ -471,7 +473,7 @@ async function ciThenGate(
   if (!(await deps.inTenant(accountId, (c) => renewSlot(c, { accountId, entryId: entry.id, holder, phase: "merge" })))) return { outcome: "pr_not_open" };
   if (entry.entryKind === "plan_writeback") {
     if (!deps.writeback || entry.planWritebackId === null) return { outcome: "ready_human_merges", reasons: ["writeback_check_unfinished"] };
-    return runWritebackGate({ inTenant: deps.inTenant, writeback: deps.writeback }, { accountId, repoId: entry.repoId, planWritebackId: entry.planWritebackId, pr, headSha });
+    return runWritebackGate({ inTenant: deps.inTenant, writeback: deps.writeback, repoVisibility: deps.repoVisibility }, { accountId, repoId: entry.repoId, planWritebackId: entry.planWritebackId, pr, headSha });
   }
   return deps.gate({ entry, headSha, expectedSignals: expected });
 }

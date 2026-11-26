@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { ENGINE_DECISION_TYPES, ENGINE_SPEC_TAGS, getCatalogueEntry, decide, type Disposition, type EngineDecisionType, type PresetName } from "@fx/decisions";
+import { CATALOGUE_VERSION, ENGINE_DECISION_TYPES, ENGINE_SPEC_TAGS, getCatalogueEntry, decide, type Disposition, type EngineDecisionType, type PresetName } from "@fx/decisions";
 import { createPool } from "@fx/db/src/pool.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
@@ -39,7 +39,10 @@ describe("engine decide route [pg]", () => {
     },
     ...over,
   });
-  const deps = (p: EngineDecidePorts | null = ports()): RunnerCloudDeps => h.deps({ appUserPool: one, engineDecide: p });
+  // D#845 ON-10e2b: the repo's visibility is read live; every test but the clamp's own sees a private repo.
+  type Vis = "private" | "public" | "unknown" | "throws";
+  const deps = (p: EngineDecidePorts | null = ports(), vis: Vis = "private"): RunnerCloudDeps =>
+    h.deps({ appUserPool: one, engineDecide: p, repoVisibility: async () => (vis === "throws" ? Promise.reject(new Error("github down")) : vis) });
   const body = (over: Record<string, unknown> = {}) => ({ repo_gh_id: GH_REPO_ID, decision_type: "engine_merge", request_key: `merge:1:${randomUUID().slice(0, 8)}`, subject: { pr: 1 }, ...over });
   const ask = async (b: unknown = body(), d: RunnerCloudDeps = deps(), k: TestKey = key) => toResponse(() => engineDecide(d, signed(k, ENGINE_DECIDE_PATH, b)));
   const receipts = async (repoId = A.repoId) => (await h.admin.query("SELECT * FROM engine_decisions WHERE repo_id = $1 ORDER BY created_at", [repoId])).rows;
@@ -277,6 +280,66 @@ describe("engine decide route [pg]", () => {
         });
       }
     }
+  });
+
+  describe("the public-repo clamp (D#845 ON-10e2b): a repo that is not clearly private asks for everything", () => {
+    const subjectOf = (type: string) => (type === "engine_spawn" ? { role: "executor", discussion: 7 } : type === "engine_merge" ? { pr: 9 } : { discussion: 7, tag: "small" });
+    for (const type of ENGINE_DECISION_TYPES) {
+      for (const preset of PRESETS) {
+        for (const vis of ["public", "unknown", "throws"] as const) {
+          it(`${type} under ${preset} on a ${vis} repo asks, and is recorded as an ask`, async () => {
+            await applyPreset(preset);
+            const r = await ask(body({ decision_type: type, request_key: `clamp:${type}:${preset}:${vis}`, subject: subjectOf(type) }), deps(ports(), vis));
+            expect(r.status).toBe(200);
+            expect(r.body).toMatchObject({ disposition: "ask", answered: null });
+            expect((r.body as { ask_id: string | null }).ask_id).not.toBeNull();
+            expect((await receipts())[0]).toMatchObject({ decision_type: type, disposition: "ask" });
+          });
+        }
+        it(`${type} under ${preset} on a private repo is unchanged`, async () => {
+          await applyPreset(preset);
+          const r = await ask(body({ decision_type: type, request_key: `clamp:${type}:${preset}:private`, subject: subjectOf(type) }), deps(ports(), "private"));
+          expect((r.body as { disposition: string }).disposition).toBe(dialUnder(type, preset));
+        });
+      }
+    }
+
+    it("a person's own click on a spawn still acts on a public repo (the click is the answer), once", async () => {
+      await applyPreset("autonomous");
+      const c = randomUUID();
+      await tmp("INSERT INTO engine_commands VALUES ($1, $2, $3, $4, 'request_spawn', $5::jsonb, $6, now() + interval '5 minutes', 'delivered')", [c, A.accountId, runnerId, A.repoId, JSON.stringify({ role: "executor", discussion: 7 }), owner]);
+      const r = await ask(body({ decision_type: "engine_spawn", request_key: "spawn:click", subject: { role: "executor", discussion: 7 }, command_id: c }), deps(pgEngineDecidePorts, "public"));
+      expect(r.body).toMatchObject({ disposition: "act", answered: "approve" });
+    });
+
+    it("the lost-race retry is clamped too: a command another key spent between the check and the insert leaves the dial to decide, and on a public repo that is ask", async () => {
+      await applyPreset("autonomous");
+      const c = randomUUID();
+      await tmp("INSERT INTO engine_commands VALUES ($1, $2, $3, $4, 'request_spawn', $5::jsonb, $6, now() + interval '5 minutes', 'delivered')", [c, A.accountId, runnerId, A.repoId, JSON.stringify({ role: "executor", discussion: 7 }), owner]);
+      const racing: EngineDecidePorts = {
+        ...pgEngineDecidePorts,
+        async coveringCommand(client, input) {
+          const cover = await pgEngineDecidePorts.coveringCommand(client, input);
+          // Another decide, under another key, takes the command before this one inserts.
+          await client.query(
+            "INSERT INTO engine_decisions (account_id, repo_id, decision_type, request_key, subject, disposition, catalogue_version, preset, answered_by, answered, command_id) VALUES ($1, $2, 'engine_spawn', 'spawn:other', $3::jsonb, 'act', $4, 'autonomous', $5, 'approve', $6)",
+            [A.accountId, A.repoId, JSON.stringify({ role: "executor", discussion: 7 }), CATALOGUE_VERSION, owner, c],
+          );
+          return cover;
+        },
+      };
+      const r = await ask(body({ decision_type: "engine_spawn", request_key: "spawn:race", subject: { role: "executor", discussion: 7 }, command_id: c }), deps(racing, "public"));
+      expect(r.status).toBe(200);
+      expect(r.body).toMatchObject({ disposition: "ask", answered: null });
+    });
+
+    it("a repo the gate refuses is the same 403 and reads no visibility", async () => {
+      await tmp("UPDATE engine_bridge_settings SET operate_enabled = false");
+      let reads = 0;
+      const d = h.deps({ appUserPool: one, engineDecide: ports(), repoVisibility: async () => (reads++, "public") });
+      expect((await ask(body(), d)).status).toBe(403);
+      expect(reads).toBe(0);
+    });
   });
 
   describe("the Spec tag (security review of the protocol): missing asks, unknown is refused", () => {

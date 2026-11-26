@@ -53,6 +53,8 @@ export interface EngineSetup {
   id: string;
   phase: (typeof SETUP_PHASES)[number];
   state: (typeof SETUP_STATES)[number];
+  /** D#845 ON-10e2b: the survey's run, or null while none has started (a public repo's survey waits for the person's consent). The survey card shows only while this is null. */
+  survey_run_id: string | null;
 }
 
 /** What each step's source says: its time when true, null when false. */
@@ -159,7 +161,7 @@ export async function readEngineSources(
     ? { setup_id: pr.id, pr_number: pr.install_pr, pr_state: pr.phase !== 'await_merge' ? 'merged' : pr.failure_code === 'pr_closed' ? 'closed' : 'open' }
     : null;
   // D#845 Ruling 102.1: the one live setup (any phase but done or removed, the newest), else null. After `done` the track's own step states carry the history.
-  const setup = (await client.query<EngineSetup>(`SELECT id, phase, state FROM project_setups WHERE account_id = $1 AND phase NOT IN ('done', 'removed') ORDER BY created_at DESC, id LIMIT 1`, [accountId])).rows[0] ?? null;
+  const setup = (await client.query<EngineSetup>(`SELECT id, phase, state, survey_run_id FROM project_setups WHERE account_id = $1 AND phase NOT IN ('done', 'removed') ORDER BY created_at DESC, id LIMIT 1`, [accountId])).rows[0] ?? null;
   const tier = rn[0]?.sandbox_engine === 'microvm' ? 'microvm' : rn[0]?.sandbox_engine === 'os_sandbox' ? 'standard' : null;
   const runners = rn.map((r) => ({ id: r.id, heardAt: r.last_seen_at.toISOString() }));
   const read: { sources: EngineSources; runners: { id: string; heardAt: string }[] } = {

@@ -39,7 +39,7 @@ async function world(repo: Partial<FakeRepoState> = {}) {
 }
 type World = Awaited<ReturnType<typeof world>>;
 const gate = (w: World, http: GitHubHttp = fakeGitHubRest(w.gh), extra: { queue?: boolean } = {}) =>
-  runMergeGateForItem({ pool: h.runWriterPool, http, authorTrust: trust, ...(extra.queue ? { queueDocuments } : {}) }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
+  runMergeGateForItem({ pool: h.runWriterPool, repoVisibility: async () => "private" as const, http, authorTrust: trust, ...(extra.queue ? { queueDocuments } : {}) }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
 const queueRepo = (): Partial<FakeRepoState> => ({ mergeQueue: { exists: true, mutations: [] }, rulesetRules: [{ type: "merge_queue", enforcement: "active" }] });
 /** The fake with the permission read answered by `reply` (a status and body, or a throw for a transport failure). */
 const permissionAnswers = (w: World, reply: () => { status: number; body: unknown }): GitHubHttp => {
@@ -89,7 +89,7 @@ describe("a public repository: the author of the pull request decides", () => {
 
   it("an allowlisted login merges with no read, and so does the queue path for a trusted author", async () => {
     const w = await world({ authorLogin: "Dependabot", ...queueRepo() });
-    const out = await runMergeGateForItem({ pool: h.runWriterPool, http: fakeGitHubRest(w.gh), authorTrust: { botLogins: async () => [], allowlist: () => ["dependabot"] }, queueDocuments }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
+    const out = await runMergeGateForItem({ pool: h.runWriterPool, repoVisibility: async () => "private" as const, http: fakeGitHubRest(w.gh), authorTrust: { botLogins: async () => [], allowlist: () => ["dependabot"] }, queueDocuments }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
     expect(out).toMatchObject({ outcome: "merge_enqueued" });
     expect(w.gh.permissionReads ?? []).toEqual([]);
   });
@@ -113,7 +113,7 @@ describe("a public repository: the author of the pull request decides", () => {
   it("an app login that cannot be read does not widen trust: a human admin still merges; anyone else is unverified", async () => {
     const w = await world({ authorLogin: "carol", collaborators: { carol: "admin" } });
     const broken = { botLogins: async (): Promise<string[]> => { throw new Error("app read failed"); }, allowlist: () => null };
-    const run = (x: World) => runMergeGateForItem({ pool: h.runWriterPool, http: fakeGitHubRest(x.gh), authorTrust: broken }, { accountId: x.accountId, workItemId: x.workItemId, prNumber: x.gh.prNumber });
+    const run = (x: World) => runMergeGateForItem({ pool: h.runWriterPool, repoVisibility: async () => "private" as const, http: fakeGitHubRest(x.gh), authorTrust: broken }, { accountId: x.accountId, workItemId: x.workItemId, prNumber: x.gh.prNumber });
     expect(await run(w)).toMatchObject({ outcome: "merged" });
     const other = await world({ authorLogin: "dave", collaborators: { dave: "write" } });
     expect(await run(other)).toMatchObject({ outcome: "ready_human_merges", reasons: ["pr_author_unverified"] });
