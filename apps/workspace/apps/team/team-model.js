@@ -15,7 +15,7 @@
 import { api, isRateLimited, retryWords, waitSeconds } from "../_lib/api.js";
 import { usd as dollars } from "../_lib/dom.js";
 import { readFleet } from "../runners/runners-fleet.js";
-import { NO_OP, agentWords, createOperate, describeHalt, describeOperate, isAgentId, stopOf } from "./team-operate.js";
+import { NO_OP, agentWords, createOperate, describeHalt, describeOperate, describeStopFailed, isAgentId, readStopFailed, stopOf } from "./team-operate.js";
 
 // The Team app's one door to the cloud, below: every URL and every request the app makes, written against the engine routes' documented shapes (the per-repo list envelope, the
 // settings read, the settings write, the command channel and the decision dials). The model and the page never build a path of their own. It lives in this file so the app stays
@@ -37,6 +37,7 @@ export const commandUrl = (id) => "/api/v1/engine/commands/" + enc(id);
 export const bridgeUrl = (repoId) => REPOS_URL + "/" + enc(repoId) + "/bridge";
 export const watchUrl = (repoId) => REPOS_URL + "/" + enc(repoId) + "/watch";
 export const haltUrl = (repoId) => REPOS_URL + "/" + enc(repoId) + "/halt";
+export const retryStopUrl = (repoId) => REPOS_URL + "/" + enc(repoId) + "/retry-stop";
 export const clearHaltUrl = (repoId) => haltUrl(repoId) + "/clear";
 export const dialsUrl = (repoId) => "/api/v1/repos/" + enc(repoId) + "/decision-settings";
 export const dialUrl = (repoId) => dialsUrl(repoId) + "/dial";
@@ -60,6 +61,7 @@ export function createTeamApi(call = api) {
     disconnectBridge: (repoId, signal) => call("DELETE", bridgeUrl(repoId), undefined, signal),
     watch: (repoId, body, signal) => call("POST", watchUrl(repoId), body, signal),
     unwatch: (repoId, browserId) => call("DELETE", watchUrl(repoId) + "?browser_id=" + enc(browserId)),
+    retryStop: (repoId, signal) => call("POST", retryStopUrl(repoId), undefined, signal),
     halt: (repoId, signal) => call("POST", haltUrl(repoId), {}, signal),
     clearHalt: (repoId, signal) => call("POST", clearHaltUrl(repoId), {}, signal),
     dials: (repoId, signal) => call("GET", dialsUrl(repoId), undefined, signal),
@@ -264,6 +266,7 @@ export function readRepos(raw) {
     id: idKey(r.repo_id), name: r.full_name, runner: typeof r.runner_name === "string" ? r.runner_name : "", liveness: typeof r.liveness === "string" ? r.liveness : "never",
     lastHeard: typeof r.last_heard_at === "string" ? r.last_heard_at : "", operate: r.operate_enabled === true, halted: r.halted === true, haltPending: r.halt_pending === true,
     haltedAt: typeof r.halted_at === "string" ? r.halted_at : "", haltedBy: isObj(r.halted_by) && typeof r.halted_by.display_name === "string" && r.halted_by.display_name !== "" ? r.halted_by.display_name : "",
+    stopFailed: readStopFailed(r.stop_failed),
   }));
 }
 export function readSettings(raw) {
@@ -472,7 +475,7 @@ export function describe(st, nowMs) {
   const lane = lanes ? laneRows(lanes, gates, nowMs, repo.name) : null;
   const rows = agents ? agents.items.map((a) => agentRow(a, live, nowMs, repo.name)).filter((r) => r.state !== "stopped").map((r) => ({ ...r, stop: r.state === "running" ? stopOf(st, r.stopId) : null, who: agentWords(r) })) : [];
   return {
-    kind: "ready", ...base, operate: describeOperate(shown, nowMs, repo, asOf, rows), halt: describeHalt(st, repo, nowMs),
+    kind: "ready", ...base, operate: describeOperate(shown, nowMs, repo, asOf, rows), halt: describeHalt(st, repo, nowMs), stopFail: describeStopFailed(st, repo),
     repos: st.repos.map((r) => ({ id: r.id, name: r.name, selected: r.id === repo.id })),
     chip: chipOf(repo), runner: repo.runner, banner: gapBanner(envs), notices: sourceNotices(envs, lanes),
     watch: st.watchMod ? st.watchMod.watchView(st.watch, repo, nowMs) : null,

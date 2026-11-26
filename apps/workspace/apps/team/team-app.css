@@ -112,3 +112,9 @@
 .tm-spin { display: inline-block; width: 0.9em; height: 0.9em; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; vertical-align: -0.1em; animation: tm-spin 1s linear infinite; }
 @keyframes tm-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .tm-spin { animation: none; } }
+/* A stop that did not finish: the state is carried by a thick frame and the words, never by colour alone; the chip reads the same words. */
+.tm-stopfail { margin: 8px 0; }
+.tm-stopfail > * + * { margin-top: 8px; }
+.tm-stop-text { margin: 6px 0; padding: 8px 10px; border: 3px double var(--accent, #1aff80); font-weight: 700; }
+.tm-stop-chip { border-width: 3px; border-style: double; }
+.tm-stop-chip[hidden], .tm-stopfail[hidden] { display: none; }

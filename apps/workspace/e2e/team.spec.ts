@@ -64,6 +64,11 @@ interface Mock {
   haltStatus: number;
   haltCode: string;
   haltPends: boolean;
+  /** Every POST to a repo's retry-stop route (the repo id), and its answer: 200 with `retryAnswer`, or an error status with `retryCode`. A person's or a halt's stop that was asked again clears the repo's `stop_failed`. */
+  retries: string[];
+  retryStatus: number;
+  retryCode: string;
+  retryAnswer: Obj;
   /** The answer to GET /api/runners (the fleet read), or null for a 500. */
   runners: Obj | null;
   /** One-click Connect: the answer to GET .../bridge (a test edits it to play the runner), every POST body and DELETE sent to it, and the status a POST or DELETE answers with. */
@@ -87,7 +92,7 @@ function fresh(over: Partial<Mock> = {}): Mock {
     log: F.envelope([F.logLine({ line_id: "aaaa000000000001", pr: 7 }), F.logLine({ line_id: "aaaa000000000002", actor_role: "executor", category: "spawned", pr: null }), F.logLine({ line_id: "aaaa000000000003", discussion: null, pr: 9, category: "gate_passed" })]),
     plan: F.plan(), stats: F.stats(), usage: F.usage(), logPage: null,
     puts: [], reads: [], fail: [], putStatus: 200, putCode: "", streaming: false, streamFrame: null,
-    commands: { commands: [] }, dials: F.dials(), posts: [], deletes: [], postStatus: 201, postCode: "", dialStatus: 200, dialCode: "", halts: [], haltStatus: 200, haltCode: "", haltPends: true, runners: F.fleet([F.runner()]),
+    commands: { commands: [] }, dials: F.dials(), posts: [], deletes: [], postStatus: 201, postCode: "", dialStatus: 200, dialCode: "", halts: [], haltStatus: 200, haltCode: "", haltPends: true, retries: [], retryStatus: 200, retryCode: "", retryAnswer: { job_id: "j0000000-0000-4000-8000-000000000001", kind: "engine_session_stop", operate_epoch: 1, already_issued: false }, runners: F.fleet([F.runner()]),
     bridgePosts: [], bridgeDeletes: 0, bridgeStatus: 201, bridgeCode: "", watch: { posts: [], deletes: [], status: 200, code: "", answer: { lease_id: LEASE, expires_at: new Date(Date.now() + 90_000).toISOString(), session_ends_at: new Date(Date.now() + 4 * 3600_000).toISOString(), limits: { per_repo: 2, per_account: 4 }, command: "held", machine: "online", last_seen: new Date().toISOString(), detail_as_of: null }, streams: [], failStream: false }, ...over, bridge: { phase: "idle", plan: "send", runners: [{ id: BRIDGE_RUNNER, name: "Workshop laptop", has_name: true, online: true, protocol_ok: true, last_seen_at: F.iso(120) }], connected: null, command: null, ...(over.bridge ?? {}) },
   };
 }
@@ -203,6 +208,14 @@ async function setup(page: Page, mock: Mock, opts: { clock?: boolean; stream?: b
       const id = `c0000000-0000-4000-8000-${String(mock.commands.commands.length + 1).padStart(12, "0")}`;
       mock.commands = { commands: [F.command({ id, kind: body.kind, args: body.args }), ...mock.commands.commands] };
       return json(route, 201, { command_id: id, state: "pending", expires_at: new Date(Date.now() + 540000).toISOString() });
+    }
+    const rm = req.method() === "POST" ? url.pathname.match(new RegExp(`^${BASE}/repos/([^/]+)/retry-stop$`)) : null;
+    if (rm) {
+      mock.retries.push(decodeURIComponent(rm[1]));
+      expect(req.postData()).toBeNull(); // no body
+      if (mock.retryStatus !== 200) return json(route, mock.retryStatus, { error: { code: mock.retryCode, message: SERVER_TEXT, request_id: "r" } });
+      if (!mock.retryAnswer.queued) mock.repos = mock.repos.map((r) => (r.repo_id === decodeURIComponent(rm[1]) ? { ...r, stop_failed: null } : r));
+      return json(route, 200, mock.retryAnswer);
     }
     const hm = req.method() === "POST" ? url.pathname.match(new RegExp(`^${BASE}/repos/([^/]+)/halt(/clear)?$`)) : null;
     if (hm) {
@@ -2481,6 +2494,90 @@ test.describe("Team app", () => {
     await noSideways(page);
     await clean(page, errors);
   });
+  // ── A stop that did not finish (ON-13c4b) ────────────────────────────────────────────────────────────────────────────
+  const failedStop = (reason: string | null, code: string | null = null, over: Partial<Mock> = {}, settingsOver: Obj = {}) => {
+    const F = makeFixtures(Date.now());
+    return operateOn({ settings: F.settings({ operate_enabled: true, ...settingsOver }), repos: [F.repo({ operate_enabled: true, stop_failed: { reason, code, at: F.iso(60) } })], ...over });
+  };
+
+  test("a failed stop: the chip and the row say it in words, Try again sends one POST, and the row goes once the stop is asked again", async ({ page }) => {
+    const { mock, errors } = await setup(page, failedStop("halt", "job_silent"));
+    await open(page);
+    await expect(t(page, "tm-stop-chip")).toHaveText("Engine stop: Stop failed");
+    await expect(t(page, "tm-stopfail")).toBeVisible();
+    await expect(t(page, "tm-stopfail-text")).toHaveText("The halt didn't finish stopping the engine. It may still be running, and commands stay refused (the machine went quiet).");
+    const btn = t(page, "tm-stopfail-retry");
+    await expect(btn).toHaveText("Try again");
+    await expect(btn).toBeEnabled();
+    await press(btn);
+    await expect.poll(() => mock.retries).toEqual([REPO_A]);
+    await expect(t(page, "tm-stopfail")).toBeHidden();
+    await expect(t(page, "tm-stop-chip")).toBeHidden();
+    await expect(t(page, "tm-live")).toHaveText("Asked the machine to stop the engine again.");
+    await clean(page, errors);
+  });
+
+  test("a system cause says the cloud tries again and the answer is queued; the row stays", async ({ page }) => {
+    const mock = failedStop("operate_off", "snapshot_failed");
+    mock.retryAnswer = { queued: true };
+    const { errors } = await setup(page, mock);
+    await open(page);
+    await expect(t(page, "tm-stopfail-text")).toHaveText("Operate is off, but the engine didn't stop. It may still be running (the engine's state couldn't be saved).");
+    await expect(t(page, "tm-stopfail-after")).toHaveText("We'll try again when the machine next reports in.");
+    await press(t(page, "tm-stopfail-retry"));
+    await expect(t(page, "tm-stopfail-note")).toHaveText("Asked again. The stop goes out when the machine next reports in.");
+    await expect(t(page, "tm-stopfail")).toBeVisible();
+    expect(mock.retries).toEqual([REPO_A]);
+    await clean(page, errors);
+  });
+
+  test("a refusal is said in fixed words, never the server's", async ({ page }) => {
+    const mock = failedStop("person", "job_expired");
+    mock.retryStatus = 409;
+    mock.retryCode = "cause_gone";
+    const { errors } = await setup(page, mock);
+    await open(page);
+    await press(t(page, "tm-stopfail-retry"));
+    await expect(t(page, "tm-stopfail-note")).toHaveText("That's no longer needed, so nothing was sent.");
+    await expect(t(page, "tm-stopfail-text")).toHaveText("The stop didn't finish. The engine may still be running (the machine didn't pick up the stop in time).");
+    await clean(page, errors);
+  });
+
+  for (const [reason, sentence, after] of [["move", "Moving the project didn't stop the engine on its old machine.", "Start the move again to try once more."], ["remove", "Removing the project didn't stop its engine.", "Stop it on the machine itself."]]) {
+    test(`a ${reason} shows the chip and the sentence and no button`, async ({ page }) => {
+      const { mock, errors } = await setup(page, failedStop(reason));
+      await open(page);
+      await expect(t(page, "tm-stop-chip")).toBeVisible();
+      await expect(t(page, "tm-stopfail-text")).toHaveText(sentence);
+      await expect(t(page, "tm-stopfail-after")).toHaveText(after);
+      await expect(t(page, "tm-stopfail-retry")).toHaveCount(0);
+      expect(mock.retries).toEqual([]);
+      await clean(page, errors);
+    });
+  }
+
+  test("a member sees the button disabled with the line that says why, and nothing is sent", async ({ page }) => {
+    const { mock, errors } = await setup(page, failedStop("person", null, {}, { can_edit: false }));
+    await open(page);
+    const btn = t(page, "tm-stopfail-retry");
+    await expect(btn).toBeVisible();
+    await expect(btn).toHaveAttribute("aria-disabled", "true");
+    await btn.focus();
+    expect(await activeId(page)).toBe("tm-stopfail-retry");
+    await expect(t(page, "tm-stopfail-why")).toHaveText("Only an owner or admin can try again.");
+    await btn.dispatchEvent("click");
+    expect(mock.retries).toEqual([]);
+    await clean(page, errors);
+  });
+
+  test("a repo whose stop did not fail shows neither the chip nor the row", async ({ page }) => {
+    const { errors } = await setup(page, operateOn());
+    await open(page);
+    await expect(t(page, "tm-stop-chip")).toBeHidden();
+    await expect(t(page, "tm-stopfail")).toBeHidden();
+    await clean(page, errors);
+  });
+
   test.describe("the live view (D#845 ON-25b)", () => {
     const pill = (page: Page) => t(page, "tm-watch-pill");
     const heardAgo = (s: number) => new Date(Date.now() - s * 1000).toISOString();

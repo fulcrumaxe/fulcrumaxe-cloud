@@ -6,7 +6,7 @@
 import { h } from "../_lib/dom.js";
 import { on, onRefresh } from "../../core/cloud-live.js";
 import { WORDS, createTeam, describe } from "./team-model.js";
-import { DIAL_CLASSES, HALT_WORDS, OP_WORDS, ROLES, TTL } from "./team-operate.js";
+import { DIAL_CLASSES, HALT_WORDS, OP_WORDS, ROLES, STOP_WORDS, TTL, stopFailNodes } from "./team-operate.js";
 
 const FULC = window.FULC;
 if (!FULC || typeof FULC.register !== "function") {
@@ -44,7 +44,7 @@ function mountApp(contentEl) {
     }
     if (hadFocus && !parent.contains(document.activeElement)) heading.focus();
   };
-  const said = { n: "", b: "", r: "", l: "", f: "", o: "", w: "", g: "" };
+  const said = { n: "", b: "", r: "", l: "", f: "", o: "", w: "", g: "", s: "" };
   const hear = (k, v) => (said[k] === v ? "" : (said[k] = v));
   const setText = (el, value) => { if (el.textContent !== value) el.textContent = value; };
 
@@ -52,9 +52,11 @@ function mountApp(contentEl) {
   const picker = h("select", { class: "tm-select", "data-testid": "tm-repo", "aria-label": "Repository", onChange: (e) => team.select(e.target.value) });
   const chip = h("span", { class: "tm-chip", "data-testid": "tm-chip" });
   const haltChip = h("span", { class: "tm-chip tm-halt-chip", "data-testid": "tm-halt-chip" });
+  const stopChip = h("span", { class: "tm-chip tm-stop-chip", "data-testid": "tm-stop-chip" });
+  stopChip.hidden = true;
   const runner = h("span", { class: "tm-runner", "data-testid": "tm-runner" });
   const sheetBtn = h("button", { type: "button", class: "tm-btn", "data-testid": "tm-settings-btn", "aria-expanded": "false", "aria-controls": "tm-sheet", onClick: () => team.toggleSheet() }, WORDS.settings);
-  const bar = h("div", { class: "tm-bar" }, picker, chip, haltChip, runner, sheetBtn);
+  const bar = h("div", { class: "tm-bar" }, picker, chip, haltChip, stopChip, runner, sheetBtn);
   const live = h("p", { class: "tm-live", role: "status", "aria-live": "polite", "data-testid": "tm-live" });
   const watchBar = h("div", { class: "tm-watch", "data-testid": "tm-liveview" });
   const banner = h("p", { class: "tm-banner", "data-testid": "tm-banner", role: "note" });
@@ -97,7 +99,9 @@ function mountApp(contentEl) {
   opWrap.hidden = true;
   const haltBox = h("section", { class: "tm-panel tm-halt", "aria-labelledby": "tm-halt-h", "data-testid": "tm-halt" });
   haltBox.hidden = true;
-  root.replaceChildren(h("div", { class: "tm-page" }, heading, bar, watchBar, live, banner, notices, note, haltBox, sheet, body, opWrap));
+  const stopBox = h("div", { class: "tm-panel tm-stopfail", "data-testid": "tm-stopfail" });
+  stopBox.hidden = true;
+  root.replaceChildren(h("div", { class: "tm-page" }, heading, bar, stopBox, watchBar, live, banner, notices, note, haltBox, sheet, body, opWrap));
 
   // A control that cannot be used right now keeps its place in the Tab order (aria-disabled, not disabled): focus stays on it through a save, and a member who tabs to it hears why.
   const box = (attrs, checked, enabled, why, set) => h("input", { type: "checkbox", checked, "aria-disabled": enabled ? null : "true", "aria-describedby": enabled ? null : why, onClick: (e) => { if (!enabled) e.preventDefault(); }, onChange: (e) => set(e.target.checked), ...attrs });
@@ -381,6 +385,18 @@ function mountApp(contentEl) {
       queueMicrotask(() => ops.cancelHalt());
     }
   }
+  // A stop that did not finish: the chip, and one row (sentence, Try again, what was answered). The click is `() => retry()`, so no event reaches the controller.
+  const retry = () => { want = "stop-retry"; ops.retryStop(); };
+  function paintStop(sf) {
+    stopBox.hidden = stopChip.hidden = !sf;
+    const chipText = sf ? sf.chip : "";
+    if (stopChip.dataset.stop !== chipText) {
+      stopChip.dataset.stop = chipText;
+      stopChip.replaceChildren(...(chipText ? [h("span", { class: "tm-vh" }, STOP_WORDS.chipContext), chipText] : []));
+    }
+    if (!sf && want === "stop-retry") want = null; // the row is gone (the stop was asked again): nothing to put focus back on
+    swap("stopfail", stopBox, sf, () => (sf ? stopFailNodes(sf, () => retry()) : null));
+  }
   // A change of state is said once; the first state of a repo is a baseline, not news.
   let haltSeen = null, haltRepo = null;
   function haltWords(hl) {
@@ -425,7 +441,7 @@ function mountApp(contentEl) {
     // Said once, when it changes: a poll that finds the same banner or the same failure says nothing. A notice is cleared when a save starts, so the same sentence again is a change.
     const o = d.operate && d.operate.show ? d.operate : null;
     const broken = hasRepos ? Object.keys(TITLE).filter((k) => d[k].failed && d.failedKeys.includes(k)).map((k) => TITLE[k] + " panel couldn't be read.").join(" ") : ""; // a panel that fails is announced too, not only drawn; only once a read has reported the failure, so a panel not yet read is not
-    const msg = [hear("n", d.sheet ? d.sheet.notice : ""), hear("o", o ? o.notice : ""), outcomeWords(o && o.commands), hear("w", d.halt ? d.halt.note : ""), haltWords(d.halt || null), hear("b", hasRepos ? d.banner : ""), hear("r", d.refreshFailed || ""), hear("l", hasRepos ? d.log.said : ""), hear("f", broken), hear("g", hasRepos ? d.log.olderFailed : "")].filter(Boolean).join(" ");
+    const msg = [hear("n", d.sheet ? d.sheet.notice : ""), hear("o", o ? o.notice : ""), outcomeWords(o && o.commands), hear("w", d.halt ? d.halt.note : ""), haltWords(d.halt || null), hear("s", d.stopFail ? d.stopFail.note : ""), hear("b", hasRepos ? d.banner : ""), hear("r", d.refreshFailed || ""), hear("l", hasRepos ? d.log.said : ""), hear("f", broken), hear("g", hasRepos ? d.log.olderFailed : "")].filter(Boolean).join(" ");
     if (msg) live.replaceChildren(h("span", null, msg));
     swap("body", body, d.kind === "ready" ? { k: "ready" } : { k: d.kind, c: d.sheet && d.sheet.canEdit, w: d.sheet && d.sheet.watch, s: d.sheet && d.sheet.saving, r: d.rv }, () => {
       if (d.kind === "ready") {
@@ -450,6 +466,7 @@ function mountApp(contentEl) {
     }
     paintOperate(o);
     paintHalt(d.halt || null);
+    paintStop(d.stopFail || null);
     if (want) { // a control that closed a part asks for focus on one that lives in another part
       const el = [...root.querySelectorAll("[data-focus]")].find((e) => e.getAttribute("data-focus") === want);
       if (el) { el.focus(); want = null; }
