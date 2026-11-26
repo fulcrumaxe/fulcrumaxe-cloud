@@ -33,6 +33,18 @@ describe("setupFinishStep", () => {
     await expect(step(pool as never)).rejects.toBe(boom);
     expect(queries).toHaveLength(1);
   });
+
+  it("reports a twin's install files that could not be recorded through reportError, by a fixed sentence", async () => {
+    const reportError = vi.fn();
+    const twin = { ...CLAIM_ROW, o_roadmap: [], o_install_pr: 7, o_install_head_sha: "c".repeat(40), o_twin: "5b0c9f0e-9d1b-4e7a-8c35-6a1f2b3c4d5e" };
+    const pool = { query: vi.fn(async (sql: string) => ({ rows: sql.includes("setup_finish_claim") ? [twin] : sql.includes("setup_finish_complete") ? [{ r: "done" }] : [{ ok: true }] })) };
+    const port = { findTeamLog: async () => 3, installPullRequest: async () => null } as unknown as SetupFinishPort;
+    const step = setupFinishStep({ reportError, setupFinishPort: () => port });
+    expect(await step(pool as never)).toBe("done");
+    expect(reportError).toHaveBeenCalledOnce();
+    expect(reportError.mock.calls[0]![0].message).toBe("twin install files not recorded: the install pull request is not merged on GitHub");
+    expect(reportError.mock.calls[0]![1]).toMatchObject({ stage: "reconcile.setup_finish_twin" });
+  });
 });
 
 describe("reconcileNextDueAt with a finish waiting", () => {

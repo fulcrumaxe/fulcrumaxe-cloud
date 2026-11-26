@@ -340,7 +340,8 @@ export function setupFinishStep(deps: Pick<ReconcileHandlerDeps, "reportError" |
       return "done";
     }
     port ??= (deps.setupFinishPort ?? createAppRunPullRequestPort)();
-    const outcome = await completeSetupFinish({ pool, port }, claim);
+    const report = (reason: string): void => deps.reportError(new Error(reason), { stage: "reconcile.setup_finish_twin", route: RECONCILE_ROUTE, code: "internal_error" });
+    const outcome = await completeSetupFinish({ pool, port, report }, claim);
     return outcome === "retry" ? "retry" : "done";
   };
 }

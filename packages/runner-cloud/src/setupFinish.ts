@@ -9,7 +9,9 @@ import { RunPullRequestError, type PullRequestRepo, type SetupFinishPort } from 
  *   1. one Discussion per kept row of the approved plan, through the App, in the category the engine's `seed-backlog.py` picks (the row's own category, else `Ideas`, else the first). A row already recorded in
  *      `project_seeded_rows` is skipped; one whose Discussion exists on GitHub but was never recorded (a crash between the create and the record) is found by the hidden marker its body ends with, and recorded;
  *   2. the team-log issue (an open `team-log` issue is reused, as the engine's bootstrap does);
- *   3. `setup_finish_complete`: records the issue, records `start_pending` when the repo is operated (item 9), and moves the setup to `done`.
+ *   3. a private twin's install files (migration 1107, Ruling 109): the files the merged install pull request ADDED are added to the twin's `install_paths` by a definer that refuses any other setup, phase or repo;
+ *      a refusal, a cap and a GitHub that will not say are reported and never fail the finish (only a GitHub that can be retried leaves the pass to run again);
+ *   4. `setup_finish_complete`: records the issue, records `start_pending` when the repo is operated (item 9), and moves the setup to `done`.
  *
  * It issues no engine start (Ruling 93.2: ON-13c issues it from `start_pending`) and borrows no person. A refusal that no retry fixes (Discussions off, no category, the App refused) is the setup's `seed_failed`
  * (the §4 copy: turn on Discussions, then try again): the job looks again fifteen minutes later, at most 96 times, and a success clears it. A GitHub that cannot be asked leaves the lease to lapse and is counted:
@@ -35,12 +37,23 @@ export interface SetupFinishClaim {
   roadmap: SetupFinishRow[];
   /** Row key to the number of the Discussion already recorded for it. */
   seeded: Map<string, number>;
+  /** The install pull request's number and the head commit the setup recorded (null in direct mode, when there is none). */
+  installPr: number | null;
+  installHeadSha: string | null;
+  /** The live twin whose private repo this is, or null. Only the database says so. */
+  twinId: string | null;
 }
 
 export type SetupFinishOutcome = "done" | "failed" | "retry" | "skipped";
 
 const NAME = /^[A-Za-z0-9_.-]{1,100}$/;
 const ROW_KEY = /^[A-Z][A-Z0-9-]{0,15}$/;
+const SHA = /^[0-9a-f]{40}$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** The shape the definer holds an install path to (migration 1107): a path outside it cannot be listed, and is counted, never named. */
+const TWIN_PATH = /^[A-Za-z0-9._/@+=~-]{1,200}$/;
+/** A twin's list holds at most this many paths (repo_twins_install_check). */
+export const TWIN_INSTALL_PATHS_MAX = 5000;
 
 /** The category the engine's `seed-backlog.py` (`get_category_id`) takes: the seed's own category when it exists, else `Ideas`, else the first one; none when the repository has none. */
 export const SEED_DEFAULT_CATEGORY = "Ideas";
@@ -71,8 +84,8 @@ function parseRoadmap(raw: unknown): SetupFinishRow[] | null {
 
 /** Takes the oldest due setup, or null when none is due. A row of a shape a setup cannot have is left to its lease (`malformed`), never acted on. */
 export async function claimSetupFinish(pool: Pick<Pool, "query">): Promise<SetupFinishClaim | null | "malformed"> {
-  const { rows } = await pool.query<{ o_account: string; o_setup: string; o_repo: string; o_attempt: number; o_owner: string | null; o_name: string | null; o_roadmap: unknown; o_seeded: unknown }>(
-    "SELECT o_account, o_setup, o_repo, o_attempt, o_owner, o_name, o_roadmap, o_seeded FROM setup_finish_claim()",
+  const { rows } = await pool.query<{ o_account: string; o_setup: string; o_repo: string; o_attempt: number; o_owner: string | null; o_name: string | null; o_roadmap: unknown; o_seeded: unknown; o_install_pr: number | null; o_install_head_sha: string | null; o_twin: string | null }>(
+    "SELECT o_account, o_setup, o_repo, o_attempt, o_owner, o_name, o_roadmap, o_seeded, o_install_pr, o_install_head_sha, o_twin FROM setup_finish_claim()",
   );
   const r = rows[0];
   if (r === undefined) return null;
@@ -85,7 +98,11 @@ export async function claimSetupFinish(pool: Pick<Pool, "query">): Promise<Setup
     seeded.set(o.row_key, o.discussion_number);
   }
   if (roadmap === null || r.o_owner === null || r.o_name === null || !NAME.test(r.o_owner) || !NAME.test(r.o_name)) return "malformed";
-  return { accountId: r.o_account, setupId: r.o_setup, repoId: r.o_repo, attempt: r.o_attempt, owner: r.o_owner, name: r.o_name, roadmap, seeded };
+  const installPr = r.o_install_pr ?? null;
+  const installHeadSha = r.o_install_head_sha ?? null;
+  const twinId = r.o_twin ?? null;
+  if ((installPr !== null && (!Number.isSafeInteger(installPr) || installPr < 1)) || (installHeadSha !== null && !SHA.test(installHeadSha)) || (twinId !== null && !UUID.test(twinId))) return "malformed";
+  return { accountId: r.o_account, setupId: r.o_setup, repoId: r.o_repo, attempt: r.o_attempt, owner: r.o_owner, name: r.o_name, roadmap, seeded, installPr, installHeadSha, twinId };
 }
 
 /** A person wrote the plan's words, so they are cleaned before they reach GitHub: no control character, and no HTML comment (the one comment a body holds is our marker). */
@@ -107,6 +124,44 @@ export interface SetupFinishDeps {
   pool: Pick<Pool, "query">;
   port: SetupFinishPort;
   now?: () => Date;
+  /** Told, by a fixed sentence (counts, never a path or a name), when a twin's install files could not all be recorded. */
+  report?: (reason: string) => void;
+}
+
+/**
+ * Ruling 109: adds the files the merged install pull request ADDED to the live twin's private list. The paths are read here from GitHub (the pull request's own file list, each with its change type), never from the runner;
+ * the definer re-checks the setup, phase, attempt and twin. A file that is only changed stays public. Nothing here fails the finish; a GitHub that can be retried is thrown on, so the pass runs again.
+ */
+async function recordTwinInstallPaths(deps: SetupFinishDeps, claim: SetupFinishClaim, repo: PullRequestRepo): Promise<void> {
+  if (claim.twinId === null || claim.installPr === null) return;
+  const report = deps.report ?? (() => undefined);
+  let pr: Awaited<ReturnType<SetupFinishPort["installPullRequest"]>>;
+  try {
+    pr = await deps.port.installPullRequest({ repo, number: claim.installPr });
+  } catch (error) {
+    if (error instanceof RunPullRequestError && !error.retryable) {
+      report("twin install files not recorded: GitHub refused the pull request read");
+      return;
+    }
+    throw error;
+  }
+  if (pr === null || !pr.merged) {
+    report("twin install files not recorded: the install pull request is not merged on GitHub");
+    return;
+  }
+  if (!pr.complete) report(`twin install files: the pull request file list is partial (${pr.files.length} of ${pr.totalCount}); the files read are recorded`);
+  const added = [...new Set(pr.files.filter((f) => f.changeType === "ADDED").map((f) => f.path))];
+  const paths = added.filter((p) => TWIN_PATH.test(p) && !p.startsWith("/") && !p.includes("//") && !p.split("/").includes(".."));
+  if (paths.length < added.length) report(`twin install files: ${added.length - paths.length} added file(s) have a path the list cannot hold and are not recorded`);
+  if (paths.length === 0) return;
+  if (paths.length > TWIN_INSTALL_PATHS_MAX) {
+    report(`twin install files not recorded: ${paths.length} added files pass the ${TWIN_INSTALL_PATHS_MAX} limit`);
+    return;
+  }
+  const { rows } = await deps.pool.query<{ o_result: string }>("SELECT o_result FROM setup_finish_twin_install_paths($1::uuid, $2::int, $3::text[])", [claim.setupId, claim.attempt, paths]);
+  const result = rows[0]?.o_result;
+  if (result === "too_many") report(`twin install files not recorded: the list would pass the ${TWIN_INSTALL_PATHS_MAX} limit`);
+  else if (result !== "ok") report(`twin install files not recorded: the definer answered ${String(result)}`);
 }
 
 /** The step for one claimed setup. Never throws for a GitHub failure: those are `retry` or a recorded `seed_failed`. A database failure throws. */
@@ -136,6 +191,7 @@ export async function completeSetupFinish(deps: SetupFinishDeps, claim: SetupFin
       }
     }
     const teamLog = (await deps.port.findTeamLog(repo)) ?? (await deps.port.createTeamLog({ repo, ...teamLogText(claim.setupId, (deps.now ?? (() => new Date()))()) }));
+    await recordTwinInstallPaths(deps, claim, repo);
     const { rows } = await deps.pool.query<{ r: string }>("SELECT setup_finish_complete($1::uuid, $2::int, $3::int) AS r", [claim.setupId, claim.attempt, teamLog]);
     return rows[0]?.r === "done" ? "done" : "skipped";
   } catch (error) {
