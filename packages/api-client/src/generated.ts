@@ -4068,6 +4068,7 @@ export interface Operations {
           phase: "survey" | "plan" | "install" | "await_merge" | "finish" | "done" | "removed";
           state: "started" | "ok" | "failed" | "skipped";
           survey_run_id: (string) | (null);
+          repo_id: string;
         }) | (null);
       }];
     };
