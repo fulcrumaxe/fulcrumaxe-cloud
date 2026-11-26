@@ -421,6 +421,19 @@ describe("a merged install pull request marks the reconciler pending", () => {
       expect(miss.written.size, `${applied} ${outcome}`).toBe(0);
     }
   });
+
+  it("sets the marker when the delivery merged an engine update (it waits for its restart), and not for one that failed or only recorded", async () => {
+    const hit = install();
+    await githubWebhookHandler(requestWithBody(body, { event: "pull_request" }), fakeDeps(), reply("engine_update_pr_closed", "finished"));
+    await hit.settled();
+    expect(hit.written.has("pending:reconcile")).toBe(true);
+    for (const outcome of ["failed", "recorded"]) {
+      const miss = install();
+      await githubWebhookHandler(requestWithBody(body, { event: "pull_request" }), fakeDeps(), reply("engine_update_pr_closed", outcome));
+      await miss.settled();
+      expect(miss.written.size, outcome).toBe(0);
+    }
+  });
 });
 
 describe("the intake allowlist source (D#31 AUTHOR-CHECK-WIRE)", () => {

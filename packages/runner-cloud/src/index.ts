@@ -182,6 +182,15 @@ export {
   installSummaryRun,
 } from "./setupInstallMerge.js";
 export {
+  claimEngineUpdate,
+  completeEngineUpdatePr,
+  engineUpdateBranch,
+  engineUpdatePullRequestText,
+  type EngineUpdateClaim,
+  type EngineUpdateOutcome,
+  type EngineUpdatePrDeps,
+} from "./engineUpdatePr.js";
+export {
   claimSetupInstall,
   completeSetupInstall,
   installPathRefused,

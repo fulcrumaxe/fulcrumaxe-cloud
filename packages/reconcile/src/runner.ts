@@ -101,10 +101,10 @@ async function terminalReapPending(pool: Pick<Pool, 'query'>, opts: WorkOptions,
   }
 }
 
-/** True while any setup has its push recorded and no install pull request yet. A failed read counts as no work (never a false alarm). */
+/** True while any setup has its push recorded and no install pull request yet, or any engine update has (D#845 ON-15c). A failed read counts as no work (never a false alarm). */
 export async function setupInstallPending(pool: Pick<Pool, 'query'>): Promise<boolean> {
   try {
-    const { rows } = await pool.query<{ pending: boolean }>('SELECT setup_install_pr_pending() AS pending');
+    const { rows } = await pool.query<{ pending: boolean }>('SELECT (setup_install_pr_pending() OR engine_update_pr_pending()) AS pending');
     return rows[0]?.pending === true;
   } catch {
     // fx-swallow-ok: an unreadable probe means "no extra work known"; a stall alert is never raised from a failed read

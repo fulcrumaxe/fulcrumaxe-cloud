@@ -175,7 +175,7 @@ describe("operate queue [pg]", () => {
     it("refuses a cause outside the closed set, a login that is not platform_ops, and forged bytes", async () => {
       const r = await rig();
       await setRow(r, "running");
-      expect(await code(issue(r, { cause: "engine_update" }))).toBe("22023");
+      expect(await code(issue(r, { cause: "engine_updated" }))).toBe("22023");
       expect(await code(issue(r, {}, h.appPool))).toBe("42501");
       expect(await code(issue(r, {}, h.adminPool))).toBe("42501");
       expect(await code(issue(r, { edit: (e) => { e.job.args.at_sha = "nothex"; } }))).toBe("22023");
