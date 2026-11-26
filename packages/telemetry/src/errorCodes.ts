@@ -646,6 +646,8 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "overlap_facts_missing",
   "ordered_resource_waiting",
   "merge_hold_expired",
+  // D#845 ON-10e2b: the merge gate held a merge only because the repository is not clearly private.
+  "public_repo_clamp",
   // The receipt behind a merge by policy (D#7 DW-R4): the write failed, or no review run is on the merged head. The merge itself stands.
   "merge_receipt_failed",
   "merge_receipt_no_run",

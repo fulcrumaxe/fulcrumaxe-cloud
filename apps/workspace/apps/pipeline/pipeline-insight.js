@@ -183,6 +183,7 @@ const REASON_WORDS = {
   run_timestamp_invalid: "a review run has an invalid time",
   ci_not_green: "CI is not green",
   auto_merge_not_allowed: "auto-merge is not allowed",
+  public_repo_clamp: "this repository is public or could not be checked, so a person merges",
   human_merge_only: "the operator set this repository so that a person merges",
   local_reviews_passed_advisory: "Reviews passed on your machine. A person merges this pull request.",
   merge_call_refused: "GitHub refused the merge",
@@ -821,6 +822,7 @@ export function childLaunchLine(data) {
  */
 export const PERSON_MERGES_REASONS = [
   "auto_merge_not_allowed",
+  "public_repo_clamp",
   "human_merge_only",
   "local_review_not_enabled",
   "local_reviews_passed_advisory",

@@ -1,6 +1,7 @@
 import { REFUSAL_REASON_SQL, refusalField } from '../runs/refusal.js';
 import type { Pool, PoolClient } from 'pg';
 import { isItemWaitingOnAnswer } from '@fx/db/src/decisionAsks.js';
+import { clampForVisibility, type ClampVisibility } from '@fx/db/src/publicRepoClamp.js';
 import { NotFoundError } from '../tenancy/errors.js';
 import { withTenant } from '../tenancy/withTenant.js';
 import { holdsSlotSql } from './slotRelease.js';
@@ -299,6 +300,35 @@ export interface ActivityCtx {
   pool: Pool;
   /** `role` is the caller's role; without it no action is offered. */
   principal: { accountId: string; userId: string; role?: string };
+  /**
+   * D#845 ON-10e2b: the live read of whether the item's repository is private (the read the merge gate uses). The merge gate holds a repository that is not clearly
+   * private, so `auto_merge` must not say "on" for one. Absent, or a failed read: "unknown", which clamps (fail closed).
+   */
+  repoVisibility?: (accountId: string, repoId: string) => Promise<ClampVisibility>;
+}
+
+/** How long the card's auto-merge display reuses a visibility answer. The merge gate never uses this cache: it reads live. */
+const DISPLAY_VISIBILITY_TTL_MS = 60_000;
+const displayVisibility = new Map<string, { visibility: 'private' | 'public'; expires: number }>();
+
+/** Test hook: forget every cached display answer. */
+export function resetDisplayVisibilityCache(): void {
+  displayVisibility.clear();
+}
+
+/**
+ * The visibility the card's auto-merge line is judged by: the live read, reused for 60 seconds per repository so a card refreshing every 10 seconds does not spend the installation's GitHub calls.
+ * Only a definite answer is kept; a failed, absent or unknown read is never cached (and reads as "unknown", which clamps), so the next refresh asks again.
+ */
+async function readDisplayVisibility(read: ActivityCtx['repoVisibility'], accountId: string, repoId: string, now: number = Date.now()): Promise<ClampVisibility> {
+  if (read === undefined) return 'unknown';
+  const key = `${accountId}:${repoId}`;
+  const hit = displayVisibility.get(key);
+  if (hit !== undefined && hit.expires > now) return hit.visibility;
+  const visibility = await read(accountId, repoId).catch((): ClampVisibility => 'unknown');
+  if (visibility === 'private' || visibility === 'public') displayVisibility.set(key, { visibility, expires: now + DISPLAY_VISIBILITY_TTL_MS });
+  else displayVisibility.delete(key);
+  return visibility;
 }
 
 /** The fixed codes the stage driver records when "Check the build" could not decide, and the sentence the card shows for each. */
@@ -747,7 +777,9 @@ async function readVerifyWithDetail(client: Parameters<typeof readItemVerify>[0]
 export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string): Promise<WorkItemActivity> {
   if (!UUID_RE.test(workItemId)) throw new NotFoundError(`work item ${workItemId} not found`);
   const { accountId, userId } = ctx.principal;
-  return withTenant(ctx.pool, accountId, userId, async (client) => {
+  // Read inside the transaction, used after it: the visibility read is a call out, so it never runs while the transaction is open.
+  let clampRepoId: string | null = null;
+  const read = await withTenant(ctx.pool, accountId, userId, async (client) => {
     const w = await client.query<{
       stage: string;
       discussion_id: string | null;
@@ -774,6 +806,7 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
     );
     const item = w.rows[0];
     if (!item) throw new NotFoundError(`work item ${workItemId} not found`);
+    clampRepoId = item.auto_merge === true ? item.repo_id : null;
 
     // The newest comments, then put back in time order.
     const commentRows = item.discussion_id
@@ -1135,4 +1168,10 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
       })),
     };
   });
+  // The merge gate's public-repo clamp (D#845 ON-10e2b): a repository that is not clearly private never auto-merges, whatever the settings say.
+  if (read.auto_merge && clampRepoId !== null) {
+    const visibility = await readDisplayVisibility(ctx.repoVisibility, accountId, clampRepoId);
+    if (clampForVisibility('act', visibility) === 'ask') return { ...read, auto_merge: false };
+  }
+  return read;
 }

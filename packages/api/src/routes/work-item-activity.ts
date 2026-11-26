@@ -12,6 +12,7 @@ import { statusSentence } from "@fx/core/src/setup-requests/copy.js";
 import { readChildLaunch } from "@fx/core/src/decisions/childLaunch.js";
 import { RUNNER_DAILY_LIMIT_SENTENCE, SELF_CLEARING_WAIT_SENTENCES, isSelfClearingReviewWait, mergeQueue } from "@fx/pipeline";
 import { setupRequestDeps } from "./setupRequests.js";
+import { engineSettingsDeps } from "./engine.js";
 import type { RouteEntry } from "../registry.js";
 import { UUID_RE, notFound } from "./run-actions.js";
 import { runnerUsageSchema } from "./runs.js";
@@ -223,7 +224,7 @@ export const workItemActivityRoutes: RouteEntry[] = [
     paramsSchema: z.object({ id: z.string() }),
     responseSchema: activityResponseSchema,
     async handler(ctx, input) {
-      const read = await getWorkItemActivity({ pool: ctx.pool, principal: ctx.principal }, input.params.id!);
+      const read = await getWorkItemActivity({ pool: ctx.pool, principal: ctx.principal, ...(engineSettingsDeps.getVisibility !== null ? { repoVisibility: engineSettingsDeps.getVisibility() } : {}) }, input.params.id!);
       // A runner run's end is worded here, from the protocol's copy, the same words the Runs detail shows.
       const runs = await Promise.all(read.runs.map(async (r) => {
         const wait = r.runtime === "runner" ? await readRunWait(ctx.pool, ctx.principal.accountId, r) : undefined;

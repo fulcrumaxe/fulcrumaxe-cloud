@@ -1042,7 +1042,7 @@ describe("D#7 DW-R4: the merge dial and the receipt behind a merge by policy", (
     await passBoth(w);
     await setDial(w, "act", 1, "autonomous");
     for (const vis of [async () => "public" as const, async () => "unknown" as const, async () => Promise.reject(new Error("lookup down"))]) {
-      expect(await via(w, vis)).toMatchObject({ outcome: "ready_human_merges", reasons: ["auto_merge_not_allowed"] });
+      expect(await via(w, vis)).toMatchObject({ outcome: "ready_human_merges", reasons: ["public_repo_clamp"] });
     }
     expect(w.gh.merges ?? []).toEqual([]);
     // The hold names no dial (the stored one says act), so it gets no receipt; the gate's fact still names the version it read.
@@ -1052,6 +1052,29 @@ describe("D#7 DW-R4: the merge dial and the receipt behind a merge by policy", (
     expect(await via(w, async () => "private")).toMatchObject({ outcome: "merged" });
     expect(w.gh.merges).toEqual([{ sha: HEAD, method: "squash" }]);
     expect(await receipts(w)).toMatchObject([{ chosen: "act", dial_version: 1 }]);
+  });
+
+  it("D#845 ON-10e2b: with the role setting off, a public, unknown or failed visibility read keeps auto_merge_not_allowed (the clamp reason is only for a hold the clamp alone causes), merges nothing and writes no receipt", async () => {
+    const via = (w: World, vis: () => Promise<"private" | "public" | "unknown">) => runMergeGateForItem({ pool: h.runWriterPool, repoVisibility: vis, http: fakeGitHubRest(w.gh) }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
+    const w = await world({ settings: {} });
+    await passBoth(w);
+    await setDial(w, "act", 1, "autonomous");
+    for (const vis of [async () => "public" as const, async () => "unknown" as const, async () => Promise.reject(new Error("lookup down"))]) {
+      expect(await via(w, vis)).toMatchObject({ outcome: "ready_human_merges", reasons: ["auto_merge_not_allowed"] });
+    }
+    expect(w.gh.merges ?? []).toEqual([]);
+    expect(await receipts(w)).toEqual([]);
+  });
+
+  it("D#845 ON-10e2b: a public repository whose dial says ask is held as auto_merge_not_allowed with exactly one ask receipt, however often the gate looks", async () => {
+    const w = await world();
+    await passBoth(w);
+    await setDial(w, "ask", 1, "cautious");
+    for (let i = 0; i < 2; i++) {
+      expect(await runMergeGateForItem({ pool: h.runWriterPool, repoVisibility: async () => "public" as const, http: fakeGitHubRest(w.gh) }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber })).toMatchObject({ outcome: "ready_human_merges", reasons: ["auto_merge_not_allowed"] });
+    }
+    expect(w.gh.merges ?? []).toEqual([]);
+    expect(await receipts(w)).toMatchObject([{ chosen: "ask", rejected_alternative: "act", dial_version: 1, actor: "policy" }]);
   });
 
   it("both must allow: auto-merge off with the dial on act is still a person's merge, and the dial never loosens the role setting; the hold the role setting alone causes names no dial, so it gets no receipt", async () => {

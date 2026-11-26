@@ -4,13 +4,14 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
 import { SESSION_COOKIE_NAME, signSession } from '@fx/core/src/auth/session.js';
-import { ACTIVITY_LIMITS, REVIEW_LIMIT_WAIT_CODE, REVIEW_SELF_CLEARING_WAIT_CODES, readOutcomeCodes } from '@fx/core/src/work-items/activity.js';
+import { ACTIVITY_LIMITS, REVIEW_LIMIT_WAIT_CODE, REVIEW_SELF_CLEARING_WAIT_CODES, readOutcomeCodes, resetDisplayVisibilityCache } from '@fx/core/src/work-items/activity.js';
 import { requestChanges } from '@fx/core/src/work-items/operatorMoves.js';
 import { maxFixRounds } from '@fx/spend';
 import { RUNNER_DAILY_LIMIT_PAUSE, RUNNER_DAILY_LIMIT_SENTENCE, SELF_CLEARING_REVIEW_WAITS, SELF_CLEARING_WAIT_SENTENCES, markBuildNeedsHuman } from '@fx/pipeline';
 import { handleApiRequest } from '../src/handler.js';
 import { ROUTES } from '../src/routes/index.js';
 import { activityResponseSchema, verifyAttemptSchema, workItemActivityRoutes } from '../src/routes/work-item-activity.js';
+import { engineSettingsDeps } from '../src/routes/engine.js';
 import { seedAccountWithMember } from './helpers/seed.js';
 import { withTenant } from '@fx/core/src/tenancy/withTenant.js';
 
@@ -42,7 +43,10 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
   let appUserPool: Pool;
   let platformOpsPool: Pool;
 
+  // D#845 ON-10e2b: the live visibility read the route uses; private unless a test says otherwise.
+  let visibility: 'private' | 'public' | 'unknown' | 'throws' = 'private';
   beforeAll(async () => {
+    engineSettingsDeps.getVisibility = () => async () => (visibility === 'throws' ? Promise.reject(new Error('lookup down')) : visibility);
     adminPool = createPool(process.env.API_DATABASE_URL!);
     admin = await adminPool.connect();
     appUserPool = createPool(process.env.API_DATABASE_URL_APP_USER!);
@@ -50,6 +54,7 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
     process.env.FX_SESSION_SECRET = FX_SESSION_SECRET;
   });
   afterAll(async () => {
+    engineSettingsDeps.getVisibility = null;
     delete process.env.FX_SESSION_SECRET;
     admin.release();
     await adminPool.end();
@@ -956,6 +961,78 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
     expect(((await (await get(external.itemId, { accountId, userId })).json()) as Activity).auto_merge).toBe(false);
     await admin.query(`UPDATE repos SET settings = '{"autoMerge":true,"blockExternalAutoMerge":false}'::jsonb WHERE id = $1`, [external.repoId]);
     expect(((await (await get(external.itemId, { accountId, userId })).json()) as Activity).auto_merge).toBe(true);
+  });
+
+  it('auto_merge is on only for a repository that is clearly private (D#845 ON-10e2b): public, unknown and a failed read show it off, even with the setting on and an act dial', async () => {
+    const { accountId, userId } = await seedAccountWithMember(admin);
+    const { itemId, repoId } = await seedItem(accountId, { autoMerge: true });
+    await admin.query(
+      `INSERT INTO decision_settings (account_id, repo_id, decision_type, disposition, preset, version, changed_by) VALUES ($1, $2, 'merge_after_reviews', 'act', 'autonomous', 1, $3)`,
+      [accountId, repoId, userId],
+    );
+    // The card's display cache would hold the first answer; this test is about each answer, so it forgets between reads.
+    const activity = async () => {
+      resetDisplayVisibilityCache();
+      return ((await (await get(itemId, { accountId, userId })).json()) as Activity).auto_merge;
+    };
+    try {
+      visibility = 'private';
+      expect(await activity()).toBe(true);
+      for (const v of ['public', 'unknown', 'throws'] as const) {
+        visibility = v;
+        expect(await activity()).toBe(false);
+      }
+      // No wiring at all fails closed too.
+      visibility = 'private';
+      engineSettingsDeps.getVisibility = null;
+      expect(await activity()).toBe(false);
+    } finally {
+      visibility = 'private';
+      engineSettingsDeps.getVisibility = () => async () => (visibility === 'throws' ? Promise.reject(new Error('lookup down')) : visibility);
+    }
+  });
+
+  it('the card reuses a definite visibility answer for a minute (one GitHub call for two refreshes) and never keeps a failed or unknown one (D#845 ON-10e2b)', async () => {
+    const { accountId, userId } = await seedAccountWithMember(admin);
+    const { itemId } = await seedItem(accountId, { autoMerge: true });
+    const read = async () => ((await (await get(itemId, { accountId, userId })).json()) as Activity).auto_merge;
+    let calls = 0;
+    let answer: 'private' | 'public' | 'unknown' | 'throws' = 'private';
+    engineSettingsDeps.getVisibility = () => async () => {
+      calls += 1;
+      return answer === 'throws' ? Promise.reject(new Error('lookup down')) : answer;
+    };
+    try {
+      resetDisplayVisibilityCache();
+      expect(await read()).toBe(true);
+      expect(await read()).toBe(true);
+      expect(calls).toBe(1);
+      // A failed or unknown read is not kept: the next refresh asks again, and shows auto-merge off meanwhile.
+      for (const v of ['throws', 'unknown'] as const) {
+        resetDisplayVisibilityCache();
+        calls = 0;
+        answer = v;
+        expect(await read()).toBe(false);
+        expect(await read()).toBe(false);
+        expect(calls).toBe(2);
+      }
+      // Once it answers private again it is on, and kept.
+      answer = 'private';
+      calls = 0;
+      expect(await read()).toBe(true);
+      expect(await read()).toBe(true);
+      expect(calls).toBe(1);
+      // A definite public answer is kept too, and the card shows auto-merge off for it: one call for two refreshes.
+      resetDisplayVisibilityCache();
+      answer = 'public';
+      calls = 0;
+      expect(await read()).toBe(false);
+      expect(await read()).toBe(false);
+      expect(calls).toBe(1);
+    } finally {
+      resetDisplayVisibilityCache();
+      engineSettingsDeps.getVisibility = () => async () => (visibility === 'throws' ? Promise.reject(new Error('lookup down')) : visibility);
+    }
   });
 
   it('auto_merge follows the merge dial too: on only when the role setting is on and the dial does not say ask (no row, act, announce and a use-the-default version are on)', async () => {

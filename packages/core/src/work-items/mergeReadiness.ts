@@ -13,6 +13,8 @@ import { ACTOR_YOU } from './queueIntent.js';
 export const PERSON_MERGES_REASONS: readonly string[] = Object.freeze([
   // The repository's setting: the cloud does not merge, a person does.
   'auto_merge_not_allowed',
+  // The repository's visibility alone holds the merge: a repository that is not clearly private never merges by itself.
+  'public_repo_clamp',
   'human_merge_only',
   // Reviews passed on the person's machine, or the repository runs on it and the cloud does not merge there.
   'local_review_not_enabled',
