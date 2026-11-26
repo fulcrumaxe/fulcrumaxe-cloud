@@ -334,13 +334,19 @@ test.describe("the plan review (D#845 ON-11b)", () => {
     await t(page, "discard").click();
     await expect(t(page, "none")).toHaveText("There is no plan to review. Write your own.");
     expect(m.calls.map((c) => c.action)).toEqual(["discard"]);
+    // The setup is still at the plan step, so Start over shows beside Write my own and reaches the server's restart.
+    await expect(t(page, "restart")).toBeVisible();
+    m.post = () => ({ json: { job_id: "x" } });
+    await t(page, "restart").click();
+    await expect(ob(page).locator('[data-testid="ob-live"]')).toHaveText("The survey started again.");
+    expect(m.calls.map((c) => c.action)).toEqual(["discard", "restart"]);
     draft = { json: draftBody({}, { source: "blank", prd_md: "", roadmap: [], version: 6 }) };
     await t(page, "blank").click();
     await expect(t(page, "no-rows")).toHaveText("There are no rows yet.");
     await expect(t(page, "problems")).toContainText("The PRD must be between 1 and 200,000 characters.");
     await expect(t(page, "problems")).toContainText("Keep at least one row");
     await expect(t(page, "approve")).toBeDisabled();
-    expect(m.calls.map((c) => c.action)).toEqual(["discard", "blank"]);
+    expect(m.calls.map((c) => c.action)).toEqual(["discard", "restart", "blank"]);
     await axe(page);
   });
 
@@ -383,12 +389,12 @@ test.describe("the plan review (D#845 ON-11b)", () => {
 
   test("a plan that cannot be read says so and Try again reads it; an approved plan waiting for its install offers Start the install", async ({ page }) => {
     let fail = true;
-    const m = mock({ get: () => (fail ? err(500, "boom") : { json: draftBody({}, { status: "approved" }) }) });
+    const m = mock({ get: () => (fail ? err(500, "boom") : { json: draftBody({}, { status: "approved", approved_by: "Ada Admin", approved_at: "2026-11-25T14:05:00.000Z" }) }) });
     await boot(page, m);
     await expect(t(page, "load-failed")).toHaveText("The plan couldn't be loaded.");
     fail = false;
     await t(page, "retry").click();
-    await expect(t(page, "approved")).toHaveText("Approved. This plan is read-only.");
+    await expect(t(page, "approved")).toHaveText(/^Approved \d{1,2}:\d{2}(\s?[AP]M)? by Ada Admin$/);
     await expect(t(page, "install")).toBeVisible();
     await expect(t(page, "save")).toHaveCount(0);
     await axe(page);

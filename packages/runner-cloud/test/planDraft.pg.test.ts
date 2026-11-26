@@ -108,6 +108,22 @@ describe("plan draft [pg]", () => {
       await refused(call(r, "PUT", null, { version: 1, prd_md: "x", roadmap: [] }), 409, "setup_phase");
     });
 
+    it("the read of an approved draft names who approved it and when, and an open draft has neither", async () => {
+      const r = await rig({ plan: false });
+      await h.admin.query("UPDATE users SET name = 'Ada Admin' WHERE id = $1", [r.f.a1]);
+      const open = (await call(r, "GET", null, null, r.f.m1)).body as { draft: { approved_by: unknown; approved_at: unknown } };
+      expect([open.draft.approved_by, open.draft.approved_at]).toEqual([null, null]);
+      await call(r, "POST", "approve", { version: 1 }, r.f.a1);
+      const done = (await call(r, "GET", null, null, r.f.m1)).body as { draft: { status: string; approved_by: string; approved_at: Date } };
+      expect(done.draft.status).toBe("approved");
+      expect(done.draft.approved_by).toBe("Ada Admin");
+      const stored = (await h.admin.query("SELECT approved_at FROM project_drafts WHERE id = $1", [r.draftId])).rows[0].approved_at as Date;
+      expect(new Date(done.draft.approved_at).getTime()).toBe(stored.getTime());
+      // A person with no name is read by their login, else "A team member"; never an id or an email.
+      await h.admin.query("UPDATE users SET name = NULL, github_login = NULL WHERE id = $1", [r.f.a1]);
+      expect(((await call(r, "GET", null)).body as { draft: { approved_by: string } }).draft.approved_by).toBe("A team member");
+    });
+
     it("with coverage it tries the install; one that cannot be issued is reported beside the approval, and approving again writes no second audit row", async () => {
       const r = await rig();
       const res = (await call(r, "POST", "approve", { version: 1 })).body as { gate: unknown; install_error: { code: string } };
@@ -227,6 +243,31 @@ describe("plan draft [pg]", () => {
       expect([got.draft.source, got.draft.version, got.draft.prd_md, got.draft.roadmap]).toEqual(["blank", 2, "", []]);
       await call(r, "POST", "blank");
       expect(((await call(r, "GET", null)).body as { draft: { version: number } }).draft.version).toBe(3);
+    });
+
+    it("start over works from a discarded draft too, and is refused for an approved plan, a setup past the plan step and a setup with no draft", async () => {
+      const r = await rig();
+      await call(r, "POST", "discard");
+      await refused(call(r, "GET", null), 404, "not_found");
+      await refused(call(r, "POST", "restart", null, r.f.m1), 403, "forbidden");
+      // No survey ports are configured, so the start refuses 503 not_configured; the discarded draft stays discarded and the setup stays at the plan step.
+      await refused(call(r, "POST", "restart"), 503, "not_configured");
+      expect((await draftRow(r.draftId)).status).toBe("discarded");
+      expect((await h.admin.query("SELECT phase, state FROM project_setups WHERE id = $1", [r.setupId])).rows[0]).toEqual({ phase: "plan", state: "ok" });
+      const approved = await rig({ plan: false });
+      await call(approved, "POST", "approve", { version: 1 });
+      await refused(call(approved, "POST", "restart"), 409, "setup_phase");
+      const past = await rig();
+      await call(past, "POST", "discard");
+      await h.admin.query("UPDATE project_setups SET phase = 'survey' WHERE id = $1", [past.setupId]);
+      await refused(call(past, "POST", "restart"), 409, "setup_phase");
+      const none = await rig();
+      await h.admin.query("DELETE FROM project_drafts WHERE id = $1", [none.draftId]);
+      await refused(call(none, "POST", "restart"), 404, "not_found");
+      const other = await rig();
+      await call(other, "POST", "discard");
+      // A setup of another account answers the same 404 as one that does not exist.
+      await refused(call(r, "POST", "restart", null, r.f.o1, other.setupId), 404, "not_found");
     });
 
     it("write my own works from the survey step of a repo with no survey, and is refused while a survey runs or after approval", async () => {

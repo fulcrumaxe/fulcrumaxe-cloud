@@ -14,7 +14,7 @@ import {
   ASK_OWNER, LABELS, NO_KVM, OPERATE_OFF, STATE_WORDS, TIME_TO_LIVE,
   COULDNT_CHECK, NEW_PRESET, NO_MACHINE, NO_OWNERS, PUBLIC_COPY, PUBLIC_OPERATE, createRefusal, dialsLine, linkedLine, machineChoices, operateBox, parseReturn, pickVisibility, placeRefusal, presetName, readPicker,
   cleanOrigin, copyText, describeStep, enginePrice, installDetail, surveyDetail, twinDetail, fixFor, machineChoiceLine, machineCommands, machineContext, prerequisites, visibilityLabel,
-  approveWords, draftRefusal, engineSection, planProblems, readDraft, toRoadmap,
+  approveWords, approvedLine, draftRefusal, engineSection, planProblems, readDraft, toRoadmap,
 } from "../apps/onboarding/onboarding-engine.js";
 
 const V1 = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages", "api", "fixtures", "v1", "getOnboarding");
@@ -773,6 +773,17 @@ describe("the plan review (ON-11b)", () => {
     expect(d.rows).toEqual([{ key: "A1", title: "First", summary: "Do it", size: "S", deps: "", keep: true }, { key: "B2", title: "First", summary: "Do it", size: "S", deps: "A1", keep: false }]);
     for (const bad of [null, {}, { setup: {}, draft: {} }, body({ setup: { phase: 3 } }), { ...body(), draft: { ...body().draft, version: 0 } }, { ...body(), draft: { ...body().draft, status: "discarded" } }, { ...body(), draft: { ...body().draft, roadmap: [ROW({ size: "XL" })] } },
       { ...body(), draft: { ...body().draft, roadmap: [ROW({ keep: "yes" })] } }, { ...body(), draft: { ...body().draft, roadmap: [ROW({ depends_on: [1] })] } }, { ...body(), draft: { ...body().draft, prd_md: null } }]) expect(readDraft(bad)).toBeNull();
+  });
+
+  it("reads who approved and when, and says it in the approved line; without both it keeps the plain line", () => {
+    const at = "2026-11-25T14:05:00.000Z";
+    const d = readDraft(body({ draft: { ...body().draft, status: "approved", approved_by: "Ada Admin", approved_at: at } }));
+    expect([d.approvedBy, d.approvedAt]).toEqual(["Ada Admin", at]);
+    const hhmm = new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    expect(approvedLine(d)).toBe("Approved " + hhmm + " by Ada Admin");
+    for (const over of [{}, { approved_by: "Ada Admin" }, { approved_at: at }, { approved_by: "", approved_at: at }, { approved_by: 7, approved_at: at }, { approved_by: "Ada", approved_at: "not a time" }]) {
+      expect(approvedLine(readDraft(body({ draft: { ...body().draft, status: "approved", ...over } }))), JSON.stringify(over)).toBe("Approved. This plan is read-only.");
+    }
   });
 
   it("fails closed: anything but a clear standard review mode is public", () => {

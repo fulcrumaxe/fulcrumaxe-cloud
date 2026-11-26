@@ -791,7 +791,8 @@ export function readDraft(body) {
     if (!r || typeof r.row_key !== "string" || typeof r.title !== "string" || typeof r.summary !== "string" || !["S", "M", "L"].includes(r.size) || !Array.isArray(r.depends_on) || !r.depends_on.every((k) => typeof k === "string") || typeof r.keep !== "boolean") return null;
     rows.push({ key: r.row_key, title: r.title, summary: r.summary, size: r.size, deps: r.depends_on.join(", "), keep: r.keep });
   }
-  return { version: d.version, status: d.status, phase: st.phase, prd: d.prd_md, rows, mode: body.review_mode === "standard" ? "standard" : "public" };
+  const at = typeof d.approved_at === "string" && !Number.isNaN(Date.parse(d.approved_at)) ? d.approved_at : null, by = typeof d.approved_by === "string" && d.approved_by !== "" ? d.approved_by : null;
+  return { version: d.version, status: d.status, phase: st.phase, prd: d.prd_md, rows, approvedAt: at, approvedBy: by, mode: body.review_mode === "standard" ? "standard" : "public" };
 }
 /** What would stop a save (`save`) or an Approve (`approve`), in words. The server judges again. */
 export function planProblems(prd, rows) {
@@ -855,7 +856,9 @@ export function approveWords(res, ctx = {}) {
 /** The PRD drawn through the public hardened renderer and nothing else (script tags, script-scheme links and raw HTML stay text). The renderer stops at 64 KiB, so a longer PRD says so; the whole text is kept. */
 export const prdView = (prd) => h("div", { class: "ob-prd", "data-testid": "ob-plan-prd-view" }, renderMarkdown(prd),
   new TextEncoder().encode(prd).length > MAX_MARKDOWN_BYTES ? h("p", { class: "ob-muted", "data-testid": "ob-plan-cut" }, "The preview stops at 64 KiB. The whole text is kept.") : "");
-const hhmm = () => new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+const hhmm = (at) => (at ? new Date(at) : new Date()).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+/** The approved view's line: who approved and when, or (a read with no name or time) the plain read-only line. */
+export const approvedLine = (d) => (d.approvedAt && d.approvedBy ? "Approved " + hhmm(d.approvedAt) + " by " + d.approvedBy : "Approved. This plan is read-only.");
 
 /**
  * Draws the plan review into `host`. `env`: { setupId, isAdmin, announce, signal, onChanged(), runAction(id), ctx() }. Stages: loading, failed, none (no draft), ready (a draft to edit, or an approved one to read).
@@ -868,6 +871,8 @@ export function mountPlanReview(host, env) {
   const admin = env.isAdmin();
   const say = (t) => env.announce(t);
   const editable = () => admin && S.d !== null && S.d.status === "draft";
+  /** After a discard there is no draft to read but the setup is still at the plan step: Start over is offered then. */
+  const planStep = () => { const s = env.ctx().setup; return !!s && s.phase === "plan"; };
   const btn = (id, label, fn, o = {}) => h("button", { type: "button", class: "ob-btn" + (o.primary ? " ob-btn-primary" : ""), "data-testid": "ob-plan-" + id, "data-focus": id, disabled: !!o.disabled || !!S.busy, onClick: fn }, label);
   const p = (t, id) => h("p", { class: "ob-muted", "data-testid": "ob-plan-" + id }, t);
   const tick = (id, label, on, set) => h("label", { class: "ob-preset" }, h("input", { type: "checkbox", checked: on, disabled: !!S.busy, "data-testid": "ob-plan-" + id, onChange: (ev) => { set(ev.target.checked); foot(); } }), h("span", null, label));
@@ -996,12 +1001,12 @@ export function mountPlanReview(host, env) {
     if (S.conflict) body.push(btn("theirs", "Load theirs", () => read(false), { primary: true }), btn("mine", "Keep mine", () => read(true)));
     if (S.stage === "loading") body.push(p("Loading the plan…", "loading"));
     else if (S.stage === "failed") body.push(p("The plan couldn't be loaded.", "load-failed"), btn("retry", "Try again", () => { S.stage = "loading"; draw(); read(false); }, { primary: true }));
-    else if (S.stage === "none") body.push(p(PLAN_NONE, "none"), ...(admin ? [btn("blank", "Write my own", blank, { primary: true })] : [p(PLAN_MEMBER, "member")]));
+    else if (S.stage === "none") body.push(p(PLAN_NONE, "none"), ...(admin ? [btn("blank", "Write my own", blank, { primary: true }), ...(planStep() ? [btn("restart", "Start over", restart)] : [])] : [p(PLAN_MEMBER, "member")]));
     else {
       S.footEl = h("div", { "data-testid": "ob-plan-foot" });
       if (S.d.mode === "public") body.push(h("p", { class: "ob-error", "data-testid": "ob-plan-banner" }, PUBLIC_BANNER));
       if (!admin) body.push(p(PLAN_MEMBER, "member"));
-      if (S.d.status === "approved") body.push(p("Approved. This plan is read-only.", "approved"));
+      if (S.d.status === "approved") body.push(p(approvedLine(S.d), "approved"));
       if (S.words) body.push(...S.words.lines.map((t) => p(t, "result")), ...S.words.actions.filter((a) => a.run).map((a) => btn("buy-" + a.id, a.label, () => env.runAction(a.id), { primary: true })));
       body.push(prdSection(), h("h4", { class: "ob-sub" }, "Roadmap"), S.rows.length ? h("ul", { class: "ob-issues", "aria-label": "Roadmap rows" }, S.rows.map(rowView)) : p("There are no rows yet.", "no-rows"),
         editable() ? btn("add", "Add a row", addRow) : "", S.footEl);
