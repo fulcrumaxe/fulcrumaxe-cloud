@@ -24,6 +24,7 @@
 import { createHash } from "node:crypto";
 import type { SdkCommand, SdkCreateParams, SdkListedSandbox, SdkSandbox, SdkSession, SdkSessionPage, SdkSandboxListPage, VercelSandboxSdk } from "./sdkSlice.js";
 import type { SandboxdCommand } from "./command.js";
+import { AgentError } from "./agentError.js";
 import { SandboxdError, type Sandbox, type Sandboxd } from "./sandboxd.js";
 
 type ListedStatus = SdkListedSandbox["status"];
@@ -81,10 +82,11 @@ const NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/;
 /** The most a timer may be asked to wait: `setTimeout` overflows past 2^31-1 ms and would fire at once. */
 const MAX_TIMER_MS = 2 ** 31 - 1;
 
-/** A daemon refusal keeps its status and fixed code; anything else is a 500 with no text. */
-function translated(err: unknown): SandboxdSdkError {
+/** A daemon refusal keeps its status and fixed code; a guest agent failure is a 502 with `guest_<its closed code>`; anything else is a 500 with no text. */
+export function translated(err: unknown): SandboxdSdkError {
   if (err instanceof SandboxdSdkError) return err;
   if (err instanceof SandboxdError) return new SandboxdSdkError(err.status, err.code);
+  if (err instanceof AgentError) return new SandboxdSdkError(502, `guest_${err.code}`);
   return new SandboxdSdkError(500, "internal");
 }
 const translate = (err: unknown): never => {
