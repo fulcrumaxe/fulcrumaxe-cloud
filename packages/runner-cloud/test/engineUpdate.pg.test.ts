@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { MACHINE_JOB_CLAIM_PATH, setupProgressPath, setupPushTokenPath, signMachineJob, verifyMachineJob, type MachineJob } from "@fulcrumaxe/runner-protocol";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { HELLO_PATH, machineJobClaimRun, readEngineBehind, removeProjectRoute, runnerHello, setupProgressRun, setupPushTokenRun, toResponse, updateEngine, type RunnerCloudDeps } from "../src/index.js";
+import { HELLO_PATH, machineJobClaimRun, readEngineBehind, readEngineUpdateCard, removeProjectRoute, runnerHello, setupProgressRun, setupPushTokenRun, toResponse, updateEngine, type RunnerCloudDeps } from "../src/index.js";
 import { harness, newKey, registerKey, respond, signed, type Harness, type TestKey } from "./helpers.js";
 
 const SHA = "c".repeat(40);
@@ -162,6 +162,67 @@ describe("engine update [pg]", () => {
     // another repo's live update (the same account's second repo) is not this repo's
     const live = await withTenant(h.appPool, a.who.accountId, a.who.userId, async (c) => (await c.query("SELECT 1 FROM engine_updates WHERE repo_id = $1", [a.repo2])).rows);
     expect(live).toEqual([]);
+  });
+
+  it("the update card [ON-15d]: the offer, the update under way, a failure while still behind, and nothing for a done update, a withdrawn release, an unplaced or foreign repo", async () => {
+    await reset(["1.2.0"]);
+    const r = await rig();
+    const card = (accountId: string, repo: string, client = h.admin) => readEngineUpdateCard(client, accountId, repo);
+    const row = (extra: string) => h.admin.query(`UPDATE engine_updates SET ${extra} WHERE repo_id = $1`, [r.who.repoId]);
+    // the offer: behind, nothing under way
+    expect(await card(r.who.accountId, r.who.repoId)).toEqual({ behind: { from: "1.0.0", to: "1.2.0" }, update: null });
+    // under way: the update, and no offer
+    await update(r);
+    expect(await card(r.who.accountId, r.who.repoId)).toEqual({ behind: null, update: { from_version: "1.0.0", to_version: "1.2.0", phase: "push", sub_step: null, state: "started", failure_code: null, pr: null } });
+    await row("phase = 'await_merge', sub_step = 'pr_open', state = 'ok', pr = 41");
+    expect(await card(r.who.accountId, r.who.repoId)).toMatchObject({ behind: null, update: { phase: "await_merge", sub_step: "pr_open", state: "ok", pr: 41 } });
+    // failed while still behind: the failure and the offer again
+    await row("phase = 'failed', state = 'failed', failure_code = 'pr_closed', failure_at = now()");
+    await h.admin.query("UPDATE machine_jobs SET state = 'expired', ended_at = now() WHERE setup_id = $1", [r.setupId]); // the job of a failed update is over, so a new one may be issued
+    expect(await card(r.who.accountId, r.who.repoId)).toEqual({ behind: { from: "1.0.0", to: "1.2.0" }, update: { from_version: "1.0.0", to_version: "1.2.0", phase: "failed", sub_step: "pr_open", state: "failed", failure_code: "pr_closed", pr: 41 } });
+    // the newest update wins: a Try again that is under way hides the older failure
+    expect((await update(r)).status).toBe(200);
+    expect(await card(r.who.accountId, r.who.repoId)).toMatchObject({ behind: null, update: { phase: "push", failure_code: null, pr: null } });
+    await row("phase = 'failed', state = 'failed', failure_code = 'job_silent', failure_at = now()");
+    // the failure outlived by the engine (the release was withdrawn, so nothing is behind): nothing to show
+    await h.admin.query("UPDATE engine_releases SET withdrawn_at = now()");
+    expect(await card(r.who.accountId, r.who.repoId)).toEqual({ behind: null, update: null });
+    await h.admin.query("UPDATE engine_releases SET withdrawn_at = NULL");
+    // done: nothing to show, and the engine is not behind once it has the version
+    await row("phase = 'done', state = 'ok', failure_code = NULL, failure_at = NULL");
+    await h.admin.query("UPDATE project_setups SET engine_version = '1.2.0' WHERE id = $1", [r.setupId]);
+    expect(await card(r.who.accountId, r.who.repoId)).toEqual({ behind: null, update: null });
+    // not on a machine: no offer (the route would answer setup_not_placed)
+    await h.admin.query("UPDATE project_setups SET engine_version = '1.0.0' WHERE id = $1", [r.setupId]);
+    await h.admin.query("DELETE FROM project_placements WHERE repo_id = $1", [r.who.repoId]);
+    expect(await card(r.who.accountId, r.who.repoId)).toEqual({ behind: null, update: null });
+    // a project that is not installed (its setup is not done) has no card
+    await h.admin.query("UPDATE project_setups SET phase = 'finish' WHERE id = $1", [r.setupId]);
+    expect(await card(r.who.accountId, r.who.repoId)).toBeNull();
+  });
+
+  it("the update card reads tenant-scoped: the same account's second repo is its own, a foreign account (through the RLS-bypassing client) gets nothing, and app_user sees only its own", async () => {
+    await reset(["1.2.0"]);
+    const a = await rig();
+    const b = await rig();
+    await update(a);
+    await h.admin.query("UPDATE engine_updates SET phase = 'failed', state = 'failed', failure_code = 'job_silent', failure_at = now() WHERE repo_id = $1", [a.who.repoId]);
+    // the second repo of the same account has no update of its own: the first repo's failure must not appear on it
+    expect(await readEngineUpdateCard(h.admin, a.who.accountId, a.repo2)).toEqual({ behind: { from: "1.0.0", to: "1.2.0" }, update: null });
+    expect(await readEngineUpdateCard(h.admin, a.who.accountId, a.who.repoId)).toMatchObject({ update: { failure_code: "job_silent" } });
+    // a foreign account id, or another account's repo, reads nothing
+    expect(await readEngineUpdateCard(h.admin, b.who.accountId, a.who.repoId)).toBeNull();
+    expect(await readEngineUpdateCard(h.admin, b.who.accountId, a.repo2)).toBeNull();
+    expect(await readEngineUpdateCard(h.admin, a.who.accountId, b.who.repoId)).toBeNull();
+    // b's own failure does not leak onto a's repo, and a's does not leak onto b's
+    await update(b);
+    expect(await readEngineUpdateCard(h.admin, b.who.accountId, b.who.repoId)).toMatchObject({ behind: null, update: { phase: "push" } });
+    expect(await readEngineUpdateCard(h.admin, a.who.accountId, a.who.repoId)).toMatchObject({ update: { phase: "failed" } });
+    // through row security as app_user: own account only
+    const seen = (acct: string, user: string, repo: string) => withTenant(h.appPool, acct, user, (c) => readEngineUpdateCard(c, acct, repo));
+    expect(await seen(a.who.accountId, a.who.userId, a.who.repoId)).toMatchObject({ update: { phase: "failed" } });
+    expect(await seen(b.who.accountId, b.who.userId, a.who.repoId)).toBeNull();
+    expect(await seen(a.who.accountId, a.who.userId, b.who.repoId)).toBeNull();
   });
 
   it("refuses the definer to a runner session, a signed job that is not the newest release's, and another account's setup", async () => {

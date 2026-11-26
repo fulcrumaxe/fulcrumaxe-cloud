@@ -6010,6 +6010,21 @@ export interface Operations {
           code: string | null;
           at: string;
         }) | (null);
+        engine_update: ({
+          behind: ({
+            from: string;
+            to: string;
+          }) | (null);
+          update: ({
+            from_version: string;
+            to_version: string;
+            phase: "push" | "pr" | "await_merge" | "restart" | "done" | "failed";
+            sub_step: string | null;
+            state: "started" | "ok" | "failed" | "skipped";
+            failure_code: string | null;
+            pr: number | null;
+          }) | (null);
+        }) | (null);
       }>;
       next_cursor: string | null;
       as_of: string;

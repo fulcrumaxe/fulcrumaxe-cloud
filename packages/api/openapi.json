@@ -53208,6 +53208,112 @@
                                 "type": "null"
                               }
                             ]
+                          },
+                          "engine_update": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "behind": {
+                                    "anyOf": [
+                                      {
+                                        "type": "object",
+                                        "properties": {
+                                          "from": {
+                                            "type": "string"
+                                          },
+                                          "to": {
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [
+                                          "from",
+                                          "to"
+                                        ],
+                                        "additionalProperties": false
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  },
+                                  "update": {
+                                    "anyOf": [
+                                      {
+                                        "type": "object",
+                                        "properties": {
+                                          "from_version": {
+                                            "type": "string"
+                                          },
+                                          "to_version": {
+                                            "type": "string"
+                                          },
+                                          "phase": {
+                                            "type": "string",
+                                            "enum": [
+                                              "push",
+                                              "pr",
+                                              "await_merge",
+                                              "restart",
+                                              "done",
+                                              "failed"
+                                            ]
+                                          },
+                                          "sub_step": {
+                                            "type": [
+                                              "string",
+                                              "null"
+                                            ]
+                                          },
+                                          "state": {
+                                            "type": "string",
+                                            "enum": [
+                                              "started",
+                                              "ok",
+                                              "failed",
+                                              "skipped"
+                                            ]
+                                          },
+                                          "failure_code": {
+                                            "type": [
+                                              "string",
+                                              "null"
+                                            ]
+                                          },
+                                          "pr": {
+                                            "type": [
+                                              "number",
+                                              "null"
+                                            ]
+                                          }
+                                        },
+                                        "required": [
+                                          "from_version",
+                                          "to_version",
+                                          "phase",
+                                          "sub_step",
+                                          "state",
+                                          "failure_code",
+                                          "pr"
+                                        ],
+                                        "additionalProperties": false
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "behind",
+                                  "update"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           }
                         },
                         "required": [
@@ -53226,7 +53332,8 @@
                           "halted_at",
                           "halted_by",
                           "halt_epoch",
-                          "stop_failed"
+                          "stop_failed",
+                          "engine_update"
                         ],
                         "additionalProperties": false
                       }

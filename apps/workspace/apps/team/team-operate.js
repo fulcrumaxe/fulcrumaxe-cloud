@@ -137,7 +137,101 @@ export function stopFailNodes(v, retry) {
   ];
 }
 
-export const NO_OP = { commands: null, commandsAt: "", commandsFailed: false, dials: null, dialsAt: "", dialsFailed: false, saving: false, notice: "", confirmStop: null, confirmHalt: null, haltNote: "", stopBusy: false, stopNote: "" };
+// ── the engine update card (D#845 ON-15d) ──────────────────────────────────────────────────────────────────────────────────────
+// The cloud sends one fact per repo, `engine_update: {behind, update} | null`; every sentence, the progress step, the PR link and who gets the button are chosen here by those
+// closed values, never taken from the server's text. `behind` is the version pair on offer (nothing under way, project on a machine); `update` is the repo's update under
+// way, or the one that failed while the project is still behind.
+export const UPDATE_WORDS = {
+  available: (from, to) => "Update available (v" + from + " → v" + to + ")",
+  running: (from, to) => "Updating the engine (v" + from + " → v" + to + ")",
+  failedTitle: (from, to) => "Engine update failed (v" + from + " → v" + to + ")",
+  update: "Update", retry: "Try again", starting: "Starting the update…", forbidden: "Only an owner or admin can update the engine.",
+  step: (n, of, label) => "Step " + n + " of " + of + ": " + label + ".",
+  steps: { push: "Preparing the update", pr: "Opening the pull request", await_merge: "Waiting for someone to merge the pull request", restart: "Restarting the engine" },
+  sub: { engine_fetch: "fetching the new version", sandbox_boot: "starting a sandbox", workspace_in: "copying the project in", bootstrap: "applying the update", bundle_out: "collecting the changes", push: "sending the changes to GitHub" },
+  merged: (to) => "Merged. Restarting the engine on v" + to + ".", mergedIdle: (to) => "Merged. The engine restarts on v" + to + " when Operate is next on.",
+  failed: (to, why) => "The update to v" + to + " didn't finish" + (why ? " (" + why + ")" : "") + ".",
+  pr: (n) => "Pull request #" + n, newTab: " (opens in a new tab)",
+  why: {
+    engine_fetch_failed: "the new version couldn't be downloaded", engine_checksum: "the download didn't match its checksum", engine_archive_refused: "the download wasn't accepted",
+    bootstrap_failed: "the update step failed on the machine", bundle_refused: "the changes from the machine weren't accepted", push_failed: "the changes couldn't be sent to GitHub",
+    direct_raced: "the update branch changed while it ran", vm_admission_refused: "the machine had no room for a sandbox", vm_boot_failed: "the sandbox didn't start",
+    vm_egress_unavailable: "the sandbox couldn't reach the network", vm_token_delivery_failed: "the sandbox couldn't be given access", vm_workspace_failed: "the project couldn't be copied into the sandbox",
+    vm_teardown_incomplete: "the sandbox didn't shut down cleanly", job_expired: "the machine didn't pick up the update in time", job_silent: "the machine went quiet", job_overran: "the update took too long",
+    engine_unsupported: "this machine can't run that version", kind_unsupported: "this machine can't run updates yet", pr_open_failed: "GitHub didn't open the pull request",
+    pr_scope_refused: "the update touched files it shouldn't have", update_head_changed: "the update branch changed after it was pushed", pr_closed: "the pull request was closed without merging",
+    pr_not_opened: "the pull request was never opened",
+  },
+  started: (to) => (to ? "Started the update to v" + to + "." : "Started the update."),
+  errors: {
+    forbidden: "Only an owner or admin can update the engine.", notFound: "That project isn't installed any more.", signedOut: "Your session has ended. Sign in again.", other: "That didn't send. Try again.",
+    not_behind: "The engine is already up to date.", update_live: "An update is already under way.", setup_not_placed: "This project isn't on a machine.", setup_changed: "A new version came out while we got ready. Try again.",
+    not_configured: "Updating isn't available right now. Try again later.",
+  },
+};
+const VERSION = /^\d{1,6}\.\d{1,6}\.\d{1,6}$/, WORD = /^[a-z][a-z0-9_]{0,63}$/, PHASES = ["push", "pr", "await_merge", "restart", "done", "failed"], STATES = ["started", "ok", "failed", "skipped"];
+const STEPS = ["push", "pr", "await_merge", "restart"], OWNER_NAME = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
+
+/** The closed shape of the list's `engine_update`; anything else reads as nothing to show (fail closed). */
+export function readEngineUpdate(raw) {
+  if (!isObj(raw)) return null;
+  const b = raw.behind, u = raw.update;
+  const behind = isObj(b) && VERSION.test(b.from) && VERSION.test(b.to) ? { from: b.from, to: b.to } : null;
+  const update = isObj(u) && VERSION.test(u.from_version) && VERSION.test(u.to_version) && PHASES.includes(u.phase) && STATES.includes(u.state) && u.phase !== "done" ? {
+    from: u.from_version, to: u.to_version, phase: u.phase, sub: typeof u.sub_step === "string" && WORD.test(u.sub_step) ? u.sub_step : "", failed: u.phase === "failed" || u.state === "failed",
+    code: typeof u.failure_code === "string" && WORD.test(u.failure_code) ? u.failure_code : "", pr: Number.isInteger(u.pr) && u.pr > 0 ? u.pr : 0,
+  } : null;
+  return behind || update ? { behind, update } : null;
+}
+
+/** The card for the open repo, or null. `repo.operate` says whether a merged update restarts at once. The flag is the one Halt reads (`canEdit`: an owner or admin). */
+export function describeEngineUpdate(st, repo) {
+  const eu = repo && repo.engineUpdate;
+  if (!st.settings || !eu) return null;
+  const { behind, update: u } = eu, can = st.settings.canEdit === true, busy = st.op.updateBusy === true;
+  const link = u && u.pr && OWNER_NAME.test(repo.name) ? { href: "https://github.com/" + repo.name + "/pull/" + u.pr, text: UPDATE_WORDS.pr(u.pr) } : null;
+  let title, detail = "", step = null;
+  if (u && !u.failed) {
+    const n = STEPS.indexOf(u.phase) + 1;
+    title = UPDATE_WORDS.running(u.from, u.to);
+    step = { n, of: STEPS.length };
+    detail = u.phase === "restart" ? (repo.operate ? UPDATE_WORDS.merged(u.to) : UPDATE_WORDS.mergedIdle(u.to))
+      : UPDATE_WORDS.step(n, STEPS.length, UPDATE_WORDS.steps[u.phase] + (u.phase === "push" && Object.hasOwn(UPDATE_WORDS.sub, u.sub) ? " (" + UPDATE_WORDS.sub[u.sub] + ")" : ""));
+  } else {
+    title = behind ? UPDATE_WORDS.available(behind.from, behind.to) : UPDATE_WORDS.failedTitle(u.from, u.to);
+    if (u) detail = UPDATE_WORDS.failed(u.to, Object.hasOwn(UPDATE_WORDS.why, u.code) ? UPDATE_WORDS.why[u.code] : "");
+  }
+  const note = st.op.updateRepo === repo.id ? st.op.updateNote : "";
+  return {
+    id: repo.id, title, detail, step, link, button: behind !== null, label: busy ? UPDATE_WORDS.starting : u ? UPDATE_WORDS.retry : UPDATE_WORDS.update,
+    canStart: can, busy, forbidden: behind && !can ? UPDATE_WORDS.forbidden : "", note, said: u ? detail : "",
+  };
+}
+
+/** Every refusal of the update route in words, chosen by the status and the closed 409 or 503 code. */
+export function updateFailure(e) {
+  const st = e && Number.isInteger(e.status) ? e.status : 0, W = UPDATE_WORDS.errors;
+  if (st === 401) return W.signedOut;
+  if (st === 403) return W.forbidden;
+  if (st === 404) return W.notFound;
+  if ((st === 409 || st === 503) && typeof e.code === "string" && Object.hasOwn(W, e.code) && e.code !== "forbidden" && e.code !== "notFound") return W[e.code];
+  return W.other;
+}
+
+/** The card's nodes. The button is aria-disabled (not disabled) for a member and while a start is in flight, so it keeps its place in the Tab order; the click calls `start()` with no argument. */
+export function updateNodes(v, start) {
+  const btn = v.button ? h("button", { type: "button", class: "tm-btn", "data-testid": "tm-update-start", "data-focus": "update-start", "aria-disabled": !v.canStart || v.busy ? "true" : "false", "aria-describedby": v.forbidden ? "tm-update-why" : null, onClick: () => { if (btn.getAttribute("aria-disabled") !== "true") start(); } }, v.label) : null;
+  return [
+    h("p", { class: "tm-update-title", tabindex: "-1", "data-focus": "update-title", "data-testid": "tm-update-title" }, v.title),
+    v.detail ? h("p", { class: "tm-update-text", "data-testid": "tm-update-text", ...(v.step ? { "data-step": String(v.step.n) } : {}) }, v.detail) : null,
+    v.link ? h("p", null, h("a", { class: "tm-update-link", href: v.link.href, target: "_blank", rel: "noopener noreferrer", "data-testid": "tm-update-pr" }, v.link.text, h("span", { class: "tm-vh" }, UPDATE_WORDS.newTab))) : null,
+    btn,
+    v.forbidden ? h("p", { class: "tm-muted", id: "tm-update-why", "data-testid": "tm-update-why" }, v.forbidden) : null,
+    v.note ? h("p", { class: "tm-halt-note", role: "note", "data-testid": "tm-update-note" }, v.note) : null,
+  ];
+}
+
+export const NO_OP = { commands: null, commandsAt: "", commandsFailed: false, dials: null, dialsAt: "", dialsFailed: false, saving: false, notice: "", confirmStop: null, confirmHalt: null, haltNote: "", stopBusy: false, stopNote: "", updateBusy: false, updateNote: "", updateRepo: "" };
 
 const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const stamp = (v) => (typeof v === "string" && Number.isFinite(Date.parse(v)) ? Date.parse(v) : null);
@@ -379,6 +473,22 @@ export function createOperate({ client, signal, get, set, refresh, aborted }) {
         return false;
       }
       patch({ stopBusy: false, stopNote: r && r.queued === true ? STOP_WORDS.queued : r && r.already_issued === true ? STOP_WORDS.already : STOP_WORDS.sent });
+      await refresh();
+      return true;
+    },
+    async startUpdate() {
+      const st = get();
+      const repo = st.repos.find((r) => r.id === st.selectedId);
+      if (!st.settings || st.settings.canEdit !== true || !repo || !repo.engineUpdate || !repo.engineUpdate.behind || st.op.updateBusy) return false;
+      patch({ updateBusy: true, updateNote: "", updateRepo: repo.id });
+      let r;
+      try { r = await client.startUpdate(repo.id, signal); } catch (e) {
+        if (aborted(e)) return false;
+        patch({ updateBusy: false, updateNote: updateFailure(e) });
+        if (e && (e.status === 404 || e.status === 409)) await refresh(); // what was shown is out of date: show what is true now
+        return false;
+      }
+      patch({ updateBusy: false, updateNote: UPDATE_WORDS.started(r && VERSION.test(r.to_version) ? r.to_version : "") });
       await refresh();
       return true;
     },

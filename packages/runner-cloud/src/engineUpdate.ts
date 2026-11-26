@@ -61,6 +61,29 @@ export async function readEngineBehind(client: PoolClient, accountId: string, re
   return { setupId: s.id, repo: { ghRepoId: Number(s.gh_repo_id) }, runnerId: s.runner_id && s.protocol_version !== null ? s.runner_id : null, from, release, behind: release !== null && from !== null && newer(release.version, from) };
 }
 
+/**
+ * D#845 ON-15d: what the Team app's update card shows for one repo of the list. `null` for a repo with no installed project. `behind` is the version pair the card offers (only while nothing is under way and the project is on a
+ * machine, so the button cannot meet `setup_not_placed`); `update` is the repo's newest update while it is under way, or after it failed while the project is still behind (a done update, or a failure the engine has since
+ * outgrown, is nothing to show). Nothing is stamped: a later update, or a later release, changes it by itself. Only closed fields leave: no ids, no text a runner wrote.
+ */
+export interface EngineUpdateCard {
+  behind: { from: string; to: string } | null;
+  update: { from_version: string; to_version: string; phase: string; sub_step: string | null; state: string; failure_code: string | null; pr: number | null } | null;
+}
+export async function readEngineUpdateCard(client: PoolClient, accountId: string, repoId: string): Promise<EngineUpdateCard | null> {
+  const seen = await readEngineBehind(client, accountId, repoId);
+  if (seen === null) return null;
+  const newest = (
+    await client.query<NonNullable<EngineUpdateCard["update"]>>(
+      `SELECT from_version, to_version, phase, sub_step, state, failure_code, pr FROM engine_updates WHERE account_id = $1 AND repo_id = $2 ORDER BY created_at DESC, id DESC LIMIT 1`,
+      [accountId, repoId],
+    )
+  ).rows[0];
+  const live = newest !== undefined && newest.phase !== "done" && newest.phase !== "failed";
+  const shown = newest !== undefined && (live || (newest.phase === "failed" && seen.behind)) ? newest : null;
+  return { behind: !live && seen.behind && seen.from !== null && seen.release !== null && seen.runnerId !== null ? { from: seen.from, to: seen.release.version } : null, update: shown };
+}
+
 export interface IssuedEngineUpdate { update_id: string; job_id: string; attempt: number; from_version: string; to_version: string; branch: string }
 
 export async function updateEngine(deps: RunnerCloudDeps, principal: SessionPrincipal, repoId: string): Promise<RunnerHttpResponse> {
