@@ -121,7 +121,7 @@ request.
 | If your change... | Run | And do |
 |---|---|---|
 | imports another workspace package, in source or in a test | `node --test scripts/ci/declared-imports.test.mjs` and `pnpm typecheck` | Declare it in `package.json` (`devDependencies` for a test-only import). A test import compiles the other package under your package's flags, so typecheck everything, not just your package. |
-| adds a new package or app directory | `packages/test-guard/test/workspace-coverage.test.ts` | Register it in `vitest.workspace.ts` and list `../test-guard/src/setup.ts` first in its `vitest.config.ts` `setupFiles`, as `packages/hetzner` and `packages/release-verify` do (#1030, #1174). |
+| adds a new package or app directory | `packages/test-guard/test/workspace-coverage.test.ts` | Register it in `vitest.workspace.ts` and list `../test-guard/src/setup.ts` first in its `vitest.config.ts` `setupFiles`, as `packages/hetzner`, `packages/release-verify` and `packages/interview` do (#1030, #1174, #1200). |
 | adds or changes an API route or schema | `packages/api/test/openapi-drift.test.ts`, `packages/api/test/inventory.test.ts`, `packages/api-client/test/drift.test.ts`, `packages/api/test/contract.test.ts` | Regenerate with `pnpm --filter @fx/api gen-openapi`, then `pnpm --filter @fx/api-client gen`, and commit `packages/api/openapi.json` and `packages/api-client/src/generated.ts`. Never edit either by hand. |
 | adds `apps/web/app/api/**/route.ts` | `apps/web/test/route-inventory.test.ts` | Add its line to `apps/web/app/api/ROUTES.allowlist`. Run every test that enumerates routes or `vercel.json`: `git grep -l "vercel.json\|ROUTES.allowlist" -- '*.test.*'`. |
 | adds a cron to a `vercel.json` | `apps/live-e2e/test/platform-pack.test.ts` | Declare its probe; the test fails on a scheduled cron no probe covers. |
@@ -168,7 +168,10 @@ The rules live in `packages/db/migrations/README.md`. In short:
   A definer that belongs to a NOLOGIN role of its own (as `engine_halt_definer` does in
   `packages/db/migrations/1031_engine_halt.sql`, #992) needs its own check in
   `packages/db/scripts/test-neon-shape.sh` that pins the exact function signatures, their ACLs and
-  the role's privileges.
+  the role's privileges. A function that several definer roles may run (as `machine_jobs_owner`,
+  `engine_start_definer` and `engine_lease_definer` all run the `1077` predicates, #1276, #1284) names every invoker in the entry's
+  `exempt` line, comma-separated, and `check_invoker_exception_shape` in
+  `packages/db/scripts/test-neon-shape.sh` then requires each to hold `EXECUTE` and nobody else.
 - A column held to a closed set of words by a `CHECK` (as `runner_sandbox_status.reason` is, with nine words since migration 1044) has the set pinned in `packages/db/scripts/test-neon-shape.sh`. Widen the set in a migration and the pinned pattern in the same change, in the order the words appear in the constraint, or the shape check fails.
 - Run before you report: `bash packages/db/scripts/check-migration-order.sh --base origin/main`,
   `bash packages/db/scripts/test-neon-shape.sh`, `node scripts/ci/check-migration-compat.mjs`, and
