@@ -1150,7 +1150,6 @@ test.describe("the engine track and the track choice (D#845 ON-6)", () => {
   };
   /** The lines of one step, as an assertion that waits for the render instead of reading it once. */
   const expectLines = (page: Page, id: string, expected: string[]) => expect(eng(page, id).locator('[data-testid="ob-engine-line"]')).toHaveText(expected);
-  const lines = (page: Page, id: string) => eng(page, id).locator('[data-testid="ob-engine-line"]').allTextContents();
   /** The answer for an account that chose the engine track, with the engine's steps in these states. */
   const states = (o: Record<string, string>, opts: { tier?: string | null; code?: string; kvm?: "present" | "absent"; helper_missing?: true } = {}) => withEngine(ONB.new, engineTrack(o, opts));
   const ALL_DONE = { machine: "done", claude: "done", github_app: "done", project: "done", plan: "done", install: "done", live: "done" };
@@ -1331,7 +1330,7 @@ test.describe("the engine track and the track choice (D#845 ON-6)", () => {
     ]);
     const shown = await eng(page, "machine").locator('[data-testid="ob-cmd"]').allTextContents();
     expect(shown).toEqual(["curl -fsSL https://claude.ai/install.sh | bash", "claude", `curl -fsSL ${origin}/install.sh | sh`, `fx-runner setup --cloud-url ${origin}`]);
-    expect(await lines(page, "machine")).toEqual([`It prints a code. Open ${origin}/link and type the code there.`, "Waiting for your machine…"]);
+    await expectLines(page, "machine", [`It prints a code. Open ${origin}/link and type the code there.`, "Waiting for your machine…"]);
     const copies = eng(page, "machine").locator('[data-testid="ob-copy"]');
     await expect(copies).toHaveCount(4);
     for (let i = 0; i < shown.length; i++) {
@@ -1339,7 +1338,7 @@ test.describe("the engine track and the track choice (D#845 ON-6)", () => {
       expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(shown[i]);
     }
     await expect(ob(page).locator('[data-testid="ob-live"]')).toHaveText("Copied");
-    for (const id of ["claude", "github_app", "project", "plan", "install", "live"]) expect(await lines(page, id)).toEqual(["Finish Connect a machine first"]);
+    for (const id of ["claude", "github_app", "project", "plan", "install", "live"]) await expectLines(page, id, ["Finish Connect a machine first"]);
     await expect(eng(page, "claude").locator('[data-testid="ob-engine-state"]')).toHaveText("Waiting");
     await noOverflow(page);
     await noPlaceholder(page);
@@ -1391,14 +1390,14 @@ test.describe("the engine track and the track choice (D#845 ON-6)", () => {
   test("a Standard machine with claude open keeps the sign-in copy, and a microVM machine with the token present shows nothing new", async ({ page }) => {
     await engineSetup(page, mock({ onboarding: [json(states({ machine: "done", claude: "active" }, { tier: "standard" }))] }), extra());
     await bootToDesktop(page);
-    expect(await lines(page, "claude")).toEqual([`Run claude on ${BOX} and sign in`]);
-    expect(await lines(page, "github_app")).toEqual(["Finish Sign in to Claude on the machine first"]);
+    await expectLines(page, "claude", [`Run claude on ${BOX} and sign in`]);
+    await expectLines(page, "github_app", ["Finish Sign in to Claude on the machine first"]);
   });
 
   test("a microVM machine with a token set says so and shows no command", async ({ page }) => {
     await engineSetup(page, mock({ onboarding: [json(states({ machine: "done", claude: "done", github_app: "active" }, { tier: "microvm" }))] }), extra());
     await bootToDesktop(page);
-    expect(await lines(page, "claude")).toEqual([`A Claude token is set on ${BOX}`]);
+    await expectLines(page, "claude", [`A Claude token is set on ${BOX}`]);
     await expect(eng(page, "claude").locator('[data-testid="ob-cmd"]')).toHaveCount(0);
   });
 
@@ -1418,24 +1417,23 @@ test.describe("the engine track and the track choice (D#845 ON-6)", () => {
   test("Standard isolation with KVM absent in the machine's facts says the no-KVM line, calmly", async ({ page }) => {
     await engineSetup(page, mock({ onboarding: [json(states({ machine: "done", claude: "active" }, { tier: "standard", kvm: "absent" }))] }), extra());
     await bootToDesktop(page);
-    expect(await lines(page, "machine")).toEqual([`${BOX} connected · Standard isolation`, "This machine has no KVM, so jobs run in the OS sandbox. That's fine for one project."]);
+    await expectLines(page, "machine", [`${BOX} connected · Standard isolation`, "This machine has no KVM, so jobs run in the OS sandbox. That's fine for one project."]);
     await expect(eng(page, "machine")).not.toHaveClass(/ob-failed/);
-    expect(await eng(page, "machine").innerText()).not.toMatch(/fail|warn|error|problem|attention/i);
+    await expect(eng(page, "machine")).not.toContainText(/fail|warn|error|problem|attention/i, { useInnerText: true });
   });
 
   test("Standard isolation with KVM present and the helper missing names the helper step, and never says the machine has no KVM", async ({ page }) => {
     await engineSetup(page, mock({ onboarding: [json(states({ machine: "done", claude: "active" }, { tier: "standard", kvm: "present", helper_missing: true }))] }), extra());
     await bootToDesktop(page);
-    const text = await eng(page, "machine").innerText();
-    expect(text).toContain("sudo fx-runner vm install");
-    expect(text).not.toMatch(/no KVM/);
+    await expect(eng(page, "machine")).toContainText("sudo fx-runner vm install", { useInnerText: true });
+    await expect(eng(page, "machine")).not.toContainText(/no KVM/, { useInnerText: true });
     await expect(eng(page, "machine")).not.toHaveClass(/ob-failed/);
   });
 
   test("a MicroVM machine with KVM present says neither KVM line", async ({ page }) => {
     await engineSetup(page, mock({ onboarding: [json(states({ machine: "done", claude: "active" }, { tier: "microvm", kvm: "present" }))] }), extra());
     await bootToDesktop(page);
-    expect(await lines(page, "machine")).toEqual([`${BOX} connected · MicroVM isolation`]);
+    await expectLines(page, "machine", [`${BOX} connected · MicroVM isolation`]);
   });
 
   test("claude open on a machine that is offline: how long ago it was last seen", async ({ page }) => {
@@ -1449,7 +1447,7 @@ test.describe("the engine track and the track choice (D#845 ON-6)", () => {
   test("with no runners list the copy says 'your machine' and prints no placeholder", async ({ page }) => {
     await engineSetup(page, mock({ onboarding: [json(states({ machine: "done", claude: "active" }, { tier: "microvm" }))] }), extra({ machine: null }));
     await bootToDesktop(page);
-    expect(await lines(page, "machine")).toEqual(["your machine connected · MicroVM isolation"]);
+    await expectLines(page, "machine", ["your machine connected · MicroVM isolation"]);
     await noPlaceholder(page);
   });
 
@@ -1459,7 +1457,7 @@ test.describe("the engine track and the track choice (D#845 ON-6)", () => {
     await bootToDesktop(page);
     await expect(eng(page, "plan")).toHaveClass(/ob-failed/);
     await expect(eng(page, "plan").locator('[data-testid="ob-engine-state"]')).toHaveText("Needs attention");
-    expect(await lines(page, "plan")).toEqual(["The survey stopped. Try again, or write your own plan"]);
+    await expectLines(page, "plan", ["The survey stopped. Try again, or write your own plan"]);
     expect(await ob(page).innerText()).not.toContain("survey_timeout");
   });
 
@@ -1467,7 +1465,7 @@ test.describe("the engine track and the track choice (D#845 ON-6)", () => {
     const body = states({ ...ALL_DONE, install: "failed", live: "pending" }, { tier: "microvm", code: "brand_new_code" });
     await engineSetup(page, mock({ onboarding: [json(body)] }), extra());
     await bootToDesktop(page);
-    expect(await lines(page, "install")).toEqual(["This step stopped. Try again."]);
+    await expectLines(page, "install", ["This step stopped. Try again."]);
   });
 
   test("every state of the list has its word: done, needs attention and waiting", async ({ page }) => {
@@ -1475,8 +1473,8 @@ test.describe("the engine track and the track choice (D#845 ON-6)", () => {
     await engineSetup(page, mock({ onboarding: [json(body)] }), extra());
     await bootToDesktop(page);
     await expect(ob(page).locator('[data-testid="ob-engine-state"]')).toContainText(["Done", "Done", "Done", "Needs attention", "Waiting", "Waiting", "Waiting"]);
-    expect(await lines(page, "project")).toEqual([`Couldn't fetch the repository to ${BOX}. Try again`]);
-    expect(await lines(page, "plan")).toEqual(["Finish Choose a project first"]);
+    await expectLines(page, "project", [`Couldn't fetch the repository to ${BOX}. Try again`]);
+    await expectLines(page, "plan", ["Finish Choose a project first"]);
   });
 
   test("GitHub App open offers Open Repos; the unpaid desktop keeps Machines and Team off (the unpaid-desktop ruling)", async ({ page }) => {
