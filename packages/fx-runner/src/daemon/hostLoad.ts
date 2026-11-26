@@ -1,7 +1,7 @@
 /**
  * D#845 ON-1b: what the runner tells the cloud about its machine's load, as the optional `host_load` block of a claim (an idle runner has no per-run heartbeat, so the
  * claim is its heartbeat). Three whole numbers: memory a new program could use and free disk space, both in megabytes, and how many project setups it is running.
- * No path, host name or free text leaves the machine. The block is gated by `project_setup_v1`: a runner that did not advertise it never builds a reporter (see `run.ts`).
+ * No path, host name or free text leaves the machine. The reporter is always built (see `run.ts`); the client sends the block only at protocol 22 and later.
  *
  * It is sent at most once every `HOST_LOAD_MIN_INTERVAL_SECONDS`, and counts as sent only once the cloud answered 200, so a failed or rate-limited claim sends it again.
  * A reading that cannot be taken (no disk volume readable) or does not fit the protocol's schema sends nothing: a missing fact is never made up.

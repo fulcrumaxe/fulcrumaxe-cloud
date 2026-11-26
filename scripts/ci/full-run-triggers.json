@@ -107,6 +107,7 @@
     {"from":"apps/workspace","to":"packages/github","kind":"test","reason":"test/staging-fixes.test.mjs reads packages/github/src/installCallback.ts by path"},
     {"from":"apps/workspace","to":"packages/pipeline","kind":"test","reason":"test/pipeline-spec-refusal-codes.test.mjs reads packages/pipeline/src by path"},
     {"from":"apps/workspace","to":"packages/telemetry","kind":"test","reason":"test/onboarding-plan-copy.test.mjs reads packages/telemetry/src/errorCodes.ts by path"},
+    {"from":"apps/workspace","to":"packages/runner-cloud","kind":"test","reason":"test/onboarding-engine.test.mjs reads packages/runner-cloud/src/placement.ts by path"},
     {"from":"apps/workspace","to":"packages/receipts","kind":"test","reason":"test/pipeline-reversal-pr-state.test.mjs reads packages/receipts/src/compensate.ts by path"},
     {"from":"apps/workspace","to":"packages/roles","kind":"test","reason":"test/roles-modes.test.mjs reads packages/roles/src/manifest.ts by path"},
     {"from":"apps/workspace","to":"packages/runner","kind":"test","reason":"test/repos-allowances.test.mjs reads packages/runner/src/runnerModes.ts by path"},

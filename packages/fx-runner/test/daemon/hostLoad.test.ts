@@ -92,7 +92,7 @@ describe("the claim carries the host load", () => {
     expect(seen).toEqual([{ sandbox_unavailable: "bwrap_missing" }, LOAD]);
   });
 
-  it("a runner that declared protocol 21, or has no reporter (it did not advertise project_setup_v1), sends nothing", async () => {
+  it("a runner that declared protocol 21, or has no reporter, sends nothing", async () => {
     const old = claimWith({ protocolVersion: MACHINE_ONBOARDING_MIN_PROTOCOL - 1 });
     await old.client.claim();
     expect(old.seen).toEqual([{}]);

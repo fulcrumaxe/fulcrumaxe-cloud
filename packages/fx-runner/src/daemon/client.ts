@@ -182,7 +182,7 @@ export interface RunnerClientConfig {
   sandboxInventory?: InventoryReporter;
   /**
    * D#845 ON-1b: the machine's load, asked on each ordinary claim (never a status poll). It is sent only when `protocolVersion` is `MACHINE_ONBOARDING_MIN_PROTOCOL` or later, and only when the
-   * reporter says it is due. It counts as sent once the cloud answered 200. Wired only by a runner whose hello lists `project_setup_v1`.
+   * reporter says it is due. It counts as sent once the cloud answered 200.
    */
   hostLoad?: HostLoadReporter;
   /**

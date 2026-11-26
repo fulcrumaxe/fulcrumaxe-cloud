@@ -12,7 +12,7 @@ import { PREFLIGHT_CODES, PREFLIGHT_FIX, preflightView } from "../../../packages
 import { parseSteps, parseTracks, shownTracks } from "../shell/core/onboarding-mode.js";
 import {
   ASK_OWNER, LABELS, NO_KVM, OPERATE_OFF, STATE_WORDS, TIME_TO_LIVE,
-  COULDNT_CHECK, NEW_PRESET, NO_MACHINE, NO_OWNERS, PUBLIC_COPY, PUBLIC_OPERATE, createRefusal, dialsLine, linkedLine, machineChoices, operateBox, parseReturn, pickVisibility, placeRefusal, presetName, readPicker,
+  CHECKING_MACHINE, CHECK_TRIES, CHECK_WAIT_MS, COULDNT_CHECK, NEW_PRESET, NO_MACHINE, NO_OWNERS, PUBLIC_COPY, PUBLIC_OPERATE, createRefusal, dialsLine, isLoadPending, linkedLine, machineChoices, operateBox, parseReturn, pickVisibility, placeRefusal, presetName, readPicker,
   cleanOrigin, copyText, describeStep, enginePrice, installDetail, surveyDetail, twinDetail, fixFor, machineChoiceLine, machineCommands, machineContext, prerequisites, visibilityLabel,
   approveWords, approvedLine, draftRefusal, engineSection, planProblems, readDraft, toRoadmap,
 } from "../apps/onboarding/onboarding-engine.js";
@@ -670,6 +670,40 @@ describe("the project picker's reads and words (ON-7b)", () => {
     expect(new Set([403, 404, 400].map((status) => placeRefusal({ status, code: "forbidden" }).text)).size).toBe(3);
     expect(placeRefusal({ status: 403 }).text).toBe("Only an owner or admin can place a project.");
     for (const odd of [undefined, null, {}, { status: 500 }, { code: "invented" }]) expect(placeRefusal(odd).text).toBe("The project couldn't be placed. Try again.");
+  });
+
+  it("a machine_not_eligible refusal says why in its own sentence, one per reason the server can name, and an unknown or missing reason falls back to the plain one", () => {
+    // The closed list is read from the server's own type, so a reason added there without a sentence here fails this test.
+    const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages", "runner-cloud", "src", "placement.ts"), "utf8");
+    const union = /export type IneligibleReason = ([^;]+);/.exec(src)?.[1] ?? "";
+    const reasons = [...union.matchAll(/"([a-z_]+)"/g)].map((m) => m[1]).filter((r) => r !== "has_project");
+    expect(reasons.sort()).toEqual(["claude_not_ready", "draining", "load_unknown", "low_disk", "low_memory", "not_live", "paused", "server_deleting"]);
+    const plain = placeRefusal({ code: "machine_not_eligible", status: 409 }).text;
+    const seen = new Set();
+    for (const reason of reasons) {
+      const r = placeRefusal({ code: "machine_not_eligible", status: 409, reason, message: "SERVER WORDS" });
+      expect(r, reason).toMatchObject({ code: "machine_not_eligible", reason });
+      expect(r.text, reason).not.toMatch(/SERVER WORDS|null|undefined/);
+      expect(r.text, reason).not.toBe(plain);
+      seen.add(r.text);
+    }
+    expect(seen.size).toBe(reasons.length);
+    expect(placeRefusal({ code: "machine_not_eligible", status: 409, reason: "invented" }).text).toBe(plain);
+    expect(placeRefusal({ code: "machine_not_eligible", status: 409, reason: 7 }).text).toBe(plain);
+    expect(placeRefusal({ code: "machine_not_eligible", status: 409, reason: "__proto__" }).text).toBe(plain);
+    // A reason beside any other code changes nothing: machine_single_project keeps its own sentence.
+    expect(placeRefusal({ code: "machine_single_project", status: 409, reason: "low_disk" }).text).toMatch(/Standard isolation hosts one project/);
+    expect(placeRefusal({ code: "machine_not_eligible", status: 409, reason: "low_memory" }).text).toMatch(/4 GB/);
+    expect(placeRefusal({ code: "machine_not_eligible", status: 409, reason: "low_disk" }).text).toMatch(/10 GB/);
+  });
+
+  it("only an unknown load is waited out: asked again a bounded number of times, a few seconds apart", () => {
+    expect(isLoadPending({ code: "machine_not_eligible", reason: "load_unknown" })).toBe(true);
+    for (const e of [{ code: "machine_not_eligible", reason: "low_memory" }, { code: "machine_not_eligible" }, { code: "machine_single_project", reason: "load_unknown" }, null, undefined]) expect(isLoadPending(e)).toBe(false);
+    expect(CHECKING_MACHINE).toBe("Checking the machine…");
+    expect(CHECK_TRIES).toBeGreaterThanOrEqual(1);
+    expect(CHECK_TRIES * CHECK_WAIT_MS).toBeGreaterThanOrEqual(20_000); // the wake poll is every 20 seconds
+    expect(CHECK_TRIES * CHECK_WAIT_MS).toBeLessThanOrEqual(60_000);
   });
 
   it("create-intent refusals and the outcomes GitHub's return carries each have a sentence", () => {
