@@ -4,6 +4,7 @@ import { freemem } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { createChannelClient } from "../../src/engineHost/channelClient.js";
 import { engineSessionPolicy } from "../../src/engineSession/sessionPolicy.js";
 import { createBootFactsSource } from "../../src/vm/bootFacts.js";
 import { startEgressProxy } from "../../src/vm/egress/proxy.js";
@@ -34,7 +35,7 @@ import { connectUnix } from "./sandboxd/helpers.js";
  *  - the host and its background process outlive the turn that started them (the marker is written after the `result`, stdin still open): the keep-one-host-open design, proved without a model;
  *  - stop wipes the token (reply says so, no state file holds it), ends the host with no survivor, and the supervisor program EXITS (Ruling 115: Node cannot zero the copies a launch makes, so the exit, the bridge's kill of the group and the guest's `init_on_free=1` are what keep the token out of a snapshot);
  *  - a RAM snapshot taken after the channel stop (the sandbox is persistent, `vmPort.stop` keeps one) holds neither the token nor its first 16 bytes, searched over every file of the snapshot directory; a search of the same files for a string that IS in the guest (the bridge's file name) is the control that the files are searchable.
- * The vsock hop itself (host to bridge) needs the host's dial of port 5255, which ON-13b2 adds with the ticks; here the bridge's presence and listening are what is checked.
+ * The second case (ON-13b2) is the runner's own dial: `vmPort.channel` over vsock port 5255 to the bridge and the supervisor init started (which would run the image's own CLI, so it is never given a config or a tick that could start it): the closed refusals, `token_put`, a `halted` stop that wipes and ends with no survivor, a fresh supervisor after it, and a RAM snapshot with no token in it.
  */
 const E = process.env;
 const dry = E["FX_SUPERVISOR_DRY"] === "1";
@@ -164,6 +165,42 @@ describe.skipIf(!(vmReady && dry))("the engine session's supervisor in a real mi
     // the marker was written well after the turn's result: the host and its process group were still alive
     expect(report["marker_after_result_s"] as number).toBeGreaterThanOrEqual(2);
     // RAM after the channel stop: the persistent sandbox's stop keeps a snapshot of the whole guest memory; the supervisor has exited, the bridge has killed the group, init_on_free has zeroed the pages
+    await vmPort.stop(name);
+    const snaps = filesUnder(snapDir);
+    expect(snaps.length, "a snapshot was kept").toBeGreaterThan(0);
+    const token = Buffer.from(CANARY);
+    expect(snaps.filter((f) => fileHolds(f, Buffer.from("engine-bridge.py"))).length, "control: the search finds a string that is in the guest's memory").toBeGreaterThan(0);
+    expect(snaps.filter((f) => fileHolds(f, token) || fileHolds(f, token.subarray(0, 16))), "no snapshot file holds the token or its first 16 bytes").toEqual([]);
+  });
+
+  it("dry run, the runner's own dial: vsock port 5255 reaches the bridge and a supervisor that has no config, takes the credential, and is wiped and ended by a halted channel stop before the snapshot", { timeout: 6 * 60_000 }, async () => {
+    const name = `fx-chn-${randomBytes(4).toString("hex")}`;
+    made.push(name);
+    await vmPort.create(name, "agent");
+    const guest = await port.guestOf({ runId: "", sandboxName: name, sessionId: "" });
+    await guest.updateNetworkPolicy(engineSessionPolicy());
+    const channel = createChannelClient(() => (vmPort.channel as NonNullable<typeof vmPort.channel>)(name), { timeoutMs: 20_000 });
+    // init starts the bridge a moment after boot: the first answers may be `unreachable` until it listens
+    let up = false;
+    for (let i = 0; i < 60 && !up; i++) {
+      up = await channel.eventsRead(0).then(() => true, () => false);
+      if (!up) await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+    expect(up, "the host reached the supervisor through vsock 5255").toBe(true);
+    // no config, so nothing can start (the image's own CLI is never run by this test), and an unverifiable command reaches nothing
+    expect(await channel.ask({ op: "tick", kind: "loop" })).toEqual({ ok: false, code: "no_session_config" });
+    expect(await channel.ask({ op: "command", command: { forged: true } })).toEqual({ ok: false, code: "command_unverified" });
+    expect(await channel.ask({ op: "exec" })).toEqual({ ok: false, code: "bad_request" });
+    await channel.tokenPut(Buffer.from(CANARY));
+    expect(await channel.stop("halted")).toEqual({ survivors: 0, tokenWiped: true, pid: expect.any(Number) });
+    // the supervisor ended, the bridge killed its group, and init starts a fresh one with no credential
+    let fresh = false;
+    for (let i = 0; i < 60 && !fresh; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      fresh = await channel.ask({ op: "tick", kind: "loop" }).then((r) => !r.ok && r.code === "no_session_config", () => false);
+    }
+    expect(fresh, "a fresh supervisor answers (it has no config, no host and no credential)").toBe(true);
+    console.error(`ENGINE CHANNEL DRY ${JSON.stringify({ dial: up, fresh_supervisor: fresh })}`);
     await vmPort.stop(name);
     const snaps = filesUnder(snapDir);
     expect(snaps.length, "a snapshot was kept").toBeGreaterThan(0);

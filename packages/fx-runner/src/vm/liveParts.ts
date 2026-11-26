@@ -12,6 +12,7 @@ import { guestMakeRuntime } from "./sandboxd/guestRuntime.js";
 import type { LiveMicrovmParts } from "./sandboxd/live.js";
 import { productionDepsBase } from "./sandboxd/production.js";
 import type { EgressStarters } from "./sandboxd/policyPort.js";
+import type { SnapshotDeps } from "./sandboxd/snapshots.js";
 
 export interface MicrovmPartsHost {
   /** The effective and real user ids, read once at the entry point (`undefined` where the platform has none). */
@@ -32,6 +33,8 @@ export interface MicrovmPartsHost {
    * (`vm_token_delivery_failed`). The caller reads the environment; this module only passes the function on and never calls it. The token is never logged, kept or put in a message.
    */
   readToken: () => Buffer;
+  /** D#845 ON-13b2: the snapshot deps (`productionSnapshots`), made once at start. Absent: no sandbox may be persistent, so no engine session can stop. */
+  snapshots?: SnapshotDeps | undefined;
 }
 
 /** Every part of `LiveMicrovmParts`, present: the entry point cannot leave one out, and a test sees each by name. */
@@ -47,7 +50,7 @@ export function createMicrovmParts(host: MicrovmPartsHost): MicrovmParts {
     },
   };
   return {
-    deps: productionDepsBase({ helperSocket: host.helperSocket, host: { euid: host.euid, platform: host.platform as NodeJS.Platform } }),
+    deps: productionDepsBase({ helperSocket: host.helperSocket, host: { euid: host.euid, platform: host.platform as NodeJS.Platform }, ...(host.snapshots === undefined ? {} : { snapshots: host.snapshots }) }),
     boot: createBootFactsSource({ tuf: host.tuf, template: TEMPLATES[0], nodeArch: host.nodeArch, readManifest: host.readManifest, now: host.now }),
     template: TEMPLATES[0],
     memMb: SMALLEST_TEMPLATE_RAM_MB,

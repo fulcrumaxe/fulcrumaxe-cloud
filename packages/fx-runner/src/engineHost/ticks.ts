@@ -97,6 +97,8 @@ export interface Ticker {
   /** The supervisor's `observer.onCompaction` (EB-12c): the next tick sent is the `reorient` one. */
   onCompaction(): void;
   noteAgentEvent(event: AgentEvent): void;
+  /** ON-13b2: queues one tick of a fixed kind on request (the runner's channel `tick`), under the same rules as a due one: a duplicate of a queued kind is dropped and counted, and a paused loop takes no `loop` or `checkin`. `checkin` needs a row key. False when it was not queued. */
+  request(kind: "loop" | "start_day" | "checkin", name?: string): boolean;
   /** Ends the ticker: queued commands are refused (`host_not_running`), a command in flight or waiting to be confirmed is `not_confirmed`. */
   close(): void;
   counts(): { dropped: number; queued: number; paused: boolean; outcomeWriteFailures: number; timedOut: number };
@@ -481,6 +483,15 @@ export function createTicker(deps: TickerDeps): Ticker {
         settle(name, { outcome: "applied" });
         if (!w.confirm.all) return;
       }
+    },
+    request(kind, name) {
+      if (closed) return false;
+      if (kind === "checkin") {
+        if (name === undefined || !ROW_KEY_PATTERN.test(name)) return false;
+        enqueue({ key: `checkin:${name}`, kind: "checkin", prompt: renderPrompt("checkin", { name }) });
+      } else if (name !== undefined) return false;
+      else enqueue(kind === "loop" ? loopTick() : { key: "start_day", kind: "start_day", prompt: renderPrompt("start_day_scheduled") });
+      return true;
     },
     close() {
       if (closed) return;

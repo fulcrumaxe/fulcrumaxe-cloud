@@ -11,7 +11,9 @@
  * Nothing here starts a process or reads `process.*`.
  */
 import type { SandboxHandle } from "../../sandbox/port.js";
+import { CHANNEL_PORT } from "../../engineHost/guestSession.js";
 import type { VmKind, VmPort } from "../jobLifecycle.js";
+import type { Connect } from "./guestAgent.js";
 import type { MicrovmSandbox } from "./microvmSandbox.js";
 import type { GuestBindings, RunEventHooks } from "./guestBindings.js";
 import type { Sandboxd } from "./sandboxd.js";
@@ -42,8 +44,15 @@ export class VmPortRefused extends Error {
   }
 }
 
+/** A connection to a guest vsock port, as `viaFirecrackerVsock` hands it out. */
+type Duplex = Awaited<ReturnType<Connect>>;
+
 /** The VM factory of a persistent sandbox that can also be woken from its kept disk (D#845 ON-13a1). */
-export type ResumableVmPort = VmPort & { resume(id: string): Promise<void> };
+export type ResumableVmPort = VmPort & {
+  resume(id: string): Promise<void>;
+  /** D#845 ON-13b2: a connection to the engine session's channel of a running VM (vsock port 5255). The microVM tier has it; the standard tier's port does not. The caller closes it. */
+  channel?(id: string): Promise<Duplex>;
+};
 
 export function createMicrovmVmPort(parts: MicrovmVmPortParts): ResumableVmPort {
   const handles = new Map<string, SandboxHandle>();
@@ -96,6 +105,7 @@ export function createMicrovmVmPort(parts: MicrovmVmPortParts): ResumableVmPort 
       signal.throwIfAborted();
     },
     releaseEgress: (id) => parts.policy.release(parts.idOf(id)),
+    channel: async (id) => (await parts.daemon.get(parts.idOf(id))).connect(CHANNEL_PORT),
     stop: (id) => parts.sandbox.stop(handleOf(id)),
     async destroy(id) {
       if (!persistentIds.has(id)) {

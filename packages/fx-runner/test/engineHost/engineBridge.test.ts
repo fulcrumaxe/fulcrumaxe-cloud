@@ -123,7 +123,7 @@ describe.skipIf(skip)("the bundled fx-engine-supervisor", () => {
     child.stdout?.on("data", (d: Buffer) => (said += d.toString()));
     await until(() => said.includes(SESSION_READY_LINE), "the ready line");
     writeFileSync(path.join(dir, "session.json"), JSON.stringify({ repo_gh_id: "424242", repo_checkout: checkout }), { mode: 0o600 });
-    expect(await ask(sock, { op: "tick", text: "go" })).toEqual({ ok: true, started: true });
+    expect(await ask(sock, { op: "tick", kind: "loop" })).toEqual({ ok: true, started: true });
     let lines: string[] = [];
     await until(() => {
       void ask(sock, { op: "events_read", after: 0 }).then((r) => (lines = (r as unknown as { lines: string[] }).lines));

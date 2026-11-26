@@ -44,6 +44,21 @@ export interface SnapshotDeps {
   ttlSeconds?: number;
 }
 
+/**
+ * D#845 ON-13b2 (Ruling 81.1a): the production snapshot wiring. The caller reads the runner's `microvm.snapshot_dir` and `microvm.snapshot_quota_bytes` (the completed caps), the free-space reader (statfs, built outside `src`) and makes the daemon's 0700
+ * state directory; any part that is missing or refused means no snapshot deps, so no sandbox may be persistent and a session's stop fails closed (`snapshot_failed`) instead of keeping an unquotaed file.
+ */
+export function productionSnapshots(config: { sandboxdDir: string; uid: number | undefined; caps: { snapshotDir: string; snapshotQuotaBytes: number } | undefined; freeBytes: (dir: string) => number | undefined; ensureDir: (dir: string, uid: number) => void }): SnapshotDeps | undefined {
+  if (config.uid === undefined || config.caps === undefined) return undefined;
+  try {
+    config.ensureDir(config.sandboxdDir, config.uid);
+  } catch {
+    // fx-swallow-ok: a state directory that cannot be made or is not safe means no snapshots (the caller reports the failed stop in its own closed word)
+    return undefined;
+  }
+  return { dir: config.caps.snapshotDir, quotaBytes: config.caps.snapshotQuotaBytes, freeBytes: config.freeBytes, stateDir: config.sandboxdDir };
+}
+
 export type SnapshotAdmission = { admit: true } | { admit: false; detail: string };
 
 /**

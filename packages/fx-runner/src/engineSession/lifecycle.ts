@@ -15,12 +15,14 @@
  * archive of `at_sha`, through the setup's crossing, and the host never reads the guest's files. Everything reported or kept about a session is the closed words of the protocol and the sandbox's own name (an id).
  */
 import type { MachineJobOf, SessionJobKind, SessionJobProgressBody } from "@fulcrumaxe/runner-protocol";
+import { createChannelClient, type SessionChannel } from "../engineHost/channelClient.js";
+import type { ChannelStopReason } from "../engineHost/guestSession.js";
 import type { JobHandlerDeps } from "../daemon/jobHandler.js";
 import type { MachineJobHandler, SessionReporter } from "../daemon/machineJobs.js";
 import { SandboxNotFoundError, type SandboxComputeState, type SandboxHandle } from "../sandbox/port.js";
 import type { SetupRepoCopy, SetupRepos } from "../setup/projectSetup.js";
 import { admitVm } from "../vm/limits.js";
-import { DEFAULT_GUEST_PATHS, GuestWorkspaceError, sendWorkspace, type GuestPaths } from "../vm/workspace/guestWorkspace.js";
+import { DEFAULT_GUEST_PATHS, GuestWorkspaceError, runInGuest, sendWorkspace, type GuestPaths } from "../vm/workspace/guestWorkspace.js";
 import type { ResumableVmPort } from "../vm/sandboxd/vmPort.js";
 import type { OperateMark } from "./operateMark.js";
 import { engineSessionPolicy } from "./sessionPolicy.js";
@@ -36,6 +38,29 @@ export const SESSION_VM_LIMIT_MS = 7 * 24 * 3_600_000;
 /** The guest RAM a start needs the host to be able to give (B-6's guard adds its own headroom on top); a smaller template does not lower it. */
 export const SESSION_MIN_GUEST_MB = 4096;
 
+/** Where the guest's supervisor keeps its state (`engine-bridge.py`'s `FX_ENGINE_DIR`): the session config goes here, as the supervisor's own user. */
+export const GUEST_ENGINE_DIR = "/vercel/sandbox/.fx-engine";
+export const SYNC_MS = 60_000;
+/** How long, and how often, a stop looks for the old supervisor program to be gone after it answered `stop` (it answers first and exits after). */
+export const SUPERVISOR_EXIT_MS = 10_000;
+export const SUPERVISOR_EXIT_POLL_MS = 250;
+/** What the guest's shells (dash, bash, busybox) print for a `kill -0` of a pid that is gone (ESRCH). */
+const NO_SUCH_PROCESS = /No such process/;
+
+/**
+ * What a stop of a running session leaves for the cloud's park (MC-6a's step 1) and for a halt: how the session was ended (`vm_stop`: the VM was stopped, `unit`: the systemd scope was ended), how many processes of the engine host's tree
+ * were still alive after the supervisor's own kill path (a stop that finds one fails and reports nothing), and the report `paused {synced}`: the guest's file systems were flushed to disk before the VM stopped (always false on the
+ * unit tier, where there is no guest disk to flush). The wire form of this report belongs to the park row, which adds its stop reason; the runner only produces it here.
+ */
+export interface SessionStopReport {
+  repo_gh_id: number;
+  job_id: string;
+  reason: MachineJobOf<"engine_session_stop">["args"]["reason"];
+  method: "vm_stop" | "unit";
+  survivors: number;
+  paused: { synced: boolean };
+}
+
 export interface EngineSessionDeps {
   vm: Pick<NonNullable<JobHandlerDeps["vm"]>, "guestOf" | "quiesce" | "lifecycle">;
   /** The persistent VM factory for one job (`live.vmPort({ ..., persistent: true })`). */
@@ -49,10 +74,28 @@ export interface EngineSessionDeps {
   /** Who a repository id is on this machine (from the mirror this machine made for it); undefined when it is not known. */
   repoOf: (repoGhId: number) => Promise<{ owner: string; name: string } | undefined>;
   mark: OperateMark;
-  runnerId: string;
   paths?: GuestPaths;
   minGuestMb?: number;
+  /**
+   * D#845 ON-13b2: the runner's own credential path, a FRESH buffer on each call (the live stack's `readToken`); zeroed here after the send. With it and a port that has a channel (the microVM tier), a start hands the credential in
+   * and starts the engine host (`credentials`, `supervisor`), and every stop sends a channel `stop` (the credential wiped, the host ended) before anything is snapshotted. Left out, a start ends at `session_boot` as before.
+   */
+  readToken?: () => Buffer;
+  /** The runner's id and the cloud address its keys are pinned for: `session.json`, which tells the guest which pinned key re-verifies a signed command and whose command it is. */
+  runnerId: string;
+  cloudOrigin?: string;
+  /** Where the guest's supervisor keeps its state (the session config goes here); the image's own by default, a test's own directory in tests. */
+  engineDir?: string;
+  /** How a stop ends the session: `vm_stop` (default) or, on the standard tier, `unit`. */
+  tier?: "vm_stop" | "unit";
+  /** How long a stop waits for the old supervisor program to be gone, and how often it looks (defaults `SUPERVISOR_EXIT_MS`, `SUPERVISOR_EXIT_POLL_MS`; a test's own, short). */
+  supervisorExit?: { totalMs: number; pollMs: number };
+  /** Told once when a stop of a RUNNING session ended well (never for a stop that found nothing up, and never for a failed one). */
+  stopped?: (report: SessionStopReport) => void;
 }
+
+/** What the guest's supervisor records as the reason its host ended: a halt and an operate-off say so; a person's own stop is theirs; the cloud's other causes are the machine's. */
+const CHANNEL_REASON: Readonly<Record<MachineJobOf<"engine_session_stop">["args"]["reason"], ChannelStopReason>> = { person: "stopped_by_person", halt: "halted", operate_off: "operate_off", move: "machine_shutdown", remove: "machine_shutdown", plan: "machine_shutdown" };
 
 /** A failure already reported: it unwinds the handler and nothing more is said. */
 class Reported extends Error {}
@@ -79,7 +122,8 @@ export function createEngineSessionHandlers(deps: EngineSessionDeps): { engine_s
     };
     return (async () => {
       try {
-        await body({ name, port, signal, say, fail });
+        const channel = port.channel === undefined ? undefined : createChannelClient(() => (port.channel as NonNullable<typeof port.channel>)(name));
+        await body({ name, port, signal, say, fail, channel });
       } catch (error) {
         // fx-swallow-ok: a failure already reported ends here; any other error (its text could hold a path) is reported as a failure of the current step in that step's one word, unless the job is already over
         if (!(error instanceof Reported) && !reporter.closed && !signal.aborted) await reporter.report({ step: current, state: "failed", failure_code: FALLBACK[current] ?? "vm_boot_failed" });
@@ -91,6 +135,8 @@ export function createEngineSessionHandlers(deps: EngineSessionDeps): { engine_s
     name: string;
     port: ResumableVmPort;
     signal: AbortSignal;
+    /** The channel to the session's supervisor; undefined on a port that has none (the standard tier), where no credential or tick goes in. */
+    channel: SessionChannel | undefined;
     say(step: SessionJobProgressBody["step"], state: SessionJobProgressBody["state"], more?: { start_mode?: StartMode }): Promise<void>;
     fail(step: SessionJobProgressBody["step"], code: FailureCode, reason?: string): Promise<never>;
   }
@@ -113,6 +159,47 @@ export function createEngineSessionHandlers(deps: EngineSessionDeps): { engine_s
     }
     if (ok) life.registry.remove(name);
     else if (life.registry.get(name) !== undefined) life.registry.markLeftover(name);
+    return ok;
+  }
+
+  /**
+   * The channel stop of a session that may hold the credential, judged: the guest said the credential is wiped, no process of the host's tree survived, and the SUPERVISOR PROGRAM ITSELF is gone. The guest answers `stop` before
+   * it exits, and Node's copies of the credential (the latin1 string, the environment object, libuv's envp copy) are freed only when the program ends, so the reply is not enough: its pid is looked up through the guest agent
+   * (the guest shell's own `kill -0` of the pid, which signals nothing: exit 1 AND the words "No such process" when none is left (an exit 1 for "Operation not permitted" is a live process), a zombie not yet reaped counting as there; anything else, a timeout included, is "not confirmed") until it is gone or `supervisorExit` is up. A reply with no pid is not confirmed either.
+   */
+  async function channelEnded(p: Parts, reason: ChannelStopReason): Promise<{ ok: true; survivors: number } | { ok: false; why: "channel" | "survivors" | "exit" }> {
+    const ended = await (p.channel as SessionChannel).stop(reason).catch(() => undefined); // fx-swallow-ok: judged just below, as one closed word
+    if (ended === undefined || !ended.tokenWiped) return { ok: false, why: "channel" };
+    if (ended.survivors > 0) return { ok: false, why: "survivors" };
+    if (ended.pid === undefined) return { ok: false, why: "exit" };
+    const wait = deps.supervisorExit ?? { totalMs: SUPERVISOR_EXIT_MS, pollMs: SUPERVISOR_EXIT_POLL_MS };
+    const guest = await deps.vm.guestOf(handleOf(p.name)).catch(() => undefined); // fx-swallow-ok: a guest that cannot be asked is "not confirmed"
+    if (guest === undefined) return { ok: false, why: "exit" };
+    const until = Date.now() + wait.totalMs;
+    for (;;) {
+      const look = await runInGuest(guest, { cmd: "sh", args: ["-c", `kill -0 ${String(ended.pid)}`] }, Math.max(1_000, Math.min(wait.totalMs, 5_000))).catch(() => undefined); // fx-swallow-ok: a look that failed is a look that did not see it gone
+      // gone only when the shell says so in words (ESRCH): `kill -0` exits 1 for "Operation not permitted" (EPERM, a live process of another user) as well, and that must never count as gone
+      if (look !== undefined && look.exitCode === 1 && !look.timedOut && NO_SUCH_PROCESS.test(`${look.stderr}\n${look.stdout}`)) return { ok: true, survivors: ended.survivors };
+      if (Date.now() >= until) return { ok: false, why: "exit" };
+      await new Promise<void>((resolve) => setTimeout(resolve, wait.pollMs));
+    }
+  }
+
+  /** Ends a VM that may hold the credential WITHOUT a snapshot (the daemon's no-snapshot teardown; the snapshots kept earlier stay). A VM that is not fully gone stays in the table as a leftover for the reaper. */
+  async function endWithoutSnapshot(port: ResumableVmPort, name: string): Promise<boolean> {
+    let ok = true;
+    for (const end of [() => port.destroy(name), () => port.releaseEgress(name)]) {
+      try {
+        await end();
+      } catch {
+        // fx-swallow-ok: reported as an incomplete teardown by the caller; the leftover is retried by the reaper
+        ok = false;
+      }
+    }
+    if (life.registry.get(name) !== undefined) {
+      if (ok) life.registry.markStopped(name);
+      else life.registry.markLeftover(name);
+    }
     return ok;
   }
 
@@ -185,7 +272,27 @@ export function createEngineSessionHandlers(deps: EngineSessionDeps): { engine_s
         await p.say("session_boot", "started");
         await port.waitGuest(name, signal).catch(() => p.fail("session_boot", "vm_boot_failed", "guest"));
         await p.say("session_boot", "ok");
-        // the session now outlives this job (credentials and the supervisor are ON-13b1's steps, skipped here)
+        if (p.channel !== undefined && deps.readToken !== undefined) {
+          // the credential goes in over the channel from the runner's own source and is zeroed here; then the guest is told whose session it is and the first tick starts the host (the guest's ticker runs the rest)
+          await p.say("credentials", "started");
+          let token: Buffer | undefined;
+          try {
+            token = deps.readToken();
+            await p.channel.tokenPut(token);
+          } catch {
+            // fx-swallow-ok: replaced by the one closed code; nothing about the token or the cause may travel
+            await p.fail("credentials", "vm_token_delivery_failed");
+          } finally {
+            token?.fill(0);
+          }
+          await p.say("credentials", "ok");
+          await p.say("supervisor", "started");
+          const config = { repo_gh_id: String(job.repo_gh_id), repo_checkout: (deps.paths ?? DEFAULT_GUEST_PATHS).workspace, runner_id: deps.runnerId, ...(deps.cloudOrigin === undefined ? {} : { cloud_origin: deps.cloudOrigin }) };
+          await guest.writeFiles([{ path: `${deps.engineDir ?? GUEST_ENGINE_DIR}/session.json`, content: JSON.stringify(config), mode: 0o600 }]).catch(() => p.fail("supervisor", "vm_boot_failed", "config"));
+          await p.channel.tick("loop").catch(() => p.fail("supervisor", "vm_boot_failed", "supervisor"));
+          await p.say("supervisor", "ok");
+        }
+        // the session now outlives this job
         await p.say("done", "ok", { start_mode: mode });
         made = "none";
       } finally {
@@ -193,9 +300,14 @@ export function createEngineSessionHandlers(deps: EngineSessionDeps): { engine_s
         // a start that did not reach `done` leaves nothing running: a VM it made is ended, a kept one it woke is stopped again (its snapshot is the disk it woke from)
         if (made === "new") await endVm(port, name);
         else if (made === "woken") {
-          await port.stop(name).catch(() => undefined); // fx-swallow-ok: a VM that will not stop stays in the table; the reaper and the next stop job handle it
-          await port.releaseEgress(name).catch(() => undefined); // fx-swallow-ok: as above
-          life.registry.markStopped(name);
+          // a credential handed in is wiped, and the supervisor that held it gone, BEFORE the snapshot; a channel that stays silent, does not confirm the wipe, leaves a survivor or whose program does not exit means the guest may
+          // still hold the credential, so the VM ends with NO snapshot (the one it woke from is kept)
+          const clean = p.channel === undefined || (await channelEnded(p, "machine_shutdown")).ok;
+          if (clean) {
+            await port.stop(name).catch(() => undefined); // fx-swallow-ok: a VM that will not stop stays in the table; the reaper and the next stop job handle it
+            await port.releaseEgress(name).catch(() => undefined); // fx-swallow-ok: as above
+            life.registry.markStopped(name);
+          } else await endWithoutSnapshot(port, name);
         }
       }
     });
@@ -214,7 +326,21 @@ export function createEngineSessionHandlers(deps: EngineSessionDeps): { engine_s
         await p.say("snapshot", "skipped");
       } else {
         await p.say("session_stop", "started");
+        // the credential is wiped and the host ended through the supervisor BEFORE anything else touches the VM, so no snapshot is taken of a guest that holds either
+        let survivors = 0;
+        if (p.channel !== undefined) {
+          const ended = await channelEnded(p, CHANNEL_REASON[job.args.reason]);
+          if (!ended.ok) {
+            // no snapshot of a guest that may hold the credential. A supervisor that did not exit, and a halt or an operate-off whose channel failed, end the VM (the earlier snapshot is kept): they must not be left running.
+            // A person's own stop whose channel failed leaves it up for the next stop job
+            if (ended.why === "exit" || job.args.reason === "halt" || job.args.reason === "operate_off") await endWithoutSnapshot(port, name);
+            return p.fail("session_stop", "vm_teardown_incomplete", ended.why);
+          }
+          survivors = ended.survivors;
+        }
         await deps.vm.quiesce(handleOf(name));
+        // the guest's file systems are flushed while it still runs: what a park's snapshot reads is not a half-written file
+        const synced = p.channel === undefined ? false : await runInGuest(await deps.vm.guestOf(handleOf(name)), { cmd: "sync", args: [] }, SYNC_MS).then((r) => r.exitCode === 0 && !r.timedOut, () => false);
         await p.say("session_stop", "ok");
         await p.say("snapshot", "started");
         await port.stop(name).catch(() => p.fail("snapshot", "snapshot_failed"));
@@ -223,6 +349,7 @@ export function createEngineSessionHandlers(deps: EngineSessionDeps): { engine_s
         life.registry.markStopped(name);
         await port.releaseEgress(name).catch(() => p.fail("snapshot", "vm_teardown_incomplete", "egress"));
         await p.say("snapshot", "ok");
+        deps.stopped?.({ repo_gh_id: job.repo_gh_id, job_id: job.job_id, reason: job.args.reason, method: deps.tier ?? "vm_stop", survivors, paused: { synced } });
       }
       if (life.registry.get(name) !== undefined) life.registry.markStopped(name);
       await p.say("done", "ok");

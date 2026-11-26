@@ -8,7 +8,7 @@ import { generateRunnerKey } from "../../src/keys.js";
 import { RUNNER_BUILD_CAPABILITIES, RUNNER_PROTOCOL_VERSION, RUNNER_VERSION } from "../../src/version.js";
 // D#845 ON-10e1: `survey_public_v1` is the newest capability of all and is dropped before everything on the ladder (pinned in surveyPublic.test.ts); these tests pin the ladder behind it.
 // D#845 ON-8f2c: `project_setup_v1` is newer still and is dropped first of all (pinned in daemon/projectSetupHello.test.ts), so the ladders below start behind both.
-const BUILD_BEHIND_PUBLIC = RUNNER_BUILD_CAPABILITIES.filter((c) => c !== "survey_public_v1" && c !== "project_setup_v1");
+const BUILD_BEHIND_PUBLIC = RUNNER_BUILD_CAPABILITIES.filter((c) => c !== "survey_public_v1" && c !== "project_setup_v1" && c !== "engine_session_v1");
 
 const REQ = "11111111-1111-4111-8111-111111111111";
 const RUNNER = "0b9b3a52-6c1e-4c53-9d5f-1f3f2a6f7a10";
