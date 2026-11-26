@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isStagingPaused, MARKER_HORIZON_MS, runGatedTick } from "@fx/core/src/pendingWork";
-import { issueSystemStarts, issueSystemStops } from "@fx/runner-cloud";
+import { drainOperateQueue, issueSystemStarts, issueSystemStops } from "@fx/runner-cloud";
 import { createPool } from "@fx/db/src/pool";
 import { queueActivationDiscovery } from "../../../../lib/discoveryWake";
 import { createErrorReporter, reportError } from "@fx/telemetry";
@@ -297,8 +297,13 @@ export function defaultReconcileDeps(): ReconcileHandlerDeps {
     startMachineSweep,
     engineSystemStops: (scope) =>
       issueSystemStops({ pool: cachedPlatformOpsPool!, engineCommandSigner: async () => (await getWorker())?.engineCommandSigner ?? null, reportError }, scope),
-    engineSystemStarts: (scope) =>
-      issueSystemStarts({ pool: cachedPlatformOpsPool!, engineCommandSigner: async () => (await getWorker())?.engineCommandSigner ?? null, pullRequests: createAppRunPullRequestPort, reportError }, scope),
+    // The operate queue (ON-13c2) is drained first, then the first starts of finished installs: one job, one time budget, one signer.
+    engineSystemStarts: async (scope) => {
+      const deps = { pool: cachedPlatformOpsPool!, engineCommandSigner: async () => (await getWorker())?.engineCommandSigner ?? null, pullRequests: createAppRunPullRequestPort, reportError };
+      const queued = await drainOperateQueue(deps, scope);
+      const first = await issueSystemStarts(deps, scope);
+      return { not_configured: queued.not_configured && first.not_configured, issued: queued.issued + first.issued, results: [...queued.results, ...first.results] };
+    },
     getWorker,
     readSandboxReapDbMode: () => readSandboxReapDbMode(cachedPlatformOpsPool!),
     capacityPass: async () => (await getWorker())?.capacityClaimPass(),

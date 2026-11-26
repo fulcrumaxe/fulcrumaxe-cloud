@@ -521,6 +521,8 @@ describe('audit_write / audit_write_system: append-only, unforgeable audit_log (
         '1093_engine_updates.sql',
         // 1100 (D#845 ON-13c1) reads 1068's machine_jobs and 1085's start_pending, and grants 1077's predicates, so it goes with them.
         '1100_engine_system_start.sql',
+        // 1105 (D#845 ON-13c2) restates 1100's issuer and owns 1100's role's new queue, so it goes with it.
+        '1105_engine_operate_queue.sql',
       ];
       const AUDIT_WRITE_MIGRATIONS = allFiles.filter(
         (f) => BUILDS_ON_HELD_BACK.includes(f) || isAuditWriteMigration(readFileSync(path.join(DEFAULT_MIGRATIONS_DIR, f), 'utf8')),

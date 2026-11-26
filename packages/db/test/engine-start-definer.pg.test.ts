@@ -60,12 +60,17 @@ describe('engine_start_definer [pg]', () => {
     expect((await admin.query(`SELECT has_schema_privilege('engine_start_definer', 'public', 'CREATE') AS ok`)).rows[0].ok).toBe(false);
   });
 
-  it('owns exactly the three functions, each a pinned SECURITY DEFINER that platform_ops alone can run; 1077\'s predicates stay with their owner, and the new role may call them', async () => {
+  it('owns exactly its functions, each a pinned SECURITY DEFINER that platform_ops alone can run; 1077\'s predicates stay with their owner, and the new role may call them', async () => {
     const rows = (await admin.query(
       `SELECT p.proname, p.prosecdef, p.proconfig, has_function_privilege('app_user', p.oid, 'EXECUTE') AS app, has_function_privilege('platform_ops', p.oid, 'EXECUTE') AS ops, has_function_privilege('public', p.oid, 'EXECUTE') AS pub
          FROM pg_proc p WHERE p.proowner = 'engine_start_definer'::regrole ORDER BY 1`)).rows;
     const pinned = ['search_path=pg_catalog, public, pg_temp'];
     expect(rows).toEqual([
+      { proname: 'engine_operate_on_starts_due', prosecdef: true, proconfig: pinned, app: false, ops: true, pub: false },
+      { proname: 'engine_operate_queue_claim', prosecdef: true, proconfig: pinned, app: false, ops: true, pub: false },
+      // 1105: the queue's trigger function, run by the writer's own session; called outside a trigger it only raises.
+      { proname: 'engine_operate_queue_enqueue', prosecdef: true, proconfig: pinned, app: true, ops: false, pub: false },
+      { proname: 'engine_operate_queue_finish', prosecdef: true, proconfig: pinned, app: false, ops: true, pub: false },
       { proname: 'engine_start_covered', prosecdef: true, proconfig: pinned, app: false, ops: true, pub: false },
       { proname: 'engine_system_start_issue', prosecdef: true, proconfig: pinned, app: false, ops: true, pub: false },
       { proname: 'engine_system_starts_due', prosecdef: true, proconfig: pinned, app: false, ops: true, pub: false },
@@ -174,7 +179,7 @@ describe('engine_start_definer [pg]', () => {
       await c.query('BEGIN');
       await c.query('SET LOCAL ROLE engine_start_definer');
       for (const sql of [
-        'SELECT job FROM machine_jobs', 'SELECT last_seq FROM machine_jobs', 'SELECT issued_at FROM machine_jobs', 'SELECT stripe_customer_id FROM accounts', 'SELECT email FROM users', 'SELECT * FROM account_members',
+        'SELECT job FROM machine_jobs', 'SELECT last_seq FROM machine_jobs', 'SELECT delivered_at FROM machine_jobs', 'SELECT stripe_customer_id FROM accounts', 'SELECT email FROM users', 'SELECT * FROM account_members',
         'SELECT updated_by FROM engine_bridge_settings', 'SELECT registered_by FROM runners', 'SELECT state FROM project_setups', 'SELECT team_log_issue FROM project_setups', 'SELECT * FROM engine_events', 'SELECT * FROM machine_provider_credentials',
         'SELECT seen_at FROM runner_sandbox_reports',
       ]) {
@@ -184,7 +189,7 @@ describe('engine_start_definer [pg]', () => {
         'SELECT id, deleted_at, engine_quantity, platform_hold_at, partner_suspended_at, subscription_ended_at, past_due_since, stripe_subscription_status FROM accounts',
         'SELECT account_id, watch_enabled, operate_enabled, operate_epoch FROM engine_bridge_settings', 'SELECT account_id, repo_id FROM engine_bridge_repos',
         'SELECT account_id, repo_id, runner_id, placed_at FROM project_placements', 'SELECT id, account_id, revoked_at FROM runners', 'SELECT id, account_id, gh_repo_id, gh_owner, gh_name FROM repos',
-        'SELECT account_id, runner_id, name FROM runner_sandboxes', 'SELECT id, account_id, repo_id, runner_id, kind, state FROM machine_jobs', 'SELECT id, account_id, repo_id, phase, start_pending FROM project_setups',
+        'SELECT account_id, runner_id, name FROM runner_sandboxes', 'SELECT id, account_id, repo_id, runner_id, kind, state, issued_at FROM machine_jobs', 'SELECT id, account_id, repo_id, phase, start_pending FROM project_setups',
       ]) {
         expect(await code(c, sql), sql).toBe('ok');
       }
