@@ -77,7 +77,7 @@ describe("scenario: a runner's hello predates a cloud deploy that added a capabi
     const signals = new EventEmitter() as Signals;
     const out: string[] = [];
     const ctx: CommandContext = { stateDir, out: (l) => out.push(l), err: (l) => out.push(l), now: () => new Date(), fetchFn: fetch };
-    const host: RunHost = { home, platform: "linux", signals, pid: process.pid, kill: (pid, signal) => process.kill(pid, signal), chdir: () => undefined, engine: createClaudeKit(spawn, { launch: testLaunch(), bashSandboxUnusable: shellSandboxUsable }), sandbox: fakeSandboxHost(), managedServer: () => true };
+    const host: RunHost = { home, platform: "linux", signals, pid: process.pid, kill: (pid, signal) => process.kill(pid, signal), chdir: () => undefined, engine: createClaudeKit(spawn, { launch: testLaunch(), bashSandboxUnusable: shellSandboxUsable }), sandbox: fakeSandboxHost(), managedServer: () => true, selfCommand: ["fx-node", "fx-runner.mjs"] };
     const done = runCommand(ctx, host, { keyrings: { [originHash(cloud.origin)!]: KEYRING }, searchPath: toolbin, probe: ROOMY, jobLimits: { enforced: true }, ...hooks }).then(
       (code) => ({ code }),
       (error: unknown) => {
@@ -105,29 +105,33 @@ describe("scenario: a runner's hello predates a cloud deploy that added a capabi
     cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
-    // D#845 ON-10e1: survey_public_v1 is the newest of all, so it is the first refused: one more refusal.
+    // D#845 ON-8f2c: project_setup_v1 is the newest of all, so it is the first refused: one more refusal.
+    cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
+    // D#845 ON-10e1: survey_public_v1 is the next, so it is refused second: one more refusal.
     cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     // D#845 MC-8b: machine_login_v1 sits between sandbox_commands_v1 and watch_mode_v1 on the ladder: one more refusal.
     cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     const run = start({ clock, onOverlapFactsAccepted: (a: boolean) => void overlap.push(a) });
     await until(() => claims() >= 1);
     // The first hello listed every capability and was refused; the second dropped only the newest (sandbox_commands_v1) and was refused; the third also dropped survey_v1 (D#845 ON-10c, the newest, so first after sandbox_commands_v1) and was refused; the fourth also dropped machine_login_v1 and was refused; the fifth also dropped watch_mode_v1 and was refused; the sixth also dropped engine_bridge_v1 and was refused; the seventh went without overlap_facts_v1 and was answered.
-    expect(hellos()).toHaveLength(8);
-    expect(listed(hellos()[0]!.body)).toContain("survey_public_v1");
-    expect(listed(hellos()[1]!.body)).not.toContain("survey_public_v1");
-    expect(listed(hellos()[1]!.body)).toContain("sandbox_commands_v1");
-    expect(listed(hellos()[2]!.body)).not.toContain("sandbox_commands_v1");
-    expect(listed(hellos()[2]!.body)).toContain("survey_v1");
-    expect(listed(hellos()[3]!.body)).not.toContain("survey_v1");
-    expect(listed(hellos()[3]!.body)).toContain("machine_login_v1");
-    expect(listed(hellos()[4]!.body)).not.toContain("machine_login_v1");
-    expect(listed(hellos()[4]!.body)).toContain("watch_mode_v1");
-    expect(listed(hellos()[5]!.body)).not.toContain("watch_mode_v1");
-    expect(listed(hellos()[5]!.body)).toContain("engine_bridge_v1");
-    expect(listed(hellos()[6]!.body)).toContain(OVERLAP_FACTS_CAPABILITY);
-    expect(listed(hellos()[6]!.body)).not.toContain("engine_bridge_v1");
-    expect(listed(hellos()[7]!.body)).not.toContain(OVERLAP_FACTS_CAPABILITY);
+    expect(hellos()).toHaveLength(9);
+    expect(listed(hellos()[0]!.body)).toContain("project_setup_v1");
+    expect(listed(hellos()[1]!.body)).not.toContain("project_setup_v1");
+    expect(listed(hellos()[1]!.body)).toContain("survey_public_v1");
+    expect(listed(hellos()[2]!.body)).not.toContain("survey_public_v1");
+    expect(listed(hellos()[2]!.body)).toContain("sandbox_commands_v1");
+    expect(listed(hellos()[3]!.body)).not.toContain("sandbox_commands_v1");
+    expect(listed(hellos()[3]!.body)).toContain("survey_v1");
+    expect(listed(hellos()[4]!.body)).not.toContain("survey_v1");
+    expect(listed(hellos()[4]!.body)).toContain("machine_login_v1");
+    expect(listed(hellos()[5]!.body)).not.toContain("machine_login_v1");
+    expect(listed(hellos()[5]!.body)).toContain("watch_mode_v1");
+    expect(listed(hellos()[6]!.body)).not.toContain("watch_mode_v1");
+    expect(listed(hellos()[6]!.body)).toContain("engine_bridge_v1");
+    expect(listed(hellos()[7]!.body)).toContain(OVERLAP_FACTS_CAPABILITY);
     expect(listed(hellos()[7]!.body)).not.toContain("engine_bridge_v1");
+    expect(listed(hellos()[8]!.body)).not.toContain(OVERLAP_FACTS_CAPABILITY);
+    expect(listed(hellos()[8]!.body)).not.toContain("engine_bridge_v1");
     expect(overlap).toEqual([false]);
 
     // The cloud is deployed with the capability (nothing is forced any more: every hello would now be answered in full). The runner keeps polling for a long while.
@@ -135,15 +139,15 @@ describe("scenario: a runner's hello predates a cloud deploy that added a capabi
     while (claims() < before + 30) await clock.advance(5000);
     await clock.advance(10 * 60_000);
     // Today: no new hello is said, so the overlap verdict is still held back. (RUNNER-REHELLO-ON-CLOUD-CHANGE is the todo below.)
-    expect(hellos()).toHaveLength(8);
+    expect(hellos()).toHaveLength(9);
     expect(overlap).toEqual([false]);
     expect(await stop(run)).toMatchObject({ code: 0 });
 
     // A restart is a fresh hello to the deployed cloud, which keeps the capability.
     const restarted = start({ clock: manualClock(), onOverlapFactsAccepted: (a: boolean) => void overlap.push(a) });
-    await until(() => hellos().length >= 9 && overlap.length >= 2);
-    expect(listed(hellos()[8]!.body)).toContain(OVERLAP_FACTS_CAPABILITY);
-    expect(listed(hellos()[8]!.body)).toContain("sandbox_commands_v1");
+    await until(() => hellos().length >= 10 && overlap.length >= 2);
+    expect(listed(hellos()[9]!.body)).toContain(OVERLAP_FACTS_CAPABILITY);
+    expect(listed(hellos()[9]!.body)).toContain("sandbox_commands_v1");
     expect(overlap).toEqual([false, true]);
     expect(await stop(restarted)).toMatchObject({ code: 0 });
   });

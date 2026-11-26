@@ -41,7 +41,7 @@ describe("verifyJob and a public repository", () => {
 });
 
 describe("the hello ladder", () => {
-  it("an old cloud that refuses only survey_public_v1 costs one retry that drops it and keeps every other capability, survey_v1 included", async () => {
+  it("an old cloud that refuses survey_public_v1 costs the retries of the two newest capabilities (project_setup_v1 goes first, ahead of it) and keeps every other capability, survey_v1 included", async () => {
     const sent: string[][] = [];
     const fetchFn = (async (_url: string, init: RequestInit) => {
       const caps = (JSON.parse(String(init.body)).capabilities ?? []) as string[];
@@ -51,10 +51,10 @@ describe("the hello ladder", () => {
     }) as unknown as typeof fetch;
     const client = createRunnerClient({ origin: "https://cloud.example.test", key: generateRunnerKey(), now: () => new Date(), fetchFn });
     const answer = await client.hello({ protocol_version: RUNNER_PROTOCOL_VERSION, binary_version: RUNNER_VERSION, model_auth_present: false, isolation: "host_sandbox", capabilities: [...RUNNER_BUILD_CAPABILITIES] });
-    expect(answer).toEqual({ kind: "ok", dropped: ["survey_public_v1"] });
-    expect(sent).toHaveLength(2);
-    expect(sent[1]).toEqual(RUNNER_BUILD_CAPABILITIES.filter((c) => c !== "survey_public_v1"));
-    expect(sent[1]).toContain("survey_v1");
+    expect(answer).toEqual({ kind: "ok", dropped: ["project_setup_v1", "survey_public_v1"] });
+    expect(sent).toHaveLength(3);
+    expect(sent[2]).toEqual(RUNNER_BUILD_CAPABILITIES.filter((c) => c !== "survey_public_v1" && c !== "project_setup_v1"));
+    expect(sent[2]).toContain("survey_v1");
   });
 });
 
