@@ -32,6 +32,12 @@ const ALLOWLIST: ReadonlyArray<{ fn: string; owner: string; reason: string }> = 
       "1062 (D#845 ON-2b): deletes a revoked runner's stored link address. SECURITY DEFINER, owned by the NOLOGIN role that holds the table's DELETE grant. It deletes only the row of the runner the trigger fired for. 0720's invoker-plus-helper shape needs EXECUTE for platform_ops and guard_definer, which the neon-shape exception check refuses.",
   },
   {
+    fn: 'engine_operate_queue_enqueue()',
+    owner: 'engine_start_definer',
+    reason:
+      "1105 (D#845 ON-13c2): the AFTER triggers on the operate switch and the ticked repos queue one row per repo in engine_operate_queue, in the writer's own transaction. The queue has no grant for any tenant role, so the writer's session cannot write it; only engine_start_definer can. SECURITY DEFINER, pinned search_path, owned by that NOLOGIN role (the same shape as 1066's engine_operate_off_supersede). It inserts queue rows only, keyed by the account and repo of the row the trigger fired for, and called outside a trigger it only raises. 0720's invoker-plus-helper shape would leave a helper that app_user could call with any account and repo.",
+  },
+  {
     fn: 'engine_operate_off_supersede()',
     owner: 'machine_jobs_owner',
     reason:

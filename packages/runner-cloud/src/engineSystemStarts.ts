@@ -6,7 +6,7 @@ import { engineSessionSpendGuard } from "./engineSpendGuard.js";
 import { RunPullRequestError, type RunPullRequestPort } from "./runPullRequest.js";
 
 /**
- * D#845 ON-13c1 (Ruling 98): the system first start. When the rows say a session must be up (an install finished and recorded `start_pending`; ON-13c2 adds the operate queue) a start is signed here and written through
+ * D#845 ON-13c1 (Ruling 98): the system first start. When the rows say a session must be up (an install finished and recorded `start_pending`, or the operate queue's claimed `start` row of ON-13c2) a start is signed here and written through
  * `engine_system_start_issue`, which holds the bytes to the rows, re-checks every gate under the person issuers' locks and consumes the cause in the same transaction (a replay answers `cause_gone`). Level-triggered: the list is derived
  * on every call. The default branch head is read through the App port outside any transaction, once per repo; a GitHub that cannot be asked leaves the repo due. The spend guard runs once per account's batch before anything is read or signed.
  */
@@ -49,8 +49,9 @@ interface DueRow { o_account: string; o_repo: string; o_runner: string; o_repo_g
 const ROUTE = "reconcile.engine_session_starts";
 const SHA40 = /^[0-9a-f]{40}$/;
 
-const listDue = async (pool: Pool, accountId: string | null, repoId: string | null, limit: number): Promise<DueRow[]> =>
-  (await pool.query<DueRow>("SELECT * FROM engine_system_starts_due($1::uuid, $2::uuid, $3::integer)", [accountId, repoId, limit])).rows;
+/** `first_start` lists the finished installs that still hold `start_pending`; `operate_on` lists the repos whose queue row (ON-13c2) the drain has claimed. */
+const listDue = async (pool: Pool, cause: SystemStartCause, accountId: string | null, repoId: string | null, limit: number): Promise<DueRow[]> =>
+  (await pool.query<DueRow>(`SELECT * FROM ${cause === "operate_on" ? "engine_operate_on_starts_due" : "engine_system_starts_due"}($1::uuid, $2::uuid, $3::integer)`, [accountId, repoId, limit])).rows;
 
 /** The head of the default branch, or the reason it could not be read. */
 async function readHead(port: HeadReader, row: DueRow): Promise<{ head: string } | { refused: SystemStartResult }> {
@@ -98,7 +99,7 @@ export async function issueSystemStarts(deps: SystemStartDeps, scope: SystemStar
   const pass: SystemStartPass = { not_configured: false, issued: 0, results: [] };
   if (signer?.signMachineJob === undefined) return { ...pass, not_configured: true };
   const cause = scope.cause ?? "first_start";
-  const rows = await listDue(deps.pool, scope.accountId ?? null, scope.repoId ?? null, scope.limit ?? 200);
+  const rows = await listDue(deps.pool, cause, scope.accountId ?? null, scope.repoId ?? null, scope.limit ?? 200);
   const sign = (job: MachineJob): unknown => signer.signMachineJob?.(job);
   const note = (row: DueRow, result: SystemStartResult): void => void pass.results.push({ account_id: row.o_account, repo_id: row.o_repo, result });
   const allowed = new Map<string, boolean>();
@@ -124,7 +125,7 @@ export async function issueSystemStarts(deps: SystemStartDeps, scope: SystemStar
       let row = first;
       let result = await issueOne(deps, sign, row, cause, read.head);
       if (result === "epoch_moved") {
-        const again = (await listDue(deps.pool, first.o_account, first.o_repo, 1))[0];
+        const again = (await listDue(deps.pool, cause, first.o_account, first.o_repo, 1))[0];
         if (again !== undefined) {
           row = again;
           result = await issueOne(deps, sign, row, cause, read.head);

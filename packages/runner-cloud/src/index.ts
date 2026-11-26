@@ -258,6 +258,14 @@ export {
 } from "./engineSystemStops.js";
 export { engineSessionSpendGuard, type EngineSpendGuardResult } from "./engineSpendGuard.js";
 export {
+  drainOperateQueue,
+  type OperateQueueAction,
+  type OperateQueueDeps,
+  type OperateQueueOutcome,
+  type OperateQueuePass,
+  type OperateQueueScope,
+} from "./engineOperateQueue.js";
+export {
   issueSystemStarts,
   type SystemStartCause,
   type SystemStartDeps,
