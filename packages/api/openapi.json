@@ -53157,6 +53157,51 @@
                             "type": "integer",
                             "minimum": -9007199254740991,
                             "maximum": 9007199254740991
+                          },
+                          "stop_failed": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "reason": {
+                                    "anyOf": [
+                                      {
+                                        "type": "string",
+                                        "enum": [
+                                          "person",
+                                          "halt",
+                                          "move",
+                                          "remove",
+                                          "operate_off",
+                                          "plan"
+                                        ]
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  },
+                                  "code": {
+                                    "type": [
+                                      "string",
+                                      "null"
+                                    ]
+                                  },
+                                  "at": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "reason",
+                                  "code",
+                                  "at"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           }
                         },
                         "required": [
@@ -53174,7 +53219,8 @@
                           "halt_pending",
                           "halted_at",
                           "halted_by",
-                          "halt_epoch"
+                          "halt_epoch",
+                          "stop_failed"
                         ],
                         "additionalProperties": false
                       }

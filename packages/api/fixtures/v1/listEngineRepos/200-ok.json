@@ -15,7 +15,8 @@
       "halt_pending": false,
       "halted_at": null,
       "halted_by": null,
-      "halt_epoch": 0
+      "halt_epoch": 0,
+      "stop_failed": { "reason": "person", "code": "snapshot_failed", "at": "2026-11-16T10:00:10.000Z" }
     }
   ],
   "next_cursor": null,
