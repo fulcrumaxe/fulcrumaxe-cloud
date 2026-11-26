@@ -72,7 +72,9 @@ type Signals = EventEmitter & RunHost["signals"];
 const newSignals = (): Signals => new EventEmitter() as unknown as Signals;
 
 /** What the program's entry point hands `run`: the real pid, the real kill and the real process start. */
-const hostWith = (signals: RunHost["signals"]): RunHost => ({ home, platform: "linux", signals, pid: process.pid, kill: (pid, signal) => process.kill(pid, signal), chdir: () => undefined, engine: createClaudeKit(spawn, { launch: testLaunch(), bashSandboxUnusable: shellSandboxUsable }), sandbox: fakeSandboxHost(), managedServer: () => true });
+/** A machine that knows its own command line: the setup and update handlers are built from it, so its hello lists `project_setup_v1`. */
+const SELF_COMMAND = ["fx-node", "fx-runner.mjs"];
+const hostWith = (signals: RunHost["signals"]): RunHost => ({ home, platform: "linux", signals, pid: process.pid, kill: (pid, signal) => process.kill(pid, signal), chdir: () => undefined, engine: createClaudeKit(spawn, { launch: testLaunch(), bashSandboxUnusable: shellSandboxUsable }), sandbox: fakeSandboxHost(), managedServer: () => true, selfCommand: SELF_COMMAND });
 
 /** A machine with room for everything: the composed-daemon tests are about other things than this machine's free memory. */
 const GB = 1024 ** 3;
@@ -147,7 +149,8 @@ describe("the engine bridge in the composed daemon", () => {
 
   it("never starts the bridge on a hello that dropped engine_bridge_v1 (an older cloud), and the claim loop is not held up", async () => {
     enable();
-    // D#845 ON-10e1: survey_public_v1 is refused before all of them.
+    // D#845 ON-8f2c: project_setup_v1 is the newest of all, so it is refused first, then survey_public_v1 (D#845 ON-10e1) before all the rest.
+    cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     // sandbox_commands_v1 (D#587 B-7b) is refused first, then survey_v1 (D#845 ON-10c), then machine_login_v1 (D#845 MC-8b), then watch_mode_v1 (D#845), then engine_bridge_v1.
     cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
@@ -157,11 +160,11 @@ describe("the engine bridge in the composed daemon", () => {
     cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
     const run = start({ host: { engineBridge: ports() } });
     await until(() => claims() >= 1 && statusFile() !== undefined);
-    // sandbox_commands_v1 goes first, then survey_v1, then machine_login_v1, then watch_mode_v1, then engine_bridge_v1: the sixth hello is the same without all of them.
-    expect(hellos()).toHaveLength(7);
-    expect(HelloMessage.parse(hellos()[5]!.body).capabilities).toContain("engine_bridge_v1");
-    expect(HelloMessage.parse(hellos()[6]!.body).capabilities).not.toContain("engine_bridge_v1");
-    expect(HelloMessage.parse(hellos()[6]!.body).capabilities).toContain("overlap_facts_v1");
+    // sandbox_commands_v1 goes first, then survey_v1, then machine_login_v1, then watch_mode_v1, then engine_bridge_v1: the last hello is the same without all of them.
+    expect(hellos()).toHaveLength(8);
+    expect(HelloMessage.parse(hellos()[6]!.body).capabilities).toContain("engine_bridge_v1");
+    expect(HelloMessage.parse(hellos()[7]!.body).capabilities).not.toContain("engine_bridge_v1");
+    expect(HelloMessage.parse(hellos()[7]!.body).capabilities).toContain("overlap_facts_v1");
     expect(statusFile()).toMatchObject({ hello: false, repos: [{ run: "waiting", reason: "hello" }] });
     expect(await stop(run)).toMatchObject({ code: 0 });
   });
@@ -180,10 +183,10 @@ describe("the engine bridge in the composed daemon", () => {
 describe("the machine's load in the composed daemon", () => {
   const claimBodies = (): unknown[] => cloud.seen.filter((s) => s.path === "/api/runner/claim").map((s) => s.body);
 
-  it("a claim carries the machine's load although the hello does not list project_setup_v1, and a restarted daemon's first claim carries it again", async () => {
+  it("a claim carries the machine's load and the hello lists project_setup_v1 (the handlers exist), and a restarted daemon's first claim carries it again", async () => {
     const first = start();
     await until(() => claims() >= 1);
-    expect(HelloMessage.parse(hellos()[0]!.body).capabilities).not.toContain("project_setup_v1");
+    expect(HelloMessage.parse(hellos()[0]!.body).capabilities).toContain("project_setup_v1");
     expect(ClaimMessage.parse(claimBodies()[0]).host_load).toEqual({ mem_avail_mb: 60 * 1024, disk_free_mb: 500 * 1024, setups_running: 0 });
     expect(await stop(first)).toMatchObject({ code: 0 });
     // A restart builds a new reporter, so its first claim is due at once: an idle machine placed 15 seconds after a restart has a fresh reading.
@@ -192,5 +195,13 @@ describe("the machine's load in the composed daemon", () => {
     await until(() => claims() > before);
     expect(ClaimMessage.parse(claimBodies()[before]).host_load).toEqual({ mem_avail_mb: 60 * 1024, disk_free_mb: 500 * 1024, setups_running: 0 });
     expect(await stop(second)).toMatchObject({ code: 0 });
+  });
+
+  it("project_setup_v1 is advertised only when the setup and update handlers exist: a machine with no guest to run them in leaves it out of its hello, and its claims still carry the load", async () => {
+    const run = start({ host: { selfCommand: undefined } });
+    await until(() => claims() >= 1);
+    expect(HelloMessage.parse(hellos()[0]!.body).capabilities).not.toContain("project_setup_v1");
+    expect(ClaimMessage.parse(claimBodies()[0]).host_load).toBeDefined();
+    expect(await stop(run)).toMatchObject({ code: 0 });
   });
 });

@@ -72,7 +72,7 @@ import { computeConflictAttestation } from "../daemon/conflictAttest.js";
 import { createPlaneBaseLedger, createPlanePushHook, type PlaneBaseLedger } from "../daemon/planePush.js";
 import { createPlanePushGithub } from "../daemon/planePushGithub.js";
 import { createPlaneMergeHandler } from "../daemon/planeMerge.js";
-import { CONFLICT_FACTS_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, ENGINE_LEASE_HELLO_CAPABILITY, HEARTBEAT_INVENTORY_HELLO_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, MACHINE_LOGIN_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, MEMORY_LIMIT_CAPABILITY, ORDERED_FACTS_CAPABILITY, OVERLAP_FACTS_CAPABILITY, SANDBOX_COMMAND_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, type LimitedBy, type PreflightCode } from "@fulcrumaxe/runner-protocol";
+import { CONFLICT_FACTS_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, ENGINE_LEASE_HELLO_CAPABILITY, HEARTBEAT_INVENTORY_HELLO_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, MACHINE_LOGIN_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, MEMORY_LIMIT_CAPABILITY, ORDERED_FACTS_CAPABILITY, OVERLAP_FACTS_CAPABILITY, PROJECT_SETUP_CAPABILITY, SANDBOX_COMMAND_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, type LimitedBy, type PreflightCode } from "@fulcrumaxe/runner-protocol";
 import { createGitTransport, createPublicHeadsReader } from "@fulcrumaxe/runner-protocol/planePush";
 import { createNixShell, findNix, findTool, identityVia } from "../daemon/nixShell.js";
 import { createDepsInstaller } from "../daemon/depsInstall.js";
@@ -740,7 +740,9 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
         return helloBody(facts);
       };
       // `kvm_fact_v1` is declared only by a runner that has a KVM reading to send (a plain present or absent), so a runner without one says what it always said.
-      const capabilityList = async () => [...RUNNER_BUILD_CAPABILITIES.filter((c) => c !== MACHINE_LOGIN_CAPABILITY || host.managedServer?.() === true), SANDBOX_COMMAND_CAPABILITY, ...(factsWithKvm?.kvm === undefined ? [] : [KVM_FACT_HELLO_CAPABILITY]), ...(preflightReporter === undefined ? [] : [PREFLIGHT_HELLO_CAPABILITY]), ...(inventoryReporter === undefined ? [] : [HEARTBEAT_INVENTORY_HELLO_CAPABILITY]), ...(engineLeaseArmed ? [ENGINE_LEASE_HELLO_CAPABILITY] : []), ...(await verifyLocal.capabilities())];
+      // D#845 ON-8f2c: `project_setup_v1` is advertised only when the setup and update handlers exist further down (a microVM guest, or the host guest on the standard tier); they are built from the same two parts, which are known by now.
+      const setupJobsPossible = vmDeps !== undefined || (host.engine.installCapture !== undefined && host.selfCommand !== undefined);
+      const capabilityList = async () => [...RUNNER_BUILD_CAPABILITIES.filter((c) => (c !== MACHINE_LOGIN_CAPABILITY || host.managedServer?.() === true) && (c !== PROJECT_SETUP_CAPABILITY || setupJobsPossible)), SANDBOX_COMMAND_CAPABILITY, ...(factsWithKvm?.kvm === undefined ? [] : [KVM_FACT_HELLO_CAPABILITY]), ...(preflightReporter === undefined ? [] : [PREFLIGHT_HELLO_CAPABILITY]), ...(inventoryReporter === undefined ? [] : [HEARTBEAT_INVENTORY_HELLO_CAPABILITY]), ...(engineLeaseArmed ? [ENGINE_LEASE_HELLO_CAPABILITY] : []), ...(await verifyLocal.capabilities())];
       const helloBody = async (facts: typeof factsPlain) => ({ protocol_version: RUNNER_PROTOCOL_VERSION, binary_version: RUNNER_VERSION, model_auth_present: await modelAuth(), isolation: "host_sandbox" as const, ...(facts === undefined ? {} : { facts }), capabilities: await capabilityList() });
       const firstHello = await helloMessage();
       let advertised = JSON.stringify(firstHello.capabilities);
