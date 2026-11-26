@@ -91,6 +91,8 @@ export interface CliIo {
   readVmToken?: () => Promise<string>;
   /** Reads the registration code or token from standard input (no echo on a terminal). Only `bin/fx-runner.mjs` supplies it. */
   readCode?: () => Promise<string>;
+  /** What the hidden `__engine-supervise` runs (the engine session's supervisor, D#845 ON-13b1). Only `bin/fx-runner.mjs` supplies it. */
+  engineSupervise?: () => Promise<number>;
 }
 
 const USAGE = `Usage: fx-runner <command> [options]
@@ -175,6 +177,8 @@ const COMMANDS: Readonly<Record<string, { flags: readonly string[]; switches: re
   // The forwarder inside a standard-tier setup sandbox (setup/hostGuest.ts); not in --help.
   "__egress-serve": { flags: [], switches: [], positionals: 1 },
   "__egress-wait": { flags: [], switches: [], positionals: 0 },
+  // The engine session's supervisor, held in the session's unit on the standard tier (engineSession/standardTier.ts); not in --help.
+  "__engine-supervise": { flags: [], switches: [], positionals: 0 },
   doctor: { flags: [], switches: ["sandbox-only"] },
   logs: { flags: [], switches: [], positionals: 1 },
   service: { flags: ["user"], switches: ["system"], positionals: 1 },
@@ -296,6 +300,10 @@ export async function runCli(io: CliIo): Promise<number> {
     if (command === "__purge") return purgeChildCommand(positionals[0], positionals[1], ctx);
     if (command === "__egress-serve") return await egressServeCommand(positionals[0], ctx);
     if (command === "__egress-wait") return await egressWaitCommand();
+    if (command === "__engine-supervise") {
+      if (io.engineSupervise === undefined) throw new CliError("__engine-supervise is only available from the fx-runner program");
+      return await io.engineSupervise();
+    }
     if (command === "doctor") {
       if (io.doctorHost === undefined) throw new CliError("doctor is only available from the fx-runner program");
       return await doctorCommand(ctx, io.doctorHost, { sandboxOnly: flags.has("sandbox-only") });

@@ -95,6 +95,7 @@ export interface HostChild {
   closeStdin(): void;
   onStdout(cb: (text: string) => void): void;
   onStderr(cb: (text: string) => void): void;
+  /** Called once, after the host has exited AND its output streams have ended (a `close`, not an `exit`): no output follows it, so the redaction tail is flushed there. */
   onExit(cb: () => void): void;
 }
 
@@ -107,6 +108,16 @@ export interface SupervisorDeps {
   readBridgeState: () => BridgeState | undefined;
   launch: (spec: HostSpawnSpec) => HostChild;
   env: Record<string, string>;
+  /**
+   * ON-13b1: the one credential the host may carry, read at each launch and never kept here (the guest supervisor's `token_put` buffer). Left out, the host has none and reads its own login.
+   * It is merged over `env` for the child only; it is never logged and never part of a handle or an event.
+   */
+  secretEnv?: (() => Record<string, string> | undefined) | undefined;
+  /**
+   * ON-13b1: how the host is started. Left out (a machine with systemd), `systemd-run --user --scope` makes the scope the kill path proves against. Inside a guest or an engine-session unit there is no
+   * systemd to ask and the unit is already the scope, so the caller runs the program directly: the kill path is then the process group.
+   */
+  wrapLaunch?: ((program: string, args: string[], unit: string) => { file: string; args: string[] }) | undefined;
   log: HostLog;
   emit: (event: HostEvent) => void;
   now: () => number;
@@ -296,6 +307,33 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     });
   }
 
+  /**
+   * A stream writer for the host log that replaces every exact copy of a secret handed to the launch with `[redacted]`, including a copy split across two chunks (the last `longest - 1` characters of a stream are held back
+   * until the next chunk or the end of the host's output). Only values of 8 or more characters are matched (a short one would mangle ordinary text).
+   */
+  function redactor(secrets: readonly string[]): { push: (text: string) => void; flush: () => void } {
+    const list = secrets.filter((v) => v.length >= 8);
+    if (list.length === 0) return { push: logWrite, flush: () => undefined };
+    const hold = Math.max(...list.map((v) => v.length)) - 1;
+    let pending = "";
+    const clean = (text: string): string => list.reduce((acc, secret) => acc.split(secret).join("[redacted]"), text);
+    return {
+      push(text) {
+        const all = clean(pending + text);
+        // never cut inside a replacement: what is held back is the raw tail, cleaned again with the next chunk
+        const keep = Math.min(hold, all.length);
+        pending = all.slice(all.length - keep);
+        const out = all.slice(0, all.length - keep);
+        if (out.length > 0) logWrite(out);
+      },
+      flush() {
+        const out = clean(pending);
+        pending = "";
+        if (out.length > 0) logWrite(out);
+      },
+    };
+  }
+
   function logWrite(text: string): void {
     let ok = false;
     try {
@@ -379,12 +417,16 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     keySource = undefined;
     const before = mustStop();
     if (before !== undefined) return before;
-    const child = deps.launch({ file: "systemd-run", args: ["--user", "--scope", "--quiet", `--unit=${unit.replace(/\.scope$/, "")}`, "--", deps.claudePath, ...args], cwd: checkout, env: deps.env });
+    const wrapped = deps.wrapLaunch?.(deps.claudePath, args, unit) ?? { file: "systemd-run", args: ["--user", "--scope", "--quiet", `--unit=${unit.replace(/\.scope$/, "")}`, "--", deps.claudePath, ...args] };
+    const secrets = deps.secretEnv?.() ?? {};
+    const child = deps.launch({ ...wrapped, cwd: checkout, env: { ...deps.env, ...secrets } });
     current = child;
+    const outLog = redactor(Object.values(secrets));
+    const errLog = redactor(Object.values(secrets));
     let tail = "";
     let skipping = false;
     child.onStdout((text) => {
-      logWrite(text);
+      outLog.push(text);
       // Only the session id of an `init` line is read; a line too long to hold is skipped to its end.
       tail += text;
       let nl = tail.indexOf("\n");
@@ -412,8 +454,12 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
         skipping = true;
       }
     });
-    child.onStderr((text) => logWrite(text));
-    child.onExit(() => onExit(child));
+    child.onStderr((text) => errLog.push(text));
+    child.onExit(() => {
+      outLog.flush();
+      errLog.flush();
+      onExit(child);
+    });
     if (child.pid === undefined) {
       queueMicrotask(() => onExit(child));
       return undefined;

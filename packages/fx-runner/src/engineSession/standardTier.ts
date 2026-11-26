@@ -1,7 +1,7 @@
 /**
  * D#845 ON-13a3: an engine session on the standard tier (a machine with no microVM). The lifecycle handlers (`lifecycle.ts`) are the same; this file is the "VM" under them: a persistent root on this machine, the
  * egress proxy and forwarder, and ONE held program in a systemd user scope named in EB-12a's pattern (`fx-engine-host-<repo id>`), started through the runner's own `sandboxLaunch` (the host guest, ON-8e). The policy is
- * `ENGINE_SESSION_NETWORK` (the one constant, via `engineSessionPolicy`). Until ON-13b1 puts the supervisor there, the held program is an idle `sleep infinity`; the unit, stop and sentinel do not change when it does.
+ * `ENGINE_SESSION_NETWORK` (the one constant, via `engineSessionPolicy`). The held program is the engine session's supervisor (`__engine-supervise`, ON-13b1) when `supervise` is given, else an idle `sleep infinity`; the unit, stop and sentinel are the same for both.
  *
  * THREAT MODEL. As the host guest's: the adversary is the repository and what the engine runs; at risk are the person's home directory, the runner's state directory (its keys and cloud credential) and the network.
  * The program runs under the host guest's sandbox (reads of home, state and the agent binary's directory denied; the only writes are its own root) and its only way out is the forwarder to the proxy on the closed policy.
@@ -16,6 +16,7 @@ import { lstatSync, statfsSync } from "node:fs";
 import path from "node:path";
 import type { JobHandlerDeps } from "../daemon/jobHandler.js";
 import type { GitCapture } from "../daemon/git.js";
+import { SESSION_READY_LINE } from "../engineHost/guestSession.js";
 import { engineHostUnit } from "../engineHost/supervisor.js";
 import { USER_RUNTIME_ROOT } from "../sandbox/hostSandbox.js";
 import { SandboxNotFoundError, type SandboxComputeState } from "../sandbox/port.js";
@@ -36,7 +37,7 @@ export class StandardSessionRefused extends Error {
 const TMPFS_MAGIC = 0x01021994;
 const TOKEN_DIR = "fx-engine-session";
 const TOKEN_FILE = "repo-token";
-const READY = "fx-engine-session-ready";
+const READY = SESSION_READY_LINE;
 const BOOT_MS = 30_000;
 const SCOPE_POLL_MS = 100;
 const SCOPE_POLLS = 100;
@@ -51,6 +52,12 @@ export const onTmpfs = (dir: string): boolean => {
   }
 };
 
+/** The program a session's unit holds: the supervisor (the runner's own `__engine-supervise`, with the CLI's path in its environment) when `supervise` is given, else the idle holder. */
+export function heldProgram(self: readonly string[], supervise: { claudePath: string } | undefined): { cmd: string; args: string[]; env: Record<string, string> } {
+  if (supervise === undefined) return { cmd: "sh", args: ["-c", `echo ${READY}; exec sleep infinity`], env: {} };
+  return { cmd: self[0] ?? "", args: [...self.slice(1), "__engine-supervise"], env: { FX_ENGINE_CLAUDE: supervise.claudePath } };
+}
+
 export interface StandardSessionDeps {
   /** The host guest's parts. `jobsRoot` is the sessions' own root directory (its sibling egress directory must not be the setup's); `scope` is required. */
   guest: HostGuestDeps;
@@ -61,6 +68,11 @@ export interface StandardSessionDeps {
   capture: GitCapture;
   sleep?: (ms: number) => Promise<void>;
   holderLimitMs?: number;
+  /**
+   * ON-13b1: the engine session's supervisor (the runner's own `__engine-supervise`, the same module the microVM runs) is the held program, with the CLI at `claudePath`. Left out, the held program is the idle holder.
+   * The supervisor says the READY line once it listens and starts no host until its first tick, so the unit, the stop and the sentinel behave as they did with the holder.
+   */
+  supervise?: { claudePath: string } | undefined;
 }
 
 export type StandardSessionParts = {
@@ -182,8 +194,9 @@ export function createStandardSessionParts(deps: StandardSessionDeps): StandardS
       const held = entry(name);
       if (held.command !== undefined && (await scopeActive(name))) return;
       if (held.command !== undefined) await stop(name); // the program ended on its own: it is started again
-      const command = (held.command = await held.guest.hold({ cmd: "sh", args: ["-c", `echo ${READY}; exec sleep infinity`], unit: unitOf(name), env: { FX_ENGINE_REPO_TOKEN_FILE: path.join(tokenDirOf(name), TOKEN_FILE) }, readPaths: [tokenDirOf(name)], limitMs: deps.holderLimitMs ?? SESSION_VM_LIMIT_MS }));
-      // booted is the program's own word: it is inside the sandbox, past the forwarder's start, and about to idle (the supervisor, ON-13b1, says the same line)
+      const program = heldProgram(deps.guest.selfCommand, deps.supervise);
+      const command = (held.command = await held.guest.hold({ cmd: program.cmd, args: program.args, unit: unitOf(name), env: { ...program.env, FX_ENGINE_REPO_TOKEN_FILE: path.join(tokenDirOf(name), TOKEN_FILE) }, readPaths: [tokenDirOf(name)], limitMs: deps.holderLimitMs ?? SESSION_VM_LIMIT_MS }));
+      // booted is the program's own word: it is inside the sandbox, past the forwarder's start, and about to idle (the supervisor says the same line)
       const said = (async () => {
         for await (const chunk of command.logs()) if (chunk.stream === "stdout" && typeof chunk.data === "string" && chunk.data.includes(READY)) return true;
         return false;

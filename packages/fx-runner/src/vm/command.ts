@@ -75,6 +75,7 @@ export async function vmCommand(args: readonly string[], host: BuildHost, out: (
     // fx-swallow-ok: a fixed sentence replaces the node error, which carries the path
     throw new CliError("the image lock could not be read; run from the repository root or pass --lock", 2);
   }
+  if (host.bundleSupervisor === undefined) throw new CliError("build-image: this program cannot bundle the engine supervisor; build the image with scripts/vm-main.mjs", 2);
   const built = await buildImage({ lock: parseLock(lockText), image, arches: arch === undefined ? ARCHES : [arch as Arch], outDir, guestDir: flags.get("guest-dir") ?? "infra/microvm-image/guest", host, ...(flags.has("mke2fs") ? { mke2fs: flags.get("mke2fs")! } : {}) });
   for (const b of built) out(`rootfs ${b.arch} sha256:${b.sha256} size ${b.size}`);
   const first = built[0];

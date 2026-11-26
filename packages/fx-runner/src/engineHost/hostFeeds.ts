@@ -26,9 +26,20 @@ const LINE_MAX = 64 * 1024;
 /** Stop reasons EB-1's `host_stopped` has no word for are left off the event (the field is optional). */
 const WIRE_REASONS = new Set(["stopped_by_person", "halted", "crash_loop", "operate_off", "machine_shutdown"]);
 
+/** ON-13b1: raw counts of one window of the in-guest host's model use (the cloud prices them); the wire shape of EB-1's `usage_tick`. */
+export interface UsageTickEvent {
+  kind: "usage_tick";
+  model_tier: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  window_s: number;
+}
+
 export interface EventSpool {
   /** Writes one event. Never throws; false when it was not written (counted in `failed()`). */
-  write(event: HostEvent | TickEvent): boolean;
+  write(event: HostEvent | TickEvent | UsageTickEvent): boolean;
   failed(): number;
   close(): void;
 }

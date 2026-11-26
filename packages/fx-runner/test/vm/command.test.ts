@@ -36,12 +36,18 @@ const run = async (args: string[]): Promise<{ code: number; lines: string[] }> =
   const lines: string[] = [];
   const out = mkdtempSync(path.join(tmpdir(), "fx-vm-cmd-"));
   dirs.push(out);
-  const code = await vmCommand(args.map((a) => (a === "OUT" ? out : a)), host(), (l) => lines.push(l));
+  const code = await vmCommand(args.map((a) => (a === "OUT" ? out : a)), { ...host(), bundleSupervisor: async () => "export {};\n" }, (l) => lines.push(l));
   return { code, lines };
 };
 const base = ["build-image", "--template", "fx-agent", "--image", IMAGE, "--out", "OUT", "--lock", path.join(IMAGE_DIR, "lock.json"), "--guest-dir", path.join(IMAGE_DIR, "guest")];
 
 describe("fx-runner vm build-image", () => {
+  it("is refused by a program that cannot bundle the engine supervisor, before anything is built", async () => {
+    const out = mkdtempSync(path.join(tmpdir(), "fx-vm-cmd-"));
+    dirs.push(out);
+    await expect(vmCommand(base.map((a) => (a === "OUT" ? out : a)), host(), () => undefined)).rejects.toThrow(/cannot bundle the engine supervisor/);
+  });
+
   it("builds both architectures when none is named, and prints the two rootfs digests", async () => {
     const { code, lines } = await run(base);
     expect(code).toBe(0);

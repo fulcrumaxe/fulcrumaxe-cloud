@@ -32,6 +32,8 @@ import { killLoginTree, readProcessTable } from "../src/daemon/claudeLogin.js";
 import { isManagedServer } from "../src/daemon/managedServer.js";
 import { openLaunchDir } from "../src/launchDir.js";
 import { vmBuildHost } from "../scripts/vm-host.mjs";
+import { runEngineSupervise } from "../scripts/engine-supervise-host.mjs";
+import { MICROVM_ENV_NAMES } from "../src/vm/sandboxd/guestEnv.js";
 import { readMemAvailableBytes, vmHostFacts, vmHostFactsWithHelper } from "../scripts/vm-facts.mjs";
 import { kernelFacts, resolver } from "../scripts/preflight-facts.mjs";
 import { createVmInstallHosts } from "../scripts/vm-install-host.mjs";
@@ -428,6 +430,15 @@ runCli({
   engineDiscovery: { cwd: process.cwd(), searchRoots: process.env.FX_RUNNER_SEARCH_ROOTS },
   engineHaltDeps,
   engineHostRuntime,
+  // D#845 ON-13b1: the engine session's supervisor, held in a standard-tier session's unit. The sandbox gives it the microVM table's variables and the CLI's path (FX_ENGINE_CLAUDE); its state is under its own root.
+  engineSupervise: () =>
+    process.env.FX_ENGINE_CLAUDE === undefined
+      ? Promise.resolve(2)
+      : runEngineSupervise({
+          dir: process.env.FX_ENGINE_DIR ?? path.join(process.cwd(), ".fx-engine"),
+          claudePath: process.env.FX_ENGINE_CLAUDE,
+          env: Object.fromEntries([...MICROVM_ENV_NAMES].map((name) => [name, process.env[name]]).filter(([, value]) => value !== undefined)),
+        }).then((code) => process.exit(code)), // the program ENDS after a stop or crash_loop (no credential copy may outlive it), open handles or not
   // A file holding the Vercel protection bypass secret, for a staging or protected-preview cloud. Only the path is read here; src/protectionBypass.ts reads the file.
   protectionBypassFile: process.env.FX_RUNNER_PROTECTION_BYPASS_FILE,
   uid: process.getuid?.(),
@@ -462,6 +473,8 @@ runCli({
     term: process.env.TERM,
     uid: process.getuid?.(),
     xdgRuntimeDir: process.env.XDG_RUNTIME_DIR,
+    // D#845 ON-13b1 (Ruling 115): the held supervisor on the standard tier is opt-in until a real bwrap run proves it can start the CLI; the idle holder is the default.
+    engineSupervise: process.env.FX_ENGINE_SUPERVISE === "1",
     // D#842 EB-3c: the engine bridge's halt path and dial ceiling keeper, bound to the machine through the same kill-path dependencies `engine-host stop` uses. Without them `run` never starts the bridge.
     engineBridge: createEngineBridgePorts(engineHaltDeps),
     // D#845 MC-8b: the Claude sign-in link's process start (Linux only; `run` refuses it elsewhere).

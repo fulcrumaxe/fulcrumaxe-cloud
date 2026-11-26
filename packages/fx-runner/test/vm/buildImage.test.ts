@@ -55,6 +55,30 @@ function fakeHost(over: { digest?: string; mke2fs?: string; writesNothing?: bool
   return { host, calls };
 }
 
+describe("buildImage, the engine session's supervisor (ON-13b1)", () => {
+  it("bundles the supervisor from the entry in the guest directory once for all architectures, and a guest directory without the bridge is refused", async () => {
+    const { host } = fakeHost();
+    const entries: string[] = [];
+    const bundling: BuildHost = { ...host, bundleSupervisor: async (entry) => (entries.push(entry), "export {};\n") };
+    await buildImage({ lock: LOCK, image: IMAGE, arches: ["amd64", "arm64"], outDir: tmp(), guestDir: GUEST_DIR, host: bundling });
+    expect(entries).toEqual([path.join(GUEST_DIR, "engine-supervisor.entry.mjs")]);
+    expect(existsSync(entries[0] as string)).toBe(true);
+    const bare = tmp();
+    for (const name of ["init", "agent.py", "relay.py"]) writeFileSync(path.join(bare, name), readFileSync(path.join(GUEST_DIR, name)));
+    await expect(buildImage({ lock: LOCK, image: IMAGE, arches: ["amd64"], outDir: tmp(), guestDir: bare, host: bundling })).rejects.toThrow();
+  });
+
+  it("the guest's init starts the bridge in its own restart loop, and the entry runs the runner's supervisor with the guest's environment table", () => {
+    const init = readFileSync(path.join(GUEST_DIR, "init"), "utf8");
+    expect(init).toContain("/usr/bin/python3 -I /usr/lib/fx/engine-bridge.py");
+    expect(init).toMatch(/while :; do \/usr\/bin\/python3 -I \/usr\/lib\/fx\/engine-bridge\.py; sleep 1; done/);
+    const entry = readFileSync(path.join(GUEST_DIR, "engine-supervisor.entry.mjs"), "utf8");
+    expect(entry).toContain("runEngineSupervise");
+    expect(entry).toContain("guestEnvOf({})");
+    expect(entry).toContain("/opt/fx/bin/claude");
+  });
+});
+
 describe("buildImage, with the programs replaced", () => {
   it("exports each architecture by digest, adds the guest files with a fixed owner and time, and builds with fixed parameters", async () => {
     const { host, calls } = fakeHost();
@@ -185,6 +209,8 @@ describe.skipIf(!mke2fsOk)("buildImage, with the real tar and mke2fs", () => {
     expect(listing.output).toMatch(/agent\.py/);
     expect(listing.output).toMatch(/relay\.py/);
     expect((await real.run("debugfs", ["-R", "stat /usr/lib/fx/relay.py", file], {})).output).toMatch(/Mode:\s+0755/);
+    expect(listing.output).toMatch(/engine-bridge\.py/);
+    expect(listing.output).not.toMatch(/fx-engine-supervisor/); // this host bundles nothing
     const stat = await real.run("debugfs", ["-R", "stat /usr/lib/fx/init", file], {});
     expect(stat.output).toMatch(/Mode:\s+0755/);
     expect(stat.output).toMatch(/User:\s+0\s+Group:\s+0/);
@@ -200,7 +226,7 @@ describe.skipIf(!mke2fsOk)("buildImage, with the real tar and mke2fs", () => {
     writeFileSync(path.join(tree, "etc", "extra"), "x");
     expect((await buildImage({ lock: LOCK, image: IMAGE, arches: ["amd64"], outDir: tmp(), guestDir: GUEST_DIR, host: withTree(tree), crane: "crane" }))[0]!.sha256).not.toBe(base);
     const guest = tmp();
-    for (const name of ["init", "agent.py", "relay.py"]) writeFileSync(path.join(guest, name), readFileSync(path.join(GUEST_DIR, name)));
+    for (const name of ["init", "agent.py", "relay.py", "engine-bridge.py"]) writeFileSync(path.join(guest, name), readFileSync(path.join(GUEST_DIR, name)));
     writeFileSync(path.join(guest, "init"), `${readFileSync(path.join(GUEST_DIR, "init"), "utf8")}# changed\n`);
     const tree2 = imageTree();
     const changedGuest = (await buildImage({ lock: LOCK, image: IMAGE, arches: ["amd64"], outDir: tmp(), guestDir: guest, host: withTree(tree2), crane: "crane" }))[0]!.sha256;
