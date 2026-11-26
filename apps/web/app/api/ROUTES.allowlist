@@ -98,6 +98,7 @@ stripe/webhook/route.ts
 system/mode/route.ts
 v1/[...path]/route.ts
 v1/assistant/messages/route.ts
+v1/engine/repos/[id]/retry-stop/route.ts
 v1/engine/repos/[id]/start/route.ts
 v1/engine/repos/[id]/update/route.ts
 v1/events/route.ts

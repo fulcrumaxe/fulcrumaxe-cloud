@@ -214,6 +214,26 @@ export async function issueEngineSessionStart(deps: RunnerCloudDeps, principal: 
   }));
 }
 
+/** The body of a stop or delete, inside the caller's tenant transaction, after the owner or admin check and with the repo's advisory lock held. Shared by the issuers and by the retry of a failed stop. */
+export async function issueStopOrDeleteLocked(
+  client: PoolClient, deps: RunnerCloudDeps, signer: Awaited<ReturnType<typeof signerOf>>, accountId: string, target: SessionTarget, kind: "engine_session_stop" | "engine_session_delete", reason: PersonStopReason | null,
+): Promise<IssuedSessionJob> {
+  const repoId = target.repoId;
+  const waiting = await pendingJob(client, accountId, repoId, kind);
+  if (waiting !== null) return { job_id: waiting, kind, operate_epoch: null, already_issued: true };
+  // Never gated; the epoch is the one now, which after an off is the post-off epoch.
+  const { epoch } = await readOperate(client, accountId, false);
+  const args = kind === "engine_session_stop" ? { reason: reason as PersonStopReason, operate_epoch: epoch } : { operate_epoch: epoch };
+  const jobId = await insertJob(client, deps, signer, target, { kind, args } as Pick<MachineJob, "kind" | "args">);
+  if (kind === "engine_session_stop") await client.query("SELECT audit_write('engine_session.stopped', $1::jsonb)", [JSON.stringify({ repo_id: repoId, job_id: jobId, reason })]);
+  else await client.query("SELECT audit_write('engine_session.deleted', $1::jsonb)", [JSON.stringify({ repo_id: repoId, job_id: jobId })]);
+  return { job_id: jobId, kind, operate_epoch: epoch, already_issued: false };
+}
+
+/** The per-repo lock every issuer takes, so two clicks issue one job. */
+export const lockEngineSession = (client: PoolClient, accountId: string, repoId: string): Promise<unknown> =>
+  client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`engine_session:${accountId}:${repoId}`]);
+
 async function issueStopOrDelete(
   deps: RunnerCloudDeps, principal: SessionPrincipal, repoId: string, kind: "engine_session_stop" | "engine_session_delete", reason: PersonStopReason | null,
 ): Promise<IssuedSessionJob> {
@@ -221,17 +241,9 @@ async function issueStopOrDelete(
   const { accountId } = principal;
   return asPerson(() => withTenant(deps.appUserPool, accountId, principal.userId, async (client) => {
     await requireOwnerOrAdmin(client);
-    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`engine_session:${accountId}:${repoId}`]);
+    await lockEngineSession(client, accountId, repoId);
     const target = await loadSessionTarget(client, accountId, repoId);
-    const waiting = await pendingJob(client, accountId, repoId, kind);
-    if (waiting !== null) return { job_id: waiting, kind, operate_epoch: null, already_issued: true };
-    // Never gated; the epoch is the one now, which after an off is the post-off epoch.
-    const { epoch } = await readOperate(client, accountId, false);
-    const args = kind === "engine_session_stop" ? { reason: reason as PersonStopReason, operate_epoch: epoch } : { operate_epoch: epoch };
-    const jobId = await insertJob(client, deps, signer, target, { kind, args } as Pick<MachineJob, "kind" | "args">);
-    if (kind === "engine_session_stop") await client.query("SELECT audit_write('engine_session.stopped', $1::jsonb)", [JSON.stringify({ repo_id: repoId, job_id: jobId, reason })]);
-    else await client.query("SELECT audit_write('engine_session.deleted', $1::jsonb)", [JSON.stringify({ repo_id: repoId, job_id: jobId })]);
-    return { job_id: jobId, kind, operate_epoch: epoch, already_issued: false };
+    return issueStopOrDeleteLocked(client, deps, signer, accountId, target, kind, reason);
   }));
 }
 

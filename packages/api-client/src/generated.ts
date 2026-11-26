@@ -6003,6 +6003,11 @@ export interface Operations {
           display_name: string;
         }) | (null);
         halt_epoch: number;
+        stop_failed: ({
+          reason: ("person" | "halt" | "move" | "remove" | "operate_off" | "plan") | (null);
+          code: string | null;
+          at: string;
+        }) | (null);
       }>;
       next_cursor: string | null;
       as_of: string;

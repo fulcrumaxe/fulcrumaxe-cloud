@@ -3,6 +3,7 @@ import { round } from '@fx/stats';
 import type { EngineRepoFreshness } from '@fx/db/src/engineBridge.js';
 import { haltPending } from '@fx/db/src/engineHalt.js';
 import { readEngineAgentStats, type EngineAgentStats } from './read.js';
+import { SANDBOX_UP_SQL, SESSION_JOB_LATERAL, jobFactOf, needsPlanRead, planHasEnded, stopFailedOf, type StopFacts, type StopFailed } from './stopFailed.js';
 
 /**
  * Engine bridge EB-5: the per-repo panel reads behind `GET /api/v1/engine/repos/:id/*`. Every function runs on the caller's tenant client, so row security
@@ -163,6 +164,8 @@ export interface RepoRow {
   halted_by: { id: string; display_name: string } | null;
   /** +1 per halt, unchanged by a clear; 0 for a repo never halted. */
   halt_epoch: number;
+  /** A stop that did not finish while the engine's sandbox is still up (ON-13c4a), derived from the repo's newest session job; null otherwise. Never stored. */
+  stop_failed: StopFailed | null;
 }
 
 /** Every ticked repo of the account with the runner that serves it and its liveness. The newest session names the runner; liveness uses the newest word from any session. */
@@ -173,7 +176,8 @@ export async function readEngineRepos(client: PoolClient, accountId?: string): P
             a.heard_at, a.sessions, (rn.revoked_at IS NOT NULL) AS revoked, rs.name AS runner_set_name,
             COALESCE(NULLIF(ru.name, ''), NULLIF(ru.github_login, ''), $1) AS registrant, EXTRACT(EPOCH FROM (now() - a.heard_at))::float8 AS heard,
             (c.halted_at IS NOT NULL) AS halted, c.halted_at, COALESCE(c.halt_epoch, 0) AS halt_epoch, ap.applied_epoch,
-            hm.user_id AS halted_by_id, COALESCE(NULLIF(hu.name, ''), NULLIF(hu.github_login, ''), $1) AS halted_by_name
+            hm.user_id AS halted_by_id, COALESCE(NULLIF(hu.name, ''), NULLIF(hu.github_login, ''), $1) AS halted_by_name,
+            b.account_id, sj.job_kind, sj.job_state, sj.job_stop_reason, sj.job_failure_code, sj.job_at, ${SANDBOX_UP_SQL} AS sandbox_up
        FROM engine_bridge_repos b
        JOIN repos r ON r.id = b.repo_id
        LEFT JOIN engine_bridge_settings st ON st.account_id = b.account_id
@@ -189,12 +193,18 @@ export async function readEngineRepos(client: PoolClient, accountId?: string): P
        -- The newest epoch the runner reported applying, from the repo's sessions (the bridge session carries it). Only looked up while halted.
        LEFT JOIN LATERAL (SELECT max((ev.body->>'halt_epoch')::int) AS applied_epoch FROM engine_events ev JOIN engine_sessions es ON es.id = ev.session_id
                            WHERE ev.account_id = b.account_id AND es.account_id = b.account_id AND c.halted_at IS NOT NULL AND es.repo_id = b.repo_id AND ev.kind = 'halt_applied') ap ON true
+       -- The repo's newest session job: a stop that failed or went unanswered shows as stop_failed while the sandbox is up. Nothing is stamped.
+       ${SESSION_JOB_LATERAL}
       ORDER BY full_name NULLS LAST, r.id`,
     [UNNAMED_MEMBER],
   );
+  const facts = rows.map((r): StopFacts => ({ job: jobFactOf(r), sandboxUp: r.sandbox_up === true, watchEnabled: r.watch_enabled === true, operateEnabled: r.operate_enabled === true }));
+  // The plan is read once per list, and only when some repo's failed stop is a `plan` one.
+  const planFor = rows.findIndex((_r, i) => needsPlanRead(facts[i]!));
+  const planEnded = planFor < 0 ? false : await planHasEnded(client, rows[planFor]!.account_id as string);
   const now = new Date();
   const seen = accountId === undefined ? new Map<string, Date>() : await readRepoWakeSeen(client, accountId, rows.map((r) => r.repo_id as string), now);
-  return rows.map((r) => {
+  return rows.map((r, i) => {
     const seenAt = seen.get(r.repo_id as string) ?? null;
     const dbAge = r.heard === null ? null : Math.round(r.heard);
     const heardAge = heardAgeWithSeen(dbAge, seenAt, now);
@@ -216,6 +226,7 @@ export async function readEngineRepos(client: PoolClient, accountId?: string): P
     halted_at: iso(r.halted_at),
     halted_by: r.halted_by_id === null || r.halted_by_id === undefined ? null : { id: r.halted_by_id, display_name: r.halted_by_name },
     halt_epoch: Number(r.halt_epoch),
+    stop_failed: stopFailedOf(facts[i]!, planEnded),
     };
   });
 }

@@ -671,6 +671,9 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "already_cancelled",
   "expired",
   "already_delivered",
+  // Try again on a failed engine stop (D#845 ON-13c4a): the stop already changed, or the system cause that stopped it no longer holds. (not_retryable is listed above.)
+  "nothing_to_retry",
+  "cause_gone",
   // Engine bridge connect and disconnect (D#845 ON-BR-2): why a runner cannot be asked, and a folder the person was not offered.
   "bridge_pending",
   "bridge_not_connected",
