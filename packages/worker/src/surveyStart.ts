@@ -163,7 +163,8 @@ export function createSurveyStart(deps: SurveyStartDeps): SurveyStartFacade {
           initiatedBy: input.userId,
           expectedExecutionMode: "runner_local",
           // CWE-367: the seat's $0 decision is for this machine only; the claim pin requires the claimer to be this very runner.
-          startMeta: { survey_runner_id: input.runnerId },
+          // D#845 ON-10e2b (Ruling 106.1): the consent rides in the start's own facts; the job issuer refuses a public survey without it.
+          startMeta: { survey_runner_id: input.runnerId, ...(input.publicConsented === true ? { public_survey_consent: true } : {}) },
           ...(input.requiresEngine === undefined ? {} : { requiresEngine: input.requiresEngine }),
           idempotency: { key, requestHash: createHash("sha256").update(`${key}\n${input.headSha}\n${input.runnerId}`).digest("hex") },
           inCreateTransaction: (client, runId) => bind(client, input.userId, input.setupId, runId, input.publicConsented === true ? { headSha: input.headSha, runnerId: input.runnerId } : null),

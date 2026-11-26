@@ -7,7 +7,10 @@ import type { PlaneMergeGoResult, PlaneMergeOrderFacts, PublicPullFacts, PublicQ
 import { mergeGateAuthorTrust } from "./github/authorTrust";
 import { openInstallationHttp, readRepoAppLogin } from "./github/installationHttp";
 import { openForRepo } from "./github/localOnlyHttp";
+import { createAppRepoVisibility } from "./github/repoVisibility";
 import { createPrStateReader } from "./github/prState";
+
+let appVisibility: ReturnType<typeof createAppRepoVisibility> | undefined;
 
 /**
  * D#6 PUBLIC-MERGE PR2b: the cloud's half of a paired `runner_local` item's merge order, built on the same pieces as the review stage (`advanceReview.ts`): the
@@ -83,6 +86,8 @@ export function createPlaneMergeOps(deps: PlaneMergeOpsDeps) {
         queueDocuments: QUEUE_DOCUMENTS,
         localReviewOptIn: createPgLocalReviewOptIn(pool),
         authorTrust: mergeGateAuthorTrust,
+        // D#845 ON-10e2b: the dial repo's visibility, read live; a public or unreadable repo's merge dial reads `ask`.
+        repoVisibility: (accountId, repoId) => (appVisibility ??= createAppRepoVisibility()).visibility({ accountId, repoId }),
         publicPlane: { open: openGoPublicHttp, read: readPublicPullRequest(pool) },
         gate1Status,
         mergeDelegate: async (_args, { mergeMode: read }) => {

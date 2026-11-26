@@ -56,7 +56,7 @@ const soft = (p) => p.catch((e) => { if (e && e.name === "AbortError") throw e; 
 function mountOnboarding(host) {
   const abort = new AbortController();
   const st = { steps: null, parsed: null, eng: null, error: "", ctx: {}, price: null, choosing: false, choiceError: "", planBusy: false, planNote: "", planLink: false };
-  let destroyed = false, busy = false, again = false, preview = null, payShown = false, picker = null, installPanel = null, installKey = "", plan = null, planFor = "";
+  let destroyed = false, busy = false, again = false, preview = null, payShown = false, picker = null, installPanel = null, installKey = "", survey = null, surveyKey = "", plan = null, planFor = "";
   // The plan picker opens once, into payHost, and stays until pay is done. The server decides when pay is done.
   function showPlans() {
     if (payShown) return;
@@ -83,6 +83,7 @@ function mountOnboarding(host) {
   const installHost = h("div", { class: "ob-panel", "data-testid": "ob-install-host" });
   // D#845 ON-11b: the plan review keeps its edits and ticks in the same way, so its host outlives every redraw too.
   const planHost = h("div", { class: "ob-panel", "data-testid": "ob-plan-host" });
+  const surveyHost = h("div", { class: "ob-panel", "data-testid": "ob-survey-host" });
   // The scrolling region is itself focusable, so the keyboard can scroll it when no control is on screen.
   host.replaceChildren(h("div", { class: "ob-app", role: "region", "aria-label": "Setup progress", tabindex: 0, "data-testid": "ob-app" }, title, live, errorEl, body));
 
@@ -98,7 +99,7 @@ function mountOnboarding(host) {
     return null;
   }
 
-  const render = (reread) => { renderBody(); syncPicker(); syncInstall(); syncPlan(reread === true); };
+  const render = (reread) => { renderBody(); syncPicker(); syncInstall(); syncSurvey(); syncPlan(reread === true); };
   /** D#845 ON-20b: the install panel is mounted for one setup's open pull request and goes when the step moves on or the pull request is another's. */
   function syncInstall() {
     const step = st.parsed && st.parsed.engine && shownTracks(st.parsed).includes("engine") ? st.parsed.engine.find((s) => s.step === "install") : null;
@@ -125,6 +126,16 @@ function mountOnboarding(host) {
       planFor = setup.id;
       plan = st.eng.mountPlanReview(planHost, { setupId: setup.id, isAdmin: () => window.currentIsAdmin !== false, announce: (t) => (live.textContent = t), signal: abort.signal, onChanged: load, runAction: runPlanAction, ctx: () => engineEnv().ctx });
     } else if (plan && reread) plan.refresh(); // a setup change read the steps again: the draft may have moved too
+  }
+  /** D#845 ON-10e2b: the survey's start card is mounted while the setup waits at the survey with no run (a public repo's survey starts only here, after consent), and goes when the setup moves on. */
+  function syncSurvey() {
+    const setup = st.parsed ? st.parsed.setup : null;
+    const want = !destroyed && !!st.eng && !!setup && setup.phase === "survey" && setup.state === "started" && setup.survey_run_id === null && shownTracks(st.parsed).includes("engine");
+    const key = want ? setup.id : "";
+    if (surveyKey === key) return;
+    if (survey) { survey.destroy(); survey = null; }
+    surveyKey = key;
+    if (key) survey = st.eng.mountSurveyStart(surveyHost, { setupId: setup.id, isAdmin: () => window.currentIsAdmin !== false, announce: (t) => (live.textContent = t), signal: abort.signal, onChanged: load });
   }
   function renderBody() {
     if (destroyed) return;
@@ -201,7 +212,7 @@ function mountOnboarding(host) {
   };
   // D#845 ON-20b: the install step's pull request (number and state) from the engine track, into the view-model's `install.pr`.
   const installCtx = () => { const pr = st.parsed && st.parsed.engine && st.eng ? st.eng.installPr(st.parsed.engine) : null; return pr ? { ...(st.ctx.install || {}), pr } : st.ctx.install; };
-  const engineEnv = () => ({ projectHost, installHost, planHost, ctx: { ...st.ctx, install: installCtx(), setup: st.parsed ? st.parsed.setup : null, machine: machineFacts(), origin: window.location.origin, isAdmin: window.currentIsAdmin !== false, price: st.price, planBusy: st.planBusy, planNote: st.planNote, planAdded: st.planAdded === true, planLink: st.planLink }, price: st.price, announce: (t) => (live.textContent = t), canOpen, openApp, runAction: runPlanAction });
+  const engineEnv = () => ({ projectHost, installHost, planHost, surveyHost, ctx: { ...st.ctx, install: installCtx(), setup: st.parsed ? st.parsed.setup : null, machine: machineFacts(), origin: window.location.origin, isAdmin: window.currentIsAdmin !== false, price: st.price, planBusy: st.planBusy, planNote: st.planNote, planAdded: st.planAdded === true, planLink: st.planLink }, price: st.price, announce: (t) => (live.textContent = t), canOpen, openApp, runAction: runPlanAction });
   // D#845 ON-22: the project step's purchase buttons. Checkout is the existing one (the server never sells a second subscription: an account that already pays gets the item added, and the answer is its own success path).
   // Returning from Stripe reloads the app, which reads the step again. "Add an engine" changes the quantity on the subscription and reads now; the account follows the provider's confirmation, so the step says so and refreshes when the app is shown again (no timer here).
 const HELD_NOTE = "You already have the Engine plan.";

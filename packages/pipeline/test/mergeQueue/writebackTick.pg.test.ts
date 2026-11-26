@@ -113,6 +113,7 @@ describe("D#598 P5c-b plan write-back in the queue tick [pg]", () => {
       github,
       inTenant: (acct, fn) => withTenant(db.runWriterPool, acct, fn),
       ourLogin: "fulcrumaxe-app[bot]",
+      repoVisibility: async () => "private",
       gate: async () => {
         throw new Error("the work-item gate must never run for a plan write-back");
       },
@@ -237,6 +238,26 @@ describe("D#598 P5c-b plan write-back in the queue tick [pg]", () => {
       await setDial(w, "act", 2);
       expect((await tick(w)).steps[0]).toMatchObject({ step: "merged" });
       expect(await receipts(w)).toMatchObject([{ chosen: "act", dial_version: 2 }]);
+    });
+
+    it("D#845 ON-10e2b: a repository that is not clearly private never auto-merges a plan write-back, whatever its dial and switch say; once it reads private again the merge follows the dial", async () => {
+      const reads: Array<[string, () => Promise<"private" | "public" | "unknown">]> = [["public", async () => "public"], ["unknown", async () => "unknown"], ["a failed read", async () => Promise.reject(new Error("lookup down"))]];
+      for (const [name, vis] of reads) {
+        const w = await world();
+        await on(w);
+        await setDial(w, "act", 1, "autonomous");
+        w.deps = { ...w.deps, repoVisibility: vis };
+        expect((await tick(w)).steps[0], name).toMatchObject({ step: "released", why: "writeback_merge_dial_ask" });
+        expect(mergeCalls(w), name).toBe(0);
+        expect(await receipts(w), name).toEqual([]);
+        // Still not private: the entry is left alone, nothing churns and nothing merges.
+        expect((await tick(w)).steps[0], name).toMatchObject({ step: "idle" });
+        expect(mergeCalls(w), name).toBe(0);
+        // Private now: the entry goes back to the queue and the merge follows the stored dial, version 1.
+        w.deps = { ...w.deps, repoVisibility: async () => "private" };
+        expect((await tick(w)).steps[0], name).toMatchObject({ step: "merged" });
+        expect(await receipts(w), name).toMatchObject([{ chosen: "act", dial_version: 1 }]);
+      }
     });
 
     it("the switch off leaves a person's merge: no receipt, whatever the dial says", async () => {

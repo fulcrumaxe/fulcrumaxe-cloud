@@ -92,7 +92,7 @@ const passBoth = async (w: World, as: Parameters<typeof review>[3], head = HEAD)
 /** A port that records every question and always says yes: a verified repo must never even be asked. */
 const asked: unknown[] = [];
 const optIn: LocalReviewOptInPort = { enabled: async (i) => (asked.push(i), true) };
-const gate = (w: World) => runMergeGateForItem({ pool: h.runWriterPool, http: fakeGitHubRest(w.gh), localReviewOptIn: optIn }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
+const gate = (w: World) => runMergeGateForItem({ pool: h.runWriterPool, repoVisibility: async () => "private" as const, http: fakeGitHubRest(w.gh), localReviewOptIn: optIn }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
 const reasonsOf = (out: Awaited<ReturnType<typeof gate>>) => (out.outcome === "ready_human_merges" ? out.reasons : []);
 
 describe("a runner_verified repo: the gate counts our sandbox's verdicts", () => {

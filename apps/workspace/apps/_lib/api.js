@@ -155,6 +155,9 @@ export async function api(method, path, body, signal, opts) {
       if (data && data.data && Number.isFinite(data.data.minimum_usd) && data.data.minimum_usd >= 0) failure.minimumUsd = data.data.minimum_usd;
       // A 409 plan_not_reviewed names how many items are still unread beside the error (data.missing): a whole number, never text.
       if (data && Number.isInteger(data.missing) && data.missing >= 0) failure.missing = data.missing;
+      // A 409 public_survey_consent_required names the commit and the machine the consent card speaks of (data.sha7: seven hex characters; data.machine: the machine's name, drawn as text only).
+      if (data && typeof data.sha7 === "string" && /^[0-9a-f]{7}$/.test(data.sha7)) failure.sha7 = data.sha7;
+      if (data && typeof data.machine === "string" && data.machine !== "" && data.machine.length <= 100) failure.machine = data.machine;
       throw failure;
     }
   } catch (e) {

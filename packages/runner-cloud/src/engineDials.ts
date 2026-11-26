@@ -1,6 +1,8 @@
 import { EngineDialsReply, ENGINE_DIALS_PATH, ENGINE_DECISION_TYPES, engineDialsTarget } from "@fulcrumaxe/runner-protocol";
 import { DIAL_DEFAULT_MARKER, getCurrentDialSetting } from "@fx/db/src/decisions.js";
+import { clampForVisibility } from "@fx/db/src/publicRepoClamp.js";
 import type { PoolClient } from "pg";
+import { readRepoVisibility } from "./repoPrivacy.js";
 import { RunnerHttpError, asRunner, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse } from "./http.js";
 import { verifyRunnerRequest, withRunnerSession } from "./verifyRunnerRequest.js";
 
@@ -86,6 +88,7 @@ export const pgEngineDialsPorts = (resolver: DialResolver): EngineDialsPorts => 
  *    machine) answers the same 404, so the route is no way to learn which repos exist.
  *  - `engine_spec_ready` is reported as the repo's own dial for it, which is what a Small, Bug, Doc or Process Spec follows; a Feature or Critical Spec asks
  *    at every preset whatever this says, and the ceiling file does not carry it.
+ *  - A repo that is not clearly private (public, or a visibility read that failed) answers `ask` for every decision whatever the stored dial says (D#845 ON-10e2b).
  *  - Nothing is written: no receipt, no audit row.
  */
 export async function engineDials(deps: RunnerCloudDeps, req: RunnerHttpRequest, search: string, ports: EngineDialsPorts): Promise<RunnerHttpResponse> {
@@ -93,22 +96,26 @@ export async function engineDials(deps: RunnerCloudDeps, req: RunnerHttpRequest,
   if (req.body.byteLength > 0) throw new RunnerHttpError(400, "invalid_message", "this request takes no body");
   const repoGhId = parseDialsQuery(search);
   const runner = await verifyRunnerRequest(deps, engineDialsTarget(repoGhId), req, { replay: "once" });
-  const reply = await asRunner(() =>
-    withRunnerSession(deps.appUserPool, runner, async (client): Promise<EngineDialsReply> => {
+  const seen = await asRunner(() =>
+    withRunnerSession(deps.appUserPool, runner, async (client) => {
       const repo = await ports.covered(client, { runnerId: runner.runnerId, repoGhId });
       if (repo === null) throw new RunnerHttpError(404, "not_found", "no such repo");
       const dispositions = {} as Record<DecisionType, Disposition>;
       for (const type of ENGINE_DECISION_TYPES) dispositions[type] = ports.resolver.resolve(type, await ports.storedDial(client, repo.repoId, type));
-      const halt = await ports.halt(client, repo.repoId);
-      return EngineDialsReply.parse({
-        repo_gh_id: repoGhId,
-        catalogue_version: ports.resolver.catalogueVersion,
-        dispositions,
-        halt_epoch: halt.epoch,
-        halted: halt.halted,
-        fetched_at: ports.now().toISOString(),
-      });
+      return { repoId: repo.repoId, dispositions, halt: await ports.halt(client, repo.repoId) };
     }),
   );
+  // D#845 ON-10e2b: read live after the transaction (no network call inside it); anything but a clear "private" asks.
+  const visibility = await readRepoVisibility(deps, runner.accountId, seen.repoId);
+  const dispositions = {} as Record<DecisionType, Disposition>;
+  for (const type of ENGINE_DECISION_TYPES) dispositions[type] = clampForVisibility(seen.dispositions[type], visibility);
+  const reply = EngineDialsReply.parse({
+    repo_gh_id: repoGhId,
+    catalogue_version: ports.resolver.catalogueVersion,
+    dispositions,
+    halt_epoch: seen.halt.epoch,
+    halted: seen.halt.halted,
+    fetched_at: ports.now().toISOString(),
+  });
   return { status: 200, body: reply, headers: { "cache-control": "no-store" } };
 }

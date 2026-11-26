@@ -110,7 +110,7 @@ function advanceTip(r: Repo, gained: string[], except?: number): void {
   }
 }
 
-const gate = (r: Repo, it: Item, http: GitHubHttp = r.http) => runMergeGateForItem({ pool: h.runWriterPool, http }, { accountId: r.accountId, workItemId: it.workItemId, prNumber: it.pr });
+const gate = (r: Repo, it: Item, http: GitHubHttp = r.http) => runMergeGateForItem({ pool: h.runWriterPool, repoVisibility: async () => "private" as const, http }, { accountId: r.accountId, workItemId: it.workItemId, prNumber: it.pr });
 const reasonsOf = (out: Awaited<ReturnType<typeof gate>>): string[] => (out.outcome === "ready_human_merges" ? [...out.reasons] : []);
 const merged = (it: Item): boolean => it.g.world.merges.length > 0;
 
@@ -147,7 +147,7 @@ describe("the mixed pair and the second item (tests 2 and 3)", () => {
     const queued = await addItem(r, 41, [`${MIG}/0011_a.sql`]);
     const direct = await addItem(r, 42, [`${MIG}/0011_b.sql`]);
     // The queue tick's call to the gate (it holds the slot, not the lease).
-    const viaTick = await runMergeGateForItem({ pool: h.runWriterPool, http: r.http }, { accountId: r.accountId, workItemId: queued.workItemId, prNumber: 41, underQueueSlot: true });
+    const viaTick = await runMergeGateForItem({ pool: h.runWriterPool, repoVisibility: async () => "private" as const, http: r.http }, { accountId: r.accountId, workItemId: queued.workItemId, prNumber: 41, underQueueSlot: true });
     expect(viaTick.outcome).toBe("merged");
     advanceTip(r, [`${MIG}/0011_a.sql`], 41);
     expect(reasonsOf(await gate(r, direct))).toEqual(["ordered_resource_out_of_order"]);

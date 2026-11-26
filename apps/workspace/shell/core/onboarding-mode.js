@@ -83,7 +83,7 @@ function parseEngine(list) {
 function parseSetup(v) {
   if (!v || typeof v !== "object" || typeof v.id !== "string" || !UUID.test(v.id)) return null;
   if (!SETUP_PHASES.includes(v.phase) || !SETUP_STATES.includes(v.state)) return null;
-  return { id: v.id, phase: v.phase, state: v.state };
+  return { id: v.id, phase: v.phase, state: v.state, survey_run_id: typeof v.survey_run_id === "string" && UUID.test(v.survey_run_id) ? v.survey_run_id : null };
 }
 
 /**

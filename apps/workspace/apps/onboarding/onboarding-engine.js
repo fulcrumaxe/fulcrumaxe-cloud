@@ -382,7 +382,9 @@ export function engineSection(steps, env) {
       // D#845 ON-20b: the install step's summary and merge, in a host the app keeps across redraws; it is there only while the pull request is open.
       s.step === "install" && s.state === "active" && s.pr_state === "open" && s.setup_id ? env.installHost || null : null,
       // D#845 ON-11b: the plan review lives in a host the app keeps across redraws, while the setup waits at the plan.
-      s.step === "plan" && (s.state === "active" || s.state === "done") && env.ctx.setup && env.ctx.setup.phase === "plan" ? env.planHost || null : null);
+      s.step === "plan" && (s.state === "active" || s.state === "done") && env.ctx.setup && env.ctx.setup.phase === "plan" ? env.planHost || null : null,
+      // D#845 ON-10e2b: the survey's start card, while the setup waits at the survey with no run (the app mounts it; a public repo's consent is asked there).
+      s.step === "plan" && s.state !== "done" && env.ctx.setup && env.ctx.setup.phase === "survey" && env.ctx.setup.state === "started" && env.ctx.setup.survey_run_id === null ? env.surveyHost || null : null);
   });
   return h("section", { class: "ob-track", "data-testid": "ob-track-engine", "aria-label": "Engine setup" },
     first === 0 ? h("div", { class: "ob-prereq", "data-testid": "ob-prereq" }, h("h3", { class: "ob-sub" }, "Before you start"),
@@ -1013,4 +1015,63 @@ export function mountPlanReview(host, env) {
   draw();
   read(false);
   return { refresh() { if (!S.dirty && !S.busy) read(false, true); }, destroy() { dead = true; host.replaceChildren(); } };
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+// D#845 ON-10e2b: the survey's start card. A setup waiting at the survey with no run shows "Start the survey". For a private repo that starts it. A public repo's start answers 409 `public_survey_consent_required`
+// (with the commit's first seven characters and the machine's name), and the card then shows the fixed consent copy and a second button that sends the consent. Nothing is stored in the browser.
+export const SURVEY_CONSENT_VALUE = "public_repo_v1";
+const SHA7_RE = /^[0-9a-f]{7}$/;
+/** The consent copy (fixed wording). A commit that could not be read is "its latest commit"; a missing machine name is "your machine". */
+export const surveyConsentCopy = (sha7, machine) =>
+  "This repo is public. The survey reads its code at " + (typeof sha7 === "string" && SHA7_RE.test(sha7) ? sha7 : "its latest commit") + " on " + (typeof machine === "string" && machine !== "" ? machine : "your machine") +
+  " and sends it to Claude. Anyone can propose changes to a public repo, so the plan it drafts may reflect text you didn't write. You'll review every item before anything is approved.";
+/**
+ * A refused survey start in words, by the server's closed code (never its message). `consent` is true for the code that opens the consent card, with the facts it names. Anything else is the plain failure.
+ */
+export function surveyStartRefusal(e) {
+  const code = e && typeof e.code === "string" ? e.code : "";
+  const machine = e && typeof e.machine === "string" && e.machine !== "" ? e.machine : "";
+  if (code === "public_survey_consent_required") return { consent: true, sha7: e.sha7, machine, text: "" };
+  if (code === "survey_needs_runner_update") return { consent: false, text: "Update fx-runner on " + (machine || "your machine") + " to survey a public repo." };
+  if (code === "survey_needs_machine_owner") return { consent: false, text: "This machine's Claude login belongs to someone else on your team." };
+  if (code === "survey_running") return { consent: false, text: PLAN_BY_ERROR.survey_running, reload: true };
+  if (code === "forbidden") return { consent: false, text: PLAN_MEMBER };
+  if (Object.hasOwn(PLAN_BY_ERROR, code)) return { consent: false, text: PLAN_BY_ERROR[code], reload: code === "setup_phase" };
+  const own = e && (e.status === 0 || e.kind === "server_error") && typeof e.message === "string" && e.message !== "";
+  return { consent: false, text: own ? e.message : "The survey didn't start. Try again, or write your own plan." };
+}
+/** Draws the start card into `host`. `env`: { setupId, isAdmin, announce, signal, onChanged() }. Returns { destroy }. A member sees the owner-or-admin line and no button. */
+export function mountSurveyStart(host, env) {
+  const S = { consent: null, err: "", busy: false };
+  let dead = false;
+  const admin = env.isAdmin();
+  const btn = (id, label, fn) => h("button", { type: "button", class: "ob-btn ob-btn-primary", "data-testid": "ob-survey-" + id, disabled: S.busy, onClick: fn }, label);
+  async function start(consented) {
+    S.busy = true; S.err = ""; draw();
+    try {
+      await api("POST", "/api/v1/setups/" + encodeURIComponent(env.setupId) + "/survey/start", consented ? { consent: SURVEY_CONSENT_VALUE } : undefined, env.signal);
+      S.busy = false; env.announce("The survey started."); env.onChanged(); return;
+    } catch (e) {
+      if (e && e.name === "AbortError") return;
+      const r = surveyStartRefusal(e);
+      S.busy = false;
+      if (r.consent && !consented) S.consent = { sha7: r.sha7, machine: r.machine };
+      else S.err = r.consent ? "The survey didn't start. Try again, or write your own plan." : r.text;
+      if (S.err) env.announce(S.err);
+      if (r.reload) env.onChanged();
+    }
+    if (!dead) draw();
+  }
+  function draw() {
+    if (dead) return;
+    const body = [];
+    if (!admin) body.push(h("p", { class: "ob-muted", "data-testid": "ob-survey-member" }, PLAN_MEMBER));
+    else if (S.consent) body.push(h("p", { class: "ob-muted", "data-testid": "ob-survey-copy" }, surveyConsentCopy(S.consent.sha7, S.consent.machine)), btn("consent", "Start the survey", () => start(true)));
+    else body.push(btn("start", "Start the survey", () => start(false)));
+    if (S.err) body.push(h("p", { class: "ob-error", role: "alert", "data-testid": "ob-survey-error" }, S.err));
+    host.replaceChildren(h("div", { class: "ob-survey", "data-testid": "ob-survey", "data-stage": S.consent ? "consent" : "start" }, body));
+  }
+  draw();
+  return { destroy() { dead = true; host.replaceChildren(); } };
 }

@@ -105,7 +105,7 @@ const passBoth = async (w: World, over: Parameters<typeof run>[3] = {}) => {
 
 const on: LocalReviewOptInPort = { enabled: async () => true };
 const gate = (w: World, optIn: LocalReviewOptInPort = on) =>
-  runMergeGateForItem({ pool: h.runWriterPool, http: httpFor(w), localReviewOptIn: optIn }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
+  runMergeGateForItem({ pool: h.runWriterPool, repoVisibility: async () => "private" as const, http: httpFor(w), localReviewOptIn: optIn }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
 const reasonsOf = (out: Awaited<ReturnType<typeof gate>>) => (out.outcome === "ready_human_merges" ? out.reasons : []);
 
 describe("runner_local: every condition met", () => {
@@ -200,7 +200,7 @@ describe("(a) the opt-in", () => {
   it("no port given at all is off", async () => {
     const w = await world();
     await passBoth(w);
-    const out = await runMergeGateForItem({ pool: h.runWriterPool, http: httpFor(w) }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
+    const out = await runMergeGateForItem({ pool: h.runWriterPool, repoVisibility: async () => "private" as const, http: httpFor(w) }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
     expect(out.outcome).toBe("ready_human_merges");
     expect(w.gh.merges).toEqual([]);
   });
@@ -408,7 +408,7 @@ describe("an unreadable protection read never makes CI look greener (CWE-636)", 
   it("cloud mode: a 403 on protection with only `build` green does not merge, though a ruleset requires slow-ci", async () => {
     const w = await world({ executionMode: "sandbox", repo: { rulesetRules: slowCiRuleset } });
     await passBoth(w, { runtime: "production" });
-    const out = await runMergeGateForItem({ pool: h.runWriterPool, http: refuse403(w), localReviewOptIn: on }, input(w));
+    const out = await runMergeGateForItem({ pool: h.runWriterPool, repoVisibility: async () => "private" as const, http: refuse403(w), localReviewOptIn: on }, input(w));
     expect(reasonsOf(out)).toContain("ci_not_green");
     expect(w.gh.merges).toEqual([]);
   });
@@ -416,7 +416,7 @@ describe("an unreadable protection read never makes CI look greener (CWE-636)", 
   it("runner_local with the opt-in off: the same 403 does not merge either", async () => {
     const w = await world({ repo: { protectionStatus: 403 } });
     await passBoth(w);
-    const out = await runMergeGateForItem({ pool: h.runWriterPool, http: httpFor(w), localReviewOptIn: { enabled: async () => false } }, input(w));
+    const out = await runMergeGateForItem({ pool: h.runWriterPool, repoVisibility: async () => "private" as const, http: httpFor(w), localReviewOptIn: { enabled: async () => false } }, input(w));
     expect(reasonsOf(out)).toEqual(expect.arrayContaining(["ci_not_green", "local_review_not_enabled"]));
     expect(w.gh.merges).toEqual([]);
   });
@@ -521,7 +521,7 @@ describe("D#6 R3c: the review and merge path of a runner_local repo stays inside
     const w = await world();
     await passBoth(w);
     const fake = fakeGitHubLocal(w.gh);
-    const out = await runMergeGateForItem({ pool: h.runWriterPool, http: fake.http, localReviewOptIn: on }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
+    const out = await runMergeGateForItem({ pool: h.runWriterPool, repoVisibility: async () => "private" as const, http: fake.http, localReviewOptIn: on }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
     expect(out).toMatchObject({ outcome: "merged", headSha: HEAD, status: "posted" });
     expect(w.gh.merges).toEqual([{ sha: HEAD, method: "squash" }]);
     // Every call that reached GitHub, by allowlist entry.
@@ -541,7 +541,7 @@ describe("D#6 R3c: the review and merge path of a runner_local repo stays inside
     const w = await world();
     await passBoth(w);
     const rest = fakeGitHubRest(w.gh);
-    await expect(runMergeGateForItem({ pool: h.runWriterPool, http: rest, localReviewOptIn: on }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber })).rejects.toThrow(/local-only GitHub client/);
+    await expect(runMergeGateForItem({ pool: h.runWriterPool, repoVisibility: async () => "private" as const, http: rest, localReviewOptIn: on }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber })).rejects.toThrow(/local-only GitHub client/);
     expect(w.gh.requests).toEqual([]);
     expect(w.gh.merges).toEqual([]);
   });
@@ -549,7 +549,7 @@ describe("D#6 R3c: the review and merge path of a runner_local repo stays inside
   it("a pull request that is not the run's recorded one is not gated", async () => {
     const w = await world();
     await passBoth(w);
-    await expect(runMergeGateForItem({ pool: h.runWriterPool, http: httpFor(w), localReviewOptIn: on }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber + 1 })).rejects.toThrow(/recorded/);
+    await expect(runMergeGateForItem({ pool: h.runWriterPool, repoVisibility: async () => "private" as const, http: httpFor(w), localReviewOptIn: on }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber + 1 })).rejects.toThrow(/recorded/);
     expect(w.gh.merges).toEqual([]);
   });
 
@@ -623,7 +623,7 @@ describe("D#6 R3c: the review and merge path of a runner_local repo stays inside
       const w = await world({ repo: { checks: { [HEAD]: many } } });
       await passBoth(w);
       const fake = fakeGitHubLocal(w.gh);
-      const out = await runMergeGateForItem({ pool: h.runWriterPool, http: fake.http, localReviewOptIn: on }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
+      const out = await runMergeGateForItem({ pool: h.runWriterPool, repoVisibility: async () => "private" as const, http: fake.http, localReviewOptIn: on }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
       expect(out.outcome).toBe("merged");
       expect(fake.calls.filter((c) => c.op === "CommitChecks")).toHaveLength(3);
     });
@@ -641,7 +641,7 @@ describe("D#6 R3c: the review and merge path of a runner_local repo stays inside
       await passBoth(w);
       const fake = fakeGitHubLocal(w.gh);
       const erroring = { ...fake.http, graphql: async (op: "PullRequestFiles" | "CommitChecks", v: Readonly<Record<string, unknown>>) => (op === "CommitChecks" ? { status: 200, body: { data: null, errors: [{ message: "boom" }] } } : fake.http.graphql(op, v)) };
-      await expect(runMergeGateForItem({ pool: h.runWriterPool, http: erroring, localReviewOptIn: on }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber })).rejects.toThrow(/GraphQL error/);
+      await expect(runMergeGateForItem({ pool: h.runWriterPool, repoVisibility: async () => "private" as const, http: erroring, localReviewOptIn: on }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber })).rejects.toThrow(/GraphQL error/);
       expect(w.gh.merges).toEqual([]);
     });
 
@@ -662,7 +662,7 @@ describe("D#6 R3c: the review and merge path of a runner_local repo stays inside
           return fake.http.graphql(op, v);
         },
       };
-      const out = await runMergeGateForItem({ pool: h.runWriterPool, http: racing, localReviewOptIn: on }, { accountId: moved.accountId, workItemId: moved.workItemId, prNumber: moved.gh.prNumber });
+      const out = await runMergeGateForItem({ pool: h.runWriterPool, repoVisibility: async () => "private" as const, http: racing, localReviewOptIn: on }, { accountId: moved.accountId, workItemId: moved.workItemId, prNumber: moved.gh.prNumber });
       expect(out.outcome).not.toBe("merged");
       expect(moved.gh.merges).toEqual([]);
     });
@@ -680,14 +680,14 @@ describe("an item's placement decides the gate's side (D#599 PL-2)", () => {
     const w = await world();
     await place(w, "cloud");
     await passBoth({ ...w, local: false }, { runtime: "production" });
-    const out = await runMergeGateForItem({ pool: h.runWriterPool, http: fakeGitHubRest(w.gh), localReviewOptIn: port }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
+    const out = await runMergeGateForItem({ pool: h.runWriterPool, repoVisibility: async () => "private" as const, http: fakeGitHubRest(w.gh), localReviewOptIn: port }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
     expect(asked).toEqual([]);
     expect(out.outcome).toBe("merged");
     // Runner reviews, which only the local rule counts, do not clear this item.
     const runner = await world();
     await place(runner, "cloud");
     await passBoth(runner);
-    const blocked = await runMergeGateForItem({ pool: h.runWriterPool, http: fakeGitHubRest(runner.gh), localReviewOptIn: port }, { accountId: runner.accountId, workItemId: runner.workItemId, prNumber: runner.gh.prNumber });
+    const blocked = await runMergeGateForItem({ pool: h.runWriterPool, repoVisibility: async () => "private" as const, http: fakeGitHubRest(runner.gh), localReviewOptIn: port }, { accountId: runner.accountId, workItemId: runner.workItemId, prNumber: runner.gh.prNumber });
     expect(blocked.outcome).not.toBe("merged");
     expect(runner.gh.merges).toEqual([]);
     expect(asked).toEqual([]);
@@ -697,7 +697,7 @@ describe("an item's placement decides the gate's side (D#599 PL-2)", () => {
     const w = await world({ executionMode: "sandbox" });
     await place(w, "runner");
     await passBoth({ ...w, local: true });
-    await expect(runMergeGateForItem({ pool: h.runWriterPool, http: fakeGitHubRest(w.gh), localReviewOptIn: on }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber })).rejects.toThrow(/local-only GitHub client/);
+    await expect(runMergeGateForItem({ pool: h.runWriterPool, repoVisibility: async () => "private" as const, http: fakeGitHubRest(w.gh), localReviewOptIn: on }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber })).rejects.toThrow(/local-only GitHub client/);
     expect(w.gh.merges).toEqual([]);
   });
 
@@ -711,7 +711,7 @@ describe("an item's placement decides the gate's side (D#599 PL-2)", () => {
     const placed = await world({ executionMode: "sandbox" });
     await place(placed, "runner");
     await passBoth({ ...placed, local: true });
-    await runMergeGateForItem({ pool: h.runWriterPool, http: fakeGitHubLocal(placed.gh).http, localReviewOptIn: port }, { accountId: placed.accountId, workItemId: placed.workItemId, prNumber: placed.gh.prNumber }).catch(() => undefined);
+    await runMergeGateForItem({ pool: h.runWriterPool, repoVisibility: async () => "private" as const, http: fakeGitHubLocal(placed.gh).http, localReviewOptIn: port }, { accountId: placed.accountId, workItemId: placed.workItemId, prNumber: placed.gh.prNumber }).catch(() => undefined);
     expect(asked).toHaveLength(2);
   });
 });

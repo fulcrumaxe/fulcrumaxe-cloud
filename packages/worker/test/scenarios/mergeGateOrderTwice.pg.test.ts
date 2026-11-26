@@ -78,6 +78,7 @@ describe("scenario: a second blocked merge order on the same head is rerouted [p
       runMergeGateForItem(
         {
           pool: w.writerPool,
+          repoVisibility: async () => "private" as const,
           authorTrust: { botLogins: async () => [BOT_LOGIN], allowlist: () => null },
           http: p.privLocal.http,
           localReviewOptIn: on,

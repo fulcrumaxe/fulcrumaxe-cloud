@@ -85,6 +85,8 @@ import { RUNNER_QUEUE_TTL_MS, type JobIssuer, type JobMode, type RepoVisibilityP
 export type JobIssueErrorCode =
   | "public_repo"
   | "repo_visibility_unknown"
+  /** D#845 ON-10e2b (Ruling 106.1): a public repo's survey run whose start did not record the person's consent (the repo was private when the start read it). */
+  | "public_survey_consent_required"
   | "role_not_runner_eligible"
   | "no_repository"
   | "repository_unreadable"
@@ -400,6 +402,17 @@ function continuationBase(c: RunContinues, branch: string): string | undefined {
   return c.baseSha;
 }
 
+/** True only when the run's start recorded `public_survey_consent: true` (set by the cloud's start from the person's consent, never by a runner). Account and run both in the predicate. */
+async function publicSurveyConsented(pool: Pool, accountId: string, runId: string): Promise<boolean> {
+  return withTenant(pool, accountId, async (client) => {
+    const { rows } = await client.query<{ ok: boolean }>(
+      "SELECT payload #>> '{meta,public_survey_consent}' = 'true' AS ok FROM run_events WHERE account_id = $1 AND run_id = $2 AND kind = 'run.input' ORDER BY seq LIMIT 1",
+      [accountId, runId],
+    );
+    return rows[0]?.ok === true;
+  });
+}
+
 export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
   const now = deps.now ?? (() => new Date());
   const newId = deps.newId ?? randomUUID;
@@ -418,6 +431,9 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
       // D#845 ON-10e1: the survey alone may name a public repo; the signed `repo.private` stays truthful.
       if (seen === "public" && !publicRepoAllowed(role, taskKind(role, input.continues !== undefined))) throw new JobIssueError("public_repo");
       if (seen !== "private" && seen !== "public") throw new JobIssueError("repo_visibility_unknown");
+      // D#845 ON-10e2b (Ruling 106.1): a public survey is issued only for a run whose start recorded the consent, in the run's own `run.input` row. A repo flipped from private to public after the start's
+      // visibility read has no such flag, so the person is asked again. Read after the visibility, and only when the repo is public.
+      if (seen === "public" && !(await publicSurveyConsented(deps.pool, run.accountId, run.id))) throw new JobIssueError("public_survey_consent_required");
 
       // D#6 R4d-4 (C33 section 1.2): a review job names the commit to review, from the run's stored head (`agent_runs.head_sha`), never parsed out
       // of the prompt. A review with no valid head, or whose prompt names a different commit, is refused and nothing is recorded.

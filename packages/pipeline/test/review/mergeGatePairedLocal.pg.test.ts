@@ -134,6 +134,7 @@ const gate = (w: World, o: { optIn?: LocalReviewOptInPort; pubHttp?: GitHubHttp;
   runMergeGateForItem(
     {
       pool: h.runWriterPool,
+      repoVisibility: async () => "private" as const,
       authorTrust: BOT_TRUST,
       http: o.privHttp ?? (w.local ? w.privLocal.http : fakeGitHubRest(w.priv)),
       localReviewOptIn: o.optIn ?? on,
@@ -505,6 +506,7 @@ describe("a paired item whose public pull request is not open: public_pr_not_ope
     const out = await runMergeGateForItem(
       {
         pool: h.runWriterPool,
+        repoVisibility: async () => "private" as const,
         authorTrust: BOT_TRUST,
         http: w.privLocal.http,
         localReviewOptIn: on,
@@ -665,6 +667,7 @@ function delegating(w: World, o: { go?: Partial<GoAttestation>; optIn?: LocalRev
     runMergeGateForItem(
       {
         pool: h.runWriterPool,
+        repoVisibility: async () => "private" as const,
         authorTrust: BOT_TRUST,
         http: w.privLocal.http,
         localReviewOptIn: o.optIn ?? on,
@@ -924,13 +927,13 @@ describe("the go phase: the whole gate again from fresh reads, with the runner's
     const sandbox = await world({ executionMode: "sandbox" });
     const calls: DelegateCall[] = [];
     const out = await runMergeGateForItem(
-      { pool: h.runWriterPool, authorTrust: BOT_TRUST, http: fakeGitHubRest(sandbox.priv), localReviewOptIn: on, publicPlane: { open: async () => fakeGitHubRest(sandbox.pub), read: readPublicPullRequest(h.runWriterPool) }, mergeDelegate: async (a) => (calls.push(a), { delegated: true }) },
+      { pool: h.runWriterPool, repoVisibility: async () => "private" as const, authorTrust: BOT_TRUST, http: fakeGitHubRest(sandbox.priv), localReviewOptIn: on, publicPlane: { open: async () => fakeGitHubRest(sandbox.pub), read: readPublicPullRequest(h.runWriterPool) }, mergeDelegate: async (a) => (calls.push(a), { delegated: true }) },
       { accountId: sandbox.accountId, workItemId: sandbox.workItemId, prNumber: sandbox.priv.prNumber, goPhase: { attestation: attest() } },
     );
     expect(out).toEqual({ outcome: "refused", reason: "go_not_applicable" });
     const local = await world();
     const noDelegate = await runMergeGateForItem(
-      { pool: h.runWriterPool, authorTrust: BOT_TRUST, http: local.privLocal.http, localReviewOptIn: on, publicPlane: { open: async () => local.pubLocal.http, read: readPublicPullRequest(h.runWriterPool) } },
+      { pool: h.runWriterPool, repoVisibility: async () => "private" as const, authorTrust: BOT_TRUST, http: local.privLocal.http, localReviewOptIn: on, publicPlane: { open: async () => local.pubLocal.http, read: readPublicPullRequest(h.runWriterPool) } },
       { accountId: local.accountId, workItemId: local.workItemId, prNumber: local.priv.prNumber, goPhase: { attestation: attest() } },
     );
     expect(noDelegate).toEqual({ outcome: "refused", reason: "go_not_applicable" });
@@ -1045,7 +1048,7 @@ describe("D#598 P1d-1: a paired item's public pull request is refused when an ou
     const queued = { mergeQueue: { exists: true, mutations: [] }, rulesetRules: [{ type: "merge_queue", enforcement: "active" }] };
     const run = (w: World) =>
       runMergeGateForItem(
-        { pool: h.runWriterPool, authorTrust: BOT_TRUST, http: fakeGitHubRest(w.priv), queueDocuments: QUEUE_DOCUMENTS, publicPlane: { open: async () => fakeGitHubRest(w.pub), read: readPublicPullRequest(h.runWriterPool) } },
+        { pool: h.runWriterPool, repoVisibility: async () => "private" as const, authorTrust: BOT_TRUST, http: fakeGitHubRest(w.priv), queueDocuments: QUEUE_DOCUMENTS, publicPlane: { open: async () => fakeGitHubRest(w.pub), read: readPublicPullRequest(h.runWriterPool) } },
         { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.priv.prNumber },
       );
     const out = await world({ executionMode: "sandbox", pub: { authorLogin: "outsider", collaborators: { outsider: "triage" }, ...queued } });
@@ -1068,7 +1071,7 @@ describe("D#6 CLOUD-POSTS-FX-GATE1 PR 1c: a cloud item counts fx-gate1 only when
     const calls: DelegateCall[] = [];
     const run = (gate1Status?: Gate1StatusCheck, go = true) =>
       runMergeGateForItem(
-        { pool: h.runWriterPool, authorTrust: BOT_TRUST, http: w.privLocal.http, localReviewOptIn: on, publicPlane: { open: async () => pub.http, read: readPublicPullRequest(h.runWriterPool) }, mergeDelegate: async (a) => (calls.push(a), { delegated: true }), ...(gate1Status ? { gate1Status } : {}) },
+        { pool: h.runWriterPool, repoVisibility: async () => "private" as const, authorTrust: BOT_TRUST, http: w.privLocal.http, localReviewOptIn: on, publicPlane: { open: async () => pub.http, read: readPublicPullRequest(h.runWriterPool) }, mergeDelegate: async (a) => (calls.push(a), { delegated: true }), ...(gate1Status ? { gate1Status } : {}) },
         { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.priv.prNumber, ...(go ? { goPhase: { attestation: attest() } } : {}) },
       );
     const a17 = () => pub.calls.filter((c) => c.label === "A17").length;
@@ -1126,7 +1129,7 @@ describe("D#6 CLOUD-POSTS-FX-GATE1 PR 1c: a cloud item counts fx-gate1 only when
     });
     const calls: DelegateCall[] = [];
     const out = await runMergeGateForItem(
-      { pool: h.runWriterPool, authorTrust: BOT_TRUST, http: t.w.privLocal.http, localReviewOptIn: on, publicPlane: { open: async () => pub.http, read: readPublicPullRequest(h.runWriterPool) }, mergeDelegate: async (a) => (calls.push(a), { delegated: true }), gate1Status: LISTED },
+      { pool: h.runWriterPool, repoVisibility: async () => "private" as const, authorTrust: BOT_TRUST, http: t.w.privLocal.http, localReviewOptIn: on, publicPlane: { open: async () => pub.http, read: readPublicPullRequest(h.runWriterPool) }, mergeDelegate: async (a) => (calls.push(a), { delegated: true }), gate1Status: LISTED },
       { accountId: t.w.accountId, workItemId: t.w.workItemId, prNumber: t.w.priv.prNumber, goPhase: { attestation: attest() } },
     );
     expect(reasons(out)).toContain("ci_not_green");
@@ -1138,7 +1141,7 @@ describe("D#6 CLOUD-POSTS-FX-GATE1 PR 1c: a cloud item counts fx-gate1 only when
     const t = await posted(OURS);
     const pub = fakeGitHubLocal(t.w.pub, { exclude: ["A10"], gate1: gate1World({ creators: {} }), gate1Fence: "status" });
     const out = await runMergeGateForItem(
-      { pool: h.runWriterPool, authorTrust: BOT_TRUST, http: t.w.privLocal.http, localReviewOptIn: on, publicPlane: { open: async () => pub.http, read: readPublicPullRequest(h.runWriterPool) }, mergeDelegate: async () => ({ delegated: true }), gate1Status: LISTED },
+      { pool: h.runWriterPool, repoVisibility: async () => "private" as const, authorTrust: BOT_TRUST, http: t.w.privLocal.http, localReviewOptIn: on, publicPlane: { open: async () => pub.http, read: readPublicPullRequest(h.runWriterPool) }, mergeDelegate: async () => ({ delegated: true }), gate1Status: LISTED },
       { accountId: t.w.accountId, workItemId: t.w.workItemId, prNumber: t.w.priv.prNumber, goPhase: { attestation: attest() } },
     );
     expect(reasons(out)).toEqual(expect.arrayContaining(["ci_not_green", "gate1_status_foreign"]));
@@ -1205,7 +1208,7 @@ describe("D#6 CLOUD-POSTS-FX-GATE1 PR 1c: a cloud item counts fx-gate1 only when
       const calls: DelegateCall[] = [];
       const run = (gate1Status?: Gate1StatusCheck) =>
         runMergeGateForItem(
-          { pool: h.runWriterPool, authorTrust: BOT_TRUST, http: w.privLocal.http, localReviewOptIn: on, publicPlane: { open: async () => pub.http, read: readPublicPullRequest(h.runWriterPool) }, mergeDelegate: async (a) => (calls.push(a), { delegated: true }), ...(gate1Status ? { gate1Status } : {}) },
+          { pool: h.runWriterPool, repoVisibility: async () => "private" as const, authorTrust: BOT_TRUST, http: w.privLocal.http, localReviewOptIn: on, publicPlane: { open: async () => pub.http, read: readPublicPullRequest(h.runWriterPool) }, mergeDelegate: async (a) => (calls.push(a), { delegated: true }), ...(gate1Status ? { gate1Status } : {}) },
           { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.priv.prNumber },
         );
       const labels = () => new Set(pub.calls.map((c) => c.label));
@@ -1279,6 +1282,7 @@ describe("a paired runner_local item blocked for an overlap: round, delta review
       runMergeGateForItem(
         {
           pool: h.runWriterPool,
+          repoVisibility: async () => "private" as const,
           authorTrust: BOT_TRUST,
           http: w.privLocal.http,
           localReviewOptIn: on,

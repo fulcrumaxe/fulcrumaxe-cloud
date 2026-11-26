@@ -70,6 +70,9 @@ describe("JobIssuer [pg]", () => {
     };
   }
 
+  /** The start's own fact (D#845 ON-10e2b, Ruling 106.1): the `run.input` row a survey start writes, with or without the person's consent in its meta. */
+  const startFact = (w: { accountId: string }, run: ExecutionRun, meta: Record<string, unknown> | null) =>
+    db.admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, (SELECT COALESCE(max(seq), 0) + 1 FROM run_events WHERE run_id = $2), 'run.input', $3::jsonb)", [w.accountId, run.id, JSON.stringify({ prompt_sha256: "0".repeat(64), ...(meta === null ? {} : { meta }) })]);
   const stored = async (id: string) => (await db.admin.query(`SELECT job_signed FROM agent_runs WHERE id = $1`, [id])).rows[0].job_signed;
   const codeOf = async (p: Promise<unknown>) => p.then(() => "returned", (e) => (e instanceof JobIssueError ? e.code : `other:${String(e)}`));
 
@@ -708,6 +711,7 @@ describe("JobIssuer [pg]", () => {
       for (const role of RUNNER_ELIGIBLE_ROLES) {
         const head = freshHead();
         const run = await runnerRun(w, role, null, role === "project-surveyor" ? { headSha: head, prompt: `Survey commit ${head}.\n` } : {});
+        if (role === "project-surveyor") await startFact(w, run, { survey_runner_id: randomUUID(), public_survey_consent: true });
         const code = await codeOf(issuer({ visibility: "public" }).issuer.issue({ run }));
         if (role === "project-surveyor") {
           expect(code, role).toBe("returned");
@@ -720,6 +724,52 @@ describe("JobIssuer [pg]", () => {
           expect(await stored(run.id), role).toBeNull();
         }
       }
+    });
+
+    // D#845 ON-10e2b (Ruling 106.1): the consent rides in the run's own start fact; a repo that turned public after the start's read has none, so the issuer asks again instead of signing.
+    describe("a public survey needs the consent the start recorded", () => {
+      const surveyRun = async (w: Parameters<typeof runnerRun>[0]) => {
+        const head = freshHead();
+        return runnerRun(w, "project-surveyor", null, { headSha: head, prompt: `Survey commit ${head}.\n` });
+      };
+      it.each([
+        ["no start fact at all", null],
+        ["a start fact with no consent (the private-at-start run)", { survey_runner_id: randomUUID() }],
+        ["consent false", { public_survey_consent: false }],
+        ["consent as text", { public_survey_consent: "yes" }],
+        ["consent in the wrong place", { consent: true }],
+      ] as Array<[string, Record<string, unknown> | null]>)("%s: public_survey_consent_required, nothing recorded", async (_name, meta) => {
+        const w = await world();
+        const run = await surveyRun(w);
+        if (meta !== null) await startFact(w, run, meta);
+        expect(await codeOf(issuer({ visibility: "public" }).issuer.issue({ run }))).toBe("public_survey_consent_required");
+        expect(await stored(run.id)).toBeNull();
+      });
+
+      it("the consent is the run's own: another run's consent, even in the same account, does not count; with its own it is issued", async () => {
+        const w = await world();
+        const other = await surveyRun(w);
+        await startFact(w, other, { public_survey_consent: true });
+        const run = await surveyRun(w);
+        expect(await codeOf(issuer({ visibility: "public" }).issuer.issue({ run }))).toBe("public_survey_consent_required");
+        await startFact(w, run, { public_survey_consent: true });
+        expect(await codeOf(issuer({ visibility: "public" }).issuer.issue({ run }))).toBe("returned");
+      });
+
+      it("a private repo ignores the flag; an unreadable one is still repo_visibility_unknown, never the consent code", async () => {
+        const w = await world();
+        const run = await surveyRun(w);
+        expect(await codeOf(issuer({ visibility: "private" }).issuer.issue({ run }))).toBe("returned");
+        const again = await surveyRun(w);
+        expect(await codeOf(issuer({ visibility: "unknown" }).issuer.issue({ run: again }))).toBe("repo_visibility_unknown");
+      });
+
+      it("the flip: the start read a private repo (no consent recorded), the repo turned public before the issue: refused, then issued once the person's consent is recorded on a new start", async () => {
+        const w = await world();
+        const run = await surveyRun(w);
+        await startFact(w, run, { survey_runner_id: randomUUID() });
+        expect(await codeOf(issuer({ visibility: "public" }).issuer.issue({ run }))).toBe("public_survey_consent_required");
+      });
     });
 
     it("every role against unknown: repo_visibility_unknown, nothing recorded", async () => {
