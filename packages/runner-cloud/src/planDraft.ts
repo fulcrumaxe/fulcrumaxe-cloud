@@ -37,7 +37,9 @@ const asOwner = async (client: PoolClient): Promise<void> => {
   if (role !== "owner" && role !== "admin") throw refuse(403, "forbidden", "only an owner or admin can change the plan");
 };
 const reviewMode = async (deps: RunnerCloudDeps, p: SessionPrincipal, repoId: string): Promise<"public" | "standard"> => ((await readRepoVisibility(deps, p.accountId, repoId)) === "private" ? "standard" : "public");
-const shown = (d: Draft) => ({ id: d.id, version: d.version, source: d.source, status: d.status, prd_md: d.prd_md, roadmap: d.roadmap, created_at: d.created_at });
+/** Who approved a draft and when: the person's display name (never an id or an email), or null on a draft nobody approved. */
+interface Approval { by: string; at: Date }
+const shown = (d: Draft, approval: Approval | null = null) => ({ id: d.id, version: d.version, source: d.source, status: d.status, prd_md: d.prd_md, roadmap: d.roadmap, created_at: d.created_at, approved_by: approval?.by ?? null, approved_at: approval?.at ?? null });
 const object = (body: unknown): Record<string, unknown> => { if (typeof body !== "object" || body === null || Array.isArray(body)) throw bad(); return body as Record<string, unknown>; };
 
 async function loadSetup(client: PoolClient, accountId: string, setupId: string, lock: boolean): Promise<Setup> {
@@ -53,6 +55,17 @@ async function loadSetup(client: PoolClient, accountId: string, setupId: string,
 /** The setup's newest draft that was not thrown away (an open one, or the approved one). */
 async function latestDraft(client: PoolClient, accountId: string, setup: Setup): Promise<Draft | null> {
   return (await client.query<Draft>(`SELECT ${DRAFT_COLUMNS} FROM project_drafts WHERE account_id = $1 AND repo_id = $2 AND setup_id = $3 AND status <> 'discarded' ORDER BY version DESC LIMIT 1`, [accountId, setup.repo_id, setup.id])).rows[0] ?? null;
+}
+
+/** The approval on an approved draft, in the session's account. A person who has no readable name is "A team member". */
+async function readApproval(client: PoolClient, accountId: string, draft: Draft): Promise<Approval | null> {
+  if (draft.status !== "approved") return null;
+  const { rows } = await client.query<Approval>(
+    `SELECT COALESCE(NULLIF(u.name, ''), NULLIF(u.github_login, ''), 'A team member') AS by, d.approved_at AS at
+       FROM project_drafts d LEFT JOIN users u ON u.id = d.approved_by WHERE d.account_id = $1 AND d.id = $2 AND d.approved_at IS NOT NULL`,
+    [accountId, draft.id],
+  );
+  return rows[0] ?? null;
 }
 
 /** An open draft is what a person edits: refused when the plan is no longer at the plan step, or already approved. */
@@ -72,13 +85,14 @@ const toPlan = (client: PoolClient, accountId: string, setupId: string) =>
 
 /** GET /api/v1/setups/:id/draft. */
 export async function readDraft(deps: RunnerCloudDeps, p: SessionPrincipal, setupId: string): Promise<RunnerHttpResponse> {
-  const { setup, draft } = await tenant(deps, p, async (client) => {
+  const { setup, draft, approval } = await tenant(deps, p, async (client) => {
     await requireMemberRole(client);
     const s = await loadSetup(client, p.accountId, setupId, false);
-    return { setup: s, draft: await latestDraft(client, p.accountId, s) };
+    const d = await latestDraft(client, p.accountId, s);
+    return { setup: s, draft: d, approval: d ? await readApproval(client, p.accountId, d) : null };
   });
   if (!draft) throw refuse(404, "not_found", "no draft for this setup");
-  return ok({ setup: { phase: setup.phase, state: setup.state }, draft: shown(draft), review_mode: await reviewMode(deps, p, setup.repo_id) });
+  return ok({ setup: { phase: setup.phase, state: setup.state }, draft: shown(draft, approval), review_mode: await reviewMode(deps, p, setup.repo_id) });
 }
 
 /** PUT /api/v1/setups/:id/draft {version, prd_md, roadmap}. */
@@ -193,7 +207,16 @@ async function discardOrBlank(deps: RunnerCloudDeps, p: SessionPrincipal, setupI
   });
 }
 
-/** POST .../draft/restart ("Start over"): the open draft is thrown away and a new survey starts. A public repo, or one whose visibility cannot be read, is refused before anything is written; a start that fails after the move puts the draft and the step back. */
+/** The draft Start over works from: the setup's newest draft, open or already discarded (a person who threw the plan away can still start over). An approved plan is refused, and so is a setup not at the plan step. */
+async function restartableDraft(client: PoolClient, accountId: string, setup: Setup): Promise<Draft> {
+  if (setup.phase !== "plan") throw refuse(409, "setup_phase", "the setup is not at the plan step");
+  const draft = (await client.query<Draft>(`SELECT ${DRAFT_COLUMNS} FROM project_drafts WHERE account_id = $1 AND repo_id = $2 AND setup_id = $3 ORDER BY version DESC LIMIT 1`, [accountId, setup.repo_id, setup.id])).rows[0];
+  if (!draft) throw refuse(404, "not_found", "no draft for this setup");
+  if (draft.status === "approved") throw refuse(409, "setup_phase", "the plan was already approved");
+  return draft;
+}
+
+/** POST .../draft/restart ("Start over"): the open draft (if it was not thrown away already) is thrown away and a new survey starts. A public repo, or one whose visibility cannot be read, is refused before anything is written; a start that fails after the move puts the draft and the step back. */
 async function restart(deps: RunnerCloudDeps, p: SessionPrincipal, setupId: string): Promise<RunnerHttpResponse> {
   const first = await tenant(deps, p, async (client) => (await asOwner(client), loadSetup(client, p.accountId, setupId, false)));
   const block = blockFor(await readRepoVisibility(deps, p.accountId, first.repo_id));
@@ -201,17 +224,18 @@ async function restart(deps: RunnerCloudDeps, p: SessionPrincipal, setupId: stri
   const old = await tenant(deps, p, async (client) => {
     await asOwner(client);
     const setup = await loadSetup(client, p.accountId, setupId, true);
-    const draft = await openDraft(client, p.accountId, setup);
-    await discard(client, p.accountId, draft.id);
+    const draft = await restartableDraft(client, p.accountId, setup);
+    if (draft.status === "draft") await discard(client, p.accountId, draft.id);
     await client.query("UPDATE project_setups SET phase = 'survey', state = 'ok', updated_at = now() WHERE account_id = $1 AND id = $2", [p.accountId, setup.id]);
     await changed(client, p.accountId, setup);
-    return draft.id;
+    // Only a draft this call threw away is put back when the start fails; one that was already discarded stays so.
+    return draft.status === "draft" ? draft.id : null;
   });
   try {
     return ok(await startSurvey(deps, p, setupId));
   } catch (error) {
     await tenant(deps, p, async (client) => {
-      await client.query("UPDATE project_drafts SET status = 'draft', final_at = NULL WHERE account_id = $1 AND id = $2 AND status = 'discarded'", [p.accountId, old]);
+      if (old !== null) await client.query("UPDATE project_drafts SET status = 'draft', final_at = NULL WHERE account_id = $1 AND id = $2 AND status = 'discarded'", [p.accountId, old]);
       await toPlan(client, p.accountId, setupId);
     });
     throw error;

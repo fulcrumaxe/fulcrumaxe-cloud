@@ -99,6 +99,37 @@ describe("the plan review's re-reads and ticks", () => {
   });
 });
 
+describe("the approved view and Start over after a discard", () => {
+  it("an approved plan says who approved it and when; a read without them keeps the plain line", async () => {
+    const at = "2026-11-25T14:05:00.000Z";
+    await mounted(draft({ status: "approved", approved_by: "Ada Admin", approved_at: at }));
+    const hhmm = new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    expect(texts(byId(host, "approved")[0])).toEqual(["Approved " + hhmm + " by Ada Admin"]);
+    host = new FakeEl("div");
+    await mounted(draft({ status: "approved" }));
+    expect(texts(byId(host, "approved")[0])).toEqual(["Approved. This plan is read-only."]);
+  });
+
+  it("after a discard (no draft, setup at the plan step) an owner sees Write my own and Start over", async () => {
+    script = (method) => { if (method === "GET") throw failure(404, "not_found"); return {}; };
+    const m = mountPlanReview(host, env({ ctx: () => ({ setup: { id: SETUP, phase: "plan", state: "ok" } }) }));
+    await settle();
+    expect(byId(host, "blank")).toHaveLength(1);
+    expect(byId(host, "restart")).toHaveLength(1);
+    m.destroy();
+  });
+
+  it("no Start over without a plan-step setup, and none for a member", async () => {
+    script = (method) => { if (method === "GET") throw failure(404, "not_found"); return {}; };
+    for (const e of [env({ ctx: () => ({}) }), env({ ctx: () => ({ setup: { id: SETUP, phase: "survey", state: "ok" } }) }), env({ isAdmin: () => false, ctx: () => ({ setup: { id: SETUP, phase: "plan", state: "ok" } }) })]) {
+      host = new FakeEl("div");
+      mountPlanReview(host, e);
+      await settle();
+      expect(byId(host, "restart")).toHaveLength(0);
+    }
+  });
+});
+
 describe("what Approve sends", () => {
   it("a public draft sends every row key and the PRD tick; a standard draft sends only the version", async () => {
     const m = await mounted(draft());
