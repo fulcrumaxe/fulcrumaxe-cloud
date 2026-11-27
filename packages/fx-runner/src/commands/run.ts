@@ -36,6 +36,7 @@ import { createLiveMicrovm, type LiveMicrovm, type LiveMicrovmParts } from "../v
 import { createSetupVmParts, createVmClaimGuard, createVmJobDeps, runEventHooks, type VmRunBlock } from "../daemon/vmJobDeps.js";
 import { createEngineUpdateHandler } from "../setup/engineUpdate.js";
 import { createTwinSeedHandler } from "../setup/twinSeed.js";
+import { createTwinPublishHandler } from "../setup/twinPublish.js";
 import { createProjectSetupHandler, setupHandlerFor } from "../setup/projectSetup.js";
 import { createHostSetupVm, type HostGuestDeps } from "../setup/hostGuest.js";
 import { createEngineLeaseGuard, createEngineSessionHandlers, createSessionLock, lockSessionHandlers, sessionStopperOf } from "../engineSession/lifecycle.js";
@@ -850,11 +851,13 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       // The runner's own stop and the dispatcher's three handlers share one lock per session name, so the stop never overlaps a cloud stop, start or delete of the same session.
       // D#845 ON-27b: `twin_seed` needs no guest: it reads a public repository anonymously and pushes it to the empty twin with the job's own one-use credential. It is offered only to a runner that lists `twin_v1`, which no build does yet.
       const twinSeedHandler = createTwinSeedHandler({ git: setupParts.git, client, revoke: (token) => setupRevoker.revokeToken(token), scratchRoot: workspaceRoot });
+      // D#845 ON-27c2: `twin_publish` runs on the host too (no guest, no model): it cuts the twin's change from this machine's own mirror and sends it to the public repository with the job's own one-use credential. Same offer rule as the seed.
+      const twinPublishHandler = createTwinPublishHandler({ mirrors, client, github: setupRevoker, transport: createGitTransport(), workRoot: path.join(stateDir, "twin-publish") });
       const sessionLock = createSessionLock();
       const leaseOn = sessionHandlers !== undefined && inventoryReporter !== undefined;
       leaseGuard.bind(leaseOn ? sessionStopperOf(sessionHandlers.engine_session_stop, sessionLock) : undefined);
       engineLeaseArmed = leaseOn;
-      const machineJobs = (machineJobDispatcher = createMachineJobDispatcher({ client, keyring, runnerId: registration.runner_id, now: ctx.now, handlers: { ...(setupHandler === undefined ? {} : { project_setup: setupHandler }), ...(updateHandler === undefined ? {} : { engine_update: updateHandler }), twin_seed: twinSeedHandler, ...(sessionHandlers === undefined ? {} : lockSessionHandlers(sessionHandlers, sessionLock)) },sandboxEngine: () => effectiveEngine(engine, loadSettings(stateDir).sandboxEngine), signal: stopped.signal, log: (event) => ctx.out(`fx-runner: machine job ${event.event}`) }));
+      const machineJobs = (machineJobDispatcher = createMachineJobDispatcher({ client, keyring, runnerId: registration.runner_id, now: ctx.now, handlers: { ...(setupHandler === undefined ? {} : { project_setup: setupHandler }), ...(updateHandler === undefined ? {} : { engine_update: updateHandler }), twin_seed: twinSeedHandler, twin_publish: twinPublishHandler, ...(sessionHandlers === undefined ? {} : lockSessionHandlers(sessionHandlers, sessionLock)) },sandboxEngine: () => effectiveEngine(engine, loadSettings(stateDir).sandboxEngine), signal: stopped.signal, log: (event) => ctx.out(`fx-runner: machine job ${event.event}`) }));
       // D#842 EB-3c: the engine bridge runs beside the claim loop, never under it: it is started here, nothing below awaits it, and it ends only when `finally` stops it.
       if (host.engineBridge !== undefined) {
         const cloud = { origin: registration.cloud_origin, key, now: ctx.now, fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass) };

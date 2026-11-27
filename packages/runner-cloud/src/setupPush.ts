@@ -22,6 +22,8 @@ const REFUSAL: Record<string, [number, string, string]> = {
   superseded: [409, "job_superseded", "a later attempt replaced this job"],
   not_active: [409, "job_not_active", "this job is not running"],
   not_ready: [409, "push_not_started", "the push step has not begun"],
+  // D#845 ON-27c2: a twin publish whose private set or base is no longer the signed one is told so, and nothing is minted.
+  set_changed: [409, "pairing_changed", "the twin's private paths changed since this job was issued"],
   already_issued: [409, "already_issued", "the credential of this attempt was already handed out"],
 };
 
@@ -39,7 +41,7 @@ export async function setupPushTokenRun(deps: RunnerCloudDeps, req: RunnerHttpRe
       const row = rows[0];
       if (row?.o_result !== "ok" || !row.o_repo_id) return { ok: false, result: row?.o_result ?? "not_found" } as const;
       const repo = (await client.query<{ gh_owner: string | null; gh_name: string | null }>("SELECT gh_owner, gh_name FROM repos WHERE account_id = $1 AND id = $2", [runner.accountId, row.o_repo_id])).rows[0];
-      return { ok: true, id: row.o_repo_id, owner: repo?.gh_owner ?? null, name: repo?.gh_name ?? null } as const;
+      return { ok: true, id: row.o_repo_id, owner: repo?.gh_owner ?? null, name: repo?.gh_name ?? null, publicTarget: definers.publicTarget } as const;
     }),
   );
   if (!granted.ok) {
@@ -47,21 +49,25 @@ export async function setupPushTokenRun(deps: RunnerCloudDeps, req: RunnerHttpRe
     throw new RunnerHttpError(status, code, message);
   }
   if (granted.owner === null || granted.name === null) throw new RunnerHttpError(409, "repo_unnamed", "the repository has no name on record");
+  // D#845 ON-27c2: a twin publish pushes to the PUBLIC repository (the grant answered it from the twin's own row): the hosted public-push token, contents and pull_requests write on that one repository (gh-policy's public-side rule).
+  const hosted = granted.publicTarget ? (deps.planePush ?? null) : null;
+  if (granted.publicTarget && hosted === null) throw new RunnerHttpError(503, "not_configured", "the runner API has no access for public pushes configured");
+  const revoke = async (token: string): Promise<void> => void (hosted === null ? await port.revoke(token) : await hosted.revokeToken(token));
   let minted: { token: string; expiresAt: Date };
   try {
-    minted = await port.mint({ id: granted.id, owner: granted.owner, name: granted.name });
+    minted = hosted === null ? await port.mint({ id: granted.id, owner: granted.owner, name: granted.name }) : await hosted.mintToken(`${granted.owner}/${granted.name}`, runner.accountId);
   } catch (error) {
     // fx-swallow-ok: mapped to a fixed status below; nothing of the error (it may name an installation) is sent
     const code = typeof error === "object" && error !== null ? (error as { code?: unknown }).code : undefined;
     const reason = typeof error === "object" && error !== null ? (error as { reason?: unknown }).reason : undefined;
-    if (code === "app_not_installed") throw new RunnerHttpError(409, "app_not_installed", "the GitHub App is not installed on the repository");
-    if (reason === "token_scope_mismatch") throw new RunnerHttpError(502, "token_scope_mismatch", "GitHub did not narrow the token as asked");
+    if (code === "app_not_installed" || code === "code_repo_installation_not_owned") throw new RunnerHttpError(409, "app_not_installed", "the GitHub App is not installed on the repository");
+    if (reason === "token_scope_mismatch" || code === "token_scope_mismatch") throw new RunnerHttpError(502, "token_scope_mismatch", "GitHub did not narrow the token as asked");
     throw new RunnerHttpError(503, "github_unavailable", "GitHub could not be asked");
   }
   try {
     return { status: 200, body: SetupPushTokenReply.parse({ token: minted.token, expires_at: minted.expiresAt.toISOString() }), headers: NO_STORE };
   } catch (error) {
-    await port.revoke(minted.token);
+    await revoke(minted.token);
     throw error;
   }
 }

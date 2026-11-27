@@ -1,5 +1,6 @@
 import type { Pool, PoolClient } from 'pg';
 import { uncoveredRuleFiles } from '@fulcrumaxe/runner-protocol/repoPairing';
+import { TWIN_FIXED_PRIVATE } from '@fulcrumaxe/runner-protocol';
 import { InvalidRoleSettingsInputError } from '../role-settings/errors.js';
 import { assertActiveMembership } from '../tenancy/scopedAccess.js';
 import { requireOwnerOrAdmin, type MembershipRole } from '../tenancy/authorize.js';
@@ -16,7 +17,7 @@ import type { RepoTwinCtx } from './twins.js';
  */
 
 /** Always private on a twin, before anything the person or the install adds (the Spec's fixed roots and secret defaults). */
-export const TWIN_FIXED_PRIVATE: readonly string[] = ['.autonomous-team/**', '.claude/**', 'CLAUDE.md', 'CLAUDE.project.md', 'docs/PRD.md', 'epics/**', '.env', '.env.*', '**/*.pem', '**/*.key'];
+export { TWIN_FIXED_PRIVATE };
 export const MAX_TWIN_BINARY_GLOBS = 100;
 export const MAX_TWIN_INSTALL_PATHS = 5000;
 

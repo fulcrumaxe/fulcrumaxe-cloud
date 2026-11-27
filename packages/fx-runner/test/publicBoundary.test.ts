@@ -61,7 +61,7 @@ describe("boundary: what the source may import, and every workspace import is de
   // run-end hook. Only this exact subpath; the root never exports them (runner-protocol's root-closure test), and the files below are the only importers.
   const PLANE_PUSH_SUBPATH = "@fulcrumaxe/runner-protocol/planePush";
   // D#694 B7-1: planePushGithub.ts imports the two queue documents it sends (runner-protocol keeps the strings; a test in @fx/github holds them equal to the pinned originals).
-  const PLANE_PUSH_IMPORTERS = ["src/commands/run.ts", "src/daemon/conflictAttest.ts", "src/daemon/conflictFacts.ts", "src/daemon/orderedFacts.ts", "src/daemon/planeMerge.ts", "src/daemon/planePush.ts", "src/daemon/planePushGithub.ts"];
+  const PLANE_PUSH_IMPORTERS = ["src/commands/run.ts", "src/daemon/conflictAttest.ts", "src/daemon/conflictFacts.ts", "src/daemon/orderedFacts.ts", "src/daemon/planeMerge.ts", "src/daemon/planePush.ts", "src/daemon/planePushGithub.ts", "src/setup/twinPublish.ts"];
 
   // The TUF client, the build trust and the release selection live in the neutral @fulcrumaxe/release-verify (D#845 ON-4a: the web app must not import this package, so the shared verifier cannot live here).
   const RELEASE_VERIFY = /^@fulcrumaxe\/release-verify(?:\/(?:tuf|pinnedFetcher|buildConfig|trustedRoot|release))?$/;

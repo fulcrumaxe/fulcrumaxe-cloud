@@ -7,6 +7,9 @@ import { memoryEditDeps } from "@fx/api/src/routes/memory.js";
 import { publicChangeDeps, queueActionDeps } from "@fx/api/src/routes/work-item-actions.js";
 import { setupRequestDeps } from "@fx/api/src/routes/setupRequests.js";
 import { repoPairingDeps } from "@fx/api/src/routes/repoPairing.js";
+import { twinRouteDeps } from "@fx/api/src/routes/repoTwins.js";
+import { closeTwinPublishPr } from "@fx/runner-cloud";
+import { createLivePlanePushPort } from "../../../../lib/github/planePushHosted";
 import { mergeQueueModeDeps } from "@fx/api/src/routes/mergeQueueMode.js";
 import { createMergeQueueModeReader } from "../../../../lib/mergeQueueMode";
 import { decisionAskDeps } from "@fx/api/src/routes/decisionAsks.js";
@@ -82,6 +85,8 @@ engineSettingsDeps.getVisibility = () => (accountId, repoId) => (engineVisibilit
 engineSeen.reader = () => runnerSeenFromCache();
 // D#598 PAIR-PICKER-API: the pairing routes ask GitHub (public, default branch, App installed) through this reader.
 repoPairingDeps.getInspector = () => getPairingInspector();
+// D#845 ON-27c2: removing a private twin closes the publish pull request it still has open on the public repository (a fixed comment; the live public-push port checks the branch is ours).
+twinRouteDeps.closePublishPr = ({ accountId, userId, twinId }) => closeTwinPublishPr({ appUserPool: appUserPool(), planePush: createLivePlanePushPort() }, { accountId, userId }, twinId);
 // D#694 B7-2: the Repos screen's merge queue line, read through the hosted `read` client (one reader per process, so its five-minute cache is shared).
 let mergeQueueReader: ReturnType<typeof createMergeQueueModeReader> | undefined;
 mergeQueueModeDeps.getReader = () => (mergeQueueReader ??= createMergeQueueModeReader(appUserPool()));

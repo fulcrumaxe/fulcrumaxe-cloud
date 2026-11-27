@@ -236,6 +236,8 @@ export interface PlanePushHostedPort {
   mintToken(codeRepo: string, accountId: string): Promise<{ token: string; expiresAt: Date }>;
   /** True only if the branch head is `headSha`, its single parent is `tipSha`, and `tipSha` is in public main's history. */
   verifyPushed(input: { accountId: string; codeRepo: string; branch: string; headSha: string; tipSha: string }): Promise<boolean>;
+  /** D#845 ON-27c2: the one open pull request for exactly `headSha` on `branch` in `codeRepo` itself against `main`, or null. Absent from an older port: a twin publish cannot be checked, and stays where it is. */
+  findOpenPullRequest?(input: { accountId: string; codeRepo: string; branch: string; headSha: string }): Promise<{ number: number; url: string } | null>;
   /** A branch head on the public repository (a token minted and revoked per read), or null when the branch does not exist. Absent from an older port: a conflict round then cannot be judged and its republish is refused. */
   branchHead?(input: { accountId: string; codeRepo: string; branch: string }): Promise<string | null>;
   /** The pull request's address if it is OPEN with head ref `branch` in `codeRepo` itself, base `main` and an address in `codeRepo`; otherwise null. */
