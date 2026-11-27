@@ -221,7 +221,7 @@ describe("the refusals", () => {
 });
 
 describe("what the build advertises", () => {
-  it("twin_v1 is not in the capabilities a runner build lists, so no runner is offered a twin job yet", () => {
-    expect(RUNNER_BUILD_CAPABILITIES as string[]).not.toContain("twin_v1");
+  it("twin_v1 is the last capability a runner build lists (D#845 ON-27d4c), and run.ts registers all three twin handlers", () => {
+    expect((RUNNER_BUILD_CAPABILITIES as string[]).at(-1)).toBe("twin_v1");
   });
 });

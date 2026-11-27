@@ -2073,6 +2073,8 @@ export interface Operations {
         publish_pr: (number) | (null);
         sync_pr: (number) | (null);
         failure_code: string | null;
+        merged_count: (number) | (null);
+        new_changes_count: (number) | (null);
         created_at: string;
         updated_at: string;
       }) | (null);
@@ -2108,6 +2110,8 @@ export interface Operations {
       publish_pr: (number) | (null);
       sync_pr: (number) | (null);
       failure_code: string | null;
+      merged_count: (number) | (null);
+      new_changes_count: (number) | (null);
       created_at: string;
       updated_at: string;
     };
@@ -2130,8 +2134,48 @@ export interface Operations {
       publish_pr: (number) | (null);
       sync_pr: (number) | (null);
       failure_code: string | null;
+      merged_count: (number) | (null);
+      new_changes_count: (number) | (null);
       created_at: string;
       updated_at: string;
+    };
+  };
+  checkRepoTwinAgain: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      id: string;
+      public_repo_id: string;
+      private_repo_id: string | null;
+      private_name: string;
+      state: "creating" | "not_connected" | "seeding" | "ready" | "paused" | "conflict" | "refused" | "failed" | "removed";
+      overlay_globs: Array<string>;
+      published_private_sha: string | null;
+      synced_public_sha: string | null;
+      publish_pr: (number) | (null);
+      sync_pr: (number) | (null);
+      failure_code: string | null;
+      merged_count: (number) | (null);
+      new_changes_count: (number) | (null);
+      created_at: string;
+      updated_at: string;
+    };
+  };
+  mergeRepoTwinPr: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: {
+      pr: "publish";
+    };
+    response: {
+      merged: boolean;
+      already: boolean;
+      pr: number;
     };
   };
   removeRepoTwin: {
@@ -2152,6 +2196,8 @@ export interface Operations {
       publish_pr: (number) | (null);
       sync_pr: (number) | (null);
       failure_code: string | null;
+      merged_count: (number) | (null);
+      new_changes_count: (number) | (null);
       created_at: string;
       updated_at: string;
     };
@@ -7444,6 +7490,28 @@ export const operations = {
     pathParams: ["id"],
     queryParams: [],
     hasBody: false,
+  },
+  checkRepoTwinAgain: {
+    method: "POST",
+    path: "/api/v1/twins/{id}/check",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  mergeRepoTwinPr: {
+    method: "POST",
+    path: "/api/v1/twins/{id}/merge",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: true,
   },
   removeRepoTwin: {
     method: "DELETE",

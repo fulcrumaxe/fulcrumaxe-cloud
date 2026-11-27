@@ -865,7 +865,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       // D#845 ON-13c3: the same stop path a signed stop job takes, for the guard's own stop of a session whose lease ran out.
       // Only a machine that reports its sandbox inventory (the microVM tier) can ever be renewed, so only it advertises `engine_lease_v1` and arms the guard; a standard-tier machine says nothing and is never self-stopped.
       // The runner's own stop and the dispatcher's three handlers share one lock per session name, so the stop never overlaps a cloud stop, start or delete of the same session.
-      // D#845 ON-27b: `twin_seed` needs no guest: it reads a public repository anonymously and pushes it to the empty twin with the job's own one-use credential. It is offered only to a runner that lists `twin_v1`, which no build does yet.
+      // D#845 ON-27b: `twin_seed` needs no guest: it reads a public repository anonymously and pushes it to the empty twin with the job's own one-use credential. It is offered only to a runner that lists `twin_v1`, which every build now lists (last), because all three twin handlers below are registered unconditionally.
       const twinSeedHandler = createTwinSeedHandler({ git: setupParts.git, client, revoke: (token) => setupRevoker.revokeToken(token), scratchRoot: workspaceRoot });
       // D#845 ON-27c2: `twin_publish` runs on the host too (no guest, no model): it cuts the twin's change from this machine's own mirror and sends it to the public repository with the job's own one-use credential. Same offer rule as the seed.
       const twinPublishHandler = createTwinPublishHandler({ mirrors, client, github: setupRevoker, transport: createGitTransport(), workRoot: path.join(stateDir, "twin-publish") });

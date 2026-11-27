@@ -5,7 +5,7 @@ import { generateRunnerKey } from "../../src/keys.js";
 import { RUNNER_BUILD_CAPABILITIES, RUNNER_PROTOCOL_VERSION, RUNNER_VERSION } from "../../src/version.js";
 // D#845 ON-10e1: `survey_public_v1` is the newest capability of all and is dropped before everything on the ladder (pinned in surveyPublic.test.ts); these tests pin the ladder behind it.
 // D#845 ON-8f2c: `project_setup_v1` is newer still and is dropped first of all (pinned in daemon/projectSetupHello.test.ts), so the ladders below start behind both.
-const BUILD_BEHIND_PUBLIC = RUNNER_BUILD_CAPABILITIES.filter((c) => c !== "survey_public_v1" && c !== "project_setup_v1");
+const BUILD_BEHIND_PUBLIC = RUNNER_BUILD_CAPABILITIES.filter((c) => c !== "survey_public_v1" && c !== "project_setup_v1" && c !== "twin_v1");
 
 /** D#845 ON-10c: `survey_v1` is the last capability the build turns on, and its step on the hello's drop ladder is the first of the newer ones, ahead of `machine_login_v1` and `watch_mode_v1`, so a cloud that lacks only it costs those two nothing. */
 const base: Hello = { protocol_version: RUNNER_PROTOCOL_VERSION, binary_version: RUNNER_VERSION, model_auth_present: false, isolation: "host_sandbox" };

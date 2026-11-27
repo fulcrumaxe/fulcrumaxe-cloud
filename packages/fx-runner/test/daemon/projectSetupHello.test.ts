@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { HelloMessage, PROJECT_SETUP_CAPABILITY, SURVEY_PUBLIC_CAPABILITY, type HelloMessage as Hello } from "@fulcrumaxe/runner-protocol";
+import { HelloMessage, PROJECT_SETUP_CAPABILITY, SURVEY_PUBLIC_CAPABILITY, TWIN_CAPABILITY, type HelloMessage as Hello } from "@fulcrumaxe/runner-protocol";
 import { createRunnerClient } from "../../src/daemon/client.js";
 import { generateRunnerKey } from "../../src/keys.js";
 import { RUNNER_BUILD_CAPABILITIES, RUNNER_PROTOCOL_VERSION, RUNNER_VERSION } from "../../src/version.js";
@@ -19,20 +19,21 @@ function cloud(unknown: string[]) {
 }
 
 describe("project_setup_v1 on the build and on the hello", () => {
-  it("is on the build, last of all, and the hello it makes is a valid one at this protocol version", () => {
+  it("is on the build, last but one (`twin_v1`, D#845 ON-27d4c, is after it), and the hello it makes is a valid one at this protocol version", () => {
     expect(RUNNER_BUILD_CAPABILITIES).toContain(PROJECT_SETUP_CAPABILITY);
-    expect(RUNNER_BUILD_CAPABILITIES.at(-1)).toBe(PROJECT_SETUP_CAPABILITY);
+    expect(RUNNER_BUILD_CAPABILITIES.at(-2)).toBe(PROJECT_SETUP_CAPABILITY);
     expect(HelloMessage.safeParse({ ...base, capabilities: [...RUNNER_BUILD_CAPABILITIES] }).success).toBe(true);
   });
 
   it("a cloud that does not know it costs one retry that drops it alone and keeps every other capability, survey_public_v1 included", async () => {
-    const { client, sent } = cloud([PROJECT_SETUP_CAPABILITY]);
+    // a cloud that lacks project_setup_v1 lacks the newer twin_v1 too, which goes first
+    const { client, sent } = cloud([PROJECT_SETUP_CAPABILITY, TWIN_CAPABILITY]);
     const answer = await client.hello({ ...base, capabilities: [...RUNNER_BUILD_CAPABILITIES] });
-    expect(answer).toEqual({ kind: "ok", dropped: [PROJECT_SETUP_CAPABILITY] });
-    expect(sent).toHaveLength(2);
+    expect(answer).toEqual({ kind: "ok", dropped: [TWIN_CAPABILITY, PROJECT_SETUP_CAPABILITY] });
+    expect(sent).toHaveLength(3);
     expect(sent[0]).toContain(PROJECT_SETUP_CAPABILITY);
-    expect(sent[1]).toEqual(RUNNER_BUILD_CAPABILITIES.filter((c) => c !== PROJECT_SETUP_CAPABILITY));
-    expect(sent[1]).toContain(SURVEY_PUBLIC_CAPABILITY);
+    expect(sent[2]).toEqual(RUNNER_BUILD_CAPABILITIES.filter((c) => c !== PROJECT_SETUP_CAPABILITY && c !== TWIN_CAPABILITY));
+    expect(sent[2]).toContain(SURVEY_PUBLIC_CAPABILITY);
   });
 
   it("a cloud that knows it keeps it: one hello, nothing dropped", async () => {
@@ -43,13 +44,13 @@ describe("project_setup_v1 on the build and on the hello", () => {
   });
 
   it("goes before survey_public_v1 on the ladder: a cloud that lacks both drops project_setup_v1 first, then survey_public_v1", async () => {
-    const { client, sent } = cloud([PROJECT_SETUP_CAPABILITY, SURVEY_PUBLIC_CAPABILITY]);
+    const { client, sent } = cloud([PROJECT_SETUP_CAPABILITY, SURVEY_PUBLIC_CAPABILITY, TWIN_CAPABILITY]);
     const answer = await client.hello({ ...base, capabilities: [...RUNNER_BUILD_CAPABILITIES] });
-    expect(answer).toEqual({ kind: "ok", dropped: [PROJECT_SETUP_CAPABILITY, SURVEY_PUBLIC_CAPABILITY] });
-    expect(sent).toHaveLength(3);
-    expect(sent[1]).toContain(SURVEY_PUBLIC_CAPABILITY);
-    expect(sent[1]).not.toContain(PROJECT_SETUP_CAPABILITY);
-    expect(sent[2]).toEqual(RUNNER_BUILD_CAPABILITIES.filter((c) => c !== PROJECT_SETUP_CAPABILITY && c !== SURVEY_PUBLIC_CAPABILITY));
+    expect(answer).toEqual({ kind: "ok", dropped: [TWIN_CAPABILITY, PROJECT_SETUP_CAPABILITY, SURVEY_PUBLIC_CAPABILITY] });
+    expect(sent).toHaveLength(4);
+    expect(sent[2]).toContain(SURVEY_PUBLIC_CAPABILITY);
+    expect(sent[2]).not.toContain(PROJECT_SETUP_CAPABILITY);
+    expect(sent[3]).toEqual(RUNNER_BUILD_CAPABILITIES.filter((c) => c !== PROJECT_SETUP_CAPABILITY && c !== SURVEY_PUBLIC_CAPABILITY && c !== TWIN_CAPABILITY));
   });
 
   it("a hello at protocol 22 that lists it parses", () => {
