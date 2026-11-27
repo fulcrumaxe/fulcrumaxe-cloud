@@ -108,7 +108,7 @@ walks other packages' files is selected when a changed file matches its `watch` 
 change can select packages you did not edit (#974). If you add a test that walks the whole tree
 for a name (a table, a field, an import), add its package to `repo_wide_scans` in the same change, as
 `packages/runner-cloud` does for the sandbox inventory (#1066); otherwise a change far from it never
-runs it. In the merge queue a dormant `Rollup` step
+runs it. An `extra_edges` example: `apps/workspace` is selected whenever `packages/runner-cloud` is, because `apps/workspace/test/onboarding-engine.test.mjs` reads `packages/runner-cloud/src/placement.ts` by path (#1287). In the merge queue a dormant `Rollup` step
 (`scripts/ci/rollup-position.mjs`, on only while the repository variable `ROLLUP_ENABLED` is
 `true`) can make an entry wait for the one on top of it instead of running the suites (#939).
 
