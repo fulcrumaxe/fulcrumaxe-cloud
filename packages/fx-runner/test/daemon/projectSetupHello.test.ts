@@ -19,7 +19,7 @@ function cloud(unknown: string[]) {
 }
 
 /** The build behind `engine_session_v1` (D#845 ON-13b2), which is listed last of all and dropped first. */
-const BUILD = RUNNER_BUILD_CAPABILITIES.filter((c) => c !== "engine_session_v1");
+const BUILD = RUNNER_BUILD_CAPABILITIES.filter((c) => c !== "engine_session_v1" && c !== "repo_token_refresh_v1");
 
 describe("project_setup_v1 on the build and on the hello", () => {
   it("is on the build, last but one (`twin_v1`, D#845 ON-27d4c, is after it, and `engine_session_v1` after that), and the hello it makes is a valid one at this protocol version", () => {

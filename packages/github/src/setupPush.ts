@@ -1,6 +1,6 @@
 import type { AppCredentialsSource } from "./appCredentials.js";
 import { GH_OWNER_LOGIN_RE, GH_REPO_NAME_RE } from "./eventMapper.js";
-import { getInstallationToken, SETUP_PUSH_PERMISSIONS, type AccessTokenRequester, type InstallationTokenCache } from "./installationToken.js";
+import { ENGINE_SESSION_PERMISSIONS, getInstallationToken, SETUP_PUSH_PERMISSIONS, type AccessTokenRequester, type InstallationTokenCache } from "./installationToken.js";
 
 /**
  * D#845 ON-8f: the one credential of a project setup's push. `mint` finds the repository's own installation (our `repos` and `installations` rows) and mints a `setup_push` token: this one repository, `contents: write` and
@@ -27,7 +27,8 @@ export interface SetupPushDeps {
   fetchImpl?: typeof fetch;
 }
 
-export function createSetupPushPort(deps: SetupPushDeps): SetupPushPort {
+/** D#845 ON-18: the same port, minting for a running engine session (`engine_session`: the five permissions, one repository) instead of a setup's push. */
+export function createSetupPushPort(deps: SetupPushDeps, purpose: "setup_push" | "engine_session" = "setup_push"): SetupPushPort {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const revoke = async (token: string): Promise<void> => {
     try {
@@ -51,9 +52,9 @@ export function createSetupPushPort(deps: SetupPushDeps): SetupPushPort {
       const token = await getInstallationToken({
         installationId: installation.installationId,
         appKind: installation.appKind,
-        purpose: "setup_push",
-        role: "setup_push",
-        scope: { repositories: [repo.name], permissions: SETUP_PUSH_PERMISSIONS },
+        purpose,
+        role: purpose,
+        scope: { repositories: [repo.name], permissions: purpose === "engine_session" ? ENGINE_SESSION_PERMISSIONS : SETUP_PUSH_PERMISSIONS },
         appCredentials: deps.appCredentials,
         requester: deps.requester,
         cache: deps.cache,

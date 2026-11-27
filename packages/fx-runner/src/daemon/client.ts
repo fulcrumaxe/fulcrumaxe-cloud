@@ -7,10 +7,10 @@ import {
   CURRENT_PROTOCOL_VERSION, MACHINE_LOGIN_CAPABILITY, MACHINE_ONBOARDING_MIN_PROTOCOL, MachineLoginCode, MachineLoginReport, machineLoginCodePath, machineLoginReportPath, SANDBOX_COMMAND_CAPABILITY, SANDBOX_INVENTORY_MIN_PROTOCOL, VERIFY_SIGN_IN_MIN_PROTOCOL, type VerifySignInState,
   CLAIM_PATH, ClaimMessage, ClaimRateLimitedReply, type ConflictAttestation, HelloMessage, HelloReply, ClaimReply, WAKE_CAPABILITY, type WakeGrant, DoneMessage, DoneReply, DoneRetryReply, EventsMessage, EventsReply, HeartbeatMessage,
   GitTicketMessage, GitTicketReply, GIT_TICKET_PATH, HeartbeatReply, SeqNotIncreasingReply, StopReply,
-  CONFLICT_FACTS_CAPABILITY, DISCOVERY_ANALYST_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, ENGINE_SESSION_CAPABILITY, PROJECT_SETUP_CAPABILITY, TWIN_CAPABILITY, SURVEY_CAPABILITY, SURVEY_PUBLIC_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, HEARTBEAT_INVENTORY_HELLO_CAPABILITY, ENGINE_LEASE_HELLO_CAPABILITY, ENGINE_LEASE_CAPABILITY, type EngineLease, WATCH_MODE_HELLO_CAPABILITY, ORDERED_FACTS_CAPABILITY, OVERLAP_FACTS_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, MEMORY_PROPOSALS_PATH, MemoryProposalsMessage, MemoryProposalsReply, MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, PLANE_MERGE_CLAIM_PATH, PLANE_MERGE_REPORT_PATH, PLANE_MERGE_VERIFY_PATH, PlaneMergeClaimMessage, PlaneMergeClaimReply, PlaneMergeReportMessage, PlaneMergeReportReply, PlaneMergeRetryReply, PlaneMergeVerifyMessage, PlaneMergeVerifyReply,
+  CONFLICT_FACTS_CAPABILITY, DISCOVERY_ANALYST_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, ENGINE_SESSION_CAPABILITY, REPO_TOKEN_REFRESH_CAPABILITY, PROJECT_SETUP_CAPABILITY, TWIN_CAPABILITY, SURVEY_CAPABILITY, SURVEY_PUBLIC_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, HEARTBEAT_INVENTORY_HELLO_CAPABILITY, ENGINE_LEASE_HELLO_CAPABILITY, ENGINE_LEASE_CAPABILITY, type EngineLease, WATCH_MODE_HELLO_CAPABILITY, ORDERED_FACTS_CAPABILITY, OVERLAP_FACTS_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, MEMORY_PROPOSALS_PATH, MemoryProposalsMessage, MemoryProposalsReply, MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, PLANE_MERGE_CLAIM_PATH, PLANE_MERGE_REPORT_PATH, PLANE_MERGE_VERIFY_PATH, PlaneMergeClaimMessage, PlaneMergeClaimReply, PlaneMergeReportMessage, PlaneMergeReportReply, PlaneMergeRetryReply, PlaneMergeVerifyMessage, PlaneMergeVerifyReply,
   BROWSER_CHROME_CAPABILITY, BROWSER_PLAYWRIGHT_CAPABILITY, DEPLOY_ORDER_CAPABILITY, DEPLOY_ORDER_CLAIM_PATH, DEPLOY_ORDER_REPORT_PATH, DeployOrderClaimMessage, DeployOrderClaimReply, DeployOrderReportMessage, DeployOrderReportReply,
   PLANE_PUSH_PAIRING_PATH, PLANE_PUSH_REPORT_PATH, PLANE_PUSH_TOKEN_PATH, PlanePushPairingMessage, PlanePushPairingReply, PlanePushReportMessage, PlanePushReportReply, PlanePushTokenMessage, PlanePushTokenReply, type ClaimCapacity, type ContextLedgerWire, type DoneCheck, type LocalOnlyEvent, type SandboxUnavailableReason, type SignedJob, type StopReason,
-  MACHINE_JOB_CLAIM_PATH, MachineJobClaimMessage, MachineJobClaimReply, MAX_PLAN_BYTES, SessionJobProgressBody, SetupProgressBody, SetupProgressReply, SetupPushTokenMessage, SetupPushTokenReply, machineJobProgressPath, setupPlanPath, setupProgressPath, setupPushTokenPath, type SignedMachineJob,
+  MACHINE_JOB_CLAIM_PATH, MachineJobClaimMessage, MachineJobClaimReply, MAX_PLAN_BYTES, SessionJobProgressBody, SetupProgressBody, SetupProgressReply, SetupPushTokenMessage, SetupPushTokenReply, REPO_TOKEN_PATH, REPO_TOKEN_STOP_PATH, RepoTokenMessage, RepoTokenReply, RepoTokenStopReply, machineJobProgressPath, setupPlanPath, setupProgressPath, setupPushTokenPath, type SignedMachineJob,
 } from "@fulcrumaxe/runner-protocol";
 import { errorCodeOf, signedGet, signedPost, type CloudReply } from "../cloud.js";
 import { WAKE_PATH, parseWakeReply } from "./wake.js";
@@ -100,6 +100,10 @@ export type MachineJobProgressResult = SetupProgressResult;
 /** The plan route's reply as the exact text read: the caller hashes it before it parses it. `too_large` is a body over `MAX_PLAN_BYTES`. */
 /** D#845 ON-8f: the one push credential of a setup job. `refused` carries the cloud's closed code (`already_issued`, `push_not_started`, `app_not_installed`, ...). Held in memory only; nothing here is logged. */
 export type SetupPushTokenResult = { kind: "token"; token: string; expiresAt: string } | { kind: "refused"; status: 404 | 409 | 502; code?: string } | CallError;
+/** D#845 ON-18: the repo-scoped token of a running session. `refused` carries the cloud's closed code (`session_not_running`, `app_not_installed`, ...). Held in memory only; nothing here is logged. */
+export type RepoTokenResult = SetupPushTokenResult;
+/** D#845 ON-18: the cloud's answer to the report of a stop for `token_refresh_failed`. `refused` carries its closed code (`session_not_running`, `not_found`); a 404 without `not_found` is a cloud that has no such route. */
+export type RepoTokenStopResult = { kind: "reported"; result: "recorded" | "already" } | { kind: "refused"; status: 404 | 409; code?: string } | CallError;
 export type SetupPlanResult = { kind: "plan"; text: string } | { kind: "missing" } | { kind: "too_large" } | CallError;
 /** D#845 MC-8b: the cloud's answer to a sign-in report. 404 and 409 are its closed refusals (no such request, or the request is no longer in a state that takes this: a late `done` is 409). */
 export type MachineLoginReportResult = { kind: "recorded" } | { kind: "refused"; status: 404 | 409; code?: string } | CallError;
@@ -161,6 +165,10 @@ export interface RunnerClient {
   machineLoginReport(requestId: string, report: MachineLoginReport): Promise<MachineLoginReportResult>;
   machineLoginCode(requestId: string): Promise<MachineLoginCodeResult>;
   setupPushToken(setupId: string, jobId: string): Promise<SetupPushTokenResult>;
+  /** D#845 ON-18: asks for the repo-scoped token of the session `sessionId` (its `engine_session_start` job id) of repository `repoGhId`. */
+  engineRepoToken(repoGhId: number, sessionId: string): Promise<RepoTokenResult>;
+  /** D#845 ON-18: tells the cloud this runner is stopping the session because its repository token could not be refreshed. Signed; the message is the token route's. */
+  engineRepoTokenStop(repoGhId: number, sessionId: string): Promise<RepoTokenStopResult>;
 }
 
 export interface RunnerClientConfig {
@@ -248,7 +256,8 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
       // D#845 ON-8f2c: `project_setup_v1` is the newest of all, so it goes before everything else: an old cloud refuses the hello only because of it, so the one retry costs that capability alone, and the runner is then never offered a setup, an engine update or a removal.
       // D#845 ON-27d4c: `twin_v1` is newer than the rest, so it goes before them: an old cloud refuses the hello only because of it, so the one retry costs that capability alone, and the runner is then never offered a twin job.
       // D#845 ON-13b2: `engine_session_v1` is the newest of all (listed last, by rule), so it goes before everything else, even `twin_v1`: a cloud that does not know it keeps everything else and the runner is never offered a session job.
-      for (const drop of [ENGINE_SESSION_CAPABILITY, TWIN_CAPABILITY, PROJECT_SETUP_CAPABILITY, SURVEY_PUBLIC_CAPABILITY, ENGINE_LEASE_HELLO_CAPABILITY, HEARTBEAT_INVENTORY_HELLO_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, SANDBOX_COMMAND_CAPABILITY, BROWSER_PLAYWRIGHT_CAPABILITY, BROWSER_CHROME_CAPABILITY, DEPLOY_ORDER_CAPABILITY, SURVEY_CAPABILITY, MACHINE_LOGIN_CAPABILITY, WATCH_MODE_HELLO_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, OVERLAP_FACTS_CAPABILITY, MEM_PROPOSAL_CAPABILITY, TIP_PUBLISH_CAPABILITY, ORDERED_FACTS_CAPABILITY, CONFLICT_FACTS_CAPABILITY, DISCOVERY_ANALYST_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, WAKE_CAPABILITY] as const) {
+      // D#845 ON-18: `repo_token_refresh_v1` is newer than all of them (listed last, by rule), so it goes before even `engine_session_v1`: a cloud that does not know it keeps everything else and the runner never asks for a repo token.
+      for (const drop of [REPO_TOKEN_REFRESH_CAPABILITY, ENGINE_SESSION_CAPABILITY, TWIN_CAPABILITY, PROJECT_SETUP_CAPABILITY, SURVEY_PUBLIC_CAPABILITY, ENGINE_LEASE_HELLO_CAPABILITY, HEARTBEAT_INVENTORY_HELLO_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, SANDBOX_COMMAND_CAPABILITY, BROWSER_PLAYWRIGHT_CAPABILITY, BROWSER_CHROME_CAPABILITY, DEPLOY_ORDER_CAPABILITY, SURVEY_CAPABILITY, MACHINE_LOGIN_CAPABILITY, WATCH_MODE_HELLO_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, OVERLAP_FACTS_CAPABILITY, MEM_PROPOSAL_CAPABILITY, TIP_PUBLISH_CAPABILITY, ORDERED_FACTS_CAPABILITY, CONFLICT_FACTS_CAPABILITY, DISCOVERY_ANALYST_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, WAKE_CAPABILITY] as const) {
         if (!refused(reply) || !(parsed.capabilities ?? []).includes(drop)) continue;
         dropped = [...dropped, drop];
         reply = await send(HELLO_PATH, { ...parsed, capabilities: (parsed.capabilities ?? []).filter((c) => !dropped.includes(c)) });
@@ -512,6 +521,36 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
         return parsed.success ? { kind: "token", token: parsed.data.token, expiresAt: parsed.data.expires_at } : fail(reply, "invalid_reply");
       }
       if (reply?.status === 404 || reply?.status === 409 || reply?.status === 502) {
+        const code = errorCodeOf(reply.body);
+        return { kind: "refused", status: reply.status, ...(code === undefined ? {} : { code }) };
+      }
+      return fail(reply);
+    },
+
+    async engineRepoToken(repoGhId, sessionId) {
+      const message = RepoTokenMessage.safeParse({ repo_gh_id: repoGhId, session_id: sessionId });
+      if (!message.success) return fail(undefined, "invalid_message");
+      const reply = await send(REPO_TOKEN_PATH, message.data);
+      if (reply?.status === 200) {
+        const parsed = RepoTokenReply.safeParse(reply.body);
+        return parsed.success ? { kind: "token", token: parsed.data.token, expiresAt: parsed.data.expires_at } : fail(reply, "invalid_reply");
+      }
+      if (reply?.status === 404 || reply?.status === 409 || reply?.status === 502) {
+        const code = errorCodeOf(reply.body);
+        return { kind: "refused", status: reply.status, ...(code === undefined ? {} : { code }) };
+      }
+      return fail(reply);
+    },
+
+    async engineRepoTokenStop(repoGhId, sessionId) {
+      const message = RepoTokenMessage.safeParse({ repo_gh_id: repoGhId, session_id: sessionId });
+      if (!message.success) return fail(undefined, "invalid_message");
+      const reply = await send(REPO_TOKEN_STOP_PATH, message.data);
+      if (reply?.status === 200) {
+        const parsed = RepoTokenStopReply.safeParse(reply.body);
+        return parsed.success ? { kind: "reported", result: parsed.data.result } : fail(reply, "invalid_reply");
+      }
+      if (reply?.status === 404 || reply?.status === 409) {
         const code = errorCodeOf(reply.body);
         return { kind: "refused", status: reply.status, ...(code === undefined ? {} : { code }) };
       }

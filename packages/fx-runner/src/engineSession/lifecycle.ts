@@ -25,6 +25,7 @@ import { admitVm } from "../vm/limits.js";
 import { DEFAULT_GUEST_PATHS, GuestWorkspaceError, runInGuest, sendWorkspace, type GuestPaths } from "../vm/workspace/guestWorkspace.js";
 import type { ResumableVmPort } from "../vm/sandboxd/vmPort.js";
 import type { OperateMark } from "./operateMark.js";
+import type { RepoTokenRefresher } from "./repoToken.js";
 import { engineSessionPolicy } from "./sessionPolicy.js";
 
 type FailureCode = NonNullable<SessionJobProgressBody["failure_code"]>;
@@ -81,6 +82,8 @@ export interface EngineSessionDeps {
    * and starts the engine host (`credentials`, `supervisor`), and every stop sends a channel `stop` (the credential wiped, the host ended) before anything is snapshotted. Left out, a start ends at `session_boot` as before.
    */
   readToken?: () => Buffer;
+  /** D#845 ON-18: the refresh loop of the session's repo-scoped token. A start that handed the credential in begins it (after `done`, with this start job's id as the session id); a stop and a delete end it. Left out: no token is asked for. */
+  repoToken?: RepoTokenRefresher;
   /** The runner's id and the cloud address its keys are pinned for: `session.json`, which tells the guest which pinned key re-verifies a signed command and whose command it is. */
   runnerId: string;
   cloudOrigin?: string;
@@ -95,7 +98,7 @@ export interface EngineSessionDeps {
 }
 
 /** What the guest's supervisor records as the reason its host ended: a halt and an operate-off say so; a person's own stop is theirs; the cloud's other causes are the machine's. */
-const CHANNEL_REASON: Readonly<Record<MachineJobOf<"engine_session_stop">["args"]["reason"], ChannelStopReason>> = { person: "stopped_by_person", halt: "halted", operate_off: "operate_off", move: "machine_shutdown", remove: "machine_shutdown", plan: "machine_shutdown" };
+const CHANNEL_REASON: Readonly<Record<MachineJobOf<"engine_session_stop">["args"]["reason"], ChannelStopReason>> = { person: "stopped_by_person", halt: "halted", operate_off: "operate_off", move: "machine_shutdown", remove: "machine_shutdown", plan: "machine_shutdown", token_refresh_failed: "machine_shutdown" };
 
 /** A failure already reported: it unwinds the handler and nothing more is said. */
 class Reported extends Error {}
@@ -295,6 +298,9 @@ export function createEngineSessionHandlers(deps: EngineSessionDeps): { engine_s
         // the session now outlives this job
         await p.say("done", "ok", { start_mode: mode });
         made = "none";
+        // the guest holds the model credential and runs the host: the repo token comes next, at the start job's own id, which the cloud takes as the session's
+        const channel = p.channel;
+        if (channel !== undefined && deps.readToken !== undefined) deps.repoToken?.begin(job.repo_gh_id, job.job_id, (token) => channel.tokenPut(token, "github"));
       } finally {
         await copy?.release().catch(() => undefined); // fx-swallow-ok: a host copy that cannot be removed now is swept with the runner's other workspaces
         // a start that did not reach `done` leaves nothing running: a VM it made is ended, a kept one it woke is stopped again (its snapshot is the disk it woke from)
@@ -315,6 +321,7 @@ export function createEngineSessionHandlers(deps: EngineSessionDeps): { engine_s
   const stop: MachineJobHandler<"engine_session_stop"> = ({ job, reporter, signal }) =>
     run(job, reporter, signal, async (p) => {
       const { name, port } = p;
+      deps.repoToken?.end(job.repo_gh_id); // a session that is being stopped asks for no more tokens
       await admit(job, p);
       const known = await deps.state(name);
       if (known === "unknown") await p.fail("session_stop", "vm_teardown_incomplete", "state");
@@ -333,7 +340,7 @@ export function createEngineSessionHandlers(deps: EngineSessionDeps): { engine_s
           if (!ended.ok) {
             // no snapshot of a guest that may hold the credential. A supervisor that did not exit, and a halt or an operate-off whose channel failed, end the VM (the earlier snapshot is kept): they must not be left running.
             // A person's own stop whose channel failed leaves it up for the next stop job
-            if (ended.why === "exit" || job.args.reason === "halt" || job.args.reason === "operate_off") await endWithoutSnapshot(port, name);
+            if (ended.why === "exit" || job.args.reason === "halt" || job.args.reason === "operate_off" || job.args.reason === "token_refresh_failed") await endWithoutSnapshot(port, name);
             return p.fail("session_stop", "vm_teardown_incomplete", ended.why);
           }
           survivors = ended.survivors;
@@ -357,6 +364,7 @@ export function createEngineSessionHandlers(deps: EngineSessionDeps): { engine_s
 
   const del: MachineJobHandler<"engine_session_delete"> = ({ job, reporter, signal }) =>
     run(job, reporter, signal, async (p) => {
+      deps.repoToken?.end(job.repo_gh_id);
       await admit(job, p);
       await p.say("session_delete", "started");
       // the VM, its egress listeners and every snapshot go; the job says `ok` only when the daemon no longer holds the name
@@ -408,10 +416,10 @@ export function lockSessionHandlers(handlers: SessionHandlerSet, lock: SessionLo
 
 /**
  * D#845 ON-13c3: the stop the runner issues to itself, through the very handler a signed stop job runs, so the stop, the snapshot and the token wipe are one path. The job is unsigned and local, and carries operate epoch 0: it can
- * never raise the operate mark (a stop is never refused for staleness), and its reason is the closest closed word, `operate_off`; the runner's own reason, `lease_expired`, is the one it logs.
+ * never raise the operate mark (a stop is never refused for staleness), and its reason is the closest closed word, `operate_off` (ON-18: `token_refresh_failed` for the stop the repo-token loop asks for); the runner's own reason, `lease_expired`, is the one it logs.
  * With a `lock` it takes the session's turn, so it never overlaps a cloud stop, start or delete of the same session (the unlocked handler goes here, the locked ones to the dispatcher).
  */
-export function sessionStopperOf(stop: MachineJobHandler<"engine_session_stop">, lock?: SessionLock): SessionStopper {
+export function sessionStopperOf(stop: MachineJobHandler<"engine_session_stop">, lock?: SessionLock, reason: MachineJobOf<"engine_session_stop">["args"]["reason"] = "operate_off"): SessionStopper {
   const once = async (repoGhId: number): Promise<boolean> => {
     let ok = true;
     const reporter: SessionReporter = {
@@ -421,7 +429,7 @@ export function sessionStopperOf(stop: MachineJobHandler<"engine_session_stop">,
         return "recorded";
       },
     };
-    const job = { v: 1, kind: "engine_session_stop", job_id: SELF_STOP_JOB_ID, repo_gh_id: repoGhId, args: { reason: "operate_off", operate_epoch: 0 } } as unknown as MachineJobOf<"engine_session_stop">;
+    const job = { v: 1, kind: "engine_session_stop", job_id: SELF_STOP_JOB_ID, repo_gh_id: repoGhId, args: { reason, operate_epoch: 0 } } as unknown as MachineJobOf<"engine_session_stop">;
     await stop({ job, reporter, signal: new AbortController().signal });
     return ok;
   };

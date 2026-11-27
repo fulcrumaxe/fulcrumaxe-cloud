@@ -3,6 +3,7 @@ import type { MachineJobClaimResult, MachineJobProgressResult } from "../../src/
 import { createMachineJobDispatcher, type MachineJobEvent } from "../../src/daemon/machineJobs.js";
 import path from "node:path";
 import { createEngineSessionHandlers, sessionNameOf, type EngineSessionDeps, type SessionStopReport } from "../../src/engineSession/lifecycle.js";
+import type { RepoTokenRefresher } from "../../src/engineSession/repoToken.js";
 import type { FakeChannel } from "../helpers/fakeChannel.js";
 import { createOperateMark, type OperateMarkEvent } from "../../src/engineSession/operateMark.js";
 import { SandboxNotFoundError, type SandboxComputeState } from "../../src/sandbox/port.js";
@@ -48,6 +49,8 @@ export interface Rig {
   /** ON-13b2: set one and every VM the factory makes has a channel to it, and the deps carry the runner's credential source (`token`) and a stop report sink. */
   channel: FakeChannel | undefined;
   token: string | undefined;
+  /** ON-18: the repo token refresh loop the deps carry (a spy in the tests). */
+  repoToken: RepoTokenRefresher | undefined;
   /** Every buffer the credential source handed out, to see each one zeroed. */
   issued: Buffer[];
   tier: "vm_stop" | "unit" | undefined;
@@ -168,6 +171,7 @@ export function sessionRig(): Rig {
             return fresh;
           },
         }),
+    ...(rig.repoToken === undefined ? {} : { repoToken: rig.repoToken }),
     ...(rig.tier === undefined ? {} : { tier: rig.tier }),
     stopped: (report) => void rig.stopReports.push(report),
     get engineDir() {
@@ -208,6 +212,7 @@ export function sessionRig(): Rig {
     makeDeps,
     channel: undefined,
     token: undefined,
+    repoToken: undefined,
     issued: [],
     tier: undefined,
     stopReports: [],

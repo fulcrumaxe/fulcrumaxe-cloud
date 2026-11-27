@@ -128,6 +128,8 @@ export interface RunnerCloudDeps {
   planeMerge?: PlaneMergePort | null;
   /** D#845 ON-8f: mints and revokes the one push credential of a project setup (a `setup_push` installation token for one customer repository). Null while it is not configured; the push-token route then answers 503 `not_configured`. */
   setupPush?: { mint(repo: { id: string; owner: string; name: string }): Promise<{ token: string; expiresAt: Date }>; revoke(token: string): Promise<void> } | null;
+  /** D#845 ON-18: mints and revokes the repo-scoped token of a running engine session (an `engine_session` installation token for one customer repository). Null while it is not configured; the repo-token route then answers 503 `not_configured`. */
+  engineRepoToken?: { mint(repo: { id: string; owner: string; name: string }): Promise<{ token: string; expiresAt: Date }>; revoke(token: string): Promise<void> } | null;
   /** D#598 P1f-2: the GitHub access of the public-push routes. Null while it is not configured; those routes then answer 503 `not_configured`. */
   planePush?: PlanePushHostedPort | null;
   /**

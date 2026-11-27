@@ -165,6 +165,7 @@ export {
 export {
   setupPushTokenRun,
 } from "./setupPush.js";
+export { engineRepoTokenRun, engineRepoTokenStopRun } from "./engineRepoToken.js";
 export {
   SEED_DEFAULT_CATEGORY,
   claimSetupFinish,

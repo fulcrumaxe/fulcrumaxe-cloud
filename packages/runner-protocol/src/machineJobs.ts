@@ -26,7 +26,7 @@ export const MACHINE_JOB_MAX_LIFE_S = 1800;
 export const MACHINE_JOB_MAX_CLOCK_SKEW_S = 60;
 /** The only hosts an engine tarball may be fetched from. */
 export const ENGINE_TARBALL_HOSTS = ["codeload.github.com", "github.com"] as const;
-export const ENGINE_STOP_REASONS = ["person", "halt", "move", "remove", "operate_off", "plan"] as const; // MC-6a1 still adds "park"
+export const ENGINE_STOP_REASONS = ["person", "halt", "move", "remove", "operate_off", "plan", "token_refresh_failed"] as const; // MC-6a1 still adds "park"; `token_refresh_failed` (ON-18) is the runner's own, after three failed repo-token refreshes in a row
 export const MACHINE_ENGINE_REQUIREMENTS = ["microvm", "any"] as const;
 export const SETUP_MODES = ["pr", "direct"] as const;
 /** The install and update branches: `fx/engine-install-<version>` and `fx/engine-update-<version>`, the version digits and dots only. */
@@ -271,6 +271,24 @@ export const SetupPushTokenMessage = strict({ job_id: z.string().uuid() });
 /** One installation token for the one repository, `contents: write` and `metadata: read` only. It never enters a guest and is revoked by the runner after the push. */
 export const SetupPushTokenReply = strict({ token: z.string().min(1).max(512), expires_at: z.string().datetime() });
 export type SetupPushTokenReply = z.infer<typeof SetupPushTokenReply>;
+
+/**
+ * D#845 ON-18: where a runner asks for the repo-scoped token of its running session (needs `repo_token_refresh_v1`). `session_id` is the `engine_session_start` job id of the session the token is for; the cloud accepts only the
+ * newest delivered or done start of that repo on that runner. The reply is the setup push's: one installation token, one repository, an hour.
+ */
+export const REPO_TOKEN_PATH = "/api/runner/engine/repo-token";
+export const RepoTokenMessage = strict({ repo_gh_id: safeInt.min(1), session_id: z.string().uuid() });
+export const RepoTokenReply = SetupPushTokenReply;
+export type RepoTokenReply = SetupPushTokenReply;
+
+/**
+ * D#845 ON-18 (Ruling 126.2): where the runner reports that it is stopping a session because its repository token could not be refreshed three times in a row. The message is the token route's. The cloud records one stop of
+ * the reason `token_refresh_failed` (so the Team card and Try again can see it) only for the placed runner's current session, once; `recorded` says it did, `already` that an earlier report did.
+ */
+export const REPO_TOKEN_STOP_PATH = "/api/runner/engine/repo-token-stop";
+export const RepoTokenStopMessage = RepoTokenMessage;
+export const RepoTokenStopReply = strict({ result: z.enum(["recorded", "already"]) });
+export type RepoTokenStopReply = z.infer<typeof RepoTokenStopReply>;
 
 /** D#845 ON-8a: where a runner told `machine_job: true` on a claim reply takes its one job, and where it reports on a setup. */
 export const MACHINE_JOB_CLAIM_PATH = "/api/runner/machine-job/claim";

@@ -83,6 +83,7 @@ export const STOP_WORDS = {
     plan: "The Engine plan ended, but the engine didn't stop. It may still be running",
     move: "Moving the project didn't stop the engine on its old machine",
     remove: "Removing the project didn't stop its engine",
+    token_refresh_failed: "The engine lost its GitHub access, so it was stopped, but the stop didn't finish. It may still be running",
   },
   why: {
     snapshot_failed: "the engine's state couldn't be saved", vm_teardown_incomplete: "the machine couldn't finish shutting it down", job_expired: "the machine didn't pick up the stop in time",
@@ -95,7 +96,7 @@ export const STOP_WORDS = {
     not_placed: "This project isn't on a machine.", runner_removed: "The machine was removed.", nothing_to_retry: "The stop already changed. Reload the page.", cause_gone: "That's no longer needed, so nothing was sent.",
   },
 };
-const STOP_REASONS = ["person", "halt", "operate_off", "plan", "move", "remove"];
+const STOP_REASONS = ["person", "halt", "operate_off", "plan", "move", "remove", "token_refresh_failed"];
 /** The closed shape of the list's `stop_failed`; anything else reads as no failed stop (fail closed). */
 export function readStopFailed(raw) {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;

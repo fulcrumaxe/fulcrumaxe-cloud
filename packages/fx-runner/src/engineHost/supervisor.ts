@@ -114,6 +114,11 @@ export interface SupervisorDeps {
    */
   secretEnv?: (() => Record<string, string> | undefined) | undefined;
   /**
+   * ON-18: further values to keep out of the host log, read at every write because they change while the host runs (the repository token, put after the launch and replaced about hourly). They are matched like
+   * `secretEnv`'s values and never reach the child's environment.
+   */
+  redactValues?: (() => string[]) | undefined;
+  /**
    * ON-13b1: how the host is started. Left out (a machine with systemd), `systemd-run --user --scope` makes the scope the kill path proves against. Inside a guest or an engine-session unit there is no
    * systemd to ask and the unit is already the scope, so the caller runs the program directly: the kill path is then the process group.
    */
@@ -311,15 +316,17 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
    * A stream writer for the host log that replaces every exact copy of a secret handed to the launch with `[redacted]`, including a copy split across two chunks (the last `longest - 1` characters of a stream are held back
    * until the next chunk or the end of the host's output). Only values of 8 or more characters are matched (a short one would mangle ordinary text).
    */
-  function redactor(secrets: readonly string[]): { push: (text: string) => void; flush: () => void } {
-    const list = secrets.filter((v) => v.length >= 8);
-    if (list.length === 0) return { push: logWrite, flush: () => undefined };
-    const hold = Math.max(...list.map((v) => v.length)) - 1;
+  function redactor(secrets: () => readonly string[]): { push: (text: string) => void; flush: () => void } {
+    // The list is read at every write, not once: the repository token arrives after the launch and changes while the host runs.
+    const current = (): string[] => secrets().filter((v) => v.length >= 8);
     let pending = "";
-    const clean = (text: string): string => list.reduce((acc, secret) => acc.split(secret).join("[redacted]"), text);
+    const clean = (list: readonly string[], text: string): string => list.reduce((acc, secret) => acc.split(secret).join("[redacted]"), text);
     return {
       push(text) {
-        const all = clean(pending + text);
+        const list = current();
+        if (list.length === 0 && pending === "") return logWrite(text);
+        const hold = list.length === 0 ? 0 : Math.max(...list.map((v) => v.length)) - 1;
+        const all = clean(list, pending + text);
         // never cut inside a replacement: what is held back is the raw tail, cleaned again with the next chunk
         const keep = Math.min(hold, all.length);
         pending = all.slice(all.length - keep);
@@ -327,7 +334,7 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
         if (out.length > 0) logWrite(out);
       },
       flush() {
-        const out = clean(pending);
+        const out = clean(current(), pending);
         pending = "";
         if (out.length > 0) logWrite(out);
       },
@@ -421,8 +428,9 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     const secrets = deps.secretEnv?.() ?? {};
     const child = deps.launch({ ...wrapped, cwd: checkout, env: { ...deps.env, ...secrets } });
     current = child;
-    const outLog = redactor(Object.values(secrets));
-    const errLog = redactor(Object.values(secrets));
+    const redactions = (): string[] => [...Object.values(secrets), ...(deps.redactValues?.() ?? [])];
+    const outLog = redactor(redactions);
+    const errLog = redactor(redactions);
     let tail = "";
     let skipping = false;
     child.onStdout((text) => {

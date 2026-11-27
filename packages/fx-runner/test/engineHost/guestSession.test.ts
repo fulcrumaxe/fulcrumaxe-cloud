@@ -1,10 +1,10 @@
 import { generateKeyPairSync, randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { guestRuntime, runEngineSupervise } from "../../scripts/engine-supervise-host.mjs";
-import { CHANNEL_OPS, CHANNEL_SOCKET, SESSION_READY_LINE, createGuestSession, EVENTS_READ_MAX, FRAME_MAX, SESSION_CONFIG_FILE, TOKEN_MAX, type ChannelReply, type GuestRuntime, type GuestSession } from "../../src/engineHost/guestSession.js";
+import { CHANNEL_OPS, CHANNEL_SOCKET, SESSION_READY_LINE, createGuestSession, writeAll, EVENTS_READ_MAX, FRAME_MAX, SESSION_CONFIG_FILE, TOKEN_MAX, type ChannelReply, type GuestRuntime, type GuestSession } from "../../src/engineHost/guestSession.js";
 import { EngineCommand, signEngineCommand } from "@fulcrumaxe/runner-protocol";
 import { originHash, type PinnedKeyrings } from "../../src/keyring.js";
 import { renderPrompt } from "../../src/engineHost/prompts.js";
@@ -28,7 +28,9 @@ const rec = process.env.FAKE_RECORD, mode = process.env.FAKE_MODE;
 const log = (o) => fs.appendFileSync(rec, JSON.stringify(o) + "\\n");
 const out = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
 const token = process.env.CLAUDE_CODE_OAUTH_TOKEN;
-log({ event: "start", pid: process.pid, argv: process.argv.slice(2), cwd: process.cwd(), tokenSeen: token === ${JSON.stringify(TOKEN)}, tokenEnvSet: token !== undefined });
+const repoFile = process.env.FX_ENGINE_REPO_TOKEN_FILE;
+const repoText = repoFile && fs.existsSync(repoFile) ? fs.readFileSync(repoFile, "utf8") : null;
+log({ event: "start", repoFile: repoFile || null, repoText, repoInEnv: Object.values(process.env).some((v) => typeof v === "string" && v.includes("ghs_sentinel_repo")), pid: process.pid, argv: process.argv.slice(2), cwd: process.cwd(), tokenSeen: token === ${JSON.stringify(TOKEN)}, tokenEnvSet: token !== undefined });
 out({ type: "system", subtype: "init", session_id: "${SID}", apiKeySource: "none" });
 if (mode === "echo") {
   // a tool output that echoes the credential: whole on stdout, split across two writes, and on stderr
@@ -54,6 +56,11 @@ process.stdin.on("data", (d) => {
     buf = buf.slice(i + 1);
     log({ event: "user", role: m.message.role, content: m.message.content });
     if (mode === "flood") { const line = JSON.stringify({ type: "assistant", pad: "x".repeat(1000) }) + "\\n"; for (let n = 0; n < 21 * 1024; n++) process.stdout.write(line); }
+    if (mode === "repoecho") {
+      // a tool output that echoes the repository token as it is NOW (the token is put after the launch and replaced while the host runs)
+      const now = fs.existsSync(repoFile) ? fs.readFileSync(repoFile, "utf8") : "none";
+      process.stdout.write("repo said " + now + " done\\n");
+    }
     if (mode === "hold") continue; // a turn that never ends (single flight)
     if (mode === "nousage") out({ type: "result", subtype: "error_max_turns", is_error: true });
     else if (mode === "echo") setTimeout(result, 400); // after the split write has completed its line
@@ -229,6 +236,153 @@ describe("events_read", () => {
   });
 });
 
+/** D#845 ON-18: `token_put github` keeps the repository token in ONE 0600 file on a tmpfs (a test's own directory here), never in the host's environment, replaced whole, zeroed and removed by every stop. */
+describe("token_put github (the repository token file)", () => {
+  const REPO_TOKEN = "ghs_sentinel_repo_token_0123456789";
+  const github = (text = REPO_TOKEN) => [{ op: "token_put", name: "github", size: text.length }, tokenBody(text)] as const;
+  const withFile = (mode = "ok") => {
+    const dir = tempDir("fx-gs-repotoken-");
+    const file = path.join(dir, "repo-token");
+    return { dir, file, r: rig(mode, (rt) => ({ ...rt, repoTokenFile: file })) };
+  };
+  const hostStarts = (r: Rig) => r.starts() as unknown as Array<{ repoFile: string | null; repoText: string | null; repoInEnv: boolean }>;
+
+  it("a guest with no token file refuses it, and nothing is written anywhere", async () => {
+    const r = rig("ok");
+    expect(await r.ask(...github())).toEqual({ ok: false, code: "refused" });
+    expect(readdirSync(r.scratch).sort()).toEqual(["bin", "checkout", "path", "state"]);
+  });
+
+  it("writes the token whole to a 0600 file, replaces it whole on the next put and leaves no temporary file", async () => {
+    const { dir, file, r } = withFile();
+    expect(await r.ask(...github())).toEqual({ ok: true });
+    expect(readFileSync(file, "utf8")).toBe(REPO_TOKEN);
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    expect(await r.ask(...github("ghs_sentinel_repo_second"))).toEqual({ ok: true });
+    expect(readFileSync(file, "utf8")).toBe("ghs_sentinel_repo_second");
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    expect(readdirSync(dir)).toEqual(["repo-token"]);
+  });
+
+  it("refuses a bad body (size mismatch, a space, too long) and leaves the file as it was", async () => {
+    const { file, r } = withFile();
+    await r.ask(...github());
+    for (const [header, body] of [
+      [{ op: "token_put", name: "github", size: 5 }, tokenBody("abc")],
+      [{ op: "token_put", name: "github", size: 4 }, Buffer.from([0x61, 0x20, 0x62, 0x63])],
+      [{ op: "token_put", name: "github", size: TOKEN_MAX + 1 }, Buffer.alloc(TOKEN_MAX + 1, 0x61)],
+      [{ op: "token_put", name: "github", size: 3, path: "/x" }, tokenBody("abc")],
+      [{ op: "token_put", name: "github", size: 3 }, undefined],
+    ] as Array<[Record<string, unknown>, Buffer | undefined]>) {
+      expect(await r.ask(header, body), JSON.stringify(header)).toEqual({ ok: false, code: "bad_request" });
+    }
+    expect(readFileSync(file, "utf8")).toBe(REPO_TOKEN);
+  });
+
+  it("never follows a link: a link at the file's name or at its temporary name is replaced, and what it pointed at is untouched", async () => {
+    const { dir, file, r } = withFile();
+    const decoy = path.join(dir, "decoy");
+    writeFileSync(decoy, "untouched");
+    symlinkSync(decoy, file);
+    symlinkSync(decoy, `${file}.new`);
+    expect(await r.ask(...github())).toEqual({ ok: true });
+    expect(lstatSync(file).isSymbolicLink()).toBe(false);
+    expect(readFileSync(file, "utf8")).toBe(REPO_TOKEN);
+    expect(readFileSync(decoy, "utf8")).toBe("untouched");
+  });
+
+  it("a put whose rename fails (the engine put a directory at the token path) leaves no token anywhere, answers with the fixed code and takes the next put once the way is clear", async () => {
+    const { dir, file, r } = withFile();
+    mkdirSync(file);
+    expect(await r.ask(...github())).toEqual({ ok: false, code: "internal" });
+    expect(readdirSync(dir)).toEqual(["repo-token"]);
+    expect(readdirSync(file)).toEqual([]);
+    rmSync(file, { recursive: true });
+    expect(await r.ask(...github())).toEqual({ ok: true });
+    expect(readFileSync(file, "utf8")).toBe(REPO_TOKEN);
+  });
+
+  it("a stop removes a temporary file a crash left, zeroing it in place first", async () => {
+    const { dir, file, r } = withFile();
+    const stale = `${file}.new`;
+    writeFileSync(stale, REPO_TOKEN);
+    const keep = path.join(dir, "keep");
+    linkSync(stale, keep);
+    await r.ask({ op: "stop", reason: "stopped_by_person" });
+    expect(existsSync(stale)).toBe(false);
+    expect(readFileSync(keep).every((b) => b === 0)).toBe(true);
+  });
+
+  it("a put replaces a leftover regular temporary file instead of failing on it", async () => {
+    const { dir, file, r } = withFile();
+    writeFileSync(`${file}.new`, "old");
+    expect(await r.ask(...github())).toEqual({ ok: true });
+    expect(readFileSync(file, "utf8")).toBe(REPO_TOKEN);
+    expect(readdirSync(dir)).toEqual(["repo-token"]);
+  });
+
+  it("writeAll keeps writing until every byte is out, and refuses a write that takes nothing", () => {
+    const got: string[] = [];
+    const slow = (_fd: number, b: Buffer, offset: number, length: number): number => {
+      const n = Math.min(3, length);
+      got.push(b.subarray(offset, offset + n).toString("latin1"));
+      return n;
+    };
+    writeAll(9, Buffer.from("ghs_0123456789"), slow);
+    expect(got.join("")).toBe("ghs_0123456789");
+    expect(got.length).toBeGreaterThan(1);
+    expect(() => writeAll(9, Buffer.from("abc"), () => 0)).toThrow("short_write");
+  });
+
+  it("the host gets the PATH of the file in its environment and reads the token from it, and the token is in no environment variable", async () => {
+    const { file, r } = withFile();
+    await r.ask(...github());
+    await r.ask({ op: "token_put", name: "claude", size: TOKEN.length }, tokenBody());
+    await r.ask({ op: "tick", kind: "loop" });
+    await until(() => hostStarts(r).length === 1, "the host to start");
+    expect(hostStarts(r)[0]).toMatchObject({ repoFile: file, repoText: REPO_TOKEN, repoInEnv: false });
+    expect(r.starts()[0]?.tokenSeen).toBe(true);
+  });
+
+  it("a guest with no token file starts a host with no such variable, and a claude put leaves the repository file alone (and the other way round)", async () => {
+    const plain = rig("ok");
+    await plain.ask({ op: "tick", kind: "loop" });
+    await until(() => plain.starts().length === 1, "the host to start");
+    expect(hostStarts(plain)[0]?.repoFile).toBeNull();
+    const { file, r } = withFile();
+    await r.ask(...github());
+    await r.ask({ op: "token_put", name: "claude", size: TOKEN.length }, tokenBody());
+    await r.ask({ op: "token_put", name: "claude", size: TOKEN.length }, tokenBody());
+    expect(readFileSync(file, "utf8")).toBe(REPO_TOKEN);
+    await r.ask({ op: "stop" });
+    expect(existsSync(file)).toBe(false);
+  });
+
+  it("a stop zeroes the file's own bytes (a second name for it sees zeros) and removes it, and no put is taken after it", async () => {
+    const { dir, file, r } = withFile();
+    await r.ask(...github());
+    const keep = path.join(dir, "keep");
+    linkSync(file, keep);
+    const reply = await r.ask({ op: "stop", reason: "stopped_by_person" });
+    expect(reply).toMatchObject({ ok: true, token_wiped: true });
+    expect(existsSync(file)).toBe(false);
+    const left = readFileSync(keep);
+    expect(left.length).toBe(REPO_TOKEN.length);
+    expect(left.every((b) => b === 0)).toBe(true);
+    expect(await r.ask(...github())).toEqual({ ok: false, code: "stopped" });
+    expect(existsSync(file)).toBe(false);
+  });
+
+  it("the token is in no reply, log, spool or event", async () => {
+    const { r } = withFile();
+    const replies = [await r.ask(...github()), await r.ask({ op: "tick", kind: "loop" })];
+    await until(() => r.users().length === 1, "the message");
+    replies.push(await r.ask({ op: "stop" }));
+    const seen = [JSON.stringify(replies), ...readdirSync(r.dir).filter((n) => n !== CHANNEL_SOCKET).map((n) => readFileSync(path.join(r.dir, n), "latin1"))].join("\n");
+    expect(seen).not.toContain(REPO_TOKEN);
+  });
+});
+
 describe("token_put and the wipe", () => {
   it("refuses a token that is not 1..4096 printable ASCII bytes of the stated size, or not named claude", async () => {
     const r = rig("ok");
@@ -239,7 +393,7 @@ describe("token_put and the wipe", () => {
       [{ op: "token_put", name: "claude", size: TOKEN_MAX + 1 }, Buffer.alloc(TOKEN_MAX + 1, 0x61)],
       [{ op: "token_put", name: "claude", size: 4 }, Buffer.from([0x61, 0x20, 0x62, 0x63])],
       [{ op: "token_put", name: "claude", size: 4 }, Buffer.from([0x61, 0x0a, 0x62, 0x63])],
-      [{ op: "token_put", name: "github", size: 3 }, tokenBody("abc")],
+      [{ op: "token_put", name: "github2", size: 3 }, tokenBody("abc")],
       [{ op: "token_put", name: "claude", size: 3, token: "abc" }, tokenBody("abc")],
       [{ op: "token_put", name: "claude", size: 3 }, undefined],
     ] as Array<[Record<string, unknown>, Buffer | undefined]>) {
@@ -533,6 +687,32 @@ describe("the host log never keeps the credential", () => {
     expect(log).toContain("tool said [redacted] done");
     expect(log).toContain("split [redacted] end");
     expect(log).toContain("err [redacted]");
+  });
+});
+
+describe("the host log never keeps the repository token", () => {
+  const FIRST = "ghs_sentinel_repo_first_0123456789";
+  const SECOND = "ghs_sentinel_repo_second_9876543210";
+  const turns = (r: Rig): number => r.events().filter((e) => e["kind"] === "usage_tick").length;
+  it("redacts a token put after the host started, and the next one that replaces it, in what the host writes", async () => {
+    const dir = tempDir("fx-gs-repolog-");
+    const r = rig("repoecho", (rt) => ({ ...rt, repoTokenFile: path.join(dir, "repo-token") }));
+    await r.ask({ op: "token_put", name: "claude", size: TOKEN.length }, tokenBody());
+    await r.ask({ op: "tick", kind: "loop" });
+    await until(() => turns(r) === 1, "the first turn");
+    await r.ask({ op: "token_put", name: "github", size: FIRST.length }, tokenBody(FIRST));
+    await r.ask({ op: "tick", kind: "loop" });
+    await until(() => turns(r) === 2, "the second turn");
+    await r.ask({ op: "token_put", name: "github", size: SECOND.length }, tokenBody(SECOND));
+    await r.ask({ op: "tick", kind: "loop" });
+    await until(() => turns(r) === 3, "the third turn");
+    await r.ask({ op: "stop" });
+    await until(() => r.events().some((e) => e["kind"] === "host_stopped"), "the host to stop");
+    const log = readFileSync(path.join(r.dir, HOST_LOG_FILE), "latin1");
+    expect(log).toContain("repo said none done");
+    expect(log).not.toContain(FIRST);
+    expect(log).not.toContain(SECOND);
+    expect(log.split("repo said [redacted] done").length - 1).toBe(2);
   });
 });
 

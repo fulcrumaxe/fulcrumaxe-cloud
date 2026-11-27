@@ -28,8 +28,8 @@ export interface SessionChannel {
   /** Wipes the credential and ends the host. Throws unless the guest said ok; the caller judges `survivors` and `tokenWiped`, and waits for the supervisor program (`pid`, the guest's own; undefined when the reply carried none) to be gone. */
   stop(reason: ChannelStopReason): Promise<{ survivors: number; tokenWiped: boolean; pid: number | undefined }>;
   eventsRead(after: number, stream?: "events" | "outcomes"): Promise<{ lines: string[]; next: number; reset: boolean }>;
-  /** Hands the credential over (1 to 4096 printable ASCII bytes). */
-  tokenPut(token: Buffer): Promise<void>;
+  /** Hands a credential over (1 to 4096 printable ASCII bytes): the model credential (`claude`, the default) or, ON-18, the repository token (`github`, which the guest keeps in a 0600 tmpfs file). */
+  tokenPut(token: Buffer, name?: "claude" | "github"): Promise<void>;
 }
 
 function frameOf(header: Record<string, unknown>, body?: Buffer): Buffer {
@@ -122,9 +122,9 @@ export function createChannelClient(connect: () => Promise<Duplex>, options: { t
       if (!Array.isArray(lines) || !lines.every((l) => typeof l === "string")) throw new ChannelError("bad_reply");
       return { lines: lines as string[], next: num(reply["next"]), reset: reply["reset"] === true };
     },
-    async tokenPut(token) {
+    async tokenPut(token, name = "claude") {
       if (token.length < 1 || token.length > TOKEN_MAX) throw new ChannelError("bad_request");
-      okOr(await ask({ op: "token_put", name: "claude", size: token.length }, token));
+      okOr(await ask({ op: "token_put", name, size: token.length }, token));
     },
   };
 }

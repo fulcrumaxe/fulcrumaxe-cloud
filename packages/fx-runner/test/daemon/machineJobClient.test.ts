@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MACHINE_JOB_CLAIM_PATH, MAX_PLAN_BYTES, MachineJobClaimMessage, SessionJobProgressBody, SetupProgressBody, machineJobProgressPath, setupPlanPath, setupProgressPath } from "@fulcrumaxe/runner-protocol";
+import { MACHINE_JOB_CLAIM_PATH, MAX_PLAN_BYTES, MachineJobClaimMessage, REPO_TOKEN_PATH, REPO_TOKEN_STOP_PATH, RepoTokenMessage, SessionJobProgressBody, SetupProgressBody, machineJobProgressPath, setupPlanPath, setupProgressPath } from "@fulcrumaxe/runner-protocol";
 import { createRunnerClient } from "../../src/daemon/client.js";
 import { generateRunnerKey } from "../../src/keys.js";
 import { SETUP_ID, signedJob } from "../helpers/machineJobFixture.js";
@@ -115,5 +115,54 @@ describe("setupPlan", () => {
     expect(await c.client.setupPlan("nope", 1)).toMatchObject({ kind: "error", code: "invalid_message" });
     expect(await c.client.setupPlan(SETUP_ID, 0)).toMatchObject({ kind: "error", code: "invalid_message" });
     expect(c.seen).toHaveLength(0);
+  });
+});
+
+/** D#845 ON-18: the repo-scoped token of a running session. */
+describe("engineRepoToken", () => {
+  const SESSION = "5d0c6f0e-2a54-4f3b-8d1e-7a9c2b3d4e5f";
+  it("sends the strict message, signed, to the engine route, and returns the token and its expiry", async () => {
+    const { client, seen } = clientAnswering(200, { token: "ghs_sentinel_x", expires_at: "2026-11-27T20:00:00.000Z" });
+    expect(await client.engineRepoToken(77, SESSION)).toEqual({ kind: "token", token: "ghs_sentinel_x", expiresAt: "2026-11-27T20:00:00.000Z" });
+    expect(seen[0]!.url).toBe(`https://cloud.example.test${REPO_TOKEN_PATH}`);
+    expect(RepoTokenMessage.parse(JSON.parse(seen[0]!.body))).toEqual({ repo_gh_id: 77, session_id: SESSION });
+    expect(Object.keys(seen[0]!.headers).some((h) => h.toLowerCase() === "signature")).toBe(true);
+  });
+  it("tells the cloud's closed refusals (404, 409, 502) from a call error, and keeps only the code", async () => {
+    for (const status of [404, 409, 502] as const) expect(await clientAnswering(status, errorBody("session_not_running")).client.engineRepoToken(77, SESSION)).toEqual({ kind: "refused", status, code: "session_not_running" });
+    expect(await clientAnswering(503, errorBody("upstream_unavailable")).client.engineRepoToken(77, SESSION)).toMatchObject({ kind: "error", status: 503 });
+    expect(await clientAnswering(401, errorBody("unauthorized")).client.engineRepoToken(77, SESSION)).toMatchObject({ kind: "error", status: 401 });
+  });
+  it("a reply the protocol does not describe is an invalid reply, and a bad id or session never leaves the machine", async () => {
+    expect(await clientAnswering(200, { token: "t", expires_at: "2026-11-27T20:00:00.000Z", extra: 1 }).client.engineRepoToken(77, SESSION)).toMatchObject({ kind: "error", code: "invalid_reply" });
+    expect(await clientAnswering(200, { token: "", expires_at: "2026-11-27T20:00:00.000Z" }).client.engineRepoToken(77, SESSION)).toMatchObject({ kind: "error", code: "invalid_reply" });
+    const refused = clientAnswering(200, {});
+    expect(await refused.client.engineRepoToken(0, SESSION)).toMatchObject({ kind: "error", code: "invalid_message" });
+    expect(await refused.client.engineRepoToken(77, "not-a-uuid")).toMatchObject({ kind: "error", code: "invalid_message" });
+    expect(refused.seen).toEqual([]);
+  });
+});
+
+/** D#845 ON-18 (Ruling 126.2): the report of the session stop made for `token_refresh_failed`. */
+describe("engineRepoTokenStop", () => {
+  const SESSION = "5d0c6f0e-2a54-4f3b-8d1e-7a9c2b3d4e5f";
+  it("sends the strict message, signed, to the stop-report route, and returns what the cloud recorded", async () => {
+    const { client, seen } = clientAnswering(200, { result: "recorded" });
+    expect(await client.engineRepoTokenStop(77, SESSION)).toEqual({ kind: "reported", result: "recorded" });
+    expect(seen[0]!.url).toBe(`https://cloud.example.test${REPO_TOKEN_STOP_PATH}`);
+    expect(RepoTokenMessage.parse(JSON.parse(seen[0]!.body))).toEqual({ repo_gh_id: 77, session_id: SESSION });
+    expect(Object.keys(seen[0]!.headers).some((h) => h.toLowerCase() === "signature")).toBe(true);
+    expect(await clientAnswering(200, { result: "already" }).client.engineRepoTokenStop(77, SESSION)).toEqual({ kind: "reported", result: "already" });
+  });
+  it("tells the closed refusals from a call error and keeps only the code (a 404 with no code is a cloud without the route)", async () => {
+    for (const status of [404, 409] as const) expect(await clientAnswering(status, errorBody("session_not_running")).client.engineRepoTokenStop(77, SESSION)).toEqual({ kind: "refused", status, code: "session_not_running" });
+    expect(await clientAnswering(404, undefined, "<html>not found</html>").client.engineRepoTokenStop(77, SESSION)).toEqual({ kind: "refused", status: 404 });
+    expect(await clientAnswering(503, errorBody("not_configured")).client.engineRepoTokenStop(77, SESSION)).toMatchObject({ kind: "error", status: 503 });
+  });
+  it("a reply the protocol does not describe is an invalid reply, and a bad id or session never leaves the machine", async () => {
+    expect(await clientAnswering(200, { result: "done" }).client.engineRepoTokenStop(77, SESSION)).toMatchObject({ kind: "error", code: "invalid_reply" });
+    const refused = clientAnswering(200, {});
+    expect(await refused.client.engineRepoTokenStop(0, SESSION)).toMatchObject({ kind: "error", code: "invalid_message" });
+    expect(refused.seen).toEqual([]);
   });
 });

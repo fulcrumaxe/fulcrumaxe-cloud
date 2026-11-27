@@ -27,9 +27,9 @@ import { RunPullRequestError } from "./runPullRequest.js";
 
 export const ENGINE_SESSION_NAME_PREFIX = "fx-engine-";
 export type EngineStopReason = (typeof ENGINE_STOP_REASONS)[number];
-/** The reasons a person can give. `operate_off` and `plan` are system-only (Ruling 82): the system's own stop issuer sets them, never a person's call. */
-export type PersonStopReason = Exclude<EngineStopReason, "operate_off" | "plan">;
-const SYSTEM_STOP_REASONS: readonly string[] = ["operate_off", "plan"];
+/** The reasons a person can give. `operate_off`, `plan` and `token_refresh_failed` (the runner's own, ON-18) are system-only (Ruling 82): the system's own stop issuer sets them, never a person's call. */
+export type PersonStopReason = Exclude<EngineStopReason, "operate_off" | "plan" | "token_refresh_failed">;
+const SYSTEM_STOP_REASONS: readonly string[] = ["operate_off", "plan", "token_refresh_failed"];
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SHA40 = /^[0-9a-f]{40}$/;
 const NO_STORE = { "cache-control": "no-store" };

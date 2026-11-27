@@ -46,6 +46,7 @@ describe("requests", () => {
     expect(await client.eventsRead(0)).toEqual({ lines: ["{}"], next: 3, reset: false });
     expect(await client.eventsRead(3, "outcomes")).toEqual({ lines: ["{}"], next: 3, reset: false });
     await client.tokenPut(Buffer.from(TOKEN));
+    await client.tokenPut(Buffer.from("ghs_x"), "github");
     expect(far.requests.map((q) => q.header)).toEqual([
       { op: "tick", kind: "loop" },
       { op: "tick", kind: "checkin", name: "pm-sweep" },
@@ -54,9 +55,11 @@ describe("requests", () => {
       { op: "events_read", after: 0 },
       { op: "events_read", after: 3, stream: "outcomes" },
       { op: "token_put", name: "claude", size: TOKEN.length },
+      { op: "token_put", name: "github", size: 5 },
     ]);
-    expect(far.requests.at(-1)?.body?.toString()).toBe(TOKEN);
-    expect(far.connections()).toBe(7); // one request per connection
+    expect(far.requests.at(-1)?.body?.toString()).toBe("ghs_x");
+    expect(far.requests.at(-2)?.body?.toString()).toBe(TOKEN);
+    expect(far.connections()).toBe(8); // one request per connection
   });
 
   it("a refusal is its closed code, and nothing of the peer's text is kept", async () => {

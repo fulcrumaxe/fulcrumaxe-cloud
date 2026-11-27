@@ -314,8 +314,8 @@ describe("setup progress body", () => {
     expect(ok(jobOf("engine_session_delete", { args: { operate_epoch: 7 } }))).toBe(true);
     expect(ok(jobOf("engine_session_delete", { args: { operate_epoch: 0, extra: 1 } }))).toBe(false);
   });
-  it("pins the stop reasons, with the two new ones", () => {
-    expect([...ENGINE_STOP_REASONS]).toEqual(["person", "halt", "move", "remove", "operate_off", "plan"]);
+  it("pins the stop reasons, and the runner's own, token_refresh_failed (ON-18)", () => {
+    expect([...ENGINE_STOP_REASONS]).toEqual(["person", "halt", "move", "remove", "operate_off", "plan", "token_refresh_failed"]);
     for (const reason of ENGINE_STOP_REASONS) expect(ok(jobOf("engine_session_stop", { args: { reason, operate_epoch: 3 } })), reason).toBe(true);
     expect(ok(jobOf("engine_session_stop", { args: { reason: "park", operate_epoch: 3 } }))).toBe(false);
   });
