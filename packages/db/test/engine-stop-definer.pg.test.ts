@@ -56,7 +56,7 @@ describe('engine_stop_definer [pg]', () => {
     expect((await admin.query(`SELECT has_schema_privilege('engine_stop_definer', 'public', 'CREATE') AS ok`)).rows[0].ok).toBe(false);
   });
 
-  it('owns exactly the five functions, each a pinned SECURITY DEFINER: the two predicates run by machine_jobs_owner alone, the three system ones by platform_ops alone', async () => {
+  it('owns exactly the six functions, each a pinned SECURITY DEFINER: the two predicates run by machine_jobs_owner alone, the three system ones by platform_ops alone, the stop report by the runner session (app_user) alone (1119)', async () => {
     const rows = (await admin.query(
       `SELECT p.proname, p.prosecdef, p.proconfig,
               has_function_privilege('app_user', p.oid, 'EXECUTE') AS app, has_function_privilege('platform_ops', p.oid, 'EXECUTE') AS ops,
@@ -66,6 +66,7 @@ describe('engine_stop_definer [pg]', () => {
     expect(rows).toEqual([
       { proname: 'engine_plan_ended', prosecdef: true, proconfig: pinned, app: false, ops: false, jobs: true, pub: false },
       { proname: 'engine_repo_operated', prosecdef: true, proconfig: pinned, app: false, ops: false, jobs: true, pub: false },
+      { proname: 'engine_repo_token_stop_report', prosecdef: true, proconfig: pinned, app: true, ops: false, jobs: false, pub: false },
       { proname: 'engine_system_stop_issue', prosecdef: true, proconfig: pinned, app: false, ops: true, jobs: false, pub: false },
       { proname: 'engine_system_stop_next_due', prosecdef: true, proconfig: pinned, app: false, ops: true, jobs: false, pub: false },
       { proname: 'engine_system_stops_due', prosecdef: true, proconfig: pinned, app: false, ops: true, jobs: false, pub: false },
@@ -82,6 +83,15 @@ describe('engine_stop_definer [pg]', () => {
       expect(await code(c, INSERT_JOB, jobArgs('engine_session_stop', 'operate_off'))).toBe('ok');
       expect(await code(c, INSERT_JOB, jobArgs('engine_session_stop', 'plan'))).toBe('ok');
       for (const reason of ['person', 'halt', 'move', 'remove']) expect(await code(c, INSERT_JOB, jobArgs('engine_session_stop', reason)), reason).toBe('42501');
+      // 1119: `token_refresh_failed` only as a failed stop with no failure code and a delivery time (the runner's own stop, reported before it runs)
+      expect(await code(c, INSERT_JOB, jobArgs('engine_session_stop', 'token_refresh_failed')), 'issued').toBe('42501');
+      const failedAs = (state: string, failure: string | null, delivered: boolean) =>
+        code(c, 'INSERT INTO machine_jobs (id, account_id, runner_id, repo_id, setup_id, kind, job, issued_at, expires_at, state, delivered_at, failure_code) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12)', [...jobArgs('engine_session_stop', 'token_refresh_failed'), state, delivered ? new Date() : null, failure]);
+      expect(await failedAs('failed', null, true)).toBe('ok');
+      expect(await failedAs('done', null, true), 'done').toBe('42501');
+      expect(await failedAs('expired', null, true), 'expired').toBe('42501');
+      expect(await failedAs('failed', 'vm_teardown_incomplete', true), 'a failure code').toBe('42501');
+      expect(await failedAs('failed', null, false), 'no delivery time').not.toBe('ok');
       expect(await code(c, INSERT_JOB, jobArgs('engine_session_start', null))).toBe('42501');
       expect(await code(c, INSERT_JOB, jobArgs('engine_session_delete', null))).toBe('42501');
       expect(await code(c, INSERT_JOB, jobArgs('engine_update', null))).toBe('42501');
@@ -146,6 +156,9 @@ describe('engine_stop_definer [pg]', () => {
       await c.query('SET LOCAL ROLE engine_stop_definer');
       const ins = (action: string, actor: string) => code(c, `INSERT INTO audit_log (account_id, actor, action, payload) VALUES ($1, $2, $3, '{}'::jsonb)`, [a.accountId, actor, action]);
       expect(await ins('engine_session.stopped', 'postgres')).toBe('ok');
+      expect(await ins('engine_session.token_refresh_failed', 'postgres')).toBe('ok'); // 1119: exactly this one more action
+      expect(await ins('engine_session.token_refresh_failed', 'someone-else')).toBe('42501');
+      expect(await ins('engine_session.token_refresh', 'postgres')).toBe('42501');
       expect(await ins('engine_session.stopped', 'someone-else')).toBe('42501');
       expect(await ins('engine_session.started', 'postgres')).toBe('42501');
       expect(await ins('discussion.erase', 'postgres')).toBe('42501');
@@ -164,7 +177,7 @@ describe('engine_stop_definer [pg]', () => {
       await c.query('BEGIN');
       await c.query('SET LOCAL ROLE engine_stop_definer');
       for (const sql of [
-        'SELECT job FROM machine_jobs', 'SELECT last_seq FROM machine_jobs', 'SELECT stripe_customer_id FROM accounts', 'SELECT plan FROM accounts', 'SELECT email FROM users', 'SELECT * FROM account_members',
+        'SELECT job FROM machine_jobs', 'SELECT renewed_at FROM engine_session_leases', 'SELECT last_seq FROM machine_jobs', 'SELECT stripe_customer_id FROM accounts', 'SELECT plan FROM accounts', 'SELECT email FROM users', 'SELECT * FROM account_members',
         'SELECT updated_by FROM engine_bridge_settings', 'SELECT registered_by FROM runners', 'SELECT gh_owner FROM repos', 'SELECT * FROM engine_events', 'SELECT * FROM machine_provider_credentials',
       ]) {
         expect(await code(c, sql), sql).toBe('42501');
@@ -175,6 +188,7 @@ describe('engine_stop_definer [pg]', () => {
         'SELECT account_id, repo_id, runner_id FROM project_placements', 'SELECT id, account_id, revoked_at FROM runners', 'SELECT id, account_id, gh_repo_id FROM repos',
         'SELECT account_id, runner_id, name, state FROM runner_sandboxes', 'SELECT account_id, runner_id, seen_at FROM runner_sandbox_reports',
         'SELECT id, account_id, repo_id, runner_id, kind, state, issued_at, stop_reason FROM machine_jobs',
+        'SELECT account_id, repo_id, runner_id, operate_epoch, expires_at FROM engine_session_leases',
       ]) {
         expect(await code(c, sql), sql).toBe('ok');
       }

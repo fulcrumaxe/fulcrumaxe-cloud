@@ -17,7 +17,7 @@ import { openInstallationHttp } from "./github/installationHttp";
 import { openForEngineRemoval } from "./github/localOnlyHttp";
 import { readPlanePushIdentity } from "@fx/core/src/repos/planePushIdentity.js";
 import { createLivePlanePushPort } from "./github/planePushHosted";
-import { createLiveSetupPushPort } from "./github/setupPush";
+import { createLiveEngineRepoTokenPort, createLiveSetupPushPort } from "./github/setupPush";
 import { createPlaneMergeOps } from "./planeMerge";
 import { openPlanSource } from "./github/planSource";
 import { runnerSeenFromCache } from "./runnerSeenCache";
@@ -61,6 +61,7 @@ let pullRequests: SetupInstallPort | undefined;
 /** D#598 P1f-2: the GitHub side of the public-push routes. Built on first use; a missing App answers the routes' fixed `not_configured`. */
 let planePush: PlanePushHostedPort | undefined;
 let setupPush: ReturnType<typeof createLiveSetupPushPort> | undefined;
+let engineRepoToken: ReturnType<typeof createLiveEngineRepoTokenPort> | undefined;
 
 /**
  * D#6 PUBLIC-MERGE PR2b: the merge-order routes' store, gate and GitHub reads. Built on first use over the worker (resolved per call, so a missing worker is a 503
@@ -154,6 +155,7 @@ export function runnerDeps(): RunnerCloudDeps {
     afterSetupPush: () => installPrNow(),
     planePush: (planePush ??= createLivePlanePushPort()),
     setupPush: (setupPush ??= createLiveSetupPushPort()),
+    engineRepoToken: (engineRepoToken ??= createLiveEngineRepoTokenPort()),
     planeMerge: (planeMerge ??= livePlaneMerge()),
     readAllowanceFile,
     engineRemovalGithub,

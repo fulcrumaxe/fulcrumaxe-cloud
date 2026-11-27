@@ -40,7 +40,8 @@ import { createTwinPublishHandler } from "../setup/twinPublish.js";
 import { createTwinSyncHandler } from "../setup/twinSync.js";
 import { createProjectSetupHandler, setupHandlerFor } from "../setup/projectSetup.js";
 import { createHostSetupVm, type HostGuestDeps } from "../setup/hostGuest.js";
-import { createEngineLeaseGuard, createEngineSessionHandlers, createSessionLock, lockSessionHandlers, sessionStopperOf } from "../engineSession/lifecycle.js";
+import { createEngineLeaseGuard, createEngineSessionHandlers, createSessionLock, lockSessionHandlers, sessionStopperOf, type SessionStopper } from "../engineSession/lifecycle.js";
+import { createRepoTokenRefresher } from "../engineSession/repoToken.js";
 import { createStandardSessionParts, sessionHandlersFor } from "../engineSession/standardTier.js";
 import { createOperateMark } from "../engineSession/operateMark.js";
 import { createRepoLookup } from "../engineSession/repoLookup.js";
@@ -75,7 +76,7 @@ import { computeConflictAttestation } from "../daemon/conflictAttest.js";
 import { createPlaneBaseLedger, createPlanePushHook, type PlaneBaseLedger } from "../daemon/planePush.js";
 import { createPlanePushGithub } from "../daemon/planePushGithub.js";
 import { createPlaneMergeHandler } from "../daemon/planeMerge.js";
-import { CONFLICT_FACTS_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, ENGINE_LEASE_HELLO_CAPABILITY, ENGINE_SESSION_CAPABILITY, HEARTBEAT_INVENTORY_HELLO_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, MACHINE_LOGIN_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, MEMORY_LIMIT_CAPABILITY, ORDERED_FACTS_CAPABILITY, OVERLAP_FACTS_CAPABILITY, PROJECT_SETUP_CAPABILITY, SANDBOX_COMMAND_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, type LimitedBy, type PreflightCode } from "@fulcrumaxe/runner-protocol";
+import { CONFLICT_FACTS_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, ENGINE_LEASE_HELLO_CAPABILITY, ENGINE_SESSION_CAPABILITY, REPO_TOKEN_REFRESH_CAPABILITY, HEARTBEAT_INVENTORY_HELLO_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, MACHINE_LOGIN_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, MEMORY_LIMIT_CAPABILITY, ORDERED_FACTS_CAPABILITY, OVERLAP_FACTS_CAPABILITY, PROJECT_SETUP_CAPABILITY, SANDBOX_COMMAND_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, type LimitedBy, type PreflightCode } from "@fulcrumaxe/runner-protocol";
 import { createGitTransport, createPublicHeadsReader } from "@fulcrumaxe/runner-protocol/planePush";
 import { createNixShell, findNix, findTool, identityVia } from "../daemon/nixShell.js";
 import { createDepsInstaller } from "../daemon/depsInstall.js";
@@ -446,6 +447,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     let memProposalAccepted = false;
     /** D#842 EB-3c: set once the hello is answered; the engine bridge starts only when the cloud kept `engine_bridge_v1`. */
     let engineBridgeAccepted = false;
+    // D#845 ON-18: whether the latest answered hello accepted `repo_token_refresh_v1`; without it no repo-token loop starts (a cloud that dropped it has no route to ask)
+    let repoTokenAccepted = false;
     // D#845 watch mode: true once a hello reply listed the `watch_mode` capability (not a protocol number: clouds at 23 and 24 exist that cannot take the slim status).
     let cloudWatchMode = false;
     // D#845 ON-6c: true once a hello reply listed the `kvm_fact` capability; only then does a hello carry `facts.kvm`.
@@ -764,7 +767,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       const setupJobsPossible = vmDeps !== undefined || (host.engine.installCapture !== undefined && host.selfCommand !== undefined);
       // D#845 ON-13b2: `engine_session_v1` is listed only by a host that has what a session needs: the live microVM stack (its channel dial, its credential source and its snapshot deps, without which no session VM can be persistent) and a user id. The same condition builds `microvmSessions` below, so the first hello already says it.
       const engineSessionArmed = vm !== undefined && vmDeps !== undefined && host.uid !== undefined && host.microvm?.deps?.snapshots !== undefined;
-      const capabilityList = async () => [...RUNNER_BUILD_CAPABILITIES.filter((c) => (c !== MACHINE_LOGIN_CAPABILITY || host.managedServer?.() === true) && (c !== PROJECT_SETUP_CAPABILITY || setupJobsPossible) && (c !== ENGINE_SESSION_CAPABILITY || engineSessionArmed)), SANDBOX_COMMAND_CAPABILITY, ...(factsWithKvm?.kvm === undefined ? [] : [KVM_FACT_HELLO_CAPABILITY]), ...(preflightReporter === undefined ? [] : [PREFLIGHT_HELLO_CAPABILITY]), ...(inventoryReporter === undefined ? [] : [HEARTBEAT_INVENTORY_HELLO_CAPABILITY]), ...(engineLeaseArmed ? [ENGINE_LEASE_HELLO_CAPABILITY] : []), ...(await verifyLocal.capabilities())];
+      const capabilityList = async () => [...RUNNER_BUILD_CAPABILITIES.filter((c) => (c !== MACHINE_LOGIN_CAPABILITY || host.managedServer?.() === true) && (c !== PROJECT_SETUP_CAPABILITY || setupJobsPossible) && (c !== ENGINE_SESSION_CAPABILITY || engineSessionArmed) && (c !== REPO_TOKEN_REFRESH_CAPABILITY || engineSessionArmed)), SANDBOX_COMMAND_CAPABILITY, ...(factsWithKvm?.kvm === undefined ? [] : [KVM_FACT_HELLO_CAPABILITY]), ...(preflightReporter === undefined ? [] : [PREFLIGHT_HELLO_CAPABILITY]), ...(inventoryReporter === undefined ? [] : [HEARTBEAT_INVENTORY_HELLO_CAPABILITY]), ...(engineLeaseArmed ? [ENGINE_LEASE_HELLO_CAPABILITY] : []), ...(await verifyLocal.capabilities())];
       const helloBody = async (facts: typeof factsPlain) => ({ protocol_version: RUNNER_PROTOCOL_VERSION, binary_version: RUNNER_VERSION, model_auth_present: await modelAuth(), isolation: "host_sandbox" as const, ...(facts === undefined ? {} : { facts }), capabilities: await capabilityList() });
       const firstHello = await helloMessage();
       let advertised = JSON.stringify(firstHello.capabilities);
@@ -789,6 +792,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
         memProposalAccepted = dropped !== undefined && !dropped.includes(MEM_PROPOSAL_CAPABILITY);
         hooks.onMemProposalAccepted?.(memProposalAccepted);
         engineBridgeAccepted = dropped !== undefined && !dropped.includes(ENGINE_BRIDGE_CAPABILITY);
+        repoTokenAccepted = dropped !== undefined && !dropped.includes(REPO_TOKEN_REFRESH_CAPABILITY);
         if (answer?.kind === "ok") cloudWatchMode = answer.watchMode === true;
         if (answer?.kind === "ok") cloudKvmFact = answer.kvmFact === true;
         if (answer?.kind === "ok") cloudPreflight = answer.preflight === true;
@@ -847,6 +851,19 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
               runnerId: registration.runner_id,
               cloudOrigin: registration.cloud_origin,
             };
+      // D#845 ON-18: the repo token's refresh loop; three failed asks in a row stop the session through the runner's own stop path (bound below, once the handlers exist), with the reason `token_refresh_failed`.
+      const repoTokenStop: { stop?: SessionStopper } = {};
+      const repoToken = createRepoTokenRefresher({
+        client,
+        enabled: () => repoTokenAccepted,
+        revoke: (token) => setupRevoker.revokeToken(token),
+        after: (ms, fn) => {
+          const timer = setTimeout(fn, ms);
+          return () => clearTimeout(timer);
+        },
+        exhausted: (repoGhId) => void repoTokenStop.stop?.(repoGhId).catch(() => false), // fx-swallow-ok: a stop that threw ended nothing; the cloud's own lease and stop paths remain
+        log: (line) => ctx.out(line),
+      });
       const microvmSessions =
         vm === undefined || vmDeps === undefined || sessionCommon === undefined
           ? undefined
@@ -854,6 +871,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
               vm: vmDeps,
               port: (options) => vm.vmPort(options),
               readToken: vm.readToken, // the runner's own credential path (`credentials set-vm-token`), a fresh buffer per call
+              repoToken,
               stopped: (r) => ctx.out(`fx-runner: engine session stopped (${r.method}, ${r.survivors} survivors, synced ${r.paused.synced})`),
               state: async (name) => (await vm.port.sandboxState?.({ runId: "", sandboxName: name, sessionId: "" })) ?? "unknown",
               ...sessionCommon,
@@ -879,6 +897,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       const sessionLock = createSessionLock();
       const leaseOn = sessionHandlers !== undefined && inventoryReporter !== undefined;
       leaseGuard.bind(leaseOn ? sessionStopperOf(sessionHandlers.engine_session_stop, sessionLock) : undefined);
+      if (leaseOn) repoTokenStop.stop = sessionStopperOf(sessionHandlers.engine_session_stop, sessionLock, "token_refresh_failed");
       engineLeaseArmed = leaseOn;
       const machineJobs = (machineJobDispatcher = createMachineJobDispatcher({ client, keyring, runnerId: registration.runner_id, now: ctx.now, handlers: { ...(setupHandler === undefined ? {} : { project_setup: setupHandler }), ...(updateHandler === undefined ? {} : { engine_update: updateHandler }), twin_seed: twinSeedHandler, twin_publish: twinPublishHandler, twin_sync: twinSyncHandler, ...(sessionHandlers === undefined ? {} : lockSessionHandlers(sessionHandlers, sessionLock)) },sandboxEngine: () => effectiveEngine(engine, loadSettings(stateDir).sandboxEngine), signal: stopped.signal, log: (event) => ctx.out(`fx-runner: machine job ${event.event}`) }));
       // D#842 EB-3c: the engine bridge runs beside the claim loop, never under it: it is started here, nothing below awaits it, and it ends only when `finally` stops it.

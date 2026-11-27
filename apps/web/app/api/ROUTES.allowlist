@@ -40,6 +40,8 @@ runner/engine/commands/pull/route.ts
 runner/engine/decide/route.ts
 runner/engine/dials/route.ts
 runner/engine/events/route.ts
+runner/engine/repo-token/route.ts
+runner/engine/repo-token-stop/route.ts
 runner/git-ticket/route.ts
 runner/heartbeat/route.ts
 runner/hello/route.ts

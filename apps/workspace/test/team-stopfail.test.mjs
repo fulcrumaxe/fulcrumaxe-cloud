@@ -65,6 +65,7 @@ describe("the row's sentence: every reason and every code", () => {
     plan: "The Engine plan ended, but the engine didn't stop. It may still be running",
     move: "Moving the project didn't stop the engine on its old machine",
     remove: "Removing the project didn't stop its engine",
+    token_refresh_failed: "The engine lost its GitHub access, so it was stopped, but the stop didn't finish. It may still be running",
     other: "The engine didn't stop",
   };
   const WHY = {
@@ -72,7 +73,7 @@ describe("the row's sentence: every reason and every code", () => {
     job_expired: "the machine didn't pick up the stop in time", job_silent: "the machine went quiet", job_overran: "the stop took too long",
   };
   const NO_WHY = [null, "kind_unsupported", "engine_unsupported", "something_new"];
-  const reasons = [["person", "person"], ["halt", "halt"], ["operate_off", "operate_off"], ["plan", "plan"], ["move", "move"], ["remove", "remove"], [null, "other"], ["reboot", "other"]];
+  const reasons = [["person", "person"], ["halt", "halt"], ["operate_off", "operate_off"], ["plan", "plan"], ["move", "move"], ["remove", "remove"], ["token_refresh_failed", "token_refresh_failed"], [null, "other"], ["reboot", "other"]];
 
   for (const [reason, key] of reasons) {
     it(`reason ${String(reason)}: ${Object.keys(WHY).length} codes with their why, ${NO_WHY.length} without`, async () => {
@@ -113,7 +114,7 @@ describe("the row's sentence: every reason and every code", () => {
 
 describe("who gets the button", () => {
   it("an owner or admin has it for a person, a halt, a system cause and an unknown reason; a move and a removal have none", async () => {
-    for (const reason of ["person", "halt", "operate_off", "plan", null]) expect((await failing(sf(reason))).t.view().stopFail, String(reason)).toMatchObject({ button: true, canRetry: true, forbidden: "", label: "Try again" });
+    for (const reason of ["person", "halt", "operate_off", "plan", "token_refresh_failed", null]) expect((await failing(sf(reason))).t.view().stopFail, String(reason)).toMatchObject({ button: true, canRetry: true, forbidden: "", label: "Try again" });
     for (const reason of ["move", "remove"]) expect((await failing(sf(reason))).t.view().stopFail, reason).toMatchObject({ button: false, canRetry: false, forbidden: "" });
   });
   it("a member sees the button, disabled, with the line that says why; a move and a removal still have none", async () => {

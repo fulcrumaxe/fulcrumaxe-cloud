@@ -28,8 +28,9 @@ const signalGroup = (pgid, signal) => {
 };
 
 /** @returns {import("../src/engineHost/guestSession.ts").GuestRuntime} */
-export function guestRuntime({ claudePath, env }) {
+export function guestRuntime({ claudePath, env, repoTokenFile = undefined }) {
   return {
+    repoTokenFile,
     uid: process.getuid?.() ?? -1,
     ownPid: process.pid,
     claudePath,
@@ -82,7 +83,8 @@ export function guestRuntime({ claudePath, env }) {
  * Prints `SESSION_READY_LINE` once it listens. A SIGTERM is a `machine_shutdown` stop (the credential is wiped, then the host ends).
  */
 export async function runEngineSupervise({ dir, claudePath, env, socket, out = (line) => process.stdout.write(`${line}\n`), tune = (runtime) => runtime }) {
-  const session = createGuestSession({ dir, runtime: tune(guestRuntime({ claudePath, env })) });
+  // ON-18: the repository token lives in one file on a tmpfs: the unit's own (standard tier) or the guest's shared memory directory
+  const session = createGuestSession({ dir, runtime: tune(guestRuntime({ claudePath, env, repoTokenFile: process.env.FX_ENGINE_REPO_TOKEN_FILE ?? "/dev/shm/fx-engine-repo-token" })) });
   const listening = await session.serve(socket ?? path.join(dir, CHANNEL_SOCKET));
   out(SESSION_READY_LINE);
   const signals = ["SIGTERM", "SIGINT", "SIGHUP"];

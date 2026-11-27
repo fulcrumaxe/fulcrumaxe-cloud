@@ -224,7 +224,7 @@ export class InstallationTokenCache {
  * permission set no other purpose may ask for (see MERGE_GATE_PERMISSIONS). It exists so the check-run, status and
  * branch-protection reads, and the commit-status write, are NOT in the allowlist of every other purpose.
  */
-export const MINT_PURPOSES = ["run", "preview_read", "sitekit_read", "merge_gate", "plan_read", "runner_git", "plane_push", "plane_merge", "plane_publish_read", "branch_delete", "branch_sync", "pairing_read", "receipt_block", "retraction", "revert_pr", "plane_parity", "setup_push", "setup_labels", "setup_finish"] as const;
+export const MINT_PURPOSES = ["run", "preview_read", "sitekit_read", "merge_gate", "plan_read", "runner_git", "plane_push", "plane_merge", "plane_publish_read", "branch_delete", "branch_sync", "pairing_read", "receipt_block", "retraction", "revert_pr", "plane_parity", "setup_push", "setup_labels", "setup_finish", "engine_session"] as const;
 export type MintPurpose = (typeof MINT_PURPOSES)[number];
 
 /**
@@ -317,6 +317,22 @@ export function assertSetupFinishToken(minted: Pick<MintedAccessToken, "permissi
   const coversOnly = Array.isArray(repos) && repos.length === 1 && repos[0]!.toLowerCase() === repo.toLowerCase();
   const keys = Object.keys(perms);
   if (perms.issues !== "write" || perms.discussions !== "write" || (perms.metadata !== undefined && perms.metadata !== "read") || keys.some((k) => k !== "issues" && k !== "discussions" && k !== "metadata") || !coversOnly) throw new InstallationTokenError("token_scope_mismatch");
+}
+
+/**
+ * D#845 ON-18 (Ruling 126.5): the only permissions an `engine_session` token asks for: what the engine needs on ONE customer repository while its session runs. It goes to the guest's tmpfs only (never a host environment),
+ * lasts an hour and is minted fresh for every refresh. Never `workflows`, `administration` or `actions`.
+ */
+export const ENGINE_SESSION_PERMISSIONS: Readonly<Record<string, "read" | "write">> = Object.freeze({ metadata: "read", contents: "write", issues: "write", pull_requests: "write", discussions: "write" });
+
+/** D#845 ON-18: an `engine_session` mint must cover exactly the one repository and say exactly the five permissions; a response that does not say is refused. */
+export function assertEngineSessionToken(minted: Pick<MintedAccessToken, "permissions" | "repositories">, repo: string): void {
+  const perms = minted.permissions;
+  if (perms === undefined || perms === null || typeof perms !== "object" || Array.isArray(perms)) throw new InstallationTokenError("token_scope_mismatch");
+  const repos = minted.repositories;
+  const coversOnly = Array.isArray(repos) && repos.length === 1 && repos[0]!.toLowerCase() === repo.toLowerCase();
+  const exact = Object.entries(ENGINE_SESSION_PERMISSIONS).every(([k, level]) => (k === "metadata" ? perms[k] === undefined : false) || perms[k] === level);
+  if (!exact || Object.keys(perms).some((k) => !(k in ENGINE_SESSION_PERMISSIONS)) || !coversOnly) throw new InstallationTokenError("token_scope_mismatch");
 }
 
 /** D#845 ON-8f2b: a `setup_labels` mint must cover exactly the one repository and say `issues: write` and `metadata: read` and nothing else; a response that does not say is refused. */
@@ -607,6 +623,14 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
     allowed = Object.keys(SETUP_PUSH_PERMISSIONS);
     appKind = params.appKind;
     namespace = "setup_push:";
+  } else if (params.purpose === "engine_session") {
+    // D#845 ON-18: the write App, ONE repository and exactly the fixed set. Fresh every time.
+    assertWriteInstallation(params.appKind);
+    if (isWide(params.scope)) throw new InstallationTokenError("purpose_not_allowed");
+    scope = { repositories: params.scope.repositories, permissions: ENGINE_SESSION_PERMISSIONS };
+    allowed = Object.keys(ENGINE_SESSION_PERMISSIONS);
+    appKind = params.appKind;
+    namespace = "engine_session:";
   } else if (params.purpose === "setup_labels") {
     // D#845 ON-8f2b: the write App, ONE repository and exactly the fixed set. Fresh every time.
     assertWriteInstallation(params.appKind);
@@ -699,7 +723,7 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
     throw new InstallationTokenError("permission_not_allowed");
   }
 
-  const neverCached = params.purpose === "plane_push" || params.purpose === "plane_merge" || params.purpose === "plane_publish_read" || params.purpose === "branch_delete" || params.purpose === "branch_sync" || params.purpose === "pairing_read" || params.purpose === "retraction" || params.purpose === "revert_pr" || params.purpose === "plane_parity" || params.purpose === "setup_push" || params.purpose === "setup_labels" || params.purpose === "setup_finish";
+  const neverCached = params.purpose === "plane_push" || params.purpose === "plane_merge" || params.purpose === "plane_publish_read" || params.purpose === "branch_delete" || params.purpose === "branch_sync" || params.purpose === "pairing_read" || params.purpose === "retraction" || params.purpose === "revert_pr" || params.purpose === "plane_parity" || params.purpose === "setup_push" || params.purpose === "setup_labels" || params.purpose === "setup_finish" || params.purpose === "engine_session";
   if (params.fresh === true && !neverCached) throw new InstallationTokenError("purpose_not_allowed");
   // D#598 C4: a plane_push token is never cached on any path, so it is fresh whatever the caller passes. Nothing is read from or written to the cache for it.
   // The same holds for a plane_publish_read token, which is minted and revoked for one proxied request.
@@ -774,6 +798,14 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
   if (params.purpose === "setup_push") {
     try {
       assertSetupPushToken(minted, (scope as MergeGateScope).repositories[0]);
+    } catch (error) {
+      await params.revoke?.(minted.token).catch(() => undefined);
+      throw error;
+    }
+  }
+  if (params.purpose === "engine_session") {
+    try {
+      assertEngineSessionToken(minted, (scope as MergeGateScope).repositories[0]);
     } catch (error) {
       await params.revoke?.(minted.token).catch(() => undefined);
       throw error;

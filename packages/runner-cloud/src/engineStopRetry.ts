@@ -8,7 +8,7 @@ import { asPerson, issueStopOrDeleteLocked, loadSessionTarget, lockEngineSession
  * D#845 ON-13c4a: Try again on a stop that did not finish. An owner or admin on a session, no body: the SERVER picks the reason from the repo's newest session job (the same read as `stop_failed` on the repos list, one rule in
  * `stopFailedOf`), so a client can never sign a reason it did not already have.
  *
- *   person, halt        reissued with the same reason through the stop issuer (never gated; a halted repo stays halted, only its machine-side stop is asked again). 200 `{job_id, kind, operate_epoch, already_issued}`.
+ *   person, halt        (and `token_refresh_failed`, as a person's stop) reissued with the same reason through the stop issuer (never gated; a halted repo stays halted, only its machine-side stop is asked again). 200 `{job_id, kind, operate_epoch, already_issued}`.
  *   operate_off, plan   system causes: a person cannot sign them. The route re-checks that the cause still holds (else 409 `cause_gone`), marks the reconcile tick and answers 200 `{queued: true}`. The system lister
  *                       re-issues after the machine's next inventory report, so this wakes the tick and cannot beat that report.
  *   move, remove        409 `not_retryable`: the stop is link 1 of a chain whose own flow retries it.
@@ -36,9 +36,10 @@ export async function retryEngineStop(deps: RunnerCloudDeps, principal: SessionP
     const failed = failedStopOf(facts);
     if (failed === null) throw refuse(409, "nothing_to_retry", "the stop already changed");
     const reason = failed.stopReason;
-    if (reason === "person" || reason === "halt") {
+    // ON-18: a session the runner stopped for `token_refresh_failed` that did not end is asked again as a person's stop (the cause was on the machine and is gone with the session)
+    if (reason === "person" || reason === "halt" || reason === "token_refresh_failed") {
       const signer = await signerOf(deps);
-      return { job: await issueStopOrDeleteLocked(client, deps, signer, accountId, target, "engine_session_stop", reason) };
+      return { job: await issueStopOrDeleteLocked(client, deps, signer, accountId, target, "engine_session_stop", reason === "token_refresh_failed" ? "person" : reason) };
     }
     if (isSystemStopReason(reason)) {
       if (stopFailedOf(facts, reason === "plan" ? await planHasEnded(client, accountId) : false) === null) throw refuse(409, "cause_gone", "that cause no longer holds");

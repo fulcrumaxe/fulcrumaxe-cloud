@@ -19,8 +19,8 @@ function cloud(unknown: string[]) {
   return { client: createRunnerClient({ origin: "https://cloud.example.test", key: generateRunnerKey(), now: () => new Date(), fetchFn }), sent };
 }
 
-/** The build behind `engine_session_v1` (D#845 ON-13b2), which is listed last of all and dropped first. */
-const BUILD = RUNNER_BUILD_CAPABILITIES.filter((c) => c !== "engine_session_v1");
+/** The build behind `engine_session_v1` (D#845 ON-13b2) and `repo_token_refresh_v1` (D#845 ON-18), which are listed after it and dropped first. */
+const BUILD = RUNNER_BUILD_CAPABILITIES.filter((c) => c !== "engine_session_v1" && c !== "repo_token_refresh_v1");
 
 describe("twin_v1 on the build and on the hello", () => {
   it("is last on the build behind engine_session_v1 and the hello it makes is a valid one", () => {

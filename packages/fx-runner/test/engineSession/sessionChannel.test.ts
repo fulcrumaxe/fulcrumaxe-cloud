@@ -3,7 +3,8 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { fakeChannel, type FakeChannel } from "../helpers/fakeChannel.js";
 import { RUNNER_ID } from "../helpers/machineJobFixture.js";
-import { NAME, compactSession, sessionRig, start, stop, type Rig } from "./sessionRig.js";
+import { createEngineSessionHandlers, sessionStopperOf } from "../../src/engineSession/lifecycle.js";
+import { NAME, compactSession, del, sessionRig, start, stop, type Rig } from "./sessionRig.js";
 
 /**
  * D#845 ON-13b2: the session lifecycle with the channel: the credential goes in over it, the host is started with a tick, and every stop sends the channel `stop` BEFORE the VM is touched. The supervisor on the far end is a
@@ -350,5 +351,108 @@ describe("a stop with the channel", () => {
     guest.runCommand = (p) => real(p.cmd === "sync" ? { cmd: "sh", args: ["-c", "exit 3"] } : p);
     await r.run(stop());
     expect(r.stopReports).toMatchObject([{ method: "vm_stop", survivors: 0, paused: { synced: false } }]);
+  });
+});
+
+/** D#845 ON-18: the repo token's refresh loop is begun by a start that handed the credential in, ended by every stop and delete, and its `put` is a channel `token_put github`. */
+describe("the repo token loop of a session", () => {
+  type Call = ["begin", number, string] | ["end", number];
+  const spy = () => {
+    const calls: Call[] = [];
+    const puts: Array<(token: Buffer) => Promise<void>> = [];
+    const refresher = {
+      begin: (repo: number, session: string, put: (token: Buffer) => Promise<void>) => {
+        calls.push(["begin", repo, session]);
+        puts.push(put);
+      },
+      end: (repo: number) => void calls.push(["end", repo]),
+    };
+    return { calls, puts, refresher };
+  };
+
+  it("a start that reached `done` begins the loop with its own job id as the session id, and the loop's put sends `token_put github` over the channel", async () => {
+    const { r, channel } = wired();
+    const s = spy();
+    r.repoToken = s.refresher;
+    const job = start(r.repo.commit, false);
+    await r.run(job);
+    expect(s.calls).toEqual([["begin", 77, job.job_id]]);
+    channel.requests.length = 0;
+    await s.puts[0]!(Buffer.from("ghs_sentinel_put", "latin1"));
+    expect(channel.requests).toHaveLength(1);
+    expect(channel.requests[0]?.header).toEqual({ op: "token_put", name: "github", size: 16 });
+    expect(channel.requests[0]?.body?.toString("latin1")).toBe("ghs_sentinel_put");
+  });
+
+  it("a put the guest refuses is an error the loop counts", async () => {
+    const { r } = wired((h) => (h["op"] === "token_put" && h["name"] === "github" ? { ok: false, code: "refused" } : { ok: true }));
+    const s = spy();
+    r.repoToken = s.refresher;
+    await r.run(start(r.repo.commit, false));
+    await expect(s.puts[0]!(Buffer.from("x"))).rejects.toMatchObject({ code: "refused" });
+  });
+
+  it("a start that failed before `done`, and a start with no credential source or no channel, begin nothing", async () => {
+    const failing = wired((h) => (h["op"] === "tick" ? { ok: false, code: "refused" } : { ok: true }));
+    const a = spy();
+    failing.r.repoToken = a.refresher;
+    await failing.r.run(start(failing.r.repo.commit, false));
+    expect(a.calls).toEqual([]);
+    const plain = sessionRig();
+    const b = spy();
+    plain.repoToken = b.refresher;
+    plain.token = TOKEN; // a credential source and no channel
+    await plain.run(start(plain.repo.commit, false));
+    plain.token = undefined;
+    plain.channel = fakeChannel(() => ({ ok: true })); // a channel and no credential source
+    await plain.run(start(plain.repo.commit, true, 2));
+    expect(b.calls).toEqual([]);
+  });
+
+  it("every stop and every delete ends the loop first, whatever happens to the stop", async () => {
+    const { r } = wired((h) => (h["op"] === "stop" ? stopAnswer() : { ok: true }));
+    const s = spy();
+    r.repoToken = s.refresher;
+    await r.run(start(r.repo.commit, false));
+    s.calls.length = 0;
+    await r.run(stop());
+    expect(s.calls).toEqual([["end", 77]]);
+    await r.run(del());
+    expect(s.calls).toEqual([["end", 77], ["end", 77]]);
+    // a stop whose channel failed ends it too: the session must not keep asking for tokens it cannot be given
+    const broken = wired((h) => (h["op"] === "stop" ? { ok: false, code: "internal" } : { ok: true }));
+    const t = spy();
+    broken.r.repoToken = t.refresher;
+    await broken.r.run(start(broken.r.repo.commit, false));
+    t.calls.length = 0;
+    await broken.r.run(stop());
+    expect(t.calls).toEqual([["end", 77]]);
+  });
+
+  it("the runner's own stopper carries the reason it is given (token_refresh_failed for the repo-token loop, operate_off by default), through the very handler a signed stop runs", async () => {
+    const { r } = wired((h) => (h["op"] === "stop" ? stopAnswer() : { ok: true }));
+    await r.run(start(r.repo.commit, false));
+    const handlers = createEngineSessionHandlers(r.makeDeps());
+    expect(await sessionStopperOf(handlers.engine_session_stop, undefined, "token_refresh_failed")(77)).toBe(true);
+    expect(r.stopReports).toMatchObject([{ reason: "token_refresh_failed", method: "vm_stop" }]);
+    r.stopReports.length = 0;
+    await r.run(start(r.repo.commit, true, 2));
+    expect(await sessionStopperOf(handlers.engine_session_stop)(77)).toBe(true);
+    expect(r.stopReports).toMatchObject([{ reason: "operate_off" }]);
+  });
+
+  it("the runner's own stop with the reason token_refresh_failed goes out as a machine shutdown through the same path, and a failed channel ends the VM with no snapshot", async () => {
+    const { r, channel } = wired((h) => (h["op"] === "stop" ? stopAnswer() : { ok: true }));
+    await r.run(start(r.repo.commit, false));
+    channel.requests.length = 0;
+    await r.run(stop(1, "token_refresh_failed"));
+    expect(channel.requests.find((q) => q.header["op"] === "stop")?.header).toEqual({ op: "stop", reason: "machine_shutdown" });
+    expect(r.stopReports).toMatchObject([{ reason: "token_refresh_failed", method: "vm_stop", survivors: 0 }]);
+    const failing = wired((h) => (h["op"] === "stop" ? { ok: false, code: "internal" } : { ok: true }));
+    await failing.r.run(start(failing.r.repo.commit, false));
+    const before = failing.r.snapshots.get(NAME) ?? 0;
+    await failing.r.run(stop(1, "token_refresh_failed"));
+    expect(failing.r.log).toContain(`destroy ${NAME}`);
+    expect(failing.r.snapshots.get(NAME) ?? 0).toBe(before);
   });
 });

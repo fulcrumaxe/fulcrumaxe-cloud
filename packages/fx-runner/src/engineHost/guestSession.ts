@@ -13,11 +13,12 @@
  *        environment at launch as the subscription variable and nowhere else, and never logged, echoed, spooled or put in an event. Node cannot zero the copies it makes (the latin1 string, the merged environment object and libuv's envp copy), so zeroing the buffer is NOT enough on its own. The guarantee the snapshot needs is that the PROGRAM ENDS:
  *        after a channel `stop` and after `crash_loop` the supervisor exits (`finished()`, which `runEngineSupervise` waits for), the bridge kills the group, the guest kernel's `init_on_free=1` zeroes the pages and init starts a fresh
  *        supervisor with no credential. The real-VM test greps a RAM snapshot taken after the channel `stop` for the token.
+ *      - `token_put {name:"github", size}` (ON-18): the repository token, written whole to ONE 0600 file on a tmpfs (`runtime.repoTokenFile`, the host's `FX_ENGINE_REPO_TOKEN_FILE`; no-follow, replaced by a rename), zeroed and removed by every `stop`, never in the environment, a log or an event. A guest with no such file refuses it.
  *  - `usage_tick`: every `result` line with all four token totals becomes one `usage_tick` engine event (raw counts only; the cloud prices them, never the engine). A turn with no usage is not a tick ("not recorded", never zero).
  *  - the 20 MB rotating log (`openHostLog`) and the event spool, in the session's state directory (the guest root is read-only: `/vercel/sandbox/...` is the writable place).
  * Restarts (1, 2, 5 minutes) and `crash_loop` are the supervisor's. Nothing here starts a program: the runtime hands in `launch`, the kill path and the clock.
  */
-import { chmodSync, closeSync, constants, fstatSync, lstatSync, openSync, readSync, unlinkSync } from "node:fs";
+import { chmodSync, closeSync, constants, fstatSync, lstatSync, openSync, readSync, renameSync, unlinkSync, writeSync } from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { ENGINE_DURATION_S_MAX, MODEL_TIER_PATTERN, ROW_KEY_PATTERN, type EngineCommandAck } from "@fulcrumaxe/runner-protocol";
@@ -60,6 +61,8 @@ export interface GuestRuntime {
   claudePath: string;
   /** A fixed allowlist, never a credential. */
   env: Record<string, string>;
+  /** ON-18: where the repository token (`token_put github`) is kept: ONE file on a tmpfs, 0600, replaced whole and zeroed at every stop. Its path is the host's `FX_ENGINE_REPO_TOKEN_FILE`; left out, the guest takes no repository token. */
+  repoTokenFile?: string;
   launch: (spec: HostSpawnSpec) => HostChild;
   isAlive: (pid: number) => boolean;
   startOf: (pid: number) => string | undefined;
@@ -92,21 +95,87 @@ const PRINTABLE = /^[\x21-\x7e]+$/;
 const fail = (code: ChannelCode, reason?: string): ChannelReply => (reason === undefined ? { ok: false, code } : { ok: false, code, reason });
 const isInt = (v: unknown, min: number, max: number): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= min && v <= max;
 
+/** Writes every byte: `write` may take fewer than asked, and half a token must never be renamed into place. A write that takes nothing is an error (the loop would never end). */
+export function writeAll(fd: number, data: Buffer, write: (fd: number, buffer: Buffer, offset: number, length: number) => number = writeSync): void {
+  let done = 0;
+  while (done < data.length) {
+    const n = write(fd, data, done, data.length - done);
+    if (n <= 0) throw new Error("short_write");
+    done += n;
+  }
+}
+
 export function createGuestSession(options: GuestSessionOptions): GuestSession {
   const { dir, runtime: rt } = options;
   ensurePrivateDir(dir, rt.uid);
   const log = openHostLog(dir, rt.uid);
   const spool = createEventSpool({ dir, uid: rt.uid, now: rt.now });
   let secret: Buffer | undefined;
+  // Every repository token put in this session, newest last, kept only so the host log can match a copy of one (an older one may still be in output the host is writing). Not cleared by `wipe`: the host's last output
+  // is written after it, and this program ends with the session.
+  const repoTokensSeen: string[] = [];
   let operating = true;
   let started = false;
   let ended: StopReason | undefined;
   let windowStart = rt.now();
   let finish: () => void = () => undefined;
   const finished = new Promise<void>((resolve) => void (finish = resolve));
+  /** Zeroes a token file in place (never opened through a link) and removes the name. A missing file is the wanted state. */
+  const wipeOne = (file: string): void => {
+    let fd = -1;
+    try {
+      fd = openSync(file, constants.O_WRONLY | constants.O_NOFOLLOW);
+      const size = fstatSync(fd).size;
+      if (size > 0) writeSync(fd, Buffer.alloc(size));
+    } catch {
+      // fx-swallow-ok: no file (or one that cannot be opened without following a link) holds nothing of ours; the unlink below removes whatever name is there
+    } finally {
+      if (fd !== -1) closeSync(fd);
+    }
+    try {
+      unlinkSync(file);
+    } catch {
+      // fx-swallow-ok: no file is the wanted state
+    }
+  };
+  /** The token file and its temporary name: a rename that failed after the write must not leave a whole token behind. */
+  const wipeRepoToken = (): void => {
+    const file = rt.repoTokenFile;
+    if (file === undefined) return;
+    wipeOne(file);
+    wipeOne(`${file}.new`);
+  };
+  /** The token goes to a new file first (created exclusively, never followed, 0600) and replaces the old whole, so the engine never reads half of it. Whatever fails after the file exists removes it again. */
+  const putRepoToken = (token: Buffer): void => {
+    const file = rt.repoTokenFile as string;
+    const temp = `${file}.new`;
+    const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW;
+    let fd: number;
+    try {
+      fd = openSync(temp, flags, 0o600);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      // a name already there (a link, a file left by a crash) is removed without being followed, then the exclusive create is tried once more
+      wipeOne(temp);
+      fd = openSync(temp, flags, 0o600);
+    }
+    let done = false;
+    try {
+      try {
+        writeAll(fd, token);
+      } finally {
+        closeSync(fd);
+      }
+      renameSync(temp, file);
+      done = true;
+    } finally {
+      if (!done) wipeOne(temp);
+    }
+  };
   const wipe = (): void => {
     secret?.fill(0);
     secret = undefined;
+    wipeRepoToken();
   };
   let ticks: GuestTicks | undefined;
   const outcomes = openHostLog(dir, rt.uid, SPOOL_MAX_BYTES, OUTCOMES_FILE);
@@ -145,7 +214,8 @@ export function createGuestSession(options: GuestSessionOptions): GuestSession {
       return c === undefined ? undefined : { ...c, bridge_enabled: true, operate_enabled: operating, written_at: rt.now() };
     },
     launch: rt.launch,
-    env: rt.env,
+    env: rt.repoTokenFile === undefined ? rt.env : { ...rt.env, FX_ENGINE_REPO_TOKEN_FILE: rt.repoTokenFile },
+    redactValues: () => repoTokensSeen,
     secretEnv: () => (secret === undefined ? undefined : { [SUBSCRIPTION_TOKEN_VAR]: secret.toString("latin1") }),
     log,
     emit: (e) => void spool.write(e),
@@ -284,9 +354,17 @@ export function createGuestSession(options: GuestSessionOptions): GuestSession {
         }
         case "token_put": {
           const size = h["size"];
-          if (h["name"] !== "claude" || !isInt(size, 1, TOKEN_MAX) || body === undefined || body.length !== size || !PRINTABLE.test(body.toString("latin1"))) return fail("bad_request");
+          const name = h["name"];
+          if ((name !== "claude" && name !== "github") || !isInt(size, 1, TOKEN_MAX) || body === undefined || body.length !== size || !PRINTABLE.test(body.toString("latin1"))) return fail("bad_request");
           if (!operating) return fail("stopped");
-          wipe();
+          if (name === "github") {
+            if (rt.repoTokenFile === undefined) return fail("refused");
+            putRepoToken(body);
+            repoTokensSeen.push(body.toString("latin1"));
+            if (repoTokensSeen.length > 4) repoTokensSeen.shift();
+            return { ok: true };
+          }
+          secret?.fill(0);
           secret = Buffer.from(body);
           return { ok: true };
         }

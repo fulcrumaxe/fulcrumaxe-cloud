@@ -18,6 +18,8 @@ Sources:
 - `apps/web/app/api/runner/engine/commands/pull/route.ts`
 - `apps/web/app/api/runner/engine/decide/route.ts`
 - `apps/web/app/api/runner/engine/dials/route.ts`
+- `apps/web/app/api/runner/engine/repo-token/route.ts`
+- `apps/web/app/api/runner/engine/repo-token-stop/route.ts`
 - `apps/web/app/api/runner/device/start/handler.ts`
 - `apps/web/app/api/runner/device/poll/handler.ts`
 - `apps/web/app/link/page.tsx`
@@ -105,6 +107,8 @@ API routes under `apps/web/app/api/` (also enumerated in
 | `/api/runner/engine/commands/{id}/ack` | POST | The runner reports what became of one command: applied, refused, expired or not confirmed (#998). |
 | `/api/runner/engine/decide` | POST | The engine's decision request, forwarded by the runner (#993). The cloud answers from the repo's dial and the halt marker, and refuses when the bridge or operate is off. |
 | `/api/runner/engine/dials` | GET | The runner reads what the repo's engine decisions currently resolve to, to write the engine's ceiling file (#1002). |
+| `/api/runner/engine/repo-token` | POST | The runner of a placed repo with a running engine session asks for the one GitHub token the engine uses on that repository: one repository, an hour, minted fresh each ask (`packages/runner-cloud/src/engineRepoToken.ts`). |
+| `/api/runner/engine/repo-token-stop` | POST | The runner that gave up refreshing a session's repository token (three failed asks in a row) reports the stop it is about to make, so the Team card can say why. Accepted only from the runner the repository is placed on, for its current running session, once (`engine_repo_token_stop_report`, migration 1119; `packages/runner-cloud/src/engineRepoToken.ts`). |
 | `/api/runners/{id}/sandbox-commands` (#1079) | POST | Session only: an owner or admin queues a signed `stop_sandbox`, `delete_sandbox` or `reap_sandboxes` command for one runner, body `{kind, name?}` (`apps/web/app/api/runners/[id]/controls.ts`, `enqueueSandboxCommand` in `packages/runner-cloud`). The fleet page offers the buttons only for a runner that is not removed, listed the `sandbox_commands_v1` capability at protocol 21 or later and has a current inventory; the route re-checks the runner itself, and the database decides the role. |
 | `/api/shell/session` | GET, POST | The one route module every rewritten shell-session path lands on — see How it works. |
 | `/api/stripe/webhook` | POST | Stripe webhook receiver; signature verification and event handling live in `@fx/billing`. |

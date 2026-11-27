@@ -341,7 +341,7 @@ describe("engine session issuers and gates [pg]", () => {
   describe("a person's stop reasons", () => {
     it("throws for operate_off and plan, which are the system's alone, and issues nothing", async () => {
       const r = await rig();
-      for (const reason of ["operate_off", "plan"]) {
+      for (const reason of ["operate_off", "plan", "token_refresh_failed"]) {
         await expect(issueEngineSessionStop(depsFor(), as(r), r.who.repoId, reason as never)).rejects.toThrow(/system-only/);
       }
       expect(await jobsOf(r.who.accountId, "engine_session_stop")).toEqual([]);

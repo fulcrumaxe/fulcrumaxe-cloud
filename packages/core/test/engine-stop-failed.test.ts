@@ -24,9 +24,9 @@ describe('stopFailedOf', () => {
     expect(stopFailedOf(facts(stop({ state, failureCode: code })), false)).toEqual({ reason: 'person', code, at: AT });
   });
 
-  it('answers each of the six reasons as itself when its cause holds', () => {
+  it('answers each of the seven reasons as itself when its cause holds', () => {
     const holds: Record<(typeof ENGINE_STOP_REASONS)[number], Partial<StopFacts>> = {
-      person: {}, halt: {}, move: {}, remove: {}, operate_off: { operateEnabled: false }, plan: {},
+      person: {}, halt: {}, move: {}, remove: {}, operate_off: { operateEnabled: false }, plan: {}, token_refresh_failed: {},
     };
     for (const reason of ENGINE_STOP_REASONS) expect(stopFailedOf(facts(stop({ stopReason: reason }), holds[reason]), true)?.reason, reason).toBe(reason);
   });
@@ -50,8 +50,8 @@ describe('stopFailedOf', () => {
     expect(stopFailedOf(facts(plan), true)).toMatchObject({ reason: 'plan' });
   });
 
-  it('never hides a person-caused stop on a system cause: person, halt, move and remove ignore the switches and the plan', () => {
-    for (const stopReason of ['person', 'halt', 'move', 'remove']) {
+  it('never hides a person-caused stop on a system cause: person, halt, move, remove and the runner\'s own token_refresh_failed ignore the switches and the plan', () => {
+    for (const stopReason of ['person', 'halt', 'move', 'remove', 'token_refresh_failed']) {
       expect(stopFailedOf(facts(stop({ stopReason }), { watchEnabled: false, operateEnabled: false }), false)?.reason, stopReason).toBe(stopReason);
       expect(stopFailedOf(facts(stop({ stopReason })), false)?.reason, stopReason).toBe(stopReason);
     }

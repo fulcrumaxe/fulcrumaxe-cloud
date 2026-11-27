@@ -255,6 +255,19 @@ describe("failed engine stop: read and Try again [pg]", () => {
       }
     });
 
+    it("D#845 ON-18: a stop the runner made with token_refresh_failed that did not finish reads as itself and is asked again as a person's stop", async () => {
+      const r = await rig();
+      await job(r, { reason: "token_refresh_failed", code: "vm_teardown_incomplete" });
+      expect(await failedOf(r)).toMatchObject({ reason: "token_refresh_failed", code: "vm_teardown_incomplete" });
+      const res = await retry(r, "owner");
+      expect(res.status).toBe(200);
+      const rows = await stopJobs(r.who.accountId);
+      const fresh = rows.find((x) => x.id === (res.body as { job_id: string }).job_id)!;
+      expect(fresh).toMatchObject({ state: "issued", stop_reason: "person", repo_id: r.who.repoId });
+      expect(verifyMachineJob(fresh.job, keyring, r.runnerId)).toMatchObject({ args: { reason: "person" } });
+      expect(await failedOf(r)).toBeNull();
+    });
+
     it("reissues a halt's stop as a halt's, never a person's, and leaves the halt flag alone", async () => {
       const r = await rig();
       await h.admin.query("INSERT INTO engine_repo_controls (account_id, repo_id, halted_at, halt_action_id, halt_epoch) VALUES ($1, $2, now(), gen_random_uuid(), 1)", [r.who.accountId, r.who.repoId]);

@@ -451,8 +451,10 @@ describe("the refusals: each one pushes nothing", () => {
 });
 
 describe("what the build advertises, and where the set comes from", () => {
-  it("twin_v1 is listed just before engine_session_v1, the last capability a runner build lists (D#845 ON-27d4c), and run.ts registers all three twin handlers", () => {
-    expect((RUNNER_BUILD_CAPABILITIES as string[]).at(-2)).toBe("twin_v1");
+  it("twin_v1 is listed just before engine_session_v1, whatever is listed after them (D#845 ON-27d4c), and run.ts registers all three twin handlers", () => {
+    const build = RUNNER_BUILD_CAPABILITIES as string[];
+    expect(build.indexOf("engine_session_v1")).toBe(build.indexOf("twin_v1") + 1);
+    expect(build.indexOf("twin_v1")).toBeGreaterThan(0);
   });
 
   it("the private patterns come from the signed job alone: the fixed roots, the person's globs, the install paths and the two rule files", () => {
