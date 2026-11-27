@@ -13,7 +13,7 @@ import { seedAccountWithMember } from './helpers/seed.js';
 
 interface Identity { accountId: string; userId: string }
 interface Track { track: string; chosen_at: string | null; steps: { step: string; setup_id?: string; pr_number?: number; pr_state?: string; state?: string; completed_at: string | null; tier?: string | null; kvm?: string; helper_missing?: boolean; preflight?: { code: string; fix: string }[] }[] }
-interface Body { started_at: string; steps: unknown[]; tracks: Track[] }
+interface Body { started_at: string; steps: unknown[]; tracks: (Track & { setup?: { id: string; repo_id: string } | null })[] }
 
 /** D#845 ON-5: the tracks in `GET /api/v1/onboarding` and `PUT /api/v1/onboarding/track`, through the real dispatcher against real Postgres. */
 describe('D#845 ON-5: onboarding engine track routes', () => {
@@ -103,6 +103,37 @@ describe('D#845 ON-5: onboarding engine track routes', () => {
       expect(install((await (await call(a, 'GET')).json()) as Body)).toMatchObject({ setup_id: sa, pr_number: 31, pr_state: 'open' });
       const none = await who('owner');
       expect(Object.keys(install((await (await call(none, 'GET')).json()) as Body))).not.toContain('pr_number');
+    });
+
+    // D#845 FU-297: the engine track's setup carries the repo the account's own live setup is for, and never another account's.
+    async function liveSetupFor(w: Identity): Promise<{ id: string; repo: string }> {
+      const inst = randomUUID();
+      const repo = randomUUID();
+      const id = randomUUID();
+      await admin.query(`INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, $3, 'team_readonly')`, [inst, w.accountId, 8_000_000 + Math.floor(Math.random() * 1_000_000)]);
+      await admin.query(`INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product) VALUES ($1, $2, $3, $4, 'team')`, [repo, w.accountId, inst, 8_000_000 + Math.floor(Math.random() * 1_000_000)]);
+      await admin.query(`INSERT INTO project_setups (id, account_id, repo_id, kind, phase, created_by) VALUES ($1, $2, $3, 'existing', 'await_merge', $4)`, [id, w.accountId, repo, w.userId]);
+      return { id, repo };
+    }
+    const engineSetupOf = async (w: Identity) => ((await (await call(w, 'GET')).json()) as Body).tracks[1]!.setup;
+
+    it('the engine track setup carries repo_id equal to the account\'s own setup repo', async () => {
+      const a = await who('owner');
+      const sa = await liveSetupFor(a);
+      expect(await engineSetupOf(a)).toMatchObject({ id: sa.id, repo_id: sa.repo });
+      expect(await engineSetupOf(await who('owner'))).toBeNull();
+    });
+
+    it('a second account with its own setup gets its own repo_id and never the first account\'s', async () => {
+      const a = await who('owner');
+      const b = await who('owner');
+      const sa = await liveSetupFor(a);
+      const sb = await liveSetupFor(b);
+      expect(sa.repo).not.toBe(sb.repo);
+      const seenByB = await engineSetupOf(b);
+      expect(seenByB).toMatchObject({ id: sb.id, repo_id: sb.repo });
+      expect(JSON.stringify(seenByB)).not.toContain(sa.repo);
+      expect(await engineSetupOf(a)).toMatchObject({ id: sa.id, repo_id: sa.repo });
     });
 
     it('machine and claude come from the account\'s own machines through the real facts read: a second account\'s signed-in machine counts for nobody else', async () => {
