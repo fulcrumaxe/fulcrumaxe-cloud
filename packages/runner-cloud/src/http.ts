@@ -114,6 +114,12 @@ export interface RunnerCloudDeps {
    * and nothing is written. A reviewer's `done` needs no GitHub call and works without it.
    */
   pullRequests?: RunPullRequestPort | null;
+  /**
+   * D#845 Ruling 122: called after a runner's `push ok` report for a setup has been recorded, so the install pull request is opened right after the request is answered instead of on the next reconcile tick (apps/web hands it
+   * to the after-response mechanism and runs the same claim and completion the tick runs). It must not wait; one that throws is logged and the report is still answered. The reconcile marker is still set, so the tick stays
+   * the backstop. Absent: only the tick acts.
+   */
+  afterSetupPush?: ((setupId: string) => void) | null;
   /** D#845 ON-20a: the install pull request's summary and merge read and write GitHub through this port (the run port plus the install step's calls). Null while it is not configured; the two routes then answer 503 `not_configured`. */
   setupInstall?: SetupInstallPort | null;
   /** Engine bridge EB-4: prices the tokens an engine batch reports (the worker's `recordEngineUsage`). Absent: the tokens are kept and no figure is recorded. */

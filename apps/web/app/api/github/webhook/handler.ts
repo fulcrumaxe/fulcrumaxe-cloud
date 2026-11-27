@@ -28,6 +28,8 @@ import { issueHasLabel, senderPermission } from "../../../../lib/github/senderPe
 import { emitDomainEvent } from "@fx/core/src/domain-events/emit.js";
 import { markWorkPending } from "@fx/core/src/pendingWork";
 import { markDiscoveryDrainPending } from "../../../../lib/discoveryWake";
+import { finishNow } from "../../../../lib/onboardingHandoff";
+import { reportError } from "@fx/telemetry";
 
 /**
  * D#2 H13a: GitHub App webhook intake. Every piece of actual logic --
@@ -72,6 +74,11 @@ async function readBodyCapped(req: NextRequest, maxBytes: number): Promise<strin
 export interface GithubWebhookHandlerDeps extends GithubWebhookDbDeps {
   /** Per-App credentials; the delivery's target-id header picks which kind's webhook secret verifies it. */
   appCredentials: AppCredentialsSource;
+  /**
+   * D#845 Ruling 122: called after a merged install pull request has moved its setup to the finish phase, so the Discussions, the team-log issue and the first session start are made right after the delivery is answered
+   * instead of on the next reconcile tick (the marker below stays the backstop). Must not throw or wait. Absent: only the tick acts.
+   */
+  afterSetupFinished?: (() => void) | undefined;
 }
 
 let cachedAppUserPool: Pool | undefined;
@@ -127,6 +134,7 @@ export function defaultGithubWebhookDeps(): GithubWebhookHandlerDeps {
       await markDiscoveryDrainPending();
       await wakeRepoInstructionImportOnConnect(cachedAppUserPool!, accountId, runs.map((r) => r.repoId));
     },
+    afterSetupFinished: () => finishNow(),
     allowlist: intakeAllowlist() ?? undefined,
     issueAuthorPermission,
     botLogins: () => platformBotLogins(),
@@ -225,5 +233,13 @@ export async function githubWebhookHandler(
   // D#845 ON-13a4: a merged install pull request moves its setup to the finish phase; wake the reconciler so the Discussions and the team-log issue are made on the next tick.
   // D#845 ON-15c: a merged engine update is waiting for its restart: the same wake.
   if (result.handled && (result.result.applied === "setup_install_pr_closed" || result.result.applied === "engine_update_pr_closed") && result.result.outcome === "finished") void markWorkPending("reconcile");
+  // D#845 Ruling 122: a person is waiting on the finish of a merged install, so it runs now; a failure here is the tick's to redo (the claim lease lapses).
+  if (result.handled && result.result.applied === "setup_install_pr_closed" && result.result.outcome === "finished") {
+    try {
+      deps.afterSetupFinished?.();
+    } catch (err) {
+      reportError(err, { stage: "github_webhook.after_setup_finished", route: "/api/github/webhook", code: "internal_error" });
+    }
+  }
   return NextResponse.json(result, { status: 200 });
 }

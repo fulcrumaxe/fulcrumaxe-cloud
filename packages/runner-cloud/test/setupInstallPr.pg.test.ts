@@ -33,7 +33,7 @@ describe("the install pull request step [pg]", () => {
   });
 
   interface Rig { who: SeedRefs; key: TestKey; runnerId: string; setupId: string; jobId: string }
-  async function rig(o: { mode?: "pr" | "direct"; head?: string } = {}): Promise<Rig> {
+  async function rig(o: { mode?: "pr" | "direct"; head?: string; afterSetupPush?: (setupId: string) => void } = {}): Promise<Rig> {
     const who = await seedAccount(h.admin, randomUUID());
     await h.admin.query("UPDATE repos SET gh_owner = 'acme', gh_name = 'widgets' WHERE id = $1", [who.repoId]);
     const key = newKey();
@@ -46,7 +46,7 @@ describe("the install pull request step [pg]", () => {
     expect((await respond(() => machineJobClaimRun(h.deps(), signed(key, MACHINE_JOB_CLAIM_PATH, {})))).status).toBe(200);
     const r = { who, key, runnerId, setupId, jobId: issued.id };
     let seq = 0;
-    const report = (body: Record<string, unknown>) => respond(() => setupProgressRun(h.deps(), signed(key, setupProgressPath(setupId), { job_id: issued.id, seq: seq++, ...body }), setupId));
+    const report = (body: Record<string, unknown>) => respond(() => setupProgressRun(h.deps(o.afterSetupPush ? { afterSetupPush: o.afterSetupPush } : {}), signed(key, setupProgressPath(setupId), { job_id: issued.id, seq: seq++, ...body }), setupId));
     expect((await report({ sub_step: "push", state: "started" })).status).toBe(200);
     expect((await report({ sub_step: "push", state: "ok", head_sha: o.head ?? HEAD })).status).toBe(200);
     return r;
@@ -88,6 +88,90 @@ describe("the install pull request step [pg]", () => {
       } finally {
         setPendingHooks(null);
       }
+    });
+  });
+
+  describe("the push report hands the install over right away (Ruling 122)", () => {
+    /** What the app's hand-off does after the answer: the tick's own claim and completion, over the given port. Errors are the hand-off's to report, never the request's. */
+    const handoff = (port: ReturnType<typeof github>["port"], runs: Promise<string>[]) => (_setupId: string) => {
+      runs.push((async () => {
+        const claim = await claimSetupInstall(h.opsPool);
+        if (claim === null || claim === "malformed") return "none";
+        return completeSetupInstall({ pool: h.opsPool, port }, claim);
+      })());
+    };
+
+    it("calls the hook once per push ok, with the setup, and never for a step that is not the pushed one", async () => {
+      const seen: string[] = [];
+      const r = await rig({ afterSetupPush: (id) => void seen.push(id) });
+      expect(seen).toEqual([r.setupId]);
+    });
+
+    it("answers the report 200 even when the hook throws, and the setup still says push ok", async () => {
+      // rig() asserts both reports (started, ok) were answered 200
+      const r = await rig({ afterSetupPush: () => { throw new Error("boom"); } });
+      expect(await setup(r.setupId)).toMatchObject({ sub_step: "push", state: "ok", install_pr: null });
+    });
+
+    it("opens the install pull request with no tick: the report's own hand-off claims the setup and finishes it over a fake GitHub", async () => {
+      const { repo, port } = github();
+      const runs: Promise<string>[] = [];
+      const r = await rig({ afterSetupPush: handoff(port, runs) });
+      expect(await Promise.all(runs)).toEqual(["opened"]);
+      expect(repo.pulls).toHaveLength(1);
+      expect(repo.pulls[0]).toMatchObject({ head: BRANCH, state: "open", draft: false });
+      expect(await setup(r.setupId)).toMatchObject({ phase: "await_merge", install_pr: repo.pulls[0]!.number });
+      // the tick that comes later finds nothing due
+      expect(await claimSetupInstall(h.opsPool)).toBeNull();
+    });
+
+    it("a failing hand-off leaves the claim for the tick, which then does it", async () => {
+      const { fake, repo, port } = github();
+      fake.inject = { label: /^A2$/, reply: { status: 502, body: { message: "Bad Gateway" } } };
+      const runs: Promise<string>[] = [];
+      const r = await rig({ afterSetupPush: handoff(port, runs) });
+      expect(await Promise.all(runs)).toEqual(["retry"]);
+      expect(repo.pulls).toEqual([]);
+      expect(await setup(r.setupId)).toMatchObject({ phase: "install", sub_step: "push", state: "ok", install_pr: null });
+      // the tick cannot take it while the hand-off's lease holds, and takes it once the lease lapses
+      expect(await claimSetupInstall(h.opsPool)).toBeNull();
+      await h.admin.query("UPDATE project_setups SET install_pr_claim_at = now() - interval '11 minutes' WHERE id = $1", [r.setupId]);
+      fake.inject = null;
+      expect(await completeSetupInstall({ pool: h.opsPool, port }, await claimOf(r))).toBe("opened");
+      expect(repo.pulls).toHaveLength(1);
+    });
+
+    it("a second claim inside the lease window gets nothing, one run after the other, so it is the lease and not row locking that keeps it off", async () => {
+      const r = await rig();
+      const first = await claimSetupInstall(h.opsPool);
+      expect(first).not.toBeNull();
+      // the first claim's transaction is long over (SKIP LOCKED has nothing left to skip); only the lease can hold the second back
+      expect(await claimSetupInstall(h.opsPool)).toBeNull();
+      expect(await claimSetupInstall(h.opsPool)).toBeNull();
+      // once the lease lapses the setup is claimable again
+      await h.admin.query("UPDATE project_setups SET install_pr_claim_at = now() - interval '11 minutes' WHERE id = $1", [r.setupId]);
+      expect(await claimSetupInstall(h.opsPool)).not.toBeNull();
+    });
+
+    it("the hand-off and a tick that race open one pull request between them", async () => {
+      const { repo, port } = github();
+      const runs: Promise<string>[] = [];
+      let tick: Promise<string> | undefined;
+      const r = await rig({
+        afterSetupPush: (id) => {
+          handoff(port, runs)(id);
+          // the tick starts in the same moment, through the same claim
+          tick = (async () => {
+            const claim = await claimSetupInstall(h.opsPool);
+            return claim === null || claim === "malformed" ? "none" : completeSetupInstall({ pool: h.opsPool, port }, claim);
+          })();
+        },
+      });
+      const outcomes = [...(await Promise.all(runs)), await tick!];
+      expect(outcomes.filter((o) => o === "opened")).toHaveLength(1);
+      expect(outcomes.filter((o) => o === "none")).toHaveLength(1);
+      expect(repo.pulls).toHaveLength(1);
+      expect(await setup(r.setupId)).toMatchObject({ phase: "await_merge" });
     });
   });
 

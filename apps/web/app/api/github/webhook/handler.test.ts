@@ -422,6 +422,29 @@ describe("a merged install pull request marks the reconciler pending", () => {
     }
   });
 
+  // D#845 Ruling 122: the merge finishes the setup right after the delivery is answered; the marker above stays the backstop.
+  it("finishes the setup right away when the delivery finished one, and for nothing else", async () => {
+    const afterSetupFinished = vi.fn();
+    const hit = install();
+    await githubWebhookHandler(requestWithBody(body, { event: "pull_request" }), fakeDeps({ afterSetupFinished }), reply("setup_install_pr_closed", "finished"));
+    await hit.settled();
+    expect(afterSetupFinished).toHaveBeenCalledOnce();
+    for (const [applied, outcome] of [["setup_install_pr_closed", "failed"], ["setup_install_pr_closed", "recorded"], ["engine_update_pr_closed", "finished"], ["skipped", undefined]] as const) {
+      const miss = install();
+      await githubWebhookHandler(requestWithBody(body, { event: "pull_request" }), fakeDeps({ afterSetupFinished }), reply(applied, outcome));
+      await miss.settled();
+    }
+    expect(afterSetupFinished).toHaveBeenCalledOnce();
+  });
+
+  it("answers the delivery 200 and keeps the marker when the immediate finish throws", async () => {
+    const hit = install();
+    const res = await githubWebhookHandler(requestWithBody(body, { event: "pull_request" }), fakeDeps({ afterSetupFinished: () => { throw new Error("boom"); } }), reply("setup_install_pr_closed", "finished"));
+    await hit.settled();
+    expect(res.status).toBe(200);
+    expect(hit.written.has("pending:reconcile")).toBe(true);
+  });
+
   it("sets the marker when the delivery merged an engine update (it waits for its restart), and not for one that failed or only recorded", async () => {
     const hit = install();
     await githubWebhookHandler(requestWithBody(body, { event: "pull_request" }), fakeDeps(), reply("engine_update_pr_closed", "finished"));
