@@ -8,7 +8,7 @@ import { publicChangeDeps, queueActionDeps } from "@fx/api/src/routes/work-item-
 import { setupRequestDeps } from "@fx/api/src/routes/setupRequests.js";
 import { repoPairingDeps } from "@fx/api/src/routes/repoPairing.js";
 import { twinRouteDeps } from "@fx/api/src/routes/repoTwins.js";
-import { closeTwinPublishPr, closeTwinSyncPr, mergeTwinPr } from "@fx/runner-cloud";
+import { bringTwinIssue, closeTwinPublishPr, closeTwinSyncPr, listTwinIssues, mergeTwinPr } from "@fx/runner-cloud";
 import { createLivePlanePushPort } from "../../../../lib/github/planePushHosted";
 import { mergeQueueModeDeps } from "@fx/api/src/routes/mergeQueueMode.js";
 import { createMergeQueueModeReader } from "../../../../lib/mergeQueueMode";
@@ -26,7 +26,7 @@ import { parsePreviewResult } from "@fx/pipeline";
 import { operatorMode } from "@fx/worker";
 import { httpRunActionSignalFromEnv } from "@fx/api/src/runActions/httpSignal.js";
 import { machineServerDeps } from "@fx/api/src/machines/servers.js";
-import { failRunnerLeases } from "../../../../lib/runnerRoutes";
+import { failRunnerLeases, runnerDeps } from "../../../../lib/runnerRoutes";
 import { startServerDelete, startStatusWorker } from "../../../../lib/machineServers";
 import { getWorker, previewEnabled, workerConfigured } from "../../../../lib/worker";
 import { createStartRetryPush, openPublicPullRequestViaWorker } from "../../../../lib/retryPush";
@@ -92,6 +92,9 @@ twinRouteDeps.closePublishPr = ({ accountId, userId, twinId }) => closeTwinPubli
 twinRouteDeps.closeSyncPr = ({ accountId, userId, twinId }) => closeTwinSyncPr({ appUserPool: appUserPool(), setupInstall: createAppRunPullRequestPort() }, { accountId, userId }, twinId);
 // D#845 ON-27d4c: Merge on the card merges the twin's open publish pull request through the App, as the install pull request's Merge does (one squash at the head it read).
 twinRouteDeps.mergePr = ({ accountId, userId, twinId }) => mergeTwinPr({ appUserPool: appUserPool(), setupInstall: createAppRunPullRequestPort() }, { accountId, userId }, twinId);
+// D#845 ON-27f: the card's list of the public repo's open issues, and Bring into the private repo (the App's issues write on the twin's private repo; the visibility is read live before the write).
+twinRouteDeps.listIssues = ({ accountId, userId, twinId }) => listTwinIssues(runnerDeps(), { accountId, userId }, twinId);
+twinRouteDeps.bringIssue = ({ accountId, userId, twinId, issue }) => bringTwinIssue(runnerDeps(), { accountId, userId }, twinId, issue);
 // D#694 B7-2: the Repos screen's merge queue line, read through the hosted `read` client (one reader per process, so its five-minute cache is shared).
 let mergeQueueReader: ReturnType<typeof createMergeQueueModeReader> | undefined;
 mergeQueueModeDeps.getReader = () => (mergeQueueReader ??= createMergeQueueModeReader(appUserPool()));

@@ -297,8 +297,8 @@ describe('twin work [pg]', () => {
       expect((await admin.query("SELECT actor FROM audit_log WHERE action = 'twin.refused' AND payload->>'twin_id' = $1", [u.id])).rows).toEqual([{ actor: adminA }]);
     });
 
-    it('a twin that is paused, removed or refused for another reason is bad_state, and is left as it is', async () => {
-      for (const [state, code] of [['paused', null], ['removed', null], ['refused', 'head_unconfirmed']] as const) {
+    it('a twin that is removed or refused for another reason is bad_state, and is left as it is (a paused one is refused too since migration 1118: see twin-issue-import.pg.test.ts)', async () => {
+      for (const [state, code] of [['removed', null], ['refused', 'head_unconfirmed']] as const) {
         const t = await twinFor(a, adminA, { state: state === 'removed' ? 'ready' : state });
         await admin.query("UPDATE repo_twins SET state = $2, failure_code = $3, removed_at = CASE WHEN $2 = 'removed' THEN now() END WHERE id = $1", [t.id, state, code]);
         expect(await visibility(a, null, t.id, 'public', null), state).toBe('bad_state');

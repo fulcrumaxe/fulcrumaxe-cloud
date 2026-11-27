@@ -1,7 +1,7 @@
 import type { AppCredentialsSource } from "./appCredentials.js";
 import { ADD_DISCUSSION_COMMENT_DOCUMENT, type RetractionSurface } from "./retraction.js";
 import { GH_OWNER_LOGIN_RE, GH_REPO_NAME_RE } from "./eventMapper.js";
-import { getInstallationToken, PLANE_PARITY_PERMISSIONS, RECEIPT_BLOCK_PERMISSIONS, RETRACTION_PERMISSIONS, REVERT_PR_PERMISSIONS, SETUP_FINISH_PERMISSIONS, SETUP_LABELS_PERMISSIONS, SETUP_READY_PERMISSIONS, type AccessTokenRequester, type InstallationTokenCache } from "./installationToken.js";
+import { getInstallationToken, ISSUE_READ_PERMISSIONS, PLANE_PARITY_PERMISSIONS, RECEIPT_BLOCK_PERMISSIONS, RETRACTION_PERMISSIONS, REVERT_PR_PERMISSIONS, SETUP_FINISH_PERMISSIONS, SETUP_LABELS_PERMISSIONS, SETUP_READY_PERMISSIONS, type AccessTokenRequester, type InstallationTokenCache } from "./installationToken.js";
 import { REVERT_PR_DOCUMENT, revertPrVariables } from "./revertPr.js";
 import { pinnedMergeGateBody, pinnedMergeQueueReadBody } from "./mergeGateGraphql.js";
 
@@ -47,6 +47,11 @@ import { pinnedMergeGateBody, pinnedMergeQueueReadBody } from "./mergeGateGraphq
  *   - `setup_labels` D#845 ON-8f2b: the install step's creation of the engine's labels in ONE customer repository, which `runner_pr` cannot do (its path list holds no `/labels` and its token holds no `issues` write).
  *                  Token: the `setup_labels` purpose (`issues: write` and `metadata: read`, one repository, minted fresh and revoked by `close()`). The client allows exactly `POST /repos/<owner>/<name>/labels`
  *                  with a JSON body of exactly `name`, `color` and `description` (strings) and no query; there is no read (a label that exists answers 422, which the caller counts as made). Everything else is `path_refused`.
+ *   - `twin_issue` D#845 ON-27f: bringing one public issue into a private twin: the ONE copy in the twin's private repository. Token: the `setup_labels` purpose (`issues: write` and `metadata: read`, one repository, fresh, revoked by `close()`).
+ *                  The client allows exactly `POST /repos/<owner>/<name>/issues` with a body of exactly `title`, `body` and `labels: ["from-public"]` and no query. Nothing else, so no read, no label and no other issue route. Its repository is the
+ *                  one the caller opened it for, which the cloud takes from the twin's own row.
+ *   - `issue_read` D#845 ON-27f (FU-324): the read of a twin's PUBLIC repository's issues. Token: the `issue_read` purpose (`issues: read` and `metadata: read`, one repository, fresh, revoked by `close()`). GET alone, and exactly two
+ *                  routes: `GET /repos/<owner>/<name>/issues` with `state=open` (and optionally `per_page`), and `GET /repos/<owner>/<name>/issues/<n>`. Everything else is `path_refused`; the shared `read` kind is not widened.
  *   - `retraction` D#7 DP7b-w: a correction on the ONE surface a deprecation notice was recorded on. Token: the `retraction` purpose (one key, by surface: `contents: write` for a
  *                  release, `issues: write` for a comment, `discussions: write` for a Discussion; one repository, minted fresh and revoked by `close()`). The client is pinned to
  *                  the surface it was opened for and allows exactly: a release, `GET` it and `PATCH` it once with a body whose only key is `body`; a comment, `POST /issues/<n>/comments`
@@ -62,7 +67,7 @@ import { pinnedMergeGateBody, pinnedMergeQueueReadBody } from "./mergeGateGraphq
  *     GitHub's own `message` cut short. It never hears a token, a header or a request body.
  */
 
-export type InstallationHttpKind = "read" | "merge_gate" | "runner_pr" | "repo_map" | "branch_delete" | "branch_sync" | "receipt_block" | "retraction" | "revert_pr" | "plane_parity" | "setup_labels" | "setup_finish" | "setup_ready";
+export type InstallationHttpKind = "read" | "merge_gate" | "runner_pr" | "repo_map" | "branch_delete" | "branch_sync" | "receipt_block" | "retraction" | "revert_pr" | "plane_parity" | "setup_labels" | "twin_issue" | "issue_read" | "setup_finish" | "setup_ready";
 
 export interface InstallationHttpRequest {
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
@@ -265,7 +270,8 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
       ...(kind === "setup_finish" ? { purpose: "setup_finish" as const, role: "setup_finish", scope: { repositories: [target.name] as [string], permissions: SETUP_FINISH_PERMISSIONS }, revoke: revokeInstallationToken } : {}),
       // D#845 ON-24a (FU-322): the `setup_ready` purpose (contents and pull requests write, one repository): fresh for each client, never cached, revoked by `close()`.
       ...(kind === "setup_ready" ? { purpose: "setup_ready" as const, role: "setup_ready", scope: { repositories: [target.name] as [string], permissions: SETUP_READY_PERMISSIONS }, revoke: revokeInstallationToken } : {}),
-      ...(kind === "setup_labels" ? { purpose: "setup_labels" as const, role: "setup_labels", scope: { repositories: [target.name] as [string], permissions: SETUP_LABELS_PERMISSIONS }, revoke: revokeInstallationToken } : {}),
+      ...(kind === "issue_read" ? { purpose: "issue_read" as const, role: "issue_read", scope: { repositories: [target.name] as [string], permissions: ISSUE_READ_PERMISSIONS }, revoke: revokeInstallationToken } : {}),
+      ...(kind === "setup_labels" || kind === "twin_issue" ? { purpose: "setup_labels" as const, role: "setup_labels", scope: { repositories: [target.name] as [string], permissions: SETUP_LABELS_PERMISSIONS }, revoke: revokeInstallationToken } : {}),
     });
     const prefix = `/repos/${target.owner}/${target.name}/`;
     // The repository itself (`GET /repos/<owner>/<name>`, no trailing slash) is also allowed, for GET only: D#6 R3b reads its `private` flag.
@@ -277,7 +283,7 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
 
     return {
       async close() {
-        if (kind === "branch_delete" || kind === "branch_sync" || kind === "retraction" || kind === "revert_pr" || kind === "plane_parity" || kind === "setup_labels" || kind === "setup_finish" || kind === "setup_ready") await revokeInstallationToken(token);
+        if (kind === "branch_delete" || kind === "branch_sync" || kind === "retraction" || kind === "revert_pr" || kind === "plane_parity" || kind === "setup_labels" || kind === "twin_issue" || kind === "issue_read" || kind === "setup_finish" || kind === "setup_ready") await revokeInstallationToken(token);
       },
       async request(raw) {
         // Snapshot every field of the request exactly once; from here on only the snapshot is used (checks, URL, body, log), so a caller's accessor
@@ -325,6 +331,21 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
           // D#845 ON-27d3: and the one label the twin's sync pull request carries, put on a pull request of this repository.
           const label = req.method === "POST" && req.path.startsWith(`${prefix}issues/`) && req.path.endsWith("/labels") && /^[1-9][0-9]{0,9}$/.test(req.path.slice(`${prefix}issues/`.length, -"/labels".length)) && req.query === undefined && isRecord(b) && Object.keys(b).join() === "labels" && Array.isArray(b["labels"]) && b["labels"].length === 1 && b["labels"][0] === "fx-twin-sync";
           if (!create && !label) throw new InstallationHttpError("path_refused");
+        }
+        // `issue_read` holds issues:read, so it gets the narrowest list there is: the open issues, and one issue by number; GET only.
+        if (kind === "issue_read") {
+          const issues = `${prefix}issues`;
+          const list = req.method === "GET" && req.path === issues && req.body === undefined && req.query !== undefined && req.query["state"] === "open" && Object.keys(req.query).every((k) => k === "state" || k === "per_page");
+          const one = req.method === "GET" && req.path.startsWith(`${issues}/`) && /^[1-9][0-9]{0,9}$/.test(req.path.slice(issues.length + 1)) && req.query === undefined && req.body === undefined;
+          if (!list && !one) throw new InstallationHttpError("path_refused");
+        }
+        // `twin_issue` holds issues:write, so it gets the narrowest list there is: open the one copy, with exactly title, body and the one label.
+        if (kind === "twin_issue") {
+          const b = req.body;
+          const copy =
+            req.method === "POST" && req.path === `${prefix}issues` && req.query === undefined && isRecord(b) && Object.keys(b).sort().join() === "body,labels,title" && typeof b["title"] === "string" && typeof b["body"] === "string" &&
+            Array.isArray(b["labels"]) && b["labels"].length === 1 && b["labels"][0] === "from-public";
+          if (!copy) throw new InstallationHttpError("path_refused");
         }
         // `repo_map` holds contents:read, so it too gets an exact list (no `contents`, commits, archives or `..`).
         if (kind === "repo_map" && !repoMapAllowed(req.method, req.path, prefix)) throw new InstallationHttpError("path_refused");
@@ -407,7 +428,7 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
             headers: {
               accept: "application/vnd.github+json",
               authorization: `Bearer ${token}`,
-              ...(kind === "branch_delete" || kind === "receipt_block" || kind === "retraction" || kind === "revert_pr" || kind === "plane_parity" || kind === "setup_labels" || kind === "setup_finish" || kind === "setup_ready" ? { "user-agent": "fulcrumaxe-cloud" } : {}),
+              ...(kind === "branch_delete" || kind === "receipt_block" || kind === "retraction" || kind === "revert_pr" || kind === "plane_parity" || kind === "setup_labels" || kind === "twin_issue" || kind === "issue_read" || kind === "setup_finish" || kind === "setup_ready" ? { "user-agent": "fulcrumaxe-cloud" } : {}),
               "x-github-api-version": "2022-11-28",
               ...(sendBody !== undefined ? { "content-type": "application/json" } : {}),
             },

@@ -9,8 +9,8 @@ import { ROUTES } from '../src/routes/index.js';
 import { githubRouteDeps } from '../src/routes/github.js';
 import { repoPairingDeps, type PairingRepoInspector } from '../src/routes/repoPairing.js';
 import { TWIN_ENABLED } from '@fx/core/src/repos/twins.js';
-import { mergeTwinPr } from '@fx/runner-cloud';
-import { twinRouteDeps, type TwinMergeAnswer } from '../src/routes/repoTwins.js';
+import { bringTwinIssue, mergeTwinPr } from '@fx/runner-cloud';
+import { twinRouteDeps, type TwinBringAnswer, type TwinIssuesAnswer, type TwinMergeAnswer } from '../src/routes/repoTwins.js';
 import { seedAccountWithMember, seedUser } from './helpers/seed.js';
 
 interface Identity {
@@ -62,6 +62,8 @@ describe('repo twins API', () => {
     twinRouteDeps.closePublishPr = null;
     twinRouteDeps.closeSyncPr = null;
     twinRouteDeps.mergePr = null;
+    twinRouteDeps.listIssues = null;
+    twinRouteDeps.bringIssue = null;
   });
   afterAll(async () => {
     repoPairingDeps.getInspector = () => null;
@@ -258,6 +260,97 @@ describe('repo twins API', () => {
     // no app wired: a fixed 503
     twinRouteDeps.mergePr = null;
     expect((await merge(owner)).status).toBe(503);
+  });
+
+  it('the issues list answers any member with what the app read, and each refusal has its own code; the bring button is the answer\'s can_bring', async () => {
+    const owner = await account();
+    const t = await readyTwin(owner);
+    const calls: Array<{ accountId: string; userId: string; twinId: string }> = [];
+    let answer: TwinIssuesAnswer = { result: 'ok', canBring: true, issues: [{ number: 12, title: 'It crashes', author: 'mallory', brought: null }, { number: 9, title: 'Typo', author: 'ada', brought: 3 }] };
+    twinRouteDeps.listIssues = async (input) => (calls.push(input), answer);
+    const member = await addMember(owner.accountId, 'member');
+    const expected = { issues: [{ number: 12, title: 'It crashes', author: 'mallory', brought_issue: null }, { number: 9, title: 'Typo', author: 'ada', brought_issue: 3 }], can_bring: true };
+    expect(await (await call(owner, 'GET', `/twins/${t.id}/issues`)).json()).toEqual(expected);
+    answer = { result: 'ok', canBring: false, issues: [] };
+    expect(await (await call(member, 'GET', `/twins/${t.id}/issues`)).json()).toEqual({ issues: [], can_bring: false });
+    expect(calls).toEqual([{ accountId: owner.accountId, userId: owner.userId, twinId: t.id }, { accountId: owner.accountId, userId: member.userId, twinId: t.id }]);
+    const refusals: Array<[TwinIssuesAnswer, number, string]> = [
+      [{ result: 'not_found' }, 404, 'not_found'],
+      [{ result: 'twin_state', state: 'refused' }, 409, 'twin_state'],
+      [{ result: 'github_unavailable' }, 503, 'github_unavailable'],
+    ];
+    for (const [a, status, code] of refusals) {
+      answer = a;
+      const res = await call(owner, 'GET', `/twins/${t.id}/issues`);
+      expect(res.status).toBe(status);
+      expect(((await res.json()) as { error: { code: string } }).error.code).toBe(code);
+    }
+    const before = calls.length;
+    expect((await call(owner, 'GET', '/twins/not-a-uuid/issues')).status).toBe(404);
+    expect(calls).toHaveLength(before);
+    twinRouteDeps.listIssues = null;
+    expect((await call(owner, 'GET', `/twins/${t.id}/issues`)).status).toBe(503);
+    twinRouteDeps.enabled = false;
+    twinRouteDeps.listIssues = async () => ({ result: 'ok', canBring: true, issues: [] });
+    const off = await call(owner, 'GET', `/twins/${t.id}/issues`);
+    expect(off.status).toBe(503);
+    expect(((await off.json()) as { error: { code: string } }).error.code).toBe('not_configured');
+  });
+
+  it('Bring asks the app to bring one issue, for an owner or admin only; each answer has its own code and a bad number never reaches the app', async () => {
+    const owner = await account();
+    const t = await readyTwin(owner);
+    const calls: Array<{ accountId: string; userId: string; twinId: string; issue: number }> = [];
+    let answer: TwinBringAnswer = { result: 'ok', privateIssue: 4 };
+    twinRouteDeps.bringIssue = async (input) => (calls.push(input), answer);
+    const bring = (who: Identity, n: string | number = 12, id = t.id) => call(who, 'POST', `/twins/${id}/issues/${n}/bring`);
+    expect(await (await bring(owner)).json()).toEqual({ private_issue: 4, already: false });
+    expect(calls).toEqual([{ accountId: owner.accountId, userId: owner.userId, twinId: t.id, issue: 12 }]);
+    answer = { result: 'already', privateIssue: 4 };
+    expect(await (await bring(await addMember(owner.accountId, 'admin'))).json()).toEqual({ private_issue: 4, already: true });
+    const refusals: Array<[TwinBringAnswer, number, string]> = [
+      [{ result: 'not_found' }, 404, 'not_found'],
+      [{ result: 'no_issue' }, 404, 'not_found'],
+      [{ result: 'twin_state', state: 'seeding' }, 409, 'twin_state'],
+      [{ result: 'issue_not_open' }, 409, 'issue_not_open'],
+      [{ result: 'in_progress' }, 409, 'issue_bring_in_progress'],
+      [{ result: 'not_private' }, 409, 'twin_not_private'],
+      [{ result: 'visibility_unknown' }, 503, 'github_unavailable'],
+      [{ result: 'github_unavailable' }, 503, 'github_unavailable'],
+    ];
+    for (const [a, status, code] of refusals) {
+      answer = a;
+      const res = await bring(owner);
+      expect(res.status).toBe(status);
+      expect(((await res.json()) as { error: { code: string } }).error.code).toBe(code);
+    }
+    const before = calls.length;
+    expect((await bring(await addMember(owner.accountId, 'member'))).status).toBe(403);
+    for (const n of ['0', '-1', '1.5', 'x', '01', '12345678901']) expect((await bring(owner, n)).status, n).toBe(422);
+    expect((await bring(owner, 12, 'not-a-uuid')).status).toBe(404);
+    expect(calls).toHaveLength(before);
+    twinRouteDeps.bringIssue = null;
+    expect((await bring(owner)).status).toBe(503);
+    twinRouteDeps.enabled = false;
+    twinRouteDeps.bringIssue = async () => ({ result: 'ok', privateIssue: 1 });
+    expect(((await (await bring(owner)).json()) as { error: { code: string } }).error.code).toBe('not_configured');
+  });
+
+  it('Bring through the route, with the real app function and a recording App port, opens one private issue, records the pair and writes one twin.issue_brought row; a second click opens nothing', async () => {
+    const owner = await account();
+    const t = await readyTwin(owner);
+    const made: Array<{ repo: string; title: string }> = [];
+    const setupInstall = {
+      readIssue: async () => ({ number: 12, title: 'It crashes', body: 'text', author: 'mallory', open: true, pull: false }),
+      createBroughtIssue: async (i: { repo: { name: string }; title: string }) => (made.push({ repo: i.repo.name, title: i.title }), 31),
+    } as never;
+    const repoVisibility = async () => 'private' as const;
+    twinRouteDeps.bringIssue = (input) => bringTwinIssue({ appUserPool, setupInstall, repoVisibility }, { accountId: input.accountId, userId: input.userId }, input.twinId, input.issue);
+    const rows = async () => (await admin.query<{ actor: string; payload: unknown }>("SELECT actor, payload FROM audit_log WHERE account_id = $1 AND action = 'twin.issue_brought'", [owner.accountId])).rows;
+    expect(await (await call(owner, 'POST', `/twins/${t.id}/issues/12/bring`)).json()).toEqual({ private_issue: 31, already: false });
+    expect(await (await call(owner, 'POST', `/twins/${t.id}/issues/12/bring`)).json()).toEqual({ private_issue: 31, already: true });
+    expect(made).toEqual([{ repo: 'widgets-private', title: 'It crashes' }]);
+    expect(await rows()).toEqual([{ actor: owner.userId, payload: { twin_id: t.id, public_issue: 12, private_issue: 31 } }]);
   });
 
   it('the create asks for a state naming the public repo, its owner, private, no auto-init and Discussions only by the twin purpose', async () => {
