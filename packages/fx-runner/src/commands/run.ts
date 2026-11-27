@@ -41,6 +41,7 @@ import { createHostSetupVm, type HostGuestDeps } from "../setup/hostGuest.js";
 import { createEngineLeaseGuard, createEngineSessionHandlers, createSessionLock, lockSessionHandlers, sessionStopperOf } from "../engineSession/lifecycle.js";
 import { createStandardSessionParts, sessionHandlersFor } from "../engineSession/standardTier.js";
 import { createOperateMark } from "../engineSession/operateMark.js";
+import { createSessionRegistry } from "../engineSession/registry.js";
 import { createRepoLookup } from "../engineSession/repoLookup.js";
 import { createSetupRepos } from "../setup/setupRepos.js";
 import { daemonInventorySource, daemonSandboxLifecycle } from "../vm/sandboxd/management.js";
@@ -830,12 +831,15 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
               runnerId: registration.runner_id,
               cloudOrigin: registration.cloud_origin,
             };
+      // D#845 ON-14a: the sessions that are up, which the bridge below reads and forwards commands to (the microVM tier only: it is the one with a channel).
+      const sessionRegistry = createSessionRegistry();
       const microvmSessions =
         vm === undefined || vmDeps === undefined || sessionCommon === undefined
           ? undefined
           : createEngineSessionHandlers({
               vm: vmDeps,
               port: (options) => vm.vmPort(options),
+              sessions: sessionRegistry,
               readToken: vm.readToken, // the runner's own credential path (`credentials set-vm-token`), a fresh buffer per call
               stopped: (r) => ctx.out(`fx-runner: engine session stopped (${r.method}, ${r.survivors} survivors, synced ${r.paused.synced})`),
               state: async (name) => (await vm.port.sandboxState?.({ runId: "", sandboxName: name, sessionId: "" })) ?? "unknown",
@@ -878,6 +882,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
           xdgRuntimeDir: host.xdgRuntimeDir,
           secrets: () => (credentials.mode === "api_key" ? [credentials.apiKey] : []),
           ports: host.engineBridge,
+          sessions: sessionRegistry,
           ...(host.engineBridgeOptions === undefined ? {} : { bridgeApply: createBridgeApply({ stateDir, uid: host.uid, now: ctx.now, options: host.engineBridgeOptions }) }),
           log: (line) => ctx.out(`fx-runner: ${line}`),
         });

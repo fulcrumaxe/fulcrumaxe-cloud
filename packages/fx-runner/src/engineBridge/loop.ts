@@ -24,7 +24,7 @@ import type { Clock } from "../daemon/lease.js";
 import { CATCHUP_MAX_BATCHES, type DetailSpool, type Selection } from "./detailSpool.js";
 import { MAX_WAIT_S, type RetryWhy, type SendOutcome } from "./upload.js";
 import { emptyDrops, type DropReason, type DropCounts } from "./shape.js";
-import type { EngineTail } from "./tail.js";
+import type { PollResult } from "./tail.js";
 import type { WatchState } from "./watchState.js";
 
 /** How often the tail's file is looked at. A local read, never a request: what is held back below is held here. */
@@ -77,7 +77,12 @@ export interface BridgeStatus {
   reason: RetryWhy | null;
 }
 
-export type TailLike = Pick<EngineTail, "poll" | "ack" | "rewind">;
+/** A tail the loop reads: the engine host's files (synchronous) or an engine session's channel (`channelTail.ts`, asynchronous). */
+export interface TailLike {
+  poll(): PollResult | Promise<PollResult>;
+  ack(seq: number | null): void;
+  rewind(): void;
+}
 
 export interface BridgeLoopDeps {
   /** The engine's own events file. The first tail is the engine's: `status` shows its acked seq. */
@@ -339,7 +344,7 @@ export class BridgeLoop {
     if (nowMs < this.holdUntil) return this.holdUntil - nowMs;
     if (this.flight === null) {
       // Each tail is read from its own saved cursor; one that refuses its file (or has no file yet) adds nothing and never stops the others.
-      const polls = this.tails.map((tail, index) => ({ tail, index, polled: tail.poll() }));
+      const polls = await Promise.all(this.tails.map(async (tail, index) => ({ tail, index, polled: await tail.poll() })));
       // Every poll that read is acked (an idle one writes nothing): a tail wants an ack or a rewind before it is polled again.
       const reads = polls.filter((p) => p.polled.status === "ok");
       if (reads.length > 0) {

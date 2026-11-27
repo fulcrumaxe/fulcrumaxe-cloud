@@ -2,6 +2,7 @@ import { SandboxInventory, type MachineJob, type SandboxInventoryRow } from "@fu
 import type { MachineJobClaimResult, MachineJobProgressResult } from "../../src/daemon/client.js";
 import { createMachineJobDispatcher, type MachineJobEvent } from "../../src/daemon/machineJobs.js";
 import path from "node:path";
+import { createSessionRegistry, type SessionRegistry } from "../../src/engineSession/registry.js";
 import { createEngineSessionHandlers, sessionNameOf, type EngineSessionDeps, type SessionStopReport } from "../../src/engineSession/lifecycle.js";
 import type { FakeChannel } from "../helpers/fakeChannel.js";
 import { createOperateMark, type OperateMarkEvent } from "../../src/engineSession/operateMark.js";
@@ -52,6 +53,8 @@ export interface Rig {
   issued: Buffer[];
   tier: "vm_stop" | "unit" | undefined;
   stopReports: SessionStopReport[];
+  /** ON-14a: the registry the lifecycle fills. */
+  sessions: SessionRegistry;
 }
 
 export function sessionRig(): Rig {
@@ -170,6 +173,7 @@ export function sessionRig(): Rig {
         }),
     ...(rig.tier === undefined ? {} : { tier: rig.tier }),
     stopped: (report) => void rig.stopReports.push(report),
+    sessions: rig.sessions,
     get engineDir() {
       return path.join((newest.current as Machine).root, "sandbox", ".fx-engine");
     },
@@ -211,6 +215,7 @@ export function sessionRig(): Rig {
     issued: [],
     tier: undefined,
     stopReports: [],
+    sessions: createSessionRegistry(),
   };
   return rig;
 }

@@ -109,6 +109,26 @@ describe("engine session issuers and gates [pg]", () => {
       expect(audit.map((a) => a.payload)).toEqual([{ repo_id: r.who.repoId, job_id: out.job_id, resume: false }]);
     });
 
+    it("carries the engine version the install recorded: the newest setup of THIS repository that has one, and never another repository's", async () => {
+      const r = await rig();
+      const other = await secondRepo(r);
+      const setup = (repoId: string, version: string | null, ago: number) => h.admin.query("INSERT INTO project_setups (account_id, repo_id, kind, created_by, phase, state, sub_step, engine_version, created_at) VALUES ($1, $2, 'existing', $3, 'done', 'ok', 'pr_merged', $4, now() - ($5 || ' minutes')::interval)", [r.who.accountId, repoId, r.who.userId, version, String(ago)]);
+      const versionOf = async (): Promise<unknown> => {
+        const out = await start(r);
+        const job = verifyMachineJob((await jobRow(out.job_id)).job, keyring, r.runnerId);
+        if (job.kind !== "engine_session_start") throw new Error("kind");
+        await h.admin.query("DELETE FROM machine_jobs WHERE id = $1", [out.job_id]);
+        return job.args.engine_version;
+      };
+      expect(await versionOf()).toBeUndefined(); // no install on record: the field is left out and the runner's bridge will not start for it
+      await setup(other.repoId, "9.9.9", 1);
+      expect(await versionOf()).toBeUndefined();
+      await setup(r.who.repoId, "1.2.3", 30);
+      await setup(r.who.repoId, "1.4.0", 10);
+      await setup(r.who.repoId, null, 1);
+      expect(await versionOf()).toBe("1.4.0");
+    });
+
     it("signs the epoch the account's settings row holds: it rises on each switch and the next start signs the new one", async () => {
       const r = await rig();
       await setOperate(r, false);

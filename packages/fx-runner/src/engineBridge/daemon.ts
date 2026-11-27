@@ -28,7 +28,9 @@ import { removeBridgeState, writeBridgeState } from "../engineHost/hostFiles.js"
 import { Inbox } from "./inbox.js";
 import { BridgeLoop, type BridgeStatus } from "./loop.js";
 import { loadBridgeSettings, type BridgedRepo } from "./settings.js";
+import { createSessionUnit, instanceGuard } from "./sessionUnit.js";
 import { EngineTail } from "./tail.js";
+import type { SessionRegistry, SessionEntry } from "../engineSession/registry.js";
 import type { SendOutcome } from "./upload.js";
 
 export const ENGINE_EVENTS_FILE = "engine-events.jsonl";
@@ -107,6 +109,8 @@ export interface EngineBridgeDeps {
   ports: EngineBridgePorts;
   /** D#845 ON-BR-2: what the runner can do to its own bridge settings when the cloud sends `bridge_enable` or `bridge_disable`. Absent: those commands are not pulled. */
   bridgeApply?: BridgeApply | undefined;
+  /** D#845 ON-14a: the engine sessions that are up (filled by the session lifecycle). Each is bridged with no settings entry and no host directory, over its channel. Absent: none. */
+  sessions?: SessionRegistry | undefined;
   /** Gets fixed text only. */
   log: (line: string) => void;
   /** Test seam: the supervisor's period. */
@@ -166,21 +170,7 @@ export function createBridgeTails(args: { stateDir: string; runnerStateDir: stri
   const { stateDir, runnerStateDir, repoGhId, uid, secrets, log } = args;
   // An engine instance id belongs to the file it first appears in (or the cursor that already holds it): the other tail never adopts it, so one file cannot take over a
   // session of the other, whether it is the other's current one, an old one from before a restart, or one the other has not read yet.
-  const owners = new Map<string, "engine" | "host">();
-  const foreign =
-    (me: "engine" | "host") =>
-    (id: string): boolean => {
-      for (const [name, t] of [["engine", tail], ["host", hostTail]] as const) {
-        const known = t.currentInstance();
-        if (known !== null && !owners.has(known)) owners.set(known, name);
-      }
-      const owner = owners.get(id);
-      if (owner === undefined) {
-        owners.set(id, me);
-        return false;
-      }
-      return owner !== me;
-    };
+  const foreign = instanceGuard(() => [["engine", tail], ["host", hostTail]]);
   const tail: EngineTail = new EngineTail({ eventsPath: path.join(stateDir, ENGINE_EVENTS_FILE), cursorPath: engineCursorPath(runnerStateDir, repoGhId), uid, secrets, log, isForeignInstance: foreign("engine") });
   const hostTail: EngineTail = new EngineTail({ eventsPath: path.join(stateDir, HOST_EVENTS_FILE), cursorPath: path.join(runnerStateDir, "engine-bridge", `${repoGhId}.host.cursor.json`), uid, secrets, log, isForeignInstance: foreign("host") });
   return { tail, hostTail };
@@ -191,7 +181,10 @@ interface Unit {
   abort: AbortController;
   loop: BridgeLoop;
   puller: CommandPuller;
-  keeper: CeilingKeeperLike;
+  /** A session repo has none (no dial file to keep). */
+  keeper: CeilingKeeperLike | undefined;
+  /** Set for an engine session's unit: the registry entry it was started from (a new start of the repo is a new entry). */
+  session?: SessionEntry;
   done: Promise<unknown>;
 }
 
@@ -242,9 +235,11 @@ export function startEngineBridge(deps: EngineBridgeDeps): EngineBridge {
   const statusOf = (repo: BridgedRepo): RepoStatus => {
     const unit = units.get(repo.repo_gh_id);
     const why = refused.get(repo.repo_gh_id);
-    return { repo_gh_id: repo.repo_gh_id, full_name: repo.full_name, run: unit !== undefined ? "running" : why !== undefined ? "refused" : "waiting", reason: unit !== undefined ? null : (why ?? (deps.accepted() ? "cloud_list" : "hello")), upload: unit?.loop.status() ?? null, pull: unit?.puller.status() ?? null, ceiling: unit?.keeper.status() ?? null };
+    return { repo_gh_id: repo.repo_gh_id, full_name: repo.full_name, run: unit !== undefined ? "running" : why !== undefined ? "refused" : "waiting", reason: unit !== undefined ? null : (why ?? (deps.accepted() ? "cloud_list" : "hello")), upload: unit?.loop.status() ?? null, pull: unit?.puller.status() ?? null, ceiling: unit?.keeper?.status() ?? null };
   };
-  const status = (): DaemonStatus => ({ settings, hello: deps.accepted(), socket: socketState, repos: known.map(statusOf) });
+  /** An engine session's repo has no name on this machine: its status line carries the id and a fixed word. */
+  const sessionRepo = (e: SessionEntry): BridgedRepo => ({ repo_gh_id: e.repo_gh_id, full_name: "engine session", state_dir: "", repo_root: "" });
+  const status = (): DaemonStatus => ({ settings, hello: deps.accepted(), socket: socketState, repos: [...known.map(statusOf), ...(deps.sessions?.list() ?? []).map((e) => statusOf(sessionRepo(e)))] });
 
   function localHalted(repo: BridgedRepo): boolean {
     try {
@@ -274,10 +269,11 @@ export function startEngineBridge(deps: EngineBridgeDeps): EngineBridge {
     return age >= 0 && age <= ALLOWED_MAX_AGE_MS;
   }
 
-  function listVerdict(repo: BridgedRepo): "ok" | "cloud_list" | "not_allowed" {
+  /** `fullName` undefined is an engine session's repo: its identity is the start job's repository id, which the list must hold (the name is the cloud's own and nothing here compares it). */
+  function listVerdict(repo: { repo_gh_id: number }, fullName?: string): "ok" | "cloud_list" | "not_allowed" {
     if (allowed === undefined || !listFresh()) return "cloud_list";
     const found = allowed.find((a) => a.repo_gh_id === repo.repo_gh_id);
-    return found !== undefined && found.full_name === repo.full_name ? "ok" : "not_allowed";
+    return found !== undefined && (fullName === undefined || found.full_name === fullName) ? "ok" : "not_allowed";
   }
 
   function start(repo: BridgedRepo, engineVersion: string): void {
@@ -366,6 +362,13 @@ export function startEngineBridge(deps: EngineBridgeDeps): EngineBridge {
     units.delete(id);
     unit.abort.abort();
     await unit.done;
+    if (unit.session !== undefined) {
+      // a session has no bridge state file; its detail goes with it when it ended (the same rule as a disconnected repo)
+      if (repoLeft && !removeDetailSpool(deps.runnerStateDir, id)) deps.log("engine-bridge: the detail spool of an ended session could not be removed");
+      refused.set(id, why);
+      deps.log("engine-bridge: stopped for a session");
+      return;
+    }
     // A repo that left the settings (a disconnect) leaves none of its detail on the machine. Removed here, after the loop ended: `disableRepos` runs in another process while the loop may still write, and the loop would write the spool again.
     if (repoLeft && !removeDetailSpool(deps.runnerStateDir, id)) deps.log("engine-bridge: the detail spool of a disconnected repo could not be removed");
     // After the loops ended, so a pull that was in flight cannot write it again. Absent reads as "off" to the engine host.
@@ -394,7 +397,7 @@ export function startEngineBridge(deps: EngineBridgeDeps): EngineBridge {
     if (!loaded.ok) {
       if (units.size > 0 || known.length > 0) deps.log("engine-bridge: the settings file is damaged; nothing is bridged until it is fixed");
       known = [];
-      for (const id of [...units.keys()]) await stopUnit(id, "settings");
+      for (const [id, unit] of [...units]) if (unit.session === undefined) await stopUnit(id, "settings");
     } else {
       known = loaded.repos;
       // Once, at start: a spool of a repo that is no longer bridged (disabled by hand while no daemon ran) is not kept.
@@ -403,7 +406,7 @@ export function startEngineBridge(deps: EngineBridgeDeps): EngineBridge {
         sweepDetailSpools(deps.runnerStateDir, new Set(loaded.repos.map((r) => r.repo_gh_id)), deps.log);
       }
       const wanted = new Map(loaded.repos.map((r) => [r.repo_gh_id, r]));
-      for (const [id, unit] of [...units]) if (!wanted.has(id) || !sameBinding(unit.repo, wanted.get(id)!)) await stopUnit(id, "disabled", !wanted.has(id));
+      for (const [id, unit] of [...units]) if (unit.session === undefined && (!wanted.has(id) || !sameBinding(unit.repo, wanted.get(id)!))) await stopUnit(id, "disabled", !wanted.has(id));
       for (const id of [...refused.keys()]) if (!wanted.has(id)) refused.delete(id);
       if (!deps.accepted()) {
         // A later hello that dropped `engine_bridge_v1` (or was not answered) stops every running repo: it waits for a hello that kept it.
@@ -416,7 +419,9 @@ export function startEngineBridge(deps: EngineBridgeDeps): EngineBridge {
         for (const repo of loaded.repos) {
           const id = repo.repo_gh_id;
           try {
-            const verdict = listVerdict(repo);
+            const verdict = listVerdict(repo, repo.full_name);
+            // An engine session of the same repository holds it: the host's files are not read while a session of it is up.
+            if (units.get(id)?.session !== undefined) continue;
             // A repo that is running leaves when the cloud's list drops it, or when the list is older than ALLOWED_MAX_AGE_MS; it waits until a fresh list holds it again.
             if (units.has(id)) {
               if (verdict === "not_allowed") await stopUnit(id, "not_allowed");
@@ -441,12 +446,57 @@ export function startEngineBridge(deps: EngineBridgeDeps): EngineBridge {
         }
       }
     }
+    await superviseSessions();
     await manageSocket();
     writeStatus();
   }
 
+  /** The engine sessions that are up (the registry the lifecycle fills): one unit each, started on the cloud's list holding the start job's repository and the version it carried, stopped when the session ends, is replaced or the list drops it. */
+  async function superviseSessions(): Promise<void> {
+    const wanted = new Map((deps.sessions?.list() ?? []).map((e) => [e.repo_gh_id, e]));
+    for (const [id, unit] of [...units]) {
+      if (unit.session === undefined) continue;
+      const entry = wanted.get(id);
+      if (entry === unit.session && deps.accepted()) {
+        const verdict = listVerdict(unit.session);
+        if (verdict === "ok") continue;
+        await stopUnit(id, verdict);
+        if (verdict === "cloud_list") refused.delete(id);
+      } else if (entry === unit.session) {
+        // the session is still the registry's and the list is fine: it is the hello that stopped it (a later hello dropped `engine_bridge_v1`); it waits for one that keeps it, as a host repo does
+        await stopUnit(id, "hello");
+        refused.delete(id);
+      } else await stopUnit(id, entry === undefined ? "session_ended" : "session_replaced", entry === undefined);
+    }
+    for (const id of [...refused.keys()]) if (!wanted.has(id) && !known.some((r) => r.repo_gh_id === id)) refused.delete(id);
+    if (!deps.accepted()) return;
+    if ([...wanted.keys()].some((id) => !units.has(id))) await probe();
+    for (const [id, entry] of wanted) {
+      if (units.has(id)) continue;
+      try {
+        const verdict = listVerdict(entry);
+        if (verdict === "cloud_list") refused.delete(id);
+        else if (verdict === "not_allowed") refused.set(id, "not_allowed");
+        else if (!ENGINE_VERSION_PATTERN.test(deps.runnerVersion)) refused.set(id, "bridge_version");
+        else if (entry.engine_version === undefined || !ENGINE_VERSION_PATTERN.test(entry.engine_version)) refused.set(id, "engine_version");
+        else startSession(entry, entry.engine_version);
+      } catch {
+        // fx-swallow-ok: one session that fails to start is refused with a closed word and the others' pass goes on; the error could name a path
+        refused.set(id, "unexpected");
+      }
+    }
+  }
+
+  function startSession(entry: SessionEntry, engineVersion: string): void {
+    const abort = new AbortController();
+    const made = createSessionUnit({ runnerStateDir: deps.runnerStateDir, uid: deps.uid, clock, runnerVersion: deps.runnerVersion, keyring: deps.keyring, runnerId: deps.runnerId, send: deps.send, wakeEpoch: deps.wakeEpoch, cloudWatchMode: deps.cloudWatchMode, secrets: deps.secrets, post: post(undefined), log: deps.log }, entry, engineVersion);
+    units.set(entry.repo_gh_id, { repo: sessionRepo(entry), abort, loop: made.loop, puller: made.puller, keeper: undefined, session: entry, done: Promise.all(made.run(abort.signal)) });
+    refused.delete(entry.repo_gh_id);
+    deps.log("engine-bridge: started for a session");
+  }
+
   async function manageSocket(): Promise<void> {
-    if (units.size === 0) {
+    if (![...units.values()].some((u) => u.session === undefined)) {
       if (socket !== undefined) await socket.close();
       socket = undefined;
       socketState = "off";
@@ -458,7 +508,7 @@ export function startEngineBridge(deps: EngineBridgeDeps): EngineBridge {
         socketPath: socketPathFor({ XDG_RUNTIME_DIR: deps.xdgRuntimeDir }),
         uid: deps.uid,
         post: decidePost,
-        pairedRepos: () => [...units.keys()],
+        pairedRepos: () => [...units].filter(([, u]) => u.session === undefined).map(([id]) => id),
         // Forwarded only on an explicit `true` from the last pull: no unit, no pull yet, or no control for the repo reads as off (the socket refuses on `false`).
         operateEnabled: (id) => units.get(id)?.puller.operateEnabled(id) === true,
         log: deps.log,

@@ -5,7 +5,7 @@ import { Duplex, duplexPair } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
 import { guestRuntime } from "../../scripts/engine-supervise-host.mjs";
 import { ChannelError, createChannelClient } from "../../src/engineHost/channelClient.js";
-import { createGuestSession, FRAME_MAX, SESSION_CONFIG_FILE, TOKEN_MAX, type GuestSession } from "../../src/engineHost/guestSession.js";
+import { createGuestSession, EVENTS_READ_MAX, FRAME_MAX, SESSION_CONFIG_FILE, TOKEN_MAX, type GuestSession } from "../../src/engineHost/guestSession.js";
 import { fakeChannel } from "../helpers/fakeChannel.js";
 import { unixSocketsRefused } from "../helpers/needsHostSockets.js";
 import { tempDir } from "../helpers/tempTree.js";
@@ -33,7 +33,7 @@ describe("requests", () => {
         case "stop":
           return { ok: true, survivors: 0, token_wiped: true, pid: 321 };
         case "events_read":
-          return { ok: true, lines: ["{}"], next: 3, reset: false };
+          return { ok: true, lines: ["{}"], ends: [(h["after"] as number) + 3], next: (h["after"] as number) + 3, reset: false };
         default:
           return { ok: true };
       }
@@ -43,8 +43,8 @@ describe("requests", () => {
     expect(await client.tick("checkin", "pm-sweep")).toEqual({ started: true });
     expect(await client.command({ any: "signed" })).toBe("7-abc");
     expect(await client.stop("halted")).toEqual({ survivors: 0, tokenWiped: true, pid: 321 });
-    expect(await client.eventsRead(0)).toEqual({ lines: ["{}"], next: 3, reset: false });
-    expect(await client.eventsRead(3, "outcomes")).toEqual({ lines: ["{}"], next: 3, reset: false });
+    expect(await client.eventsRead(0)).toEqual({ lines: ["{}"], ends: [3], next: 3, reset: false });
+    expect(await client.eventsRead(3, "outcomes")).toEqual({ lines: ["{}"], ends: [6], next: 6, reset: false });
     await client.tokenPut(Buffer.from(TOKEN));
     expect(far.requests.map((q) => q.header)).toEqual([
       { op: "tick", kind: "loop" },
@@ -76,6 +76,62 @@ describe("requests", () => {
     await expectCode(createChannelClient(async () => client, { timeoutMs: 40 }).tick("loop"), "timeout");
     expect(client.destroyed).toBe(true);
     server.destroy();
+  });
+
+  it("an events reply whose line ends do not line up (missing, a different count, not rising, the last not at `next`) is `bad_reply`: no cursor is ever kept on it", async () => {
+    const reply = (over: Record<string, unknown>) => fakeChannel(() => ({ ok: true, lines: ["a", "b"], ends: [2, 4], next: 4, reset: false, ...over })).connect;
+    expect(await createChannelClient(reply({})).eventsRead(0, "engine")).toEqual({ lines: ["a", "b"], ends: [2, 4], next: 4, reset: false });
+    for (const bad of [{ ends: undefined }, { ends: [2] }, { ends: [2, 2] }, { ends: [4, 2] }, { ends: [2, 5] }, { ends: [2, -1] }, { ends: [2, "4"] }, { next: 9 }]) await expectCode(createChannelClient(reply(bad)).eventsRead(0, "engine"), "bad_reply");
+  });
+
+  it("each offset is judged on its own: not rising (even when it ends at `next`), a last end that is not `next`, and a span that cannot hold its line are each refused", async () => {
+    const reply = (lines: string[], ends: number[], next: number, over: Record<string, unknown> = {}) => fakeChannel(() => ({ ok: true, lines, ends, next, reset: false, ...over })).connect;
+    // not rising, yet the last end IS `next`: only the rising check refuses it
+    await expectCode(createChannelClient(reply(["a", "b", "c"], [2, 6, 4], 4)).eventsRead(0), "bad_reply");
+    await expectCode(createChannelClient(reply(["a", "b"], [2, 2], 2)).eventsRead(0), "bad_reply");
+    // rising, but the last end is not `next`
+    await expectCode(createChannelClient(reply(["a", "b"], [2, 4], 5)).eventsRead(0), "bad_reply");
+    await expectCode(createChannelClient(reply(["a", "b"], [2, 4], 3)).eventsRead(0), "bad_reply");
+    // a span shorter than its line and newline
+    await expectCode(createChannelClient(reply(["abc", "d"], [2, 4], 4)).eventsRead(0), "bad_reply");
+    await expectCode(createChannelClient(reply(["ab", "c"], [2, 4], 4)).eventsRead(0), "bad_reply");
+    // the first end must be past where the read began (`after`), or past 0 after a reset
+    await expectCode(createChannelClient(reply(["a"], [10], 10)).eventsRead(10), "bad_reply");
+    await expectCode(createChannelClient(reply(["a"], [3], 3)).eventsRead(10), "bad_reply");
+    await expectCode(createChannelClient(reply(["a"], [0], 0, { reset: true })).eventsRead(10), "bad_reply");
+    // a reset reply is judged from 0, not from `after`
+    expect(await createChannelClient(reply(["a"], [2], 2, { reset: true })).eventsRead(10)).toEqual({ lines: ["a"], ends: [2], next: 2, reset: true });
+    // and an honest reply from `after` still passes
+    expect(await createChannelClient(reply(["a"], [12], 12)).eventsRead(10)).toEqual({ lines: ["a"], ends: [12], next: 12, reset: false });
+    // a line of invalid UTF-8 re-encodes longer than its span: that is honest, and kept
+    expect(await createChannelClient(reply(["\ufffd"], [2], 2)).eventsRead(0)).toEqual({ lines: ["\ufffd"], ends: [2], next: 2, reset: false });
+  });
+
+  it("a span or a whole reply wider than one read window is refused before anything is built from it, with no allocation spike (one ~60-byte reply used to take the runner's memory up by hundreds of MB)", async () => {
+    const after = 7;
+    let calls = 0;
+    const repeat = String.prototype.repeat;
+    String.prototype.repeat = function (this: string, n: number): string {
+      calls += 1;
+      if (n > 1_000_000) throw new Error("allocated from a guest span");
+      return repeat.call(this, n);
+    };
+    const before = process.memoryUsage().rss;
+    try {
+      for (const ends of [[after + 400_000_000], [after + EVENTS_READ_MAX + 1], [after + EVENTS_READ_MAX + 2, after + 400_000_000]]) {
+        const next = ends[ends.length - 1]!;
+        await expectCode(createChannelClient(fakeChannel(() => ({ ok: true, lines: ends.map(() => "x"), ends, next, reset: false })).connect).eventsRead(after), "bad_reply");
+      }
+      // after a reset the window counts from 0
+      await expectCode(createChannelClient(fakeChannel(() => ({ ok: true, lines: ["x"], ends: [EVENTS_READ_MAX + 1], next: EVENTS_READ_MAX + 1, reset: true })).connect).eventsRead(after), "bad_reply");
+    } finally {
+      String.prototype.repeat = repeat;
+    }
+    expect(calls).toBe(0);
+    expect(process.memoryUsage().rss - before).toBeLessThan(150 * 1024 * 1024);
+    // exactly one window is fine
+    const last = after + EVENTS_READ_MAX;
+    expect(await createChannelClient(fakeChannel(() => ({ ok: true, lines: ["#"], ends: [last], next: last, reset: false })).connect).eventsRead(after)).toEqual({ lines: ["#"], ends: [last], next: last, reset: false });
   });
 
   it("a stop reply's pid is a number above 1, and anything else is no pid (the caller then does not confirm the program is gone)", async () => {

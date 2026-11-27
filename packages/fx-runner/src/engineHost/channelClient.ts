@@ -6,7 +6,7 @@
  */
 import type { Duplex } from "node:stream";
 import type { ChannelCode, ChannelReply, ChannelStopReason } from "./guestSession.js";
-import { FRAME_MAX, TOKEN_MAX } from "./guestSession.js";
+import { EVENTS_READ_MAX, FRAME_MAX, TOKEN_MAX } from "./guestSession.js";
 
 export type ChannelFailure = ChannelCode | "unreachable" | "bad_reply" | "timeout";
 export class ChannelError extends Error {
@@ -27,7 +27,8 @@ export interface SessionChannel {
   command(signed: unknown): Promise<string>;
   /** Wipes the credential and ends the host. Throws unless the guest said ok; the caller judges `survivors` and `tokenWiped`, and waits for the supervisor program (`pid`, the guest's own; undefined when the reply carried none) to be gone. */
   stop(reason: ChannelStopReason): Promise<{ survivors: number; tokenWiped: boolean; pid: number | undefined }>;
-  eventsRead(after: number, stream?: "events" | "outcomes"): Promise<{ lines: string[]; next: number; reset: boolean }>;
+  /** `ends[i]` is the byte offset just past `lines[i]` in the guest's file; `next` is the end of the last one. */
+  eventsRead(after: number, stream?: "events" | "outcomes" | "engine"): Promise<{ lines: string[]; ends: number[]; next: number; reset: boolean }>;
   /** Hands the credential over (1 to 4096 printable ASCII bytes). */
   tokenPut(token: Buffer): Promise<void>;
 }
@@ -120,7 +121,20 @@ export function createChannelClient(connect: () => Promise<Duplex>, options: { t
       const reply = okOr(await ask({ op: "events_read", after, ...(stream === "events" ? {} : { stream }) }));
       const lines = reply["lines"];
       if (!Array.isArray(lines) || !lines.every((l) => typeof l === "string")) throw new ChannelError("bad_reply");
-      return { lines: lines as string[], next: num(reply["next"]), reset: reply["reset"] === true };
+      const ends = reply["ends"];
+      const next = num(reply["next"]);
+      // a reply whose offsets do not line up with its lines is not one this client can keep a cursor on. The guest is the untrusted side, so every offset is bounded before anything is built from it: the first end is past where the read began (`from`, 0 after a reset),
+      // the whole reply fits the read window, the ends rise strictly, the last is `next`, and each line's span holds at least the line's own characters and its newline (a line of invalid UTF-8 re-encodes longer than its span, never shorter)
+      if (!Array.isArray(ends) || ends.length !== lines.length) throw new ChannelError("bad_reply");
+      const from = reply["reset"] === true ? 0 : after;
+      let prev = from;
+      ends.forEach((e, i) => {
+        const end = num(e);
+        if (end <= prev || end - from > EVENTS_READ_MAX || end - prev < (lines[i] as string).length + 1) throw new ChannelError("bad_reply");
+        prev = end;
+      });
+      if (ends.length > 0 && prev !== next) throw new ChannelError("bad_reply");
+      return { lines: lines as string[], ends: ends as number[], next, reset: reply["reset"] === true };
     },
     async tokenPut(token) {
       if (token.length < 1 || token.length > TOKEN_MAX) throw new ChannelError("bad_request");

@@ -65,7 +65,20 @@ export function notConfirmedDueMs(waiting: Pick<Waiting, "expiresMs" | "mtimeMs"
   return Math.min(start + ENGINE_COMMAND_MAX_LIFE_S * 1000, waiting.expiresMs ?? Number.POSITIVE_INFINITY) + NOT_CONFIRMED_AFTER_MS;
 }
 
-export class Inbox {
+/**
+ * What the command puller needs of an inbox. The host engine's is the directory below; an engine session's (`channelInbox.ts`) forwards over the session's channel, so its steps may be asynchronous. `write` gets the verified command and the
+ * signed bytes it came in as.
+ */
+export interface CommandInbox {
+  loadState(nowMs: number): InboxState;
+  saveState(state: InboxState): void;
+  write(command: EngineCommand, signed: unknown): string | Promise<string>;
+  waiting(): Waiting[] | Promise<Waiting[]>;
+  consumed(): Consumed[] | Promise<Consumed[]>;
+  settle(name: string, ack: EngineCommandAck): void | Promise<void>;
+}
+
+export class Inbox implements CommandInbox {
   constructor(
     private readonly stateDir: string,
     private readonly uid: number | undefined,
