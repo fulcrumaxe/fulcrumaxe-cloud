@@ -310,6 +310,180 @@ describe('migration 1066: session job contract', () => {
     });
   });
 
+  describe('machine_job_expire: a job waiting on the cloud after `push ok` (FU-315)', () => {
+    const sweep = (who: SeedRefs, runner: string) => asRunner(who, runner, (c) => c.query('SELECT * FROM machine_job_pending()'));
+    const HEAD = 'a'.repeat(40);
+    /** A setup of a fresh account, a project_setup job of it, and the setup's push state. */
+    async function setupJob(o: { subStep?: string | null; state?: string; head?: string | null; pr?: number | null; kind?: 'project_setup' | 'engine_update'; update?: Partial<{ phase: string; subStep: string; state: string; head: string | null; pr: number | null }>; progressAgoMin: number }) {
+      const c = await seedAccount(admin, randomUUID());
+      const setupId = (
+        await admin.query<{ id: string }>(
+          `INSERT INTO project_setups (account_id, repo_id, kind, created_by, phase, sub_step, state, install_head_sha, install_pr) VALUES ($1, $2, 'existing', $3, $4, $5, $6, $7, $8) RETURNING id`,
+          [c.accountId, c.repoId, c.userId, o.kind === 'engine_update' ? 'done' : 'install', o.subStep === undefined ? 'push' : o.subStep, o.state ?? 'ok', o.head === undefined ? HEAD : o.head, o.pr ?? null],
+        )
+      ).rows[0]!.id;
+      const kind = o.kind ?? 'project_setup';
+      if (kind === 'engine_update') {
+        const u = o.update ?? {};
+        await admin.query(
+          `INSERT INTO engine_updates (account_id, repo_id, setup_id, from_version, to_version, phase, sub_step, state, attempt, head_sha, pr, created_by) VALUES ($1, $2, $3, '1.0.0', '1.1.0', $4, $5, $6, 1, $7, $8, $9)`,
+          [c.accountId, c.repoId, setupId, u.phase ?? 'push', u.subStep ?? 'push', u.state ?? 'ok', u.head === undefined ? HEAD : u.head, u.pr ?? null, c.userId],
+        );
+      }
+      const runner = await insertRunner(admin, c.accountId, c.userId);
+      const id = await job({ who: c, runner, kind, setupId });
+      await admin.query(`UPDATE machine_jobs SET last_seq = 3, last_progress_at = now() - make_interval(mins => $2) WHERE id = $1`, [id, o.progressAgoMin]);
+      return { c, runner, id, setupId };
+    }
+    const setupRow = async (id: string) => (await admin.query('SELECT state, failure_code FROM project_setups WHERE id = $1', [id])).rows[0];
+    const updateRow = async (setupId: string) => (await admin.query('SELECT phase, state, failure_code FROM engine_updates WHERE setup_id = $1', [setupId])).rows[0];
+
+    it('keeps a project_setup job at `push ok` with its head recorded inside the cloud window, and its setup is not failed', async () => {
+      const j = await setupJob({ progressAgoMin: 30 }); // the old rule (10 min) would have failed it
+      await sweep(j.c, j.runner);
+      expect(await row(j.id)).toMatchObject({ state: 'delivered', failure_code: null, ended_at: null });
+      expect(await setupRow(j.setupId)).toEqual({ state: 'ok', failure_code: null });
+    });
+
+    it('expires it, and fails its setup, once the cloud window (one hour) has passed', async () => {
+      const j = await setupJob({ progressAgoMin: 61 });
+      await sweep(j.c, j.runner);
+      expect(await row(j.id)).toMatchObject({ state: 'expired', failure_code: 'job_silent' });
+      expect(await setupRow(j.setupId)).toEqual({ state: 'failed', failure_code: 'job_silent' });
+    });
+
+    it('still ends it at three hours as job_overran, whatever the window', async () => {
+      const j = await setupJob({ progressAgoMin: 5 });
+      await admin.query(`UPDATE machine_jobs SET delivered_at = now() - interval '181 minutes' WHERE id = $1`, [j.id]);
+      await sweep(j.c, j.runner);
+      expect(await row(j.id)).toMatchObject({ state: 'expired', failure_code: 'job_overran' });
+    });
+
+    it('expires a job silent BEFORE `push ok` at ten minutes as before: each missing condition of the wait is its own case', async () => {
+      const cases: Array<[string, Parameters<typeof setupJob>[0]]> = [
+        ['push step not yet ok', { state: 'started', progressAgoMin: 11 }],
+        ['an earlier step', { subStep: 'bundle_out', progressAgoMin: 11 }],
+        ['no head recorded', { head: null, progressAgoMin: 11 }],
+        ['a pull request already recorded', { pr: 7, progressAgoMin: 11 }],
+      ];
+      for (const [name, o] of cases) {
+        const j = await setupJob(o);
+        await sweep(j.c, j.runner);
+        expect(await row(j.id), name).toMatchObject({ state: 'expired', failure_code: 'job_silent' });
+        expect(await setupRow(j.setupId), name).toEqual({ state: 'failed', failure_code: 'job_silent' });
+      }
+    });
+
+    it('does not take a setup of ANOTHER attempt for the job\'s wait', async () => {
+      const j = await setupJob({ progressAgoMin: 11 });
+      await admin.query(`UPDATE machine_jobs SET attempt = 2 WHERE id = $1`, [j.id]);
+      await admin.query(`UPDATE project_setups SET attempt = 3 WHERE id = $1`, [j.setupId]);
+      await sweep(j.c, j.runner);
+      expect(await row(j.id)).toMatchObject({ state: 'expired', failure_code: 'job_silent' });
+    });
+
+    it('gives an engine_update job at `push ok` with its head the same window, and fails the update only after it', async () => {
+      const waiting = await setupJob({ kind: 'engine_update', progressAgoMin: 30 });
+      await sweep(waiting.c, waiting.runner);
+      expect(await row(waiting.id)).toMatchObject({ state: 'delivered', failure_code: null });
+      expect(await updateRow(waiting.setupId)).toEqual({ phase: 'push', state: 'ok', failure_code: null });
+      await admin.query(`UPDATE machine_jobs SET last_progress_at = now() - interval '61 minutes' WHERE id = $1`, [waiting.id]);
+      await sweep(waiting.c, waiting.runner);
+      expect(await row(waiting.id)).toMatchObject({ state: 'expired', failure_code: 'job_silent' });
+      expect(await updateRow(waiting.setupId)).toEqual({ phase: 'failed', state: 'failed', failure_code: 'job_silent' });
+    });
+
+    it('expires an engine_update job silent before its push ok at ten minutes, for each missing condition', async () => {
+      const cases: Array<[string, NonNullable<Parameters<typeof setupJob>[0]['update']>]> = [
+        ['push started', { state: 'started' }],
+        ['no head', { head: null }],
+        ['a pull request recorded', { pr: 9 }],
+        ['the update past its push phase', { phase: 'pr' }],
+        ['the update at another step', { subStep: 'pr_open' }],
+      ];
+      for (const [name, update] of cases) {
+        const j = await setupJob({ kind: 'engine_update', update, progressAgoMin: 11 });
+        await sweep(j.c, j.runner);
+        expect(await row(j.id), name).toMatchObject({ state: 'expired', failure_code: 'job_silent' });
+      }
+    });
+
+    it('reads the setup for a project_setup job and the update for an engine_update job, never the other row', async () => {
+      // The setup says `push ok` with a head, but the job is an engine_update and its update row is missing.
+      const a1 = await setupJob({ kind: 'engine_update', progressAgoMin: 11 });
+      await admin.query(`DELETE FROM engine_updates WHERE setup_id = $1`, [a1.setupId]);
+      await admin.query(`UPDATE project_setups SET phase = 'install', sub_step = 'push', state = 'ok', install_head_sha = $2 WHERE id = $1`, [a1.setupId, HEAD]);
+      await sweep(a1.c, a1.runner);
+      expect(await row(a1.id)).toMatchObject({ state: 'expired', failure_code: 'job_silent' });
+      // The update says `push ok` with a head, but the job is a project_setup whose own setup is not at the push.
+      const b1 = await setupJob({ subStep: 'bundle_out', progressAgoMin: 11 });
+      await admin.query(
+        `INSERT INTO engine_updates (account_id, repo_id, setup_id, from_version, to_version, phase, sub_step, state, attempt, head_sha, created_by) VALUES ($1, $2, $3, '1.0.0', '1.1.0', 'push', 'push', 'ok', 1, $4, $5)`,
+        [b1.c.accountId, b1.c.repoId, b1.setupId, HEAD, b1.c.userId],
+      );
+      await sweep(b1.c, b1.runner);
+      expect(await row(b1.id)).toMatchObject({ state: 'expired', failure_code: 'job_silent' });
+    });
+
+    it('does not take an engine update of ANOTHER attempt, or a setup past its install phase, for the job\'s wait', async () => {
+      const u = await setupJob({ kind: 'engine_update', progressAgoMin: 11 });
+      await admin.query(`UPDATE engine_updates SET attempt = 2 WHERE setup_id = $1`, [u.setupId]);
+      await sweep(u.c, u.runner);
+      expect(await row(u.id)).toMatchObject({ state: 'expired', failure_code: 'job_silent' });
+      const s2 = await setupJob({ progressAgoMin: 11 });
+      await admin.query(`UPDATE project_setups SET phase = 'finish' WHERE id = $1`, [s2.setupId]);
+      await sweep(s2.c, s2.runner);
+      expect(await row(s2.id)).toMatchObject({ state: 'expired', failure_code: 'job_silent' });
+    });
+
+    /** A second setup (and its update) in the SAME account, waiting on the cloud, so the job's own row is the only thing that tells the two apart. */
+    async function otherWaitingSetup(c: SeedRefs, withUpdate: boolean) {
+      // One live setup and one live update per repo is the tables' own rule, so the second one sits on a second repo of the account.
+      const repoId = (await admin.query<{ id: string }>(`INSERT INTO repos (account_id, installation_id, gh_repo_id, product) VALUES ($1, NULL, $2, 'web') RETURNING id`, [c.accountId, Math.floor(Math.random() * 1e9)])).rows[0]!.id;
+      const id = (
+        await admin.query<{ id: string }>(
+          `INSERT INTO project_setups (account_id, repo_id, kind, created_by, phase, sub_step, state, install_head_sha) VALUES ($1, $2, 'existing', $3, 'install', 'push', 'ok', $4) RETURNING id`,
+          [c.accountId, repoId, c.userId, HEAD],
+        )
+      ).rows[0]!.id;
+      if (withUpdate) {
+        await admin.query(
+          `INSERT INTO engine_updates (account_id, repo_id, setup_id, from_version, to_version, phase, sub_step, state, attempt, head_sha, created_by) VALUES ($1, $2, $3, '1.0.0', '1.1.0', 'push', 'push', 'ok', 1, $4, $5)`,
+          [c.accountId, repoId, id, HEAD, c.userId],
+        );
+      }
+      return id;
+    }
+
+    it('takes only the job\'s OWN setup for its wait: a second setup of the account waiting on the cloud does not give the job the hour', async () => {
+      const j = await setupJob({ subStep: 'bundle_out', progressAgoMin: 11 }); // its own setup is not at push ok
+      await otherWaitingSetup(j.c, false);
+      await sweep(j.c, j.runner);
+      expect(await row(j.id)).toMatchObject({ state: 'expired', failure_code: 'job_silent' });
+      expect(await setupRow(j.setupId)).toEqual({ state: 'failed', failure_code: 'job_silent' });
+    });
+
+    it('takes only the job\'s OWN update for its wait: a second update of the account waiting on the cloud does not give the job the hour', async () => {
+      const j = await setupJob({ kind: 'engine_update', update: { state: 'started' }, progressAgoMin: 11 }); // its own update has not finished its push
+      await otherWaitingSetup(j.c, true);
+      await sweep(j.c, j.runner);
+      expect(await row(j.id)).toMatchObject({ state: 'expired', failure_code: 'job_silent' });
+      expect(await updateRow(j.setupId)).toEqual({ phase: 'failed', state: 'failed', failure_code: 'job_silent' });
+    });
+
+    it('leaves a session job and a twin job on the ten-minute rule even when their account has a setup waiting on the cloud', async () => {
+      const waiting = await setupJob({ progressAgoMin: 30 });
+      for (const kind of ['engine_session_start', 'twin_seed', 'twin_publish', 'twin_sync'] as const) {
+        const runner = await insertRunner(admin, waiting.c.accountId, waiting.c.userId);
+        const id = await job({ who: waiting.c, runner, kind: kind as Kind });
+        await admin.query(`UPDATE machine_jobs SET last_seq = 0, last_progress_at = now() - interval '11 minutes' WHERE id = $1`, [id]);
+        await sweep(waiting.c, runner);
+        expect(await row(id), kind).toMatchObject({ state: 'expired', failure_code: 'job_silent' });
+      }
+      expect(await row(waiting.id)).toMatchObject({ state: 'delivered' });
+    });
+  });
+
   describe('operate_epoch', () => {
     const settings = async (who: SeedRefs) => (await admin.query<{ operate_enabled: boolean; operate_epoch: number }>('SELECT operate_enabled, operate_epoch FROM engine_bridge_settings WHERE account_id = $1', [who.accountId])).rows[0];
     /** An owner's tenant session, the way the switch is written. */
