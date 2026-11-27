@@ -155,6 +155,27 @@ describe("the engine update's pull request, watch and restart [pg]", () => {
       expect(await update(refused.updateId)).toMatchObject({ phase: "failed", failure_code: "pr_open_failed" });
     });
 
+    it("a FORBIDDEN answer to MarkReady fails the update pr_open_failed and logs the call, the status and the type (FU-317); an already-ready reused pull request does not ask again", async () => {
+      const forbidden = { status: 200, body: { data: { markPullRequestReadyForReview: null }, errors: [{ type: "FORBIDDEN", path: ["markPullRequestReadyForReview"], message: "Resource not accessible by integration" }] } };
+      const r = await rig();
+      const g = github();
+      g.fake.inject = { label: /^A1 MarkReady$/, reply: forbidden };
+      const lines: string[] = [];
+      expect(await completeEngineUpdatePr({ pool: h.opsPool, port: g.port, log: (l) => lines.push(l) }, await claimOf(r))).toBe("failed");
+      expect(await update(r.updateId)).toMatchObject({ phase: "failed", failure_code: "pr_open_failed" });
+      expect(lines.map((l) => JSON.parse(l))).toEqual([{ event: "runner.setup_pr.failure", step: "engine_update_pr", id: r.updateId, op: "MarkReady", reason: "rejected", status: 200, graphql_types: ["FORBIDDEN"] }]);
+      expect(lines.join("")).not.toMatch(/Resource not accessible|acme|widgets|ghs_/);
+
+      const again = await rig();
+      const k = github();
+      const first = await k.port.openDraft({ repo: { id: "r", owner: "acme", name: "widgets" }, branch: BRANCH, base: "main", text: engineUpdatePullRequestText("1.0.0", "1.2.0") });
+      await k.port.markReady({ repo: { id: "r", owner: "acme", name: "widgets" }, pullRequest: first });
+      k.fake.inject = { label: /^A1 MarkReady$/, reply: forbidden };
+      const quiet: string[] = [];
+      expect(await completeEngineUpdatePr({ pool: h.opsPool, port: k.port, log: (l) => quiet.push(l) }, await claimOf(again))).toBe("opened");
+      expect(quiet).toEqual([]);
+    });
+
     it("lists only what is due: a push not yet ok, no recorded head, an opened update and an inactive account are never claimed; a lease is held ten minutes and a new commit is due at once", async () => {
       await rig({ update: { state: "started" } });
       await rig({ update: { head: null } });

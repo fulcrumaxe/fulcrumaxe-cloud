@@ -1,7 +1,7 @@
 import type { Pool } from "pg";
 import { LocalOnlyGithubError } from "./localOnlyGithub.js";
 import { RunPullRequestError, type PullRequestRepo, type SetupInstallPort } from "./runPullRequest.js";
-import { installPathRefused } from "./setupInstallPr.js";
+import { defaultSetupPrLog, installPathRefused, logSetupPrFailure } from "./setupInstallPr.js";
 
 /**
  * D#845 ON-15c (Ruling 98): the cloud's step after an engine update's runner pushed its branch (`engine_update_head_record`, migration 1093). It rides the reconcile job of the install step: every pass takes the oldest update whose pushed
@@ -59,6 +59,8 @@ export interface EngineUpdatePrDeps {
   /** The platform_ops pool: the claim and the recording definers are its alone. */
   pool: Pick<Pool, "query">;
   port: SetupInstallPort;
+  /** Where the one-line JSON diagnostics go (default: `console.log`). Never the database. */
+  log?: (line: string) => void;
 }
 
 /** The step for one claimed update. Never throws for a GitHub failure: those are `retry` or a recorded failure. A database failure throws. */
@@ -91,9 +93,17 @@ export async function completeEngineUpdatePr(deps: EngineUpdatePrDeps, claim: En
     const { rows } = await deps.pool.query<{ ok: boolean }>("SELECT engine_update_pr_record($1::uuid, $2::int, $3, $4::int) AS ok", [claim.updateId, claim.attempt, claim.headSha, ref.number]);
     return rows[0]?.ok === true ? "opened" : "skipped";
   } catch (error) {
-    if (error instanceof RunPullRequestError) return error.retryable ? "retry" : fail("pr_open_failed");
+    const write = deps.log ?? defaultSetupPrLog;
+    if (error instanceof RunPullRequestError) {
+      if (error.retryable) return "retry";
+      logSetupPrFailure(write, { step: "engine_update_pr", id: claim.updateId, error });
+      return fail("pr_open_failed");
+    }
     // a call the fence refused is a bug in this step, not a GitHub failure, and no retry fixes it: recorded, so the update does not sit leased and unseen
-    if (error instanceof LocalOnlyGithubError) return fail("pr_open_failed");
+    if (error instanceof LocalOnlyGithubError) {
+      logSetupPrFailure(write, { step: "engine_update_pr", id: claim.updateId, error });
+      return fail("pr_open_failed");
+    }
     throw error;
   }
 }
