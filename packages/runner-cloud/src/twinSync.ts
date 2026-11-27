@@ -4,11 +4,12 @@ import { MACHINE_JOB_MAX_LIFE_S, TWIN_SYNC_MAX_PATHS, isTwinSyncPath, twinSyncBr
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { RunnerHttpError, pgCode, type RunnerCloudDeps } from "./http.js";
 import { requireMemberRole } from "./memberRole.js";
-import { RunPullRequestError, type RunPullRequestPort } from "./runPullRequest.js";
+import { LocalOnlyGithubError } from "./localOnlyGithub.js";
+import { RunPullRequestError, type RunPullRequestPort, type SetupInstallPort } from "./runPullRequest.js";
 
 /**
  * D#845 ON-27d2: the cloud's halves of a private twin's sync, the public repository's changes coming into the twin (the runner's half is fx-runner's `twinSync.ts`). The sync pull request through the App, the merge handling, the
- * conflict state and the reconcile tick that calls these come with ON-27d3 and ON-27d4; until then nothing does, and `TWIN_ENABLED` is off.
+ * conflict state are ON-27d3 (below, and migration 1115); the reconcile tick that calls these comes with ON-27d4, and until then nothing does and `TWIN_ENABLED` is off.
  *
  *   issueTwinSync   The tick's session (no person) or an owner or admin, given the paths the parity found pending (at most 200; the caller's, never the runner's). Reads the twin's default-branch tip and the public `main` tip through
  *                   the App (metadata only: two refs) and signs a `twin_sync` job: the twin's tip as its base, the public tip, the branch named from the public tip, the paths and the live private set. It writes it through
@@ -163,4 +164,120 @@ export async function checkTwinSync(deps: Pick<RunnerCloudDeps, "appUserPool" | 
     throw error;
   }
   return tenant(async (client) => (await client.query<{ o_result: TwinSyncCheck }>("SELECT o_result FROM twin_sync_check($1::uuid, $2::boolean)", [id, ok])).rows[0]!.o_result);
+}
+
+/**
+ * D#845 ON-27d3: the sync pull request. Public facts only: the public repository's name, the paths the job brought in and the logins of the public commits' authors. Paths with a backtick, a control character, a line separator, a bidirectional-control or a zero-width character are counted, not listed.
+ * The paths and the authors sit in code fences, where GitHub makes no link or notification of them.
+ */
+const UNLISTABLE = /[`\u0000-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/;
+export const TWIN_SYNC_MAX_LISTED = 200;
+export const TWIN_SYNC_FOOTER = "Opened by the sync. Look through the files above, then merge to bring them in. Nothing else from the public repository is in this change.";
+export function buildTwinSyncText(input: { publicRepo: string; paths: readonly string[]; authors: readonly string[] }): { title: string; body: string } {
+  const shown = input.paths.filter((p) => !UNLISTABLE.test(p)).slice(0, TWIN_SYNC_MAX_LISTED);
+  const fence = (lines: readonly string[]): string => (lines.length === 0 ? "" : `\n\n\`\`\`\n${lines.join("\n")}\n\`\`\``);
+  const more = input.paths.length - shown.length;
+  const authors = input.authors.length === 0 ? "" : `\n\nAuthors:${fence(input.authors)}`;
+  return {
+    title: `Bring in changes made on ${input.publicRepo}`,
+    body: `Changes made on ${input.publicRepo} since the last sync.\n\nFiles: ${input.paths.length}${fence(shown)}${more > 0 ? `\n\nand ${more} more not listed here` : ""}${authors}\n\n${TWIN_SYNC_FOOTER}`,
+  };
+}
+
+/** The change types of a compare that a sync may carry. `renamed` and `copied` name an old path as well; any other string closes the pull request. */
+const SYNC_CHANGE_STATUSES: ReadonlySet<string> = new Set(["added", "removed", "modified", "changed", "renamed", "copied"]);
+/**
+ * The verified commit's changes against its base, as REST compare shows them: every path that changed, old path of a rename or copy included, must be one the signed job named (and so outside the private set), and every change type
+ * must be a known one. A list that may be cut short, or no change at all, is not a pass.
+ */
+async function changesAreNamed(port: SetupInstallPort, repo: { id: string; owner: string; name: string }, base: string, head: string, named: readonly string[]): Promise<boolean> {
+  const changes = await port.commitChanges({ repo, base, head });
+  if (!changes.complete || changes.files.length === 0) return false;
+  return changes.files.every((f) => {
+    if (!SYNC_CHANGE_STATUSES.has(f.status)) return false;
+    const twoSided = f.status === "renamed" || f.status === "copied";
+    if (twoSided !== (f.previousPath !== null)) return false;
+    const paths = f.previousPath === null ? [f.path] : [f.previousPath, f.path];
+    return paths.every((p) => isTwinSyncPath(p) && named.includes(p));
+  });
+}
+
+export type TwinSyncPrOpen = "recorded" | "refused" | "not_ready" | "not_found" | "github_unavailable";
+
+/**
+ * Opens the pull request for a verified sync branch on the twin, through the App, and records its number (`twin_sync_pr_record`). `userId` is null for the tick's own session; a person must be an owner or admin (the definer re-checks).
+ * Draft first, as the install's step is: the branch must still be at the verified head, the pull request's head must be it, and its changed files (every page) must all be paths the signed job named, before the label and the ready mark. A pull
+ * request that fails any of these is closed and the twin refused (`head_unconfirmed`); a GitHub that cannot be asked leaves everything where it is, and the next pass reuses the open pull request.
+ */
+export async function openTwinSyncPr(deps: Pick<RunnerCloudDeps, "appUserPool" | "setupInstall" | "planePush">, principal: { accountId: string; userId: string | null }, twinId: string): Promise<TwinSyncPrOpen> {
+  const port = deps.setupInstall ?? null;
+  const tenant = <T>(fn: (client: PoolClient) => Promise<T>) => (principal.userId === null ? withTenant(deps.appUserPool, principal.accountId, fn) : withTenant(deps.appUserPool, principal.accountId, principal.userId, fn));
+  const id = twinId.toLowerCase();
+  const t = await tenant(async (client) => (await client.query<{ o_repo_id: string; o_owner: string; o_name: string; o_branch: string; o_head: string; o_base: string; o_public_owner: string; o_public_name: string; o_tip: string; o_synced: string; o_paths: string[] }>("SELECT o_repo_id, o_owner, o_name, o_branch, o_head, o_base, o_public_owner, o_public_name, o_tip, o_synced, o_paths FROM twin_sync_pr_target($1::uuid)", [id])).rows[0] ?? null);
+  if (t === null) return "not_ready";
+  if (port === null) return "github_unavailable";
+  const repo = { id: t.o_repo_id, owner: t.o_owner, name: t.o_name };
+  const publicRepo = `${t.o_public_owner}/${t.o_public_name}`;
+  let number: number | null = null;
+  // The draft once it is open: a refusal that leaves no number must not leave it open (CWE-459).
+  let draft: number | null = null;
+  try {
+    if ((await tipOf(port, repo, t.o_branch)) === t.o_head) {
+      let authors: string[] = [];
+      try {
+        authors = (await deps.planePush?.commitAuthors?.({ accountId: principal.accountId, codeRepo: publicRepo, base: t.o_synced, head: t.o_tip })) ?? [];
+      } catch {
+        // fx-swallow-ok: the authors are a courtesy line; a public repository that cannot be read for them leaves the list off, and the pull request is the same without it
+      }
+      const ref = await port.openDraft({ repo, branch: t.o_branch, base: await port.defaultBranch(repo), text: buildTwinSyncText({ publicRepo, paths: t.o_paths, authors }) });
+      draft = ref.number;
+      // The pull request shows the commit that was verified and changes only the signed paths; anything else is not ours to hand to the engine.
+      const files = ref.headSha === t.o_head ? await port.changedFiles({ repo, number: ref.number }) : null;
+      let named = files !== null && files.complete && files.files.length > 0 && files.files.every((f) => t.o_paths.includes(f.path));
+      // GraphQL names a renamed file by its new path only, so a delete of an unnamed path folded into a rename of a named one passes the check above. The verified commit's own changes, read against its base with REST compare, give the old
+      // path too: both sides of a rename or copy must be paths the job named, and a change type that is not known closes the pull request (as the `done` route does).
+      if (named) named = await changesAreNamed(port, repo, t.o_base, t.o_head, t.o_paths);
+      if (named) {
+        await port.labelTwinSync({ repo, number: ref.number });
+        await port.markReady({ repo, pullRequest: ref });
+        number = ref.number;
+      } else {
+        await port.close({ repo, number: ref.number });
+      }
+    }
+  } catch (error) {
+    if (error instanceof RunPullRequestError && error.retryable) return "github_unavailable";
+    // A refusal no retry fixes (the fence, GitHub's 4xx): the twin is refused rather than left leased.
+    if (!(error instanceof RunPullRequestError) && !(error instanceof LocalOnlyGithubError)) throw error;
+    // No number will be recorded, so Remove could never close this draft: close it now, as well as it can be done. A close that fails too leaves it (the branch and the draft are the twin's own, and the twin is refused either way).
+    if (draft !== null && number === null) {
+      try {
+        await port.close({ repo, number: draft });
+      } catch {
+        // fx-swallow-ok: best effort; the refusal stands whether or not the close lands, and nothing here can say more than the refusal already does
+      }
+    }
+  }
+  return tenant(async (client) => (await client.query<{ o_result: TwinSyncPrOpen }>("SELECT o_result FROM twin_sync_pr_record($1::uuid, $2, $3)", [id, t.o_head, number])).rows[0]!.o_result);
+}
+
+export type TwinSyncClose = "closed" | "none" | "github_unavailable";
+
+/**
+ * Closes the sync pull request a twin still has open on its private repository (Remove everything, Stop publishing). Read after the removal: the repository and the number are the twin's own rows'. The close is a plain close through the App
+ * (the run port's A5; nothing is said on the pull request, the branch is kept). A GitHub that cannot be asked leaves it open; the removed twin ignores its merge.
+ */
+export async function closeTwinSyncPr(deps: Pick<RunnerCloudDeps, "appUserPool" | "setupInstall">, principal: { accountId: string; userId: string | null }, twinId: string): Promise<TwinSyncClose> {
+  const tenant = <T>(fn: (client: PoolClient) => Promise<T>) => (principal.userId === null ? withTenant(deps.appUserPool, principal.accountId, fn) : withTenant(deps.appUserPool, principal.accountId, principal.userId, fn));
+  const open = await tenant(async (client) => (await client.query<{ o_repo_id: string; o_owner: string; o_name: string; o_pr: number }>("SELECT o_repo_id, o_owner, o_name, o_pr FROM twin_sync_open_pr($1::uuid)", [twinId.toLowerCase()])).rows[0] ?? null);
+  if (open === null) return "none";
+  const port = deps.setupInstall ?? null;
+  if (port === null) return "github_unavailable";
+  try {
+    await port.close({ repo: { id: open.o_repo_id, owner: open.o_owner, name: open.o_name }, number: open.o_pr });
+    return "closed";
+  } catch (error) {
+    if (error instanceof RunPullRequestError) return error.retryable ? "github_unavailable" : "none";
+    throw error;
+  }
 }

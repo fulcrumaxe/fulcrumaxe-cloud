@@ -66,6 +66,20 @@ describe("machine job schema", () => {
     expect(ok(jobOf("twin_seed", { args: { ...args, repo: "acme/other" } }))).toBe(false);
     expect(ok(jobOf("twin_seed", { args: { ...args, public: { ...args.public, default_branch: "release/1.x" } } }))).toBe(true);
   });
+  it("a twin publish that updates an open pull request (replaces_head) names that pull request's own branch, not one made from its head, and every other rule holds", () => {
+    const args = ARGS["twin_publish"] as { public: Record<string, unknown>; private: Record<string, unknown> };
+    const first = "fx/publish-" + "d".repeat(12);
+    expect(ok(jobOf("twin_publish", { args: { ...args, branch: first, replaces_head: SHA } }))).toBe(true);
+    // without replaces_head the branch must still be the head's, and replaces_head must be a full commit id
+    expect(ok(jobOf("twin_publish", { args: { ...args, branch: first } }))).toBe(false);
+    for (const replaces_head of ["main", SHA.toUpperCase(), "a".repeat(39), "", 7, null]) expect(ok(jobOf("twin_publish", { args: { ...args, branch: first, replaces_head } })), String(replaces_head)).toBe(false);
+    // the branch is still a publish branch, the job still goes from a base to a different head, and its home is still the private twin
+    for (const branch of ["main", "fx/twin-sync-" + "d".repeat(12), "fx/publish-" + "d".repeat(11), "x" + first]) expect(ok(jobOf("twin_publish", { args: { ...args, branch, replaces_head: SHA } })), branch).toBe(false);
+    expect(ok(jobOf("twin_publish", { args: { ...args, branch: first, replaces_head: SHA, private: { ...args.private, base: "c".repeat(40) } } }))).toBe(false);
+    expect(ok(jobOf("twin_publish", { repo_gh_id: 78, args: { ...args, branch: first, replaces_head: SHA } }))).toBe(false);
+    // a sync job carries no replaces_head
+    expect(ok(jobOf("twin_sync", { args: { ...(ARGS["twin_sync"] as object), replaces_head: SHA } }))).toBe(false);
+  });
   it("holds a twin publish to its one home: the private twin through its setup, going from its base to its head, on a branch named from the head", () => {
     const args = ARGS["twin_publish"] as { public: Record<string, unknown>; private: Record<string, unknown>; private_set: Record<string, unknown> };
     expect(ok(jobOf("twin_publish"))).toBe(true);

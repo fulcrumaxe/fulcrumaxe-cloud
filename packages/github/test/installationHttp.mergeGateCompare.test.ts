@@ -80,7 +80,7 @@ describe("merge_gate: the three-dot compare", () => {
     expect(t.calls).toEqual([]);
   });
 
-  it("every other kind still refuses a compare: the exemption is the merge gate's alone", async () => {
+  it("every other kind still refuses a compare with a branch name or a query (runner_pr alone reads two bare commit ids, in installationHttp.runnerPrCompare.test.ts)", async () => {
     const t = setup();
     const others: Array<[InstallationHttpKind, Record<string, unknown>]> = [
       ["read", {}],

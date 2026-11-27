@@ -191,6 +191,21 @@ export function createPlanePushApi(deps: PlanePushApiDeps) {
     },
 
     /**
+     * D#845 ON-27d3: the distinct GitHub logins of the authors of the commits from `base` (exclusive) to `head` on the public repo (`GET /compare/<base>...<head>`, the 250 commits GitHub lists at most), in the order they first appear;
+     * null when GitHub has no such comparison. A commit whose author has no GitHub account adds none. A login that is not a GitHub login's shape is dropped, never passed on.
+     */
+    async commitAuthors(input: { codeRepo: string; base: string; head: string; token: string }): Promise<string[] | null> {
+      const { owner, name } = split(input.codeRepo);
+      if (!/^[0-9a-f]{40}$/.test(input.base) || !/^[0-9a-f]{40}$/.test(input.head)) throw new PlanePushApiError("public_unavailable");
+      const res = await call("GET", `/repos/${owner}/${name}/compare/${input.base}...${input.head}`, input.token);
+      if (res.status === 404 || res.status === 422) return null;
+      const commits = res.status === 200 && res.body !== null && typeof res.body === "object" ? (res.body as { commits?: unknown }).commits : undefined;
+      if (!Array.isArray(commits)) throw new PlanePushApiError("public_unavailable");
+      const logins = commits.map((c) => (c !== null && typeof c === "object" ? (c as { author?: { login?: unknown } | null }).author?.login : undefined));
+      return [...new Set(logins.filter((l): l is string => typeof l === "string" && /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}|[A-Za-z0-9-]{0,34}\[bot\])$/.test(l)))];
+    },
+
+    /**
      * True when the commit is in `main`'s history (`GET /compare/main...<sha>` says the commit is `behind` main or `identical` to it). False for a
      * commit that is ahead of or has diverged from main, and for one GitHub does not know.
      */

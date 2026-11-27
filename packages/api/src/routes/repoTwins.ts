@@ -14,7 +14,7 @@ import { repoPairingDeps } from "./repoPairing.js";
  * The kill switch. Production never sets it: it is the constant, which ON-27d turns on. Tests flip it.
  * `closePublishPr` (D#845 ON-27c2, set by the app) closes the publish pull request a removed twin still has open on the public repository; with none, nothing is closed.
  */
-export const twinRouteDeps: { enabled: boolean; closePublishPr: ((input: { accountId: string; userId: string; twinId: string }) => Promise<unknown>) | null } = { enabled: TWIN_ENABLED, closePublishPr: null };
+export const twinRouteDeps: { enabled: boolean; closePublishPr: ((input: { accountId: string; userId: string; twinId: string }) => Promise<unknown>) | null; closeSyncPr: ((input: { accountId: string; userId: string; twinId: string }) => Promise<unknown>) | null } = { enabled: TWIN_ENABLED, closePublishPr: null, closeSyncPr: null };
 
 const enabled = (): void => {
   if (!twinRouteDeps.enabled) throw new ApiError(503, "not_configured", "private twins are not available yet");
@@ -50,12 +50,15 @@ async function change(ctx: { pool: Pool; principal: { accountId: string; userId:
   enabled();
   try {
     const twin = toItem(await changeRepoTwin({ pool: ctx.pool, principal: ctx.principal }, id, action));
-    // The removal stands whatever follows: a publish pull request that cannot be closed now stays open on GitHub, and the removed twin ignores its merge.
-    if (action === "remove" && twinRouteDeps.closePublishPr !== null) {
-      try {
-        await twinRouteDeps.closePublishPr({ accountId: ctx.principal.accountId, userId: ctx.principal.userId, twinId: id });
-      } catch (closeError) {
-        reportError(closeError, { stage: "twin.close_publish_pr" });
+    // The removal stands whatever follows: a publish or sync pull request that cannot be closed now stays open on GitHub, and the removed twin ignores its merge. Each close is tried on its own.
+    if (action === "remove") {
+      for (const [close, stage] of [[twinRouteDeps.closePublishPr, "twin.close_publish_pr"], [twinRouteDeps.closeSyncPr, "twin.close_sync_pr"]] as const) {
+        if (close === null) continue;
+        try {
+          await close({ accountId: ctx.principal.accountId, userId: ctx.principal.userId, twinId: id });
+        } catch (closeError) {
+          reportError(closeError, { stage });
+        }
       }
     }
     return twin;

@@ -52,7 +52,7 @@ describe("A25 CommitParents", () => {
     expect(seen).toHaveLength(1);
     await expect(localOnlyGithub(inner).graphql("CommitParents", good)).rejects.toMatchObject({ rule: "not_allowlisted" });
     expect(seen).toHaveLength(1);
-    expect(LOCAL_ONLY_ALLOWLIST.filter((e) => e.only === "setupInstall").map((e) => e.id)).toEqual(["A25", "A26", "A30"]);
+    expect(LOCAL_ONLY_ALLOWLIST.filter((e) => e.only === "setupInstall").map((e) => e.id)).toEqual(["A25", "A26", "A30", "A31", "A32"]);
   });
 });
 

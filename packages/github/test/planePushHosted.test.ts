@@ -38,7 +38,9 @@ interface World {
   compare?: string;
   pr?: unknown;
   /** Make the named read answer 500. */
-  fail?: "ref" | "commit" | "compare" | "pulls" | "list";
+  fail?: "ref" | "commit" | "compare" | "pulls" | "list" | "authors";
+  /** What `GET /compare/<base>...<head>` answers for the authors read (D#845 ON-27d3): GitHub's commit list; absent is 404 (no such comparison). */
+  authorCommits?: unknown[];
   /** What `GET /pulls?state=open&head=...` answers (a list of pull requests as GitHub shapes them). */
   list?: unknown;
   /** With fail "pulls": answer with the failure only for the first N reads of the pull request, then answer normally (a blip). */
@@ -73,6 +75,7 @@ async function setup(world: World, expiresInMs = 3_600_000, now?: () => number) 
       return world.branchHead === null || world.branchHead === undefined ? ghError(404, "Not Found") : json(200, { object: { sha: world.branchHead } });
     }
     if (r.path === `/repos/acme/widgets/git/commits/${HEAD}`) return world.fail === "commit" ? ghError(500, "boom") : json(200, { sha: HEAD, parents: (world.parents ?? [TIP]).map((sha) => ({ sha })) });
+    if (r.path === `/repos/acme/widgets/compare/${HEAD}...${TIP}`) return world.fail === "authors" ? ghError(500, "boom") : world.authorCommits === undefined ? ghError(404, "Not Found") : json(200, { status: "ahead", commits: world.authorCommits });
     if (r.path === `/repos/acme/widgets/compare/main...${TIP}`) return world.fail === "compare" ? ghError(500, "boom") : json(200, { status: world.compare ?? "behind" });
     if (r.method === "POST" && r.path === "/repos/acme/widgets/pulls") {
       if (world.create === "refused") return ghError(422, "Validation Failed");
@@ -350,6 +353,31 @@ describe("pullRequestBase (D#6 STACK-THREE-DEEP)", () => {
     const t = await setup({ pr: pr() });
     await expect(t.hosted.pullRequestBase({ accountId: "22222222-2222-4222-8222-222222222222", codeRepo: "acme/widgets", number: 9 })).rejects.toMatchObject({ code: "code_repo_installation_not_owned" });
     expect(t.server.seen.every((r) => r.path === "/repos/acme/widgets/installation")).toBe(true);
+  });
+});
+
+describe("commitAuthors (D#845 ON-27d3)", () => {
+  const ask = (t: Awaited<ReturnType<typeof setup>>, over: Record<string, string> = {}) => t.hosted.commitAuthors({ accountId: ACCOUNT, codeRepo: "acme/widgets", base: HEAD, head: TIP, ...over });
+  const commit = (login: unknown) => ({ sha: "c".repeat(40), author: login === undefined ? null : { login } });
+
+  it("answers the distinct logins in order of first appearance, through a fresh token that is revoked after", async () => {
+    const t = await setup({ authorCommits: [commit("alice"), commit("bob"), commit("alice"), commit("dependabot[bot]"), commit(undefined)] });
+    expect(await ask(t)).toEqual(["alice", "bob", "dependabot[bot]"]);
+    expect(t.requested).toHaveLength(1);
+    expect(t.trail().at(-1)).toBe("DELETE /installation/token ghs_hosted1");
+  });
+
+  it("drops a login that is not a GitHub login's shape, so nothing but a name reaches a pull request", async () => {
+    const t = await setup({ authorCommits: [commit("@everyone"), commit("a b"), commit("ok-name"), commit("-lead"), commit("x".repeat(40)), commit("a\nb"), commit(7), commit("`x`")] });
+    expect(await ask(t)).toEqual(["ok-name"]);
+  });
+
+  it("answers null when GitHub has no such comparison, refuses a sha that is not a commit before any call, and throws when GitHub cannot be read", async () => {
+    expect(await ask(await setup({}))).toBeNull();
+    const t = await setup({ authorCommits: [] });
+    await expect(ask(t, { base: "main" })).rejects.toBeInstanceOf(PlanePushApiError);
+    await expect(ask(await setup({ fail: "authors" }))).rejects.toBeDefined();
+    expect(await ask(t)).toEqual([]);
   });
 });
 

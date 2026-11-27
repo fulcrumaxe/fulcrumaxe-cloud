@@ -182,12 +182,12 @@ describe("twin publish [pg]", () => {
     return jobId;
   }
   /** The webhook's call, in the session the webhook has: the account, no person, no runner. */
-  async function prClosed(r: Rig, o: { repo?: string; pr?: number; merged?: boolean; ref?: string; account?: string } = {}): Promise<string> {
+  async function prClosed(r: Rig, o: { repo?: string; pr?: number; merged?: boolean; ref?: string; account?: string; sha?: string | null } = {}): Promise<string> {
     const c = await h.appPool.connect();
     try {
       await c.query("BEGIN");
       await c.query("SELECT set_config('app.account_id', $1, true)", [o.account ?? r.who.accountId]);
-      const out = (await c.query("SELECT twin_publish_pr_closed($1::uuid, $2::int, $3::boolean, $4) AS r", [o.repo ?? r.publicId, o.pr ?? 7, o.merged ?? true, o.ref ?? BRANCH])).rows[0].r as string;
+      const out = (await c.query("SELECT twin_publish_pr_closed($1::uuid, $2::int, $3::boolean, $4, $5) AS r", [o.repo ?? r.publicId, o.pr ?? 7, o.merged ?? true, o.ref ?? BRANCH, o.sha === undefined ? PUSHED : o.sha])).rows[0].r as string;
       await c.query("COMMIT");
       return out;
     } finally {
@@ -575,9 +575,11 @@ describe("twin publish [pg]", () => {
       expect(calls.verifies).toEqual([{ accountId: r.who.accountId, codeRepo: "acme/widgets", branch: BRANCH, headSha: PUSHED, tipSha: PUB_TIP }]);
       expect(calls.finds).toEqual([{ accountId: r.who.accountId, codeRepo: "acme/widgets", branch: BRANCH, headSha: PUSHED }]);
       expect(await twinRow(r.twinId)).toMatchObject({ state: "ready", publish_pr: 7, publish_head: PUSHED, failure_code: null });
-      // recorded once; and while it is open the twin is not published again
+      // recorded once; and while it is open and already carries the private tip, nothing more is issued (a newer tip updates it in place: twinSyncPr.pg.test.ts)
       expect(await check(r)).toBe("not_ready");
-      expect(await failureOf(() => issue(r))).toEqual({ status: 409, code: "publish_open" });
+      const jobsBefore = (await jobRows(r.setupId)).length;
+      expect(await issue(r)).toEqual({ outcome: "in_sync" });
+      expect(await jobRows(r.setupId)).toHaveLength(jobsBefore);
     });
 
     it("refuses the twin (head_unconfirmed) when GitHub does not show the pushed head under the signed parent, or shows no single open pull request for it", async () => {

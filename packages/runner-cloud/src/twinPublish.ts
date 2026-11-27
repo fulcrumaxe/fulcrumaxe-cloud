@@ -25,6 +25,7 @@ interface TwinFacts {
   state: string;
   base: string | null;
   publishPr: number | null;
+  publishHead: string | null;
   public: { id: string; ghId: number; owner: string | null; name: string | null };
   private: { id: string; ghId: number; owner: string | null; name: string | null };
   runnerId: string | null;
@@ -34,8 +35,8 @@ interface TwinFacts {
 
 async function readFacts(client: PoolClient, accountId: string, twinId: string): Promise<TwinFacts | null> {
   const t = (
-    await client.query<{ public_repo_id: string; private_repo_id: string | null; state: string; published_private_sha: string | null; publish_pr: number | null; binary_globs: string[] } & Omit<TwinFacts["set"], "blob_globs">>(
-      `SELECT public_repo_id, private_repo_id, state, published_private_sha, publish_pr, overlay_globs, install_paths, binary_globs, identifier_rules_path, plan_data_rules_path
+    await client.query<{ public_repo_id: string; private_repo_id: string | null; state: string; published_private_sha: string | null; publish_pr: number | null; publish_head: string | null; binary_globs: string[] } & Omit<TwinFacts["set"], "blob_globs">>(
+      `SELECT public_repo_id, private_repo_id, state, published_private_sha, publish_pr, publish_head, overlay_globs, install_paths, binary_globs, identifier_rules_path, plan_data_rules_path
          FROM repo_twins WHERE account_id = $1 AND id = $2 AND state <> 'removed'`,
       [accountId, twinId],
     )
@@ -50,7 +51,7 @@ async function readFacts(client: PoolClient, accountId: string, twinId: string):
   const placed = (await client.query<{ runner_id: string }>("SELECT pl.runner_id FROM project_placements pl JOIN runners r ON r.account_id = pl.account_id AND r.id = pl.runner_id AND r.revoked_at IS NULL WHERE pl.account_id = $1 AND pl.repo_id = $2", [accountId, t.private_repo_id])).rows[0];
   const setup = (await client.query<{ id: string }>("SELECT id FROM project_setups WHERE account_id = $1 AND repo_id = $2 ORDER BY created_at DESC, id LIMIT 1", [accountId, t.private_repo_id])).rows[0];
   return {
-    state: t.state, base: t.published_private_sha, publishPr: t.publish_pr, public: pub, private: prv, runnerId: placed?.runner_id ?? null, setupId: setup?.id ?? null,
+    state: t.state, base: t.published_private_sha, publishPr: t.publish_pr, publishHead: t.publish_head, public: pub, private: prv, runnerId: placed?.runner_id ?? null, setupId: setup?.id ?? null,
     set: { overlay_globs: t.overlay_globs, install_paths: t.install_paths, blob_globs: t.binary_globs, identifier_rules_path: t.identifier_rules_path, plan_data_rules_path: t.plan_data_rules_path },
   };
 }
@@ -79,7 +80,9 @@ export async function issueTwinPublish(deps: RunnerCloudDeps, principal: { accou
   });
   if (facts === null) throw refuse(404, "not_found", "no such private twin");
   if (facts.state !== "ready" || facts.base === null) throw refuse(409, "twin_state", "the private twin is not ready to publish");
-  if (facts.publishPr !== null) throw refuse(409, "publish_open", "a publish pull request is open; merge or close it first");
+  // An open publish pull request is updated in place (the job names its branch and the head recorded for it); with no head on record it cannot be, and it blocks as it always did.
+  const update = facts.publishPr !== null;
+  if (update && facts.publishHead === null) throw refuse(409, "publish_open", "a publish pull request is open; merge or close it first");
   if (facts.public.owner === null || facts.public.name === null || facts.private.owner === null || facts.private.name === null) throw refuse(409, "repo_unnamed", "a repository has no name on record");
   if (facts.setupId === null) throw refuse(409, "setup_not_found", "the private twin has no setup");
   if (facts.runnerId === null) throw refuse(409, "setup_not_placed", "the private twin is not placed on a machine");
@@ -88,6 +91,8 @@ export async function issueTwinPublish(deps: RunnerCloudDeps, principal: { accou
   let head: string | null;
   let tip: string | null;
   let publicBranch: string;
+  const openBranch = update ? await tenant(async (client) => (await client.query<{ o_branch: string }>("SELECT o_branch FROM twin_publish_open_pr($1::uuid)", [id])).rows[0]?.o_branch ?? null) : null;
+  if (update && openBranch === null) throw refuse(409, "publish_open", "a publish pull request is open; merge or close it first");
   try {
     head = await tipOf(port, prv, await port.defaultBranch(prv));
     publicBranch = await port.defaultBranch(pub);
@@ -111,13 +116,14 @@ export async function issueTwinPublish(deps: RunnerCloudDeps, principal: { accou
       twin_id: id,
       public: { owner: pub.owner, name: pub.name, gh_id: facts.public.ghId, tip },
       private: { owner: prv.owner, name: prv.name, gh_id: facts.private.ghId, base: facts.base, head },
-      branch: `fx/publish-${head.slice(0, 12)}`,
+      branch: openBranch ?? `fx/publish-${head.slice(0, 12)}`,
+      ...(update ? { replaces_head: facts.publishHead } : {}),
       private_set: facts.set,
     },
   } as MachineJob);
   let row: { o_result: string; o_attempt: number | null };
   try {
-    row = await tenant(async (client) => (await client.query<{ o_result: string; o_attempt: number | null }>("SELECT o_result, o_attempt FROM twin_publish_issue($1::uuid, $2::uuid, $3::jsonb, $4, $5)", [id, jobId, JSON.stringify(signed), issued, expires])).rows[0]!);
+    row = await tenant(async (client) => (await client.query<{ o_result: string; o_attempt: number | null }>("SELECT o_result, o_attempt FROM " + (update ? "twin_publish_update_issue" : "twin_publish_issue") + "($1::uuid, $2::uuid, $3::jsonb, $4, $5)", [id, jobId, JSON.stringify(signed), issued, expires])).rows[0]!);
   } catch (error) {
     if (pgCode(error) === "42501") throw refuse(403, "forbidden", "only an owner or admin can start a publish");
     throw error;
@@ -130,7 +136,9 @@ export async function issueTwinPublish(deps: RunnerCloudDeps, principal: { accou
     no_setup: [409, "setup_not_found", "the private twin has no setup"],
     not_placed: [409, "setup_not_placed", "the private twin is not placed on a machine"],
     job_live: [409, "publish_live", "a publish of this twin is already under way or waiting to be checked"],
+    no_open_pr: [409, "publish_open", "a publish pull request is open; merge or close it first"],
   };
+  if (row.o_result === "up_to_date") return { outcome: "in_sync" };
   if (row.o_result !== "ok" || row.o_attempt === null) {
     const [status, code, message] = refusals[row.o_result] ?? [409, "twin_state", "the private twin cannot be published now"];
     throw refuse(status, code, message);

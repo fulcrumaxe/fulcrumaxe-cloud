@@ -58,6 +58,7 @@ describe('repo twins API', () => {
     asked.length = 0;
     twinRouteDeps.enabled = true;
     twinRouteDeps.closePublishPr = null;
+    twinRouteDeps.closeSyncPr = null;
   });
   afterAll(async () => {
     repoPairingDeps.getInspector = () => null;
@@ -261,6 +262,42 @@ describe('repo twins API', () => {
     const id2 = await makeTwin(owner, repo2, priv2);
     const stopped = await call(owner, 'DELETE', `/twins/${id2}`);
     expect(stopped.status).toBe(200);
+    expect(await stateOf(id2)).toBe('removed');
+  });
+
+  it('stopping a twin also closes its open sync pull request, each close on its own: a publish close that fails does not stop the sync close, and neither undoes the removal', async () => {
+    const owner = await account();
+    const order: string[] = [];
+    const seen: Array<{ accountId: string; userId: string; twinId: string }> = [];
+    twinRouteDeps.closePublishPr = async () => {
+      order.push('publish');
+      throw new Error('github is down');
+    };
+    twinRouteDeps.closeSyncPr = async (input) => {
+      order.push(`sync:${await stateOf(input.twinId)}`);
+      seen.push(input);
+    };
+    const repo = await seedRepo(owner.accountId, 'sync-widgets');
+    const priv = await seedRepo(owner.accountId, 'sync-widgets-private');
+    const id = await makeTwin(owner, repo, priv);
+    await call(owner, 'POST', `/twins/${id}/pause`);
+    await call(owner, 'POST', `/twins/${id}/resume`);
+    expect(order).toEqual([]);
+    expect((await call(await addMember(owner.accountId, 'member'), 'DELETE', `/twins/${id}`)).status).toBe(403);
+    expect(order).toEqual([]);
+    expect((await call(owner, 'DELETE', `/twins/${id}`)).status).toBe(200);
+    expect(order).toEqual(['publish', 'sync:removed']);
+    expect(seen).toEqual([{ accountId: owner.accountId, userId: owner.userId, twinId: id }]);
+    expect(await stateOf(id)).toBe('removed');
+    // a second stop is a 409 and closes nothing more
+    expect((await call(owner, 'DELETE', `/twins/${id}`)).status).toBe(409);
+    expect(order).toHaveLength(2);
+    // a sync close that throws is reported and the removal stands
+    twinRouteDeps.closeSyncPr = async () => {
+      throw new Error('github is down');
+    };
+    const id2 = await makeTwin(owner, await seedRepo(owner.accountId, 'sync-gadgets'), await seedRepo(owner.accountId, 'sync-gadgets-private'));
+    expect((await call(owner, 'DELETE', `/twins/${id2}`)).status).toBe(200);
     expect(await stateOf(id2)).toBe('removed');
   });
 

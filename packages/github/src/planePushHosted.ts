@@ -63,6 +63,8 @@ export interface HostedPlanePush {
    * (`not_open`), and so is one whose head is not the recorded branch of the paired repository (`not_ours`). The branch is never touched. An unreadable answer throws a `PlanePushApiError`.
    */
   closeRefusedPullRequest(input: { accountId: string; codeRepo: string; number: number; branch: string; comment: string }): Promise<{ result: "closed"; commented: boolean } | { result: "not_open" } | { result: "not_ours" }>;
+  /** D#845 ON-27d3: the distinct logins of the authors of the public commits from `base` (exclusive) to `head`, or null when GitHub has no such comparison (a token minted and revoked around the read). */
+  commitAuthors(input: { accountId: string; codeRepo: string; base: string; head: string }): Promise<string[] | null>;
   /** Revokes a token `mintToken` handed out and the caller could not use. True when it is gone; never throws. */
   revokeToken(token: string): Promise<boolean>;
 }
@@ -135,6 +137,8 @@ export function createHostedPlanePush(api: PlanePushApi, deps: { now?: () => num
         if (!parents || parents.length !== 1 || parents[0] !== tipSha) return false;
         return api.inMainHistory({ codeRepo, sha: tipSha, token });
       }),
+
+    commitAuthors: ({ accountId, codeRepo, base, head }) => withFreshToken(accountId, codeRepo, (token) => retryTransientRead(() => api.commitAuthors({ codeRepo, base, head, token }))),
 
     pullRequestState: ({ accountId, codeRepo, number }) => withFreshToken(accountId, codeRepo, (token) => retryTransientRead(() => api.pullRequestState({ codeRepo, number, token }))),
 
