@@ -19,7 +19,7 @@
 import { EngineControl, JobSignatureError, MAX_CLOCK_SKEW_S, isBridgeCommandKind, verifyEngineCommand, watchUntilAcceptable, type EngineCommand, type EngineCommandAck, type EngineCommandOf, type JobKeyring } from "@fulcrumaxe/runner-protocol";
 import { signedPost, type CloudReply, type SignedPost } from "../cloud.js";
 import type { Clock } from "../daemon/lease.js";
-import { Inbox, InboxRefused, notConfirmedDueMs } from "./inbox.js";
+import { InboxRefused, notConfirmedDueMs, type CommandInbox } from "./inbox.js";
 
 export const PULL_PATH = "/api/runner/engine/commands/pull";
 export const ackPath = (commandId: string): string => `/api/runner/engine/commands/${commandId}/ack`;
@@ -75,7 +75,7 @@ export interface PullStatus {
 export interface InboxLoopDeps {
   /** One signed POST to the cloud (`signedPost` bound to the origin and the runner key). Never throws: a failure to reach the cloud is a reply of status 0. */
   post: (path: string, body: unknown) => Promise<CloudReply>;
-  inbox: Inbox;
+  inbox: CommandInbox;
   /** The pinned public keys the cloud's commands are signed with. */
   keyring: JobKeyring;
   runnerId: string;
@@ -267,7 +267,7 @@ export class CommandPuller {
         continue;
       }
       try {
-        this.deps.inbox.write(command);
+        await this.deps.inbox.write(command, raw);
       } catch (error) {
         // fx-swallow-ok: the error could name a path or a command; nothing was written, the command stays unacked (the cloud reads it as not confirmed) and a fixed line is logged
         if (error instanceof InboxRefused) {
@@ -315,9 +315,9 @@ export class CommandPuller {
   private async sendAcks(): Promise<void> {
     try {
       const nowMs = this.deps.clock.now().getTime();
-      for (const done of this.deps.inbox.consumed()) if (!this.unsent.has(done.commandId)) this.unsent.set(done.commandId, { name: done.name, ack: done.ack });
+      for (const done of await this.deps.inbox.consumed()) if (!this.unsent.has(done.commandId)) this.unsent.set(done.commandId, { name: done.name, ack: done.ack });
       const seen = this.deps.inbox.loadState(nowMs).seen;
-      for (const w of this.deps.inbox.waiting()) {
+      for (const w of await this.deps.inbox.waiting()) {
         // The engine can rewrite the file, so the time the runner recorded when it wrote it decides; the file's expiry can only make that earlier.
         const due = notConfirmedDueMs(w, seen[w.commandId.toLowerCase()]);
         if (this.unsent.has(w.commandId) || nowMs < due) continue;
@@ -337,7 +337,7 @@ export class CommandPuller {
         this.ackSucceed();
         if (owed.name !== null) {
           try {
-            this.deps.inbox.settle(owed.name, owed.ack);
+            await this.deps.inbox.settle(owed.name, owed.ack);
           } catch {
             // fx-swallow-ok: an unsettled file is acked again, and the cloud answers 409
             this.deps.log("engine-inbox: a settled command could not be moved");

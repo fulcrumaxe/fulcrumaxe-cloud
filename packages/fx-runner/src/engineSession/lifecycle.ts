@@ -25,6 +25,7 @@ import { admitVm } from "../vm/limits.js";
 import { DEFAULT_GUEST_PATHS, GuestWorkspaceError, runInGuest, sendWorkspace, type GuestPaths } from "../vm/workspace/guestWorkspace.js";
 import type { ResumableVmPort } from "../vm/sandboxd/vmPort.js";
 import type { OperateMark } from "./operateMark.js";
+import type { SessionRegistry } from "./registry.js";
 import { engineSessionPolicy } from "./sessionPolicy.js";
 
 type FailureCode = NonNullable<SessionJobProgressBody["failure_code"]>;
@@ -90,6 +91,8 @@ export interface EngineSessionDeps {
   tier?: "vm_stop" | "unit";
   /** How long a stop waits for the old supervisor program to be gone, and how often it looks (defaults `SUPERVISOR_EXIT_MS`, `SUPERVISOR_EXIT_POLL_MS`; a test's own, short). */
   supervisorExit?: { totalMs: number; pollMs: number };
+  /** D#845 ON-14a: the sessions the bridge reads. A start that ran its supervisor registers its repository, job and channel once it is `done`; a stop or a delete clears it as it begins. */
+  sessions?: SessionRegistry;
   /** Told once when a stop of a RUNNING session ended well (never for a stop that found nothing up, and never for a failed one). */
   stopped?: (report: SessionStopReport) => void;
 }
@@ -226,6 +229,7 @@ export function createEngineSessionHandlers(deps: EngineSessionDeps): { engine_s
       const { name, port } = p;
       let made: "none" | "new" | "woken" = "none";
       let copy: SetupRepoCopy | undefined;
+      deps.sessions?.clear(job.repo_gh_id); // a start that does not reach `done` leaves no registered session behind (the disk it replaces is gone or stopped)
       try {
         await admit(job, p);
         await p.say("session_create", "started");
@@ -295,6 +299,8 @@ export function createEngineSessionHandlers(deps: EngineSessionDeps): { engine_s
         // the session now outlives this job
         await p.say("done", "ok", { start_mode: mode });
         made = "none";
+        // the bridge now reads the session's events and forwards its commands; the repository is the signed job's own
+        if (p.channel !== undefined && deps.readToken !== undefined) deps.sessions?.register({ repo_gh_id: job.repo_gh_id, job_id: job.job_id, engine_version: job.args.engine_version, fresh: mode !== "resumed", channel: p.channel });
       } finally {
         await copy?.release().catch(() => undefined); // fx-swallow-ok: a host copy that cannot be removed now is swept with the runner's other workspaces
         // a start that did not reach `done` leaves nothing running: a VM it made is ended, a kept one it woke is stopped again (its snapshot is the disk it woke from)
@@ -315,6 +321,7 @@ export function createEngineSessionHandlers(deps: EngineSessionDeps): { engine_s
   const stop: MachineJobHandler<"engine_session_stop"> = ({ job, reporter, signal }) =>
     run(job, reporter, signal, async (p) => {
       const { name, port } = p;
+      deps.sessions?.clear(job.repo_gh_id); // before anything is asked of the guest: the bridge stops reading a session that is going down
       await admit(job, p);
       const known = await deps.state(name);
       if (known === "unknown") await p.fail("session_stop", "vm_teardown_incomplete", "state");
@@ -357,6 +364,7 @@ export function createEngineSessionHandlers(deps: EngineSessionDeps): { engine_s
 
   const del: MachineJobHandler<"engine_session_delete"> = ({ job, reporter, signal }) =>
     run(job, reporter, signal, async (p) => {
+      deps.sessions?.clear(job.repo_gh_id);
       await admit(job, p);
       await p.say("session_delete", "started");
       // the VM, its egress listeners and every snapshot go; the job says `ok` only when the daemon no longer holds the name

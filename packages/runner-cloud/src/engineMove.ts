@@ -98,11 +98,11 @@ export async function moveEngineProject(deps: RunnerCloudDeps, principal: Sessio
     const operate = await readOperate(client, accountId, true);
     if (!operate.enabled || operate.epoch < 1 || !(await repoOperated(client, accountId, repoId))) throw refuse(409, "operate_off", "operate is off, so the engine cannot be started on the new machine");
     // Whether the old machine has anything to clean up, read before its undelivered start is taken back.
-    const needed = !placed.removed && ((await hadSession(client, accountId, { repoId, ghRepoId: placed.ghRepoId, owner: null, name: null, runnerId: placed.runnerId })) || (await liveStart(client, accountId, repoId, placed.runnerId)));
+    const needed = !placed.removed && ((await hadSession(client, accountId, { accountId, repoId, ghRepoId: placed.ghRepoId, owner: null, name: null, runnerId: placed.runnerId })) || (await liveStart(client, accountId, repoId, placed.runnerId)));
     const out = await moveProject(client, { accountId, userId: principal.userId }, { repoId, toRunnerId, carryState: input.carryState, now: (deps.now ?? (() => new Date()))(), wakeEnabled: configuredWakeKey(deps.wakeKey) !== null });
     await client.query("SELECT machine_cleanup_supersede_starts($1, $2)", [repoId, out.from_runner_id]);
     if (needed) await client.query("SELECT machine_cleanup_request_move($1, $2)", [repoId, out.from_runner_id]);
-    const session: SessionTarget = { repoId, ghRepoId: placed.ghRepoId, owner: first.owner, name: first.name, runnerId: out.to_runner_id };
+    const session: SessionTarget = { accountId, repoId, ghRepoId: placed.ghRepoId, owner: first.owner, name: first.name, runnerId: out.to_runner_id };
     const startJobId = await insertJob(client, deps, signer, session, { kind: "engine_session_start", args: { at_sha: head, resume: false, operate_epoch: operate.epoch } });
     await client.query("SELECT audit_write('engine_session.started', $1::jsonb)", [JSON.stringify({ repo_id: repoId, job_id: startJobId, resume: false })]);
     return { from_runner_id: out.from_runner_id, to_runner_id: out.to_runner_id, start_job_id: startJobId, operate_epoch: operate.epoch, old_copy: needed ? ("queued" as const) : ("none" as const) };

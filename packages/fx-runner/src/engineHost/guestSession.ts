@@ -8,7 +8,8 @@
  *      - `command {command}`: the signed `EngineCommand` the runner forwards is checked again here against the key this build pins for the cloud address `session.json` names (`verifyCommandWith`); anything that does not
  *        check out is `command_unverified` and reaches nothing. A verified one goes to the ticker, and its outcome is a line of `engine-host-outcomes.jsonl`.
  *      - `stop {reason?}`: wipes the credential FIRST, then ends the host through the supervisor's own stop (close stdin, then the kill path). A stopped session takes no further tick: the next start is a new supervisor.
- *      - `events_read {after, stream?}`: the engine events the supervisor wrote (`engine-host-events.jsonl`; `stream: "outcomes"` reads the command outcomes instead), whole lines from byte `after`, at most `EVENTS_READ_MAX` bytes; `reset` when the file is shorter than `after` (it rotated).
+ *      - `events_read {after, stream?}`: the engine events the supervisor wrote (`engine-host-events.jsonl`; `stream: "outcomes"` reads the command outcomes instead, and `stream: "engine"` the engine's OWN `engine-events.jsonl`, which the host never opens: it is the guest's file, read
+ *        here and nowhere else), whole lines from byte `after`, at most `EVENTS_READ_MAX` bytes; `ends` is the byte offset just past each line, so the reader can keep an exact cursor; `reset` when the file is shorter than `after` (it rotated).
  *      - `token_put {name:"claude", size}`: 1..4096 printable ASCII bytes follow the frame (no JSON field carries them). They are held in ONE buffer that is zeroed by the next `token_put` and by every `stop`, handed to the host's
  *        environment at launch as the subscription variable and nowhere else, and never logged, echoed, spooled or put in an event. Node cannot zero the copies it makes (the latin1 string, the merged environment object and libuv's envp copy), so zeroing the buffer is NOT enough on its own. The guarantee the snapshot needs is that the PROGRAM ENDS:
  *        after a channel `stop` and after `crash_loop` the supervisor exits (`finished()`, which `runEngineSupervise` waits for), the bridge kills the group, the guest kernel's `init_on_free=1` zeroes the pages and init starts a fresh
@@ -27,7 +28,7 @@ import { ensurePrivateDir, readJsonNoFollow } from "../engineBridge/stateFiles.j
 import { keyringFor, type PinnedKeyrings } from "../keyring.js";
 import { openAnsweredStore } from "./answered.js";
 import { credentialModeOf, tickSettingsOf } from "./hostConfig.js";
-import { createAgentFeed, createEventSpool, SPOOL_FILE, SPOOL_MAX_BYTES } from "./hostFeeds.js";
+import { createAgentFeed, createEventSpool, ENGINE_EVENTS_FILE, SPOOL_FILE, SPOOL_MAX_BYTES } from "./hostFeeds.js";
 import { acquireHostLock, isRepoGhId, openHostLog, type BridgeState } from "./hostFiles.js";
 import { createGuestTicks, OUTCOMES_FILE, verifyCommandWith, type GuestTicks } from "./guestTicks.js";
 import { openSessionStore } from "./session.js";
@@ -242,16 +243,22 @@ export function createGuestSession(options: GuestSessionOptions): GuestSession {
     try {
       fd = openSync(path.join(dir, file), constants.O_RDONLY | constants.O_NOFOLLOW);
       const st = fstatSync(fd);
-      if (!st.isFile() || st.uid !== rt.uid || (st.mode & 0o022) !== 0) return { ok: true, lines: [], next: 0, reset: false };
+      if (!st.isFile() || st.uid !== rt.uid || (st.mode & 0o022) !== 0) return { ok: true, lines: [], ends: [], next: 0, reset: false };
       const reset = after > st.size;
       const from = reset ? 0 : after;
       const buf = Buffer.alloc(Math.min(st.size - from, EVENTS_READ_MAX));
       const got = readSync(fd, buf, 0, buf.length, from);
       const whole = buf.subarray(0, buf.subarray(0, got).lastIndexOf(0x0a) + 1);
-      return { ok: true, lines: whole.toString("utf8").split("\n").slice(0, -1), next: from + whole.length, reset };
+      // a window with no line end in it (a line longer than the window) would stall the reader for ever: it is handed over as one junk line spanning the window, which the reader judges and drops
+      if (whole.length === 0 && got > 0 && got === buf.length && buf.length === EVENTS_READ_MAX) return { ok: true, lines: ["#"], ends: [from + got], next: from + got, reset };
+      const lines = whole.toString("utf8").split("\n").slice(0, -1);
+      // the end of each line in the FILE's bytes (a line of invalid UTF-8 would not re-encode to its own length, so the reader cannot work this out from the text)
+      let end = from;
+      const ends = whole.toString("latin1").split("\n").slice(0, -1).map((raw) => (end += raw.length + 1));
+      return { ok: true, lines, ends, next: from + whole.length, reset };
     } catch {
       // fx-swallow-ok: no spool yet (nothing has happened) or one that cannot be read safely reads as no events; the caller asks again from where it was
-      return { ok: true, lines: [], next: after, reset: false };
+      return { ok: true, lines: [], ends: [], next: after, reset: false };
     } finally {
       if (fd !== -1) closeSync(fd);
     }
@@ -280,7 +287,7 @@ export function createGuestSession(options: GuestSessionOptions): GuestSession {
         }
         case "events_read": {
           const stream = h["stream"] ?? "events";
-          return isInt(h["after"], 0, Number.MAX_SAFE_INTEGER) && (stream === "events" || stream === "outcomes") ? eventsRead(h["after"], stream === "events" ? SPOOL_FILE : OUTCOMES_FILE) : fail("bad_request");
+          return isInt(h["after"], 0, Number.MAX_SAFE_INTEGER) && (stream === "events" || stream === "outcomes" || stream === "engine") ? eventsRead(h["after"], stream === "events" ? SPOOL_FILE : stream === "engine" ? ENGINE_EVENTS_FILE : OUTCOMES_FILE) : fail("bad_request");
         }
         case "token_put": {
           const size = h["size"];

@@ -69,7 +69,7 @@ export async function removeProjectIn(client: PoolClient, a: Actor, repoId: stri
     // already holds (`delivered`) is its own: it needs the stop and delete, issued after it by the machine's claim, just as a session that ran does.
     await client.query("SELECT machine_cleanup_supersede_starts($1, $2)", [repoId, placed.runner_id]);
     const needed = o.machineParts && !placed.revoked
-      && ((await hadSession(client, a.accountId, { repoId, ghRepoId: Number(placed.gh_repo_id), owner: null, name: null, runnerId: placed.runner_id }))
+      && ((await hadSession(client, a.accountId, { accountId: a.accountId, repoId, ghRepoId: Number(placed.gh_repo_id), owner: null, name: null, runnerId: placed.runner_id }))
         || (await liveStart(client, a.accountId, repoId, placed.runner_id)));
     await client.query("DELETE FROM project_placements WHERE account_id = $1 AND repo_id = $2", [a.accountId, repoId]);
     if (!placed.revoked) {

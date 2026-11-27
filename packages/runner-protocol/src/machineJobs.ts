@@ -79,7 +79,8 @@ export const MachineJob = z
     job("project_setup", strict({ mode: z.enum(SETUP_MODES), base_sha: z.string().regex(SHA40_PATTERN), engine: EngineReleaseRef, plan_ref: PlanRef, branch: z.string().regex(ENGINE_INSTALL_BRANCH) })),
     job("engine_update", strict({ engine: EngineReleaseRef, branch: z.string().regex(ENGINE_UPDATE_BRANCH) })),
     // Every session kind carries the operate epoch the cloud read when it issued the job (a start is never signed at 0: the first on-switch makes 1).
-    job("engine_session_start", strict({ at_sha: z.string().regex(SHA40_PATTERN), resume: z.boolean(), operate_epoch: safeInt.min(1) })),
+    // `engine_version` is the version the repository's install recorded; the runner reads no engine file on the host, so the bridge takes it from here (D#845 ON-14a). Absent: the cloud had none on record, and the bridge does not start for the session.
+    job("engine_session_start", strict({ at_sha: z.string().regex(SHA40_PATTERN), resume: z.boolean(), operate_epoch: safeInt.min(1), engine_version: z.string().regex(ENGINE_VERSION_PATTERN).optional() })),
     job("engine_session_stop", strict({ reason: z.enum(ENGINE_STOP_REASONS), operate_epoch: safeInt.min(0) })),
     job("engine_session_delete", strict({ operate_epoch: safeInt.min(0) })),
     job("project_remove", strict({ delete_sandbox: z.boolean(), removal_pr: z.boolean() })),

@@ -98,6 +98,10 @@ describe("machine job schema", () => {
     expect(ok(jobOf("engine_session_stop", { job_id: "x" }))).toBe(false);
     expect(ok(jobOf("engine_session_start", { args: { at_sha: "A".repeat(40), resume: true, operate_epoch: 1 } }))).toBe(false);
     expect(ok(jobOf("engine_session_start", { args: { at_sha: SHA, resume: "yes", operate_epoch: 1 } }))).toBe(false);
+    // ON-14a: a start may carry the engine version its install recorded, in the one shape every engine version has; a start with none is still a start
+    expect(ok(jobOf("engine_session_start", { args: { at_sha: SHA, resume: false, operate_epoch: 1, engine_version: "1.4.0" } }))).toBe(true);
+    for (const bad of ["1.4", "v1.4.0", "1.4.0-rc1", "latest", "", "1.4.0 ", 140, null]) expect(ok(jobOf("engine_session_start", { args: { at_sha: SHA, resume: false, operate_epoch: 1, engine_version: bad } })), String(bad)).toBe(false);
+    expect(ok(jobOf("engine_session_stop", { args: { reason: "person", operate_epoch: 1, engine_version: "1.4.0" } }))).toBe(false);
     expect(ok(jobOf("engine_session_stop", { args: { reason: "crash", operate_epoch: 0 } }))).toBe(false);
     expect(ok(jobOf("engine_update", { args: { engine: { ...ENGINE, version: "1.2" }, branch: "fx/engine-update-1.2.4" } }))).toBe(false);
   });

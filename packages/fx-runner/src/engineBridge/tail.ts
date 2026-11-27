@@ -70,6 +70,8 @@ interface Poll {
   marks: { seq: number; pos: Pos }[];
 }
 const NO_INODE = -1;
+/** The inode a remote stream's cursor carries (a channel has none). */
+const REMOTE_INODE = 1;
 
 export class EngineTail {
   private committed: Cursor | null = null;
@@ -189,6 +191,43 @@ export class EngineTail {
       if (n === 0) break;
       filled += n;
     }
+    this.scanBuffer(buf, filled, start, size, final, mainInode, result);
+  }
+
+  /**
+   * D#845 ON-14a: the same judging over whole lines a channel read returned (`read(after)`: the bytes at offset `after` of a file this process never opens, and whether that file was shorter than `after`; undefined when the channel could not be read: nothing is
+   * judged and the poll is idle). The "file" is one stream of the engine session's guest, so its inode is a constant and the cursor's offset is the guest file's byte offset. A shorter file starts again from 0 and skips what the cloud already has, as a shrunk local file does.
+   */
+  async pollRemote(read: (after: number) => Promise<{ bytes: Buffer; reset: boolean } | undefined>): Promise<PollResult> {
+    if (this.last !== null) throw new Error("engine-bridge: poll() with a batch not yet acked or rewound");
+    const result: PollResult = { status: "idle", events: [], dropped: emptyDrops(), gaps: [], reset: false, more: false };
+    try {
+      if (!this.loaded) {
+        this.committed = loadCursor(this.opts.cursorPath, this.opts.observe, this.opts.uid);
+        this.loaded = true;
+        this.rewind();
+      }
+      if (this.work.inode === NO_INODE) this.work = { ...this.work, inode: REMOTE_INODE, offset: 0 };
+      const got = await read(this.work.offset);
+      if (got === undefined) return result;
+      if (got.reset) {
+        this.work = { ...this.work, offset: 0, lastSeen: this.work.acked };
+        this.discarding = false;
+      }
+      const start = this.work.offset;
+      this.scanBuffer(got.bytes, got.bytes.length, start, start + got.bytes.length, false, REMOTE_INODE, result);
+      this.lastRefusal = null;
+      result.status = "ok";
+      return result;
+    } catch (error) {
+      if (!(error instanceof FileRefused)) throw error;
+      if (this.lastRefusal !== error.reason) this.opts.log(`engine-bridge: a bridge file was refused (${error.reason}); nothing is read or sent`);
+      this.lastRefusal = error.reason;
+      return { ...result, status: "refused" };
+    }
+  }
+
+  private scanBuffer(buf: Buffer, filled: number, start: number, size: number, final: boolean, mainInode: number, result: PollResult): void {
     const inode = this.work.inode;
     const events = result.events;
     let at = 0;

@@ -203,7 +203,7 @@ describe("usage_tick", () => {
 describe("events_read", () => {
   it("returns whole lines from a byte offset, continues from `next`, and answers reset when the file is shorter than the offset", async () => {
     const r = rig("ok");
-    expect(await r.ask({ op: "events_read", after: 0 })).toEqual({ ok: true, lines: [], next: 0, reset: false });
+    expect(await r.ask({ op: "events_read", after: 0 })).toEqual({ ok: true, lines: [], ends: [], next: 0, reset: false });
     await r.ask({ op: "tick", kind: "loop" });
     await until(() => r.events().some((e) => e["kind"] === "usage_tick"), "a usage_tick");
     const first = (await r.ask({ op: "events_read", after: 0 })) as unknown as { lines: string[]; next: number; reset: boolean };
@@ -211,10 +211,38 @@ describe("events_read", () => {
     expect(first.lines.length).toBeGreaterThanOrEqual(2);
     expect(first.lines.map((l) => (JSON.parse(l) as { kind: string }).kind)).toContain("host_started");
     expect(first.next).toBe(statSync(path.join(r.dir, SPOOL_FILE)).size);
-    expect(await r.ask({ op: "events_read", after: first.next })).toEqual({ ok: true, lines: [], next: first.next, reset: false });
+    expect(await r.ask({ op: "events_read", after: first.next })).toEqual({ ok: true, lines: [], ends: [], next: first.next, reset: false });
     const past = (await r.ask({ op: "events_read", after: first.next + 100000 })) as unknown as { lines: string[]; reset: boolean };
     expect(past.reset).toBe(true);
     expect(past.lines).toEqual(first.lines);
+  });
+
+  it("`engine` reads the engine's own events file inside the guest, with the exact end of each line, and no other stream reads it", async () => {
+    const r = rig("ok");
+    const file = path.join(r.dir, "engine-events.jsonl");
+    expect(await r.ask({ op: "events_read", after: 0, stream: "engine" })).toEqual({ ok: true, lines: [], ends: [], next: 0, reset: false });
+    writeFileSync(file, `{"a":1}\n{"é":2}\npartial`, { mode: 0o600 });
+    const second = 8 + Buffer.byteLength('{"é":2}') + 1;
+    expect(await r.ask({ op: "events_read", after: 0, stream: "engine" })).toEqual({ ok: true, lines: ['{"a":1}', '{"é":2}'], ends: [8, second], next: second, reset: false });
+    expect(await r.ask({ op: "events_read", after: 8, stream: "engine" })).toMatchObject({ lines: ['{"é":2}'], ends: [second] });
+    expect(await r.ask({ op: "events_read", after: second + 100, stream: "engine" })).toMatchObject({ reset: true, ends: [8, second] });
+    // the host's own stream and the outcomes are other files
+    expect(await r.ask({ op: "events_read", after: 0 })).toMatchObject({ lines: [] });
+    expect(await r.ask({ op: "events_read", after: 0, stream: "outcomes" })).toMatchObject({ lines: [] });
+    // a file open to others reads as nothing, as the other streams' do
+    chmodSync(file, 0o666);
+    expect(await r.ask({ op: "events_read", after: 0, stream: "engine" })).toEqual({ ok: true, lines: [], ends: [], next: 0, reset: false });
+  });
+
+  it("keeps the true byte end of a line that is not valid UTF-8, and hands over a window with no line end as one junk line", async () => {
+    const r = rig("ok");
+    const file = path.join(r.dir, "engine-events.jsonl");
+    writeFileSync(file, Buffer.concat([Buffer.from([0xff, 0xfe, 0x0a]), Buffer.from("ok\n")]), { mode: 0o600 });
+    const got = (await r.ask({ op: "events_read", after: 0, stream: "engine" })) as unknown as { lines: string[]; ends: number[]; next: number };
+    expect(got.ends).toEqual([3, 6]);
+    expect(got.next).toBe(6);
+    writeFileSync(file, "x".repeat(EVENTS_READ_MAX + 10), { mode: 0o600 });
+    expect(await r.ask({ op: "events_read", after: 0, stream: "engine" })).toEqual({ ok: true, lines: ["#"], ends: [EVENTS_READ_MAX], next: EVENTS_READ_MAX, reset: false });
   });
 
   it("never returns more than EVENTS_READ_MAX bytes at a time and never a partial line", async () => {
@@ -371,7 +399,7 @@ describe.skipIf(sockets)("the socket", () => {
     const listening = await r.session.serve(file);
     try {
       expect(statSync(file).mode & 0o777).toBe(0o600);
-      expect(await ask(file, [frame({ op: "events_read", after: 0 })])).toEqual({ ok: true, lines: [], next: 0, reset: false });
+      expect(await ask(file, [frame({ op: "events_read", after: 0 })])).toEqual({ ok: true, lines: [], ends: [], next: 0, reset: false });
       expect(await ask(file, [frame({ op: "token_put", name: "claude", size: TOKEN.length }), tokenBody()])).toEqual({ ok: true });
       // the frame and the token split across writes, the way a vsock bridge delivers them
       const split = Buffer.concat([frame({ op: "token_put", name: "claude", size: 3 }), tokenBody("abc")]);

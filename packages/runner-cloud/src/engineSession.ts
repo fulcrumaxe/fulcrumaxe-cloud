@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
-import { MACHINE_JOB_MAX_LIFE_S, type ENGINE_STOP_REASONS, type MachineJob } from "@fulcrumaxe/runner-protocol";
+import { ENGINE_VERSION_PATTERN, MACHINE_JOB_MAX_LIFE_S, type ENGINE_STOP_REASONS, type MachineJob } from "@fulcrumaxe/runner-protocol";
 import { engineCoverageRefusal, readEngineCoverage } from "@fx/core/src/onboarding/engineCoverage.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { RunnerHttpError, pgCode, type RunnerCloudDeps, type RunnerHttpResponse, type SessionPrincipal } from "./http.js";
@@ -47,7 +47,7 @@ export interface IssuedSessionJob {
 /** A test seam: runs inside the issuing transaction, right after the gates have read the epoch and still hold the settings row lock. Never set in production. */
 export interface IssueHooks { afterGate?: () => Promise<void> }
 
-export interface SessionTarget { repoId: string; ghRepoId: number; owner: string | null; name: string | null; runnerId: string }
+export interface SessionTarget { accountId: string; repoId: string; ghRepoId: number; owner: string | null; name: string | null; runnerId: string }
 
 /** A refusal by a definer (42501: not an owner or admin of an active account) is the person's 403. */
 export async function asPerson<T>(run: () => Promise<T>): Promise<T> {
@@ -79,7 +79,7 @@ export async function loadSessionTarget(client: PoolClient, accountId: string, r
   )).rows[0];
   if (!placed) throw refuse(409, "not_placed", "the project is not placed on a machine");
   if (placed.revoked) throw refuse(409, "runner_removed", "the machine was removed");
-  return { repoId, ghRepoId: Number(repo.gh_repo_id), owner: repo.gh_owner, name: repo.gh_name, runnerId: placed.runner_id };
+  return { accountId, repoId, ghRepoId: Number(repo.gh_repo_id), owner: repo.gh_owner, name: repo.gh_name, runnerId: placed.runner_id };
 }
 
 /**
@@ -148,6 +148,14 @@ export async function insertJob(client: PoolClient, deps: RunnerCloudDeps, signe
   const jobId = randomUUID();
   const issued = at ?? (deps.now ?? (() => new Date()))();
   const expires = new Date(issued.getTime() + MACHINE_JOB_MAX_LIFE_S * 1000);
+  // D#845 ON-14a: a start carries the engine version the install recorded (the newest setup of this repository that has one), so the runner's bridge reads no engine file to learn it.
+  if (job.kind === "engine_session_start") {
+    const row = (await client.query<{ engine_version: string | null }>(
+      "SELECT engine_version FROM project_setups WHERE account_id = $1 AND repo_id = $2 AND engine_version IS NOT NULL ORDER BY created_at DESC, id DESC LIMIT 1",
+      [t.accountId, t.repoId],
+    )).rows[0];
+    if (row?.engine_version != null && ENGINE_VERSION_PATTERN.test(row.engine_version)) job = { kind: job.kind, args: { ...job.args, engine_version: row.engine_version } } as Pick<MachineJob, "kind" | "args">;
+  }
   const signed = signer.signMachineJob({
     v: 1, job_id: jobId, runner_id: t.runnerId, repo_gh_id: t.ghRepoId, requires_engine: "any", issued_at: issued.toISOString(), expires_at: expires.toISOString(), ...job,
   } as MachineJob);
