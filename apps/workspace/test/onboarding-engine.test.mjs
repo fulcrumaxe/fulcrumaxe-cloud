@@ -14,7 +14,7 @@ import {
   ASK_OWNER, LABELS, NO_KVM, OPERATE_OFF, STATE_WORDS, TIME_TO_LIVE,
   CHECKING_MACHINE, CHECK_TRIES, CHECK_WAIT_MS, COULDNT_CHECK, NEW_PRESET, NO_MACHINE, NO_OWNERS, PUBLIC_COPY, PUBLIC_OPERATE, createRefusal, dialsLine, isLoadPending, linkedLine, machineChoices, operateBox, parseReturn, pickVisibility, placeRefusal, presetName, readPicker,
   cleanOrigin, copyText, describeStep, enginePrice, installDetail, surveyDetail, twinDetail, fixFor, machineChoiceLine, machineCommands, machineContext, prerequisites, visibilityLabel,
-  approveWords, approvedLine, draftRefusal, engineSection, planProblems, readDraft, toRoadmap,
+  approveWords, approvedLine, draftRefusal, engineSection, planProblems, readDraft, retryRefusal, toRoadmap,
 } from "../apps/onboarding/onboarding-engine.js";
 
 const V1 = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages", "api", "fixtures", "v1", "getOnboarding");
@@ -958,5 +958,53 @@ describe("twinDetail (D#845 ON-27a)", () => {
   it("is empty for a missing row, an unknown state or a name that is not a repo name, and links only a well-formed owner", () => {
     for (const bad of [null, undefined, {}, row({ state: "__proto__" }), row({ state: "toString" }), row({ private_name: "../x" }), row({ private_name: 3 })]) expect(twinDetail(bad, "acme")).toEqual({});
     for (const owner of ["", undefined, "a/b", "-x", "x y"]) expect(twinDetail(row({}), owner).twin.private_url).toBe("");
+  });
+});
+
+// D#845 FU-313 / FU-307: a failed install step is retried in place, and the install has its own words for a public repo.
+describe("the failed install step (FU-313, FU-307)", () => {
+  const failed = (code) => track({ machine: "done", claude: "done", github_app: "done", project: "done", plan: "done", install: "failed" }, { code });
+  const installSetup = { id: "3c1c0b7e-5f0a-4c1e-9b1f-0a1b2c3d4e5f", phase: "install", state: "failed" };
+  it("names the cause for every install code, and an owner or admin gets a Try again action", () => {
+    const codes = { deps_failed: "Engine install stopped", bootstrap_failed: "Engine install stopped", job_silent: "box-1 stopped answering", job_expired: "box-1 stopped answering", engine_fetch_failed: "couldn't be fetched on box-1", push_failed: "Couldn't push", direct_raced: "The repo changed", pr_open_failed: "Couldn't open the install PR", install_head_changed: "pull request was closed" };
+    for (const [code, words] of Object.entries(codes)) {
+      const v = at(failed(code), "install", { setup: installSetup });
+      expect(text(v), code).toContain(words);
+      expect(text(v), code).not.toContain(code);
+      expect(v.actions, code).toEqual([{ id: "retry_install", label: "Try again", run: true }]);
+    }
+  });
+  it("tells a member who can retry and offers no action", () => {
+    const v = at(failed("deps_failed"), "install", { setup: installSetup, isAdmin: false });
+    expect(v.actions).toEqual([]);
+    expect(text(v)).toContain("Ask an owner or admin to try again");
+  });
+  it("offers no Try again when the setup is not at the install step (the cloud would refuse it), and shows a refused retry's sentence", () => {
+    expect(at(failed("deps_failed"), "install", { setup: { ...installSetup, phase: "await_merge" } }).actions).toEqual([]);
+    expect(at(failed("deps_failed"), "install", {}).actions).toEqual([]);
+    expect(text(at(failed("deps_failed"), "install", { setup: installSetup, installNote: "GitHub couldn't be reached. Start the install again in a minute." }))).toContain("GitHub couldn't be reached");
+  });
+  it("reads as running once the retry started the next attempt (state active, setup started), and says nothing of the old failure", () => {
+    const steps = track({ machine: "done", claude: "done", github_app: "done", project: "done", plan: "done", install: "active" });
+    const v = at(steps, "install", { setup: { ...installSetup, state: "started" } });
+    expect(text(v)).toBe("The install is running on box-1.");
+    expect(v.actions).toEqual([]);
+    expect(text(at(steps, "install", { setup: { ...installSetup, phase: "plan", state: "ok" } }))).toBe("");
+  });
+  it("says a refused retry in words, never the server's own, and rereads when the setup moved on", () => {
+    expect(retryRefusal({ code: "github_unavailable", message: "SERVER" })).toEqual({ text: "GitHub couldn't be reached. Start the install again in a minute.", reread: false });
+    expect(retryRefusal({ code: "not_retryable", message: "SERVER" })).toEqual({ text: "The install couldn't be started again. Try again.", reread: true });
+    expect(retryRefusal({ code: "forbidden" }).text).toBe("Only owners and admins can start the install again.");
+    expect(retryRefusal({ code: "forbidden" }).text).not.toBe(retryRefusal({ code: "public_repo" }).text);
+    expect(at(failed("job_silent"), "install", { setup: installSetup, name: "" }).lines[0]).toBe("Your machine stopped answering during the install. Try again");
+    expect(at(failed("job_silent"), "install", { setup: installSetup, name: "box-1" }).lines[0]).toBe("box-1 stopped answering during the install. Try again");
+    expect(retryRefusal(null)).toEqual({ text: "The install couldn't be started again. Try again.", reread: false });
+  });
+  it("gives the install its own words for a public repo, apart from the survey's", () => {
+    const install = approveWords({ install: null, gate: null, install_error: { code: "public_repo", message: "SERVER" } }).lines[0];
+    expect(install).toBe("Approved. This repo is public, so the engine installs into its private repo instead. Set that up first, then start the install again. Choose Start the install to try again.");
+    expect(install).not.toContain("survey");
+    expect(retryRefusal({ code: "public_repo" }).text).not.toContain("survey");
+    expect(draftRefusal({ code: "public_repo" }).text).toBe("This repo is public, so the survey can't run again. Write your own plan instead.");
   });
 });
