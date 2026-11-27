@@ -20,3 +20,16 @@ export async function findTwinsForPush(client: PoolClient, input: { accountId: s
   );
   return rows.map((r) => r.id);
 }
+
+/**
+ * D#845 ON-27d4b: the webhook's mark, one `twin_parity_mark_due` per twin found (migration 1112: it re-checks that the pushed repository is one of the twin's two sides and that the twin is ready or in conflict). The twin's due time is then
+ * 60 seconds on and the push counts in `mark_seq`, so a check that began before it cannot clear it. Returns how many twins were marked.
+ */
+export async function markTwinParityDue(client: PoolClient, input: { accountId: string; twinIds: string[]; repoId: string | null; fullName: string }): Promise<number> {
+  let marked = 0;
+  for (const twinId of input.twinIds) {
+    const { rows } = await client.query<{ o_result: string }>('SELECT o_result FROM twin_parity_mark_due($1::uuid, $2::uuid, $3)', [twinId, input.repoId || null, input.fullName]);
+    if (rows[0]?.o_result === 'ok') marked += 1;
+  }
+  return marked;
+}

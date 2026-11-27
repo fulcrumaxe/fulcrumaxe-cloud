@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import net from "node:net";
 import tls from "node:tls";
 import type { Pool } from "pg";
@@ -188,6 +189,26 @@ describe("GET /api/cron/setup-request-check: the repo instruction file import (D
     expect("planeParity" in seen[1]!).toBe(false);
     expect(seen[1]!.deadlineAt).toBe(clock.value + 60_000);
     expect("deadlineAt" in seen[0]!).toBe(false);
+  });
+});
+
+describe("GET /api/cron/setup-request-check: the twin sweep (D#845 ON-27d4b)", () => {
+  it("passes the twin check and steps to the worker only when bound, with the tick's one deadline; the route binds them and the webhook marks twins", async () => {
+    await markWorkPending("setup-request-check", { since: clock.value - 120_000 });
+    const seen: Array<Record<string, unknown>> = [];
+    const worker = { sweepSetupRequestChecks: vi.fn(async (input: Record<string, unknown>) => (seen.push(input), { listed: 0, passed: 0, notYet: 0, skipped: 0, failed: 0, nextDueAt: null })) };
+    const base = { cronSecret: SECRET, getWorker: async () => worker, envSource: productionVercelEnvSource, log: () => undefined, now: () => clock.value };
+    await setupRequestCheckHandler(req(`Bearer ${SECRET}`), base as never);
+    const twin = { compute: vi.fn(), ports: {} };
+    await markWorkPending("setup-request-check", { since: clock.value - 120_000 });
+    await setupRequestCheckHandler(req(`Bearer ${SECRET}`), { ...base, twin } as never);
+    expect(seen.map((i) => "twin" in i)).toEqual([false, true]);
+    expect(seen[1]!.twin).toBe(twin);
+    expect(seen[1]!.deadlineAt).toBe(clock.value + 60_000);
+    const route = readFileSync(new URL("./route.ts", import.meta.url), "utf8");
+    expect(route).toMatch(/twin: \{ compute: computeTwinParityForJob, ports: twinSweepPorts \}/);
+    const webhook = readFileSync(new URL("../../github/webhook/handler.ts", import.meta.url), "utf8");
+    expect(webhook).toMatch(/wakeTwinParity\(cachedAppUserPool!, event, markTwinParityDue\)/);
   });
 });
 

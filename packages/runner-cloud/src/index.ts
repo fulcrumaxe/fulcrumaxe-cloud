@@ -217,6 +217,7 @@ export {
 } from "./setupJobs.js";
 export { retryEngineStop } from "./engineStopRetry.js";
 export { readEngineBehind, readEngineUpdateCard, updateEngine, type EngineBehind, type EngineUpdateCard, type IssuedEngineUpdate } from "./engineUpdate.js";
+export { guardTwinVisibility, type TwinVisibilityGuard } from "./twinVisibility.js";
 export { checkTwinSeed, issueTwinSeed, type IssuedTwinSeed, type TwinSeedCheck } from "./twinSeed.js";
 export { buildTwinSyncText, checkTwinSync, closeTwinSyncPr, issueTwinSync, openTwinSyncPr, type IssuedTwinSync, type TwinSyncCheck, type TwinSyncClose, type TwinSyncPrOpen } from "./twinSync.js";
 export { checkTwinPublish, closeTwinPublishPr, issueTwinPublish, TWIN_PUBLISH_CLOSE_COMMENT, type IssuedTwinPublish, type TwinPublishCheck, type TwinPublishClose } from "./twinPublish.js";

@@ -19,6 +19,8 @@ import { wakeMergeQueue } from "../../../../lib/mergeQueue";
 import { wakeGateReask } from "../../../../lib/gateReask";
 import { wakeSiblingConflicts } from "../../../../lib/siblingConflictWake";
 import { wakePlaneParity } from "../../../../lib/planeParityWake";
+import { wakeTwinParity } from "../../../../lib/twinParityWake";
+import { markTwinParityDue } from "@fx/core/src/repos/twinParityDue.js";
 import { wakeRepoInstructionImport, wakeRepoInstructionImportOnConnect } from "../../../../lib/repoInstructionWake";
 import { intakeAllowlist } from "../../../../lib/github/intakeTrust";
 import { issueAuthorPermission } from "../../../../lib/github/issueAuthorPermission";
@@ -126,7 +128,7 @@ export function defaultGithubWebhookDeps(): GithubWebhookHandlerDeps {
     // D#519 MQ3-b: a pull request or CI event for a repo with a live merge-queue entry wakes the queue. The merge gate asks itself again when the public pull
     // request opens or its checks finish green (D#6). A merged pull request also wakes the repository's other open pull requests that now conflict. They are independent: one failing does not skip the others.
     onRepoEvent: async (event) => {
-      const results = await Promise.allSettled([wakeMergeQueue(cachedAppUserPool!, event), wakeGateReask(cachedAppUserPool!, event), wakeSiblingConflicts(cachedAppUserPool!, event), wakePlaneParity(cachedAppUserPool!, event), wakeRepoInstructionImport(cachedAppUserPool!, event)]);
+      const results = await Promise.allSettled([wakeMergeQueue(cachedAppUserPool!, event), wakeGateReask(cachedAppUserPool!, event), wakeSiblingConflicts(cachedAppUserPool!, event), wakePlaneParity(cachedAppUserPool!, event), wakeTwinParity(cachedAppUserPool!, event, markTwinParityDue), wakeRepoInstructionImport(cachedAppUserPool!, event)]);
       const failed = results.find((r): r is PromiseRejectedResult => r.status === "rejected");
       if (failed) throw failed.reason;
     },

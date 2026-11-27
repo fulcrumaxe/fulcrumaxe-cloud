@@ -85,6 +85,7 @@ import { sweepSetupRequestChecks as runSetupRequestCheckSweep, type CheckSweepCo
 import type { LiveSecretsSource } from "@fx/core/src/memory/index.js";
 import { sweepRepoInstructionFiles, type RepoFileRead, type RepoFileSweepCounts } from "@fx/core/src/memory/repoFileSweep.js";
 import { sweepPlaneParity, type ParityCompute, type ParitySweepCounts } from "@fx/core/src/repos/planeParityChecks.js";
+import { sweepTwins, type TwinParityCompute, type TwinSweepCounts, type TwinWorkPorts } from "@fx/core/src/repos/twinSweep.js";
 import { sweepBranchCleanups as runBranchCleanupSweep, type BranchCleanupCounts, type BranchCleanupGithub } from "./branchCleanup.js";
 import type { PrCloseOpen } from "./privatePrClose.js";
 import { reconcileHolder, sweepPrSlotHolders as runPrSlotSweep, type PrSlotSweepCounts, type PrStateOpen, type ReconcileOutcome } from "./prSlotReconcile.js";
@@ -260,7 +261,7 @@ export interface Worker extends PlanePublish, Pick<SurveyStartFacade, "startSurv
    * the cron only: the list is one definer (migration 0874) and the rest runs per request under its own tenant. `envSource` is where a
    * provider's variable names come from; the caller binds it.
    */
-  sweepSetupRequestChecks(input: { envSource: VercelEnvSource; planeParity?: ParityCompute; repoFiles?: { read: RepoFileRead; liveSecrets: LiveSecretsSource }; deadlineAt?: number }): Promise<CheckSweepCounts & { parity?: ParitySweepCounts; repoFiles?: RepoFileSweepCounts }>;
+  sweepSetupRequestChecks(input: { envSource: VercelEnvSource; planeParity?: ParityCompute; twin?: { compute: TwinParityCompute; ports: TwinWorkPorts }; repoFiles?: { read: RepoFileRead; liveSecrets: LiveSecretsSource }; deadlineAt?: number }): Promise<CheckSweepCounts & { parity?: ParitySweepCounts; twin?: TwinSweepCounts; repoFiles?: RepoFileSweepCounts }>;
   /**
    * D#598 P1f-5d: one pass of the branch cleanup sweep (a cron of its own, behind its own pending-work marker): removes the private branches of closed or
    * merged paired items whose head still is the recorded one. `github` is the GitHub client opener (apps/web binds it); the signing key is read here. For the cron only.
@@ -580,15 +581,18 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
       const counts = await runSetupRequestCheckSweep({ pool: pools.runnerPool, envSource: input.envSource });
       const deadline = input.deadlineAt !== undefined ? { deadlineAt: input.deadlineAt } : {};
       const parity = input.planeParity ? await sweepPlaneParity({ pool: pools.runnerPool, compute: input.planeParity, ...deadline }) : undefined;
+      // D#845 ON-27d4b: the twins' parity checks and work run beside the plane parity pass, in the time it leaves.
+      const twin = input.twin ? await sweepTwins({ pool: pools.runnerPool, ...input.twin, ...deadline }) : undefined;
       // D#601 MEM-5b: the repo instruction file import runs after the parity pass, in whatever time the tick has left.
       const repoFiles = input.repoFiles ? await sweepRepoInstructionFiles({ pool: pools.runnerPool, ...input.repoFiles, ...deadline }) : undefined;
-      if (!parity && !repoFiles) return counts;
-      const extra = [parity, repoFiles].filter((c): c is NonNullable<typeof c> => c !== undefined);
+      if (!parity && !twin && !repoFiles) return counts;
+      const extra = [parity, twin, repoFiles].filter((c): c is NonNullable<typeof c> => c !== undefined);
       return {
         ...counts,
         listed: counts.listed + extra.reduce((n, c) => n + c.listed, 0),
         nextDueAt: [counts.nextDueAt, ...extra.map((c) => c.nextDueAt)].reduce<number | null>((a, b) => (a === null ? b : b === null ? a : Math.min(a, b)), null),
         ...(parity ? { parity } : {}),
+        ...(twin ? { twin } : {}),
         ...(repoFiles ? { repoFiles } : {}),
       };
     };
