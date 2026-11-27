@@ -89,9 +89,15 @@ async function fastJobsNextDueAt(pool: Pick<TickDeps["pool"], "query">, summary:
   const credits = await readCreditsBreak(pool);
   if (credits.broken) pending.push(CREDITS_JOB);
   // D#845 ON-8f2a: a pushed install whose pull request is not yet opened (the pass failed to reach GitHub, or has not run since the push report marked us).
-  if (await setupInstallPending(pool)) pending.push(INSTALL_JOB);
+  // D#845 Ruling 122: a job that answered `not_due` (or stopped on its budget) this tick carries its own next_due_at to the gate whether or not the probe could see work, so a probe that failed to read, or a
+  // setup that was only leased a moment ago, never lets the gate fall back to the slow backstop: the longest wait is the job's own cadence.
+  const carried = (job: string): boolean => {
+    const result = summary.results.find((r) => r.job === job)?.result;
+    return result === "not_due" || result === "budget";
+  };
+  if (carried(INSTALL_JOB) || (await setupInstallPending(pool))) pending.push(INSTALL_JOB);
   // D#845 ON-13a4: a merged install whose Discussions and team-log issue are not made yet (or a seed failure inside its retry window).
-  if (await setupFinishPending(pool)) pending.push(FINISH_JOB);
+  if (carried(FINISH_JOB) || (await setupFinishPending(pool))) pending.push(FINISH_JOB);
   if (pending.length === 0) return null;
   const { rows } = await pool.query<{ name: string; due: number }>(
     "SELECT name, (EXTRACT(EPOCH FROM next_due_at) * 1000)::float8 AS due FROM reconcile_jobs WHERE name = ANY($1::text[])",

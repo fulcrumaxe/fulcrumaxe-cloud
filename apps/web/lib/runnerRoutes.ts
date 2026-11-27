@@ -11,6 +11,7 @@ import { recordEngineUsage, runnerLimitsFor } from "@fx/worker";
 import { createAppRepoVisibility } from "./github/repoVisibility";
 import { createInstallationAccountReader } from "./github/installationAccount";
 import { getWorker } from "./worker";
+import { installPrNow } from "./onboardingHandoff";
 import { createAppRunPullRequestPort } from "./github/runnerPullRequest";
 import { openInstallationHttp } from "./github/installationHttp";
 import { openForEngineRemoval } from "./github/localOnlyHttp";
@@ -149,6 +150,8 @@ export function runnerDeps(): RunnerCloudDeps {
     installationAccount: (installationAccount ??= createInstallationAccountReader()),
     pullRequests: (pullRequests ??= createAppRunPullRequestPort()),
     setupInstall: (pullRequests ??= createAppRunPullRequestPort()),
+    // D#845 Ruling 122: a `push ok` report opens the install pull request right after it is answered; the reconcile tick is the backstop.
+    afterSetupPush: () => installPrNow(),
     planePush: (planePush ??= createLivePlanePushPort()),
     setupPush: (setupPush ??= createLiveSetupPushPort()),
     planeMerge: (planeMerge ??= livePlaneMerge()),

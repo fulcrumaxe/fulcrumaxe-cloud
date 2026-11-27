@@ -111,8 +111,17 @@ export async function setupProgressRun(deps: RunnerCloudDeps, req: RunnerHttpReq
   });
   // A direct-mode job that lost the race for the default branch is replaced by the same setup in PR mode; when that cannot be done it stays failed for a person's Retry.
   if (result === "ok" && body.state === "failed" && body.failure_code === "direct_raced") await reissueRacedSetup(deps, runner, setupId.toLowerCase(), body.job_id);
-  // D#845 ON-8f2a: the pushed commit is recorded, so the install pull request is due; the reconcile job takes it on the next tick (never in this request, and a lost marker only costs the backstop).
-  if (result === "ok" && body.sub_step === "push" && body.state === "ok") void markWorkPending("reconcile");
+  // D#845 ON-8f2a: the pushed commit is recorded, so the install pull request is due; the reconcile job is the backstop (a lost marker only costs the backstop).
+  if (result === "ok" && body.sub_step === "push" && body.state === "ok") {
+    void markWorkPending("reconcile");
+    // D#845 Ruling 122: the person's next screen waits on this pull request, so it is opened right after this answer, through the same claim and completion; the marker above stays the backstop.
+    try {
+      deps.afterSetupPush?.(setupId.toLowerCase());
+    } catch {
+      // fx-swallow-ok: the hand-off is best effort and the marker above is the backstop; one coded log line, and the recorded report is still answered
+      (deps.log ?? console.warn)(JSON.stringify({ event: "runner.setup_push_handoff_failed", code: "hook_threw" }));
+    }
+  }
   if (result === "ok") return { status: 200, body: SetupProgressReply.parse({ recorded: true }), headers: NO_STORE };
   if (result === "superseded") throw new RunnerHttpError(409, "job_superseded", "a later attempt replaced this job");
   if (result === "not_active") throw new RunnerHttpError(409, "job_not_active", "this job is not running");
