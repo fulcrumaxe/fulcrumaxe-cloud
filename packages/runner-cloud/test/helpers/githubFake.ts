@@ -54,6 +54,8 @@ export interface FakePullRequest {
   author: { login: string; type: "Bot" | "User" };
   /** D#845 ON-20a: merged by a person or by the A10 call (a merged pull request is closed). */
   merged?: boolean;
+  /** D#845 ON-27d3: the labels put on it (`POST /issues/<n>/labels`), by name. */
+  labels?: string[];
   /** Who merged it, as GraphQL names an actor: a bot WITHOUT the `[bot]` REST adds (`fulcrumaxe-runner` for our App), a person by login. Unset on a merged pull request: GraphQL answers null. */
   mergedBy?: { login: string; type: "Bot" | "User" };
 }
@@ -69,6 +71,11 @@ export interface FakeRepo {
   pulls: FakePullRequest[];
   /** D#845 ON-8f2a: commits by id with their parents (only those a test names; every other id is "no such object", as GitHub answers). */
   commits: Map<string, string[]>;
+  /**
+   * D#845 ON-27d3 (A32): the files of a commit's compare against its one parent, by commit id, in the shape GitHub's compare answer gives them (`filename`, `status` and, for a rename or copy, `previous_filename`; `patch` and the
+   * url fields are there too, because the real answer carries them). A commit with no entry here compares as an empty change.
+   */
+  commitFiles: Map<string, Array<{ filename: string; status: string; previous_filename?: string }>>;
   /** D#845 ON-8f2b: the repository's labels by lower-cased name, as GitHub keeps them (names are unique case-insensitively). */
   labels: Map<string, { name: string; color: string; description: string }>;
   /** D#845 ON-13a4: whether Discussions are on, the categories GitHub made when they were turned on (a repository's own, which no App can add), and the Discussions in the order they were made. */
@@ -117,7 +124,7 @@ export class FakeGithub implements GithubClient {
   markReadyForbidden = false;
 
   addRepo(owner: string, name: string, over: Partial<Pick<FakeRepo, "defaultBranch" | "supportsDrafts" | "id" | "discussionsEnabled">> & { categories?: string[] } = {}): FakeRepo {
-    const repo: FakeRepo = { id: over.id ?? 1234567, owner, name, defaultBranch: over.defaultBranch ?? "main", supportsDrafts: over.supportsDrafts ?? true, branches: new Map(), pulls: [], commits: new Map(), labels: new Map(), discussionsEnabled: over.discussionsEnabled ?? true, categories: [], discussions: [], issues: [], nextNumber: 100 };
+    const repo: FakeRepo = { id: over.id ?? 1234567, owner, name, defaultBranch: over.defaultBranch ?? "main", supportsDrafts: over.supportsDrafts ?? true, branches: new Map(), pulls: [], commits: new Map(), commitFiles: new Map(), labels: new Map(), discussionsEnabled: over.discussionsEnabled ?? true, categories: [], discussions: [], issues: [], nextNumber: 100 };
     if (repo.discussionsEnabled || over.categories !== undefined) repo.categories = (over.categories ?? ["Announcements", "General", "Ideas", "Polls", "Q&A", "Show and tell"]).map((n, i) => ({ id: `DIC_kwDOFake${repo.id}_${i}`, name: n }));
     repo.branches.set(repo.defaultBranch, { oid: "a".repeat(40), aheadBy: 0, files: [] });
     this.repos.set(`${owner}/${name}`.toLowerCase(), repo);
@@ -214,10 +221,20 @@ export class FakeGithub implements GithubClient {
       if (!keysAre(req.body, ["sha", "merge_method"]) || (req.body as { merge_method: unknown }).merge_method !== "squash") this.deny("A10 body");
       return { label: "A10", handler: () => this.mergePull(m![1]!, m![2]!, Number(m![3]), String((req.body as { sha: unknown }).sha)) };
     }
+    if (method === "GET" && (m = /^\/repos\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/compare\/([0-9a-f]{40})\.\.\.([0-9a-f]{40})$/.exec(path))) {
+      noQuery([]);
+      if (req.body !== undefined) this.deny("body on GET");
+      return { label: "A32", handler: () => this.compare(m![1]!, m![2]!, m![3]!, m![4]!) };
+    }
     if (method === "POST" && (m = /^\/repos\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/labels$/.exec(path))) {
       noQuery([]);
       if (!keysAre(req.body, ["name", "color", "description"])) this.deny("A26 body");
       return { label: "A26", handler: () => this.createLabel(m![1]!, m![2]!, req.body as { name: string; color: string; description: string }) };
+    }
+    if (method === "POST" && (m = /^\/repos\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/issues\/([1-9]\d*)\/labels$/.exec(path))) {
+      noQuery([]);
+      if (!keysAre(req.body, ["labels"])) this.deny("A31 body");
+      return { label: "A31", handler: () => this.labelPull(m![1]!, m![2]!, Number(m![3]), (req.body as { labels: unknown }).labels) };
     }
     if (method === "GET" && (m = /^\/repos\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/issues$/.exec(path))) {
       noQuery(["labels", "state", "per_page"]);
@@ -230,6 +247,39 @@ export class FakeGithub implements GithubClient {
       return { label: "A29", handler: () => this.createIssue(m![1]!, m![2]!, req.body as { title: string; body: string; labels: string[] }) };
     }
     return this.deny(`${method} ${path}`);
+  }
+
+  /** `GET /compare/<base>...<head>` for a head that is one commit on the base: GitHub's answer for that shape, files with their statuses (a rename carries `previous_filename`), unknown ids 404. */
+  private compare(owner: string, name: string, base: string, head: string): GithubResponse {
+    const repo = this.repoOf(owner, name);
+    if (!repo) return notFound();
+    const parents = repo.commits.get(head);
+    if (parents === undefined || !repo.commits.has(base) && parents[0] !== base) return notFound();
+    if (parents.length !== 1 || parents[0] !== base) throw new StrictFakeError("A32: the fake compares a commit with its one parent only (a diverged compare is not faked)");
+    const files = (repo.commitFiles.get(head) ?? []).map((f, i) => ({
+      sha: i.toString(16).padStart(40, "0"),
+      filename: f.filename,
+      status: f.status,
+      additions: 1,
+      deletions: 0,
+      changes: 1,
+      blob_url: `https://github.com/${owner}/${name}/blob/${head}/${f.filename}`,
+      raw_url: `https://github.com/${owner}/${name}/raw/${head}/${f.filename}`,
+      contents_url: `https://api.github.com/repos/${owner}/${name}/contents/${f.filename}?ref=${head}`,
+      patch: "@@ -0,0 +1 @@\n+x",
+      ...(f.previous_filename === undefined ? {} : { previous_filename: f.previous_filename }),
+    }));
+    return ok({
+      url: `https://api.github.com/repos/${owner}/${name}/compare/${base}...${head}`,
+      status: "ahead",
+      ahead_by: 1,
+      behind_by: 0,
+      total_commits: 1,
+      base_commit: { sha: base, parents: [] },
+      merge_base_commit: { sha: base, parents: [] },
+      commits: [{ sha: head, parents: [{ sha: base }] }],
+      files,
+    });
   }
 
   private listIssues(owner: string, name: string, query: Record<string, string | number>): GithubResponse {
@@ -315,6 +365,17 @@ export class FakeGithub implements GithubClient {
     pr.merged = true;
     pr.mergedBy = { login: FAKE_APP_LOGIN.replace(/\[bot\]$/, ""), type: "Bot" };
     return ok({ sha: "f".repeat(40), merged: true, message: "Pull Request successfully merged" });
+  }
+
+  /** Putting labels on a pull request: a body of label names; GitHub answers the pull request's labels. A number with no pull request is 404, and a label that does not exist is a bug of the caller (the real one would make it with a default colour). */
+  private labelPull(owner: string, name: string, number: number, labels: unknown): GithubResponse {
+    const repo = this.repoOf(owner, name);
+    const pr = repo?.pulls.find((p) => p.number === number);
+    if (!repo || !pr) return notFound();
+    if (!Array.isArray(labels) || labels.length < 1 || !labels.every((l) => typeof l === "string")) throw new StrictFakeError("A31: labels is a list of names");
+    for (const l of labels as string[]) if (!repo.labels.has(l.toLowerCase())) throw new StrictFakeError(`A31: the label ${l} was not made first`);
+    pr.labels = [...new Set([...(pr.labels ?? []), ...(labels as string[])])];
+    return ok(pr.labels.map((n) => ({ name: n })));
   }
 
   private closePull(owner: string, name: string, number: number): GithubResponse {
@@ -462,10 +523,12 @@ export function installationKindClient(fake: FakeGithub, kind: FakeInstallationK
     const rest = repoRoot.test(req.path) ? req.path.replace(repoRoot, "") : null;
     // `merge_gate` (D#845 ON-20a, the install merge): its live path rule is any path under the repository, so here too (the strict fake then answers or refuses by its own table). Its token holds contents write.
     if (kind === "merge_gate") return rest !== null;
-    if (kind === "setup_labels") return req.method === "POST" && rest === "/labels" && req.query === undefined && keysAre(req.body, ["name", "color", "description"]);
+    if (kind === "setup_labels") return req.method === "POST" && req.query === undefined && ((rest === "/labels" && keysAre(req.body, ["name", "color", "description"])) || (rest !== null && /^\/issues\/[1-9]\d*\/labels$/.test(rest) && keysAre(req.body, ["labels"])));
     if (kind === "setup_finish") return (req.method === "POST" && req.path === "/graphql") || (rest === "/issues" && (req.method === "GET" || req.method === "POST"));
     if (req.method === "POST" && req.path === "/graphql") return true;
     if (rest === null) return false;
+    // D#845 ON-27d3 (A32): the one compare of two commit ids, no query (installationHttp's own rule for this kind)
+    if (req.method === "GET" && rest !== null && /^\/compare\/[0-9a-f]{40}\.\.\.[0-9a-f]{40}$/.test(rest) && req.query === undefined && req.body === undefined) return true;
     if (req.method === "GET") return rest === "" || rest === "/pulls";
     if (req.method === "POST") return rest === "/pulls";
     return req.method === "PATCH" && /^\/pulls\/\d+$/.test(rest);

@@ -62,11 +62,11 @@ function client(answer: string) {
 const deliver = (c: PoolClient, p: GithubPullRequestPayload) => applyMappedEvent(c, ctx, mapEvent('pull_request', p, { allowlist: [] }));
 
 describe('the twin publish pull request watch', () => {
-  it('a merged publish pull request goes to the definer with the repository, the number, merged and the head branch; its answer ends the delivery', async () => {
+  it('a merged publish pull request goes to the definer with the repository, the number, merged the head branch and the merged head commit; its answer ends the delivery', async () => {
     const { c, watch, seen } = client('merged');
     expect(await deliver(c, pull({ action: 'closed', merged: true, number: 31 }))).toEqual({ applied: 'twin_publish_pr_closed', outcome: 'merged' });
     expect(watch()).toHaveLength(1);
-    expect(watch()[0]!.values).toEqual([REPO_ID, 31, true, BRANCH]);
+    expect(watch()[0]!.values).toEqual([REPO_ID, 31, true, BRANCH, 'c'.repeat(40)]);
     // nothing else was asked: the delivery is the twin's, not a work item's
     expect(seen).toHaveLength(1);
   });
@@ -74,7 +74,7 @@ describe('the twin publish pull request watch', () => {
   it('a pull request closed unmerged goes to the definer with merged false', async () => {
     const { c, watch } = client('closed');
     expect(await deliver(c, pull({ action: 'closed', merged: false }))).toEqual({ applied: 'twin_publish_pr_closed', outcome: 'closed' });
-    expect(watch()[0]!.values).toEqual([REPO_ID, 12, false, BRANCH]);
+    expect(watch()[0]!.values).toEqual([REPO_ID, 12, false, BRANCH, 'c'.repeat(40)]);
   });
 
   it('a pull request the definer does not know goes on as any other pull request (an unlinked one is skipped)', async () => {

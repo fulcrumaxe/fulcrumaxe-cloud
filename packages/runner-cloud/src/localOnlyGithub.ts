@@ -267,6 +267,7 @@ export const SETUP_INSTALL_DOCUMENTS = Object.freeze({
  * D#845 ON-8f2b (A26): the engine's 11 labels, as the engine's own label bootstrap script creates them (a test reads that script against this table). The install step creates them in the project's
  * repository after the engine's files are pushed, one call each. The call is allowed only with exactly one of these rows as its body, so a runner, a job or a person can never choose a label.
  */
+export const TWIN_SYNC_LABEL: Readonly<{ name: string; color: string; description: string }> = Object.freeze({ name: "fx-twin-sync", color: "5319E7", description: "Changes made on the public repository, brought into this private working copy" });
 export const SETUP_INSTALL_LABELS: readonly Readonly<{ name: string; color: string; description: string }>[] = Object.freeze(
   [
     { name: "code-review-passed", color: "0E8A16", description: "Code review passed — ready for next gate" },
@@ -380,6 +381,10 @@ export const LOCAL_ONLY_ALLOWLIST: readonly LocalOnlyAllowlistEntry[] = Object.f
     { id: "A29", method: "POST", paths: ["/repos/{owner}/{repo}/issues"], query: [], body: '{ title, body ending with the fx-team-log marker, labels: ["team-log"] }', only: "setupFinish" },
     // D#845 ON-20a: the install pull request's file stats, on the same opt-in client. A10 is held on a setupInstall client only when it is pinned to one pull request and one head (`installMerge`).
     { id: "A30", method: "POST", paths: ["/graphql"], query: [], body: "{ query: InstallPullRequest, variables: exactly owner, name, number, optional cursor }", only: "setupInstall" },
+    // D#845 ON-27d3: the twin's sync pull request carries one label, made with A26 (the one extra row, TWIN_SYNC_LABEL) and put on the pull request here.
+    { id: "A31", method: "POST", paths: ["/repos/{owner}/{repo}/issues/{n}/labels"], query: [], body: '{ labels: ["fx-twin-sync"] }', only: "setupInstall" },
+    // D#845 ON-27d3: the verified sync commit's changes against its parent, with a renamed file's old path (GitHub's REST compare, two 40-hex commit ids, no query).
+    { id: "A32", method: "GET", paths: ["/repos/{owner}/{repo}/compare/{range}"], query: [], body: "none", only: "setupInstall" },
   ].map((entry) => Object.freeze(entry) as LocalOnlyAllowlistEntry),
 );
 
@@ -404,6 +409,7 @@ const PLACEHOLDERS: Readonly<Record<string, (segment: string) => boolean>> = {
   "{id}": (s) => DIGITS.test(s),
   "{sha}": (s) => /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(s),
   "{branch}": (s) => NAME.test(s) && s !== "." && s !== "..",
+  "{range}": (s) => /^[0-9a-f]{40}\.\.\.[0-9a-f]{40}$/.test(s),
 };
 
 function decoded(value: string): string {
@@ -565,7 +571,9 @@ function bodyFits(entry: LocalOnlyAllowlistEntry, body: unknown, gate1Attest: bo
     case "A30":
       return documentBodyFits(body, SETUP_INSTALL_DOCUMENTS, SETUP_INSTALL_VARIABLES, "InstallPullRequest");
     case "A26":
-      return isPlainObject(body) && hasExactKeys(body, ["name", "color", "description"]) && SETUP_INSTALL_LABELS.some((row) => row.name === body.name && row.color === body.color && row.description === body.description);
+      return isPlainObject(body) && hasExactKeys(body, ["name", "color", "description"]) && [...SETUP_INSTALL_LABELS, TWIN_SYNC_LABEL].some((row) => row.name === body.name && row.color === body.color && row.description === body.description);
+    case "A31":
+      return isPlainObject(body) && hasExactKeys(body, ["labels"]) && Array.isArray(body.labels) && body.labels.length === 1 && body.labels[0] === TWIN_SYNC_LABEL.name;
     case "A22":
     case "A23":
     case "A24":

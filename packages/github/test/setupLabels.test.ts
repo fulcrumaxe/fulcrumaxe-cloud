@@ -12,6 +12,7 @@ import { strictGithubFetch } from "./helpers/strictGithub.js";
 const TARGET = { repoId: "11111111-1111-4111-8111-111111111111", owner: "acme", name: "widgets" };
 const LABELS = "/repos/acme/widgets/labels";
 const ROW = { name: "spec_ready", color: "0E8A16", description: "Spec is ready" };
+const PR_LABELS = "/repos/acme/widgets/issues/12/labels";
 let pem: string;
 beforeAll(() => {
   pem = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } }).privateKey;
@@ -32,6 +33,7 @@ function setup(opts: { appKind?: string; answer?: (p: Parameters<AccessTokenRequ
     calls.push({ method, url, auth: (init?.headers as Record<string, string> | undefined)?.authorization, body: init?.body as string | undefined });
     if (method === "DELETE" && url.pathname === "/installation/token") return new Response(null, { status: 204 });
     if (method === "POST" && url.pathname === LABELS) return json(201, { id: 1, name: ROW.name });
+    if (method === "POST" && url.pathname === PR_LABELS) return json(200, [{ name: "fx-twin-sync" }]);
     throw new Error(`unexpected fetch ${method} ${url}`);
   }) as unknown as typeof fetch);
   const open = createInstallationHttp({
@@ -128,6 +130,47 @@ describe("setup_labels installation kind", () => {
       await expect(t.open("setup_labels", TARGET)).rejects.toThrow("token_scope_mismatch");
       expect(t.calls.at(-1)).toMatchObject({ method: "DELETE", auth: "Bearer ghs_setup_labels_1" });
     }
+  });
+});
+
+describe("setup_labels installation kind: the twin sync label on a pull request (D#845 ON-27d3)", () => {
+  it("puts exactly the one label on a numbered pull request of its own repository, with the same token, and nothing else of the issues route", async () => {
+    const t = setup();
+    const http = await t.open("setup_labels", TARGET);
+    expect(await http.request({ method: "POST", path: PR_LABELS, body: { labels: ["fx-twin-sync"] } })).toEqual({ status: 200, body: [{ name: "fx-twin-sync" }] });
+    expect(labelCalls(t).map((c) => [c.method, c.url.pathname, c.auth])).toEqual([["POST", PR_LABELS, "Bearer ghs_setup_labels_1"]]);
+  });
+
+  it.each([
+    ["another label", "POST", PR_LABELS, { labels: ["ci:full"] }],
+    ["two labels", "POST", PR_LABELS, { labels: ["fx-twin-sync", "bug"] }],
+    ["an extra key", "POST", PR_LABELS, { labels: ["fx-twin-sync"], x: 1 }],
+    ["no body", "POST", PR_LABELS, undefined],
+    ["a string", "POST", PR_LABELS, { labels: "fx-twin-sync" }],
+    ["PUT", "PUT", PR_LABELS, { labels: ["fx-twin-sync"] }],
+    ["DELETE", "DELETE", PR_LABELS, undefined],
+    ["number zero", "POST", "/repos/acme/widgets/issues/0/labels", { labels: ["fx-twin-sync"] }],
+    ["a leading zero", "POST", "/repos/acme/widgets/issues/012/labels", { labels: ["fx-twin-sync"] }],
+    ["a non-number", "POST", "/repos/acme/widgets/issues/x/labels", { labels: ["fx-twin-sync"] }],
+    ["an eleven-digit number", "POST", "/repos/acme/widgets/issues/12345678901/labels", { labels: ["fx-twin-sync"] }],
+    ["a name under the label", "POST", `${PR_LABELS}/fx-twin-sync`, { labels: ["fx-twin-sync"] }],
+    ["another repository", "POST", "/repos/acme/other/issues/12/labels", { labels: ["fx-twin-sync"] }],
+    ["the comments route", "POST", "/repos/acme/widgets/issues/12/comments", { labels: ["fx-twin-sync"] }],
+  ] as const)("refuses %s (path_refused, nothing sent)", async (_name, method, path, body) => {
+    const t = setup();
+    const http = await t.open("setup_labels", TARGET);
+    await expect(http.request({ method, path, ...(body === undefined ? {} : { body }) })).rejects.toThrow(/path_refused|method_refused/);
+    await expect(http.request({ method: "POST", path: PR_LABELS, query: { x: "1" }, body: { labels: ["fx-twin-sync"] } })).rejects.toThrow("path_refused");
+    expect(labelCalls(t)).toEqual([]);
+  });
+
+  it("no other kind can put a label on a pull request: the pull request kind and the read-only kinds are refused", async () => {
+    const t = setup();
+    for (const kind of ["runner_pr", "read", "repo_map", "plane_parity"] as const) {
+      const http = await t.open(kind, TARGET);
+      await expect(http.request({ method: "POST", path: PR_LABELS, body: { labels: ["fx-twin-sync"] } }), kind).rejects.toThrow(/path_refused|method_refused/);
+    }
+    expect(labelCalls(t)).toEqual([]);
   });
 });
 

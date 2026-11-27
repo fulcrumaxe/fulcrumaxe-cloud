@@ -106,6 +106,8 @@ export const MachineJob = z
       public: strict({ owner: GH_OWNER, name: GH_NAME, gh_id: safeInt.min(1), tip: z.string().regex(SHA40_PATTERN) }),
       private: strict({ owner: GH_OWNER, name: GH_NAME, gh_id: safeInt.min(1), base: z.string().regex(SHA40_PATTERN), head: z.string().regex(SHA40_PATTERN) }),
       branch: z.string().regex(/^fx\/publish-[0-9a-f]{12}$/),
+      // D#845 ON-27d3: set when the publish pull request is still open. The job then pushes to THAT pull request's branch (named from its first head, not this one) as D#598's compare-and-swap update of the head the cloud recorded.
+      replaces_head: z.string().regex(SHA40_PATTERN).optional(),
       private_set: TwinPrivateSet,
     })),
     // D#845 ON-27d2: the twin's sync, the public repository's change coming in. Homed on the twin's private repository and setup like the others; it READS the public repository anonymously and pushes ONE commit (the listed
@@ -127,7 +129,7 @@ export const MachineJob = z
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a twin seed targets the private twin only, through its setup", path: ["args"] });
     }
     // A publish is homed on the twin's private repository and setup; it pushes to the other repository, the public one, to a branch named from the private head. One that names the public repository as its home is refused here and at issue.
-    if (j.kind === "twin_publish" && (j.args.private.gh_id !== j.repo_gh_id || j.args.public.gh_id === j.repo_gh_id || j.setup_id === undefined || j.requires_engine !== "any" || j.args.private.base === j.args.private.head || j.args.branch !== `fx/publish-${j.args.private.head.slice(0, 12)}`)) {
+    if (j.kind === "twin_publish" && (j.args.private.gh_id !== j.repo_gh_id || j.args.public.gh_id === j.repo_gh_id || j.setup_id === undefined || j.requires_engine !== "any" || j.args.private.base === j.args.private.head || (j.args.replaces_head === undefined && j.args.branch !== `fx/publish-${j.args.private.head.slice(0, 12)}`))) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a twin publish is homed on the private twin, through its setup, and goes from its base to its head", path: ["args"] });
     }
     // A sync is homed on the twin and its setup, reads the other repository (the public one) and goes to a branch named from the public tip; its paths are listed once each.

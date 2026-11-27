@@ -402,3 +402,78 @@ describe("what the build advertises", () => {
     expect(RUNNER_BUILD_CAPABILITIES as string[]).not.toContain("twin_v1");
   });
 });
+
+describe("an open publish pull request is updated in place (D#845 ON-27d3)", () => {
+  /** The first publish, then more private work the mirror also holds: the job for the update carries the first push's commit as replaces_head, the SAME branch and the SAME base, and the new head. */
+  async function opened() {
+    const w = await world();
+    const first = await run(w);
+    const branch = `fx/publish-${w.head.slice(0, 12)}`;
+    const pushed = git(w.pub, "rev-parse", branch);
+    expect(first.at(-1)).toEqual({ sub_step: "pr_open", state: "ok" });
+    mkdirSync(path.join(w.fx.repo, "src"), { recursive: true });
+    writeFileSync(path.join(w.fx.repo, "src/more.ts"), "export const more = 3;\n");
+    writeFileSync(path.join(w.fx.repo, "docs-private-note.md"), "ok\n");
+    git(w.fx.repo, "add", "-A");
+    git(w.fx.repo, "commit", "-q", "-m", "more private work");
+    const head2 = git(w.fx.repo, "rev-parse", "HEAD");
+    git(w.fx.repo, "push", "-q", w.mirror, "HEAD:refs/heads/more");
+    const update = (over: Record<string, unknown> = {}) => w.job({ branch, replaces_head: pushed, private: { owner: "acme", name: "widgets-private", gh_id: 2, base: w.base, head: head2 }, ...over });
+    return { w, branch, pushed, head2, update };
+  }
+
+  it("pushes the new commit over the same branch (a compare-and-swap on the recorded head), opens no second pull request, and reports the new head", async () => {
+    const { w, branch, pushed, update } = await opened();
+    w.opened.length = 0;
+    w.asked.length = 0;
+    const steps = await run(w, update());
+    const commit = git(w.pub, "rev-parse", branch);
+    expect(commit).not.toBe(pushed);
+    expect(steps).toEqual([
+      { sub_step: "twin_fetch", state: "started" },
+      { sub_step: "twin_fetch", state: "ok" },
+      { sub_step: "push", state: "started" },
+      { sub_step: "push", state: "ok", head_sha: commit },
+      { sub_step: "pr_open", state: "ok" },
+    ]);
+    // one commit on the public tip with both changes, still none of the private set; no other branch
+    expect(git(w.pub, "rev-list", "--parents", "-n", "1", branch)).toBe(`${commit} ${w.pubTip}`);
+    const tree = git(w.pub, "ls-tree", "-r", "--name-only", branch).split("\n");
+    expect(tree).toEqual(expect.arrayContaining(["src/new.ts", "src/more.ts"]));
+    for (const secret of [".autonomous-team/notes.md", "docs/plan/roadmap.md", ".github/workflows/engine.yml"]) expect(tree, secret).not.toContain(secret);
+    expect(refs(w.pub)).toEqual([`refs/heads/${branch} ${commit}`, `refs/heads/main ${w.pubTip}`].sort());
+    expect(w.opened).toEqual([]);
+    expect(w.asked).toHaveLength(1);
+    expect(w.revoked.at(-1)).toBe(TOKEN);
+    expect(readdirSync(w.workRoot)).toEqual([]);
+  }, 60_000);
+
+  it("a branch someone else pushed to is public_branch_moved: nothing is pushed over it and the credential is revoked", async () => {
+    const { w, branch, update } = await opened();
+    git(w.fx.repo, "push", "-q", w.pub, `${w.base}:refs/heads/${branch}`, "--force");
+    const before = refs(w.pub);
+    const steps = await run(w, update());
+    expect(steps.at(-1)).toMatchObject({ sub_step: "push", state: "failed", failure_code: "public_branch_moved" });
+    expect(refs(w.pub)).toEqual(before);
+    expect(w.revoked.length).toBeGreaterThanOrEqual(2);
+  }, 60_000);
+
+  it("a branch that is gone is public_branch_moved too, and an update to a branch that is not the recorded one pushes nothing", async () => {
+    const { w, branch, update } = await opened();
+    git(w.pub, "update-ref", "-d", `refs/heads/${branch}`);
+    const before = refs(w.pub);
+    expect((await run(w, update())).at(-1)).toMatchObject({ sub_step: "push", state: "failed", failure_code: "public_branch_moved" });
+    expect(refs(w.pub)).toEqual(before);
+    expect(w.opened).toHaveLength(1);
+  }, 60_000);
+
+  it("the schema takes replaces_head only for a publish job and holds an update to the same rules: a plain publish still needs its branch named from its head", async () => {
+    const { w, branch, pushed, update } = await opened();
+    expect(MachineJobSchema.safeParse(update()).success).toBe(true);
+    expect(MachineJobSchema.safeParse(update({ replaces_head: "main" })).success).toBe(false);
+    expect(MachineJobSchema.safeParse(update({ branch: "feature/x" })).success).toBe(false);
+    expect(MachineJobSchema.safeParse(w.job({ branch })).success).toBe(true);
+    expect(MachineJobSchema.safeParse(w.job({ branch: "fx/publish-000000000000" })).success).toBe(false);
+    expect(MachineJobSchema.safeParse(w.job({ branch: "fx/publish-000000000000", replaces_head: pushed })).success).toBe(true);
+  }, 60_000);
+});

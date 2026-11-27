@@ -31,7 +31,7 @@ export function lazyFullCiRepos(env: NodeJS.ProcessEnv): () => ReadonlySet<strin
   };
 }
 
-export function createLivePlanePushPort(env: NodeJS.ProcessEnv = process.env): PlanePushHostedPort & Pick<HostedPlanePush, "openPullRequest" | "ensureFullCiLabel" | "findOpenPullRequest" | "branchHead" | "pullRequestState" | "pullRequestBase" | "closeRefusedPullRequest"> {
+export function createLivePlanePushPort(env: NodeJS.ProcessEnv = process.env): PlanePushHostedPort & Pick<HostedPlanePush, "openPullRequest" | "ensureFullCiLabel" | "findOpenPullRequest" | "commitAuthors" | "branchHead" | "pullRequestState" | "pullRequestBase" | "closeRefusedPullRequest"> {
   const api = createPlanePushApi({
     appCredentials: loadAppCredentials(env),
     requester: buildAccessTokenRequester({ resolveUpstream: (host, lookupFn) => resolveChecked(host, lookupFn), forwardPinned: nodeHttpsPinnedRequester }),
@@ -56,6 +56,7 @@ export function createLivePlanePushPort(env: NodeJS.ProcessEnv = process.env): P
     verifyPushed: (input) => guard(() => hosted.verifyPushed(input)),
     verifyPullRequest: (input) => guard(() => hosted.verifyPullRequest(input)),
     findOpenPullRequest: (input) => guard(() => hosted.findOpenPullRequest(input)),
+    commitAuthors: (input) => guard(() => hosted.commitAuthors(input)),
     pullRequestState: (input) => guard(() => hosted.pullRequestState(input)),
     pullRequestBase: (input) => guard(() => hosted.pullRequestBase(input)),
     closeRefusedPullRequest: (input) => guard(() => hosted.closeRefusedPullRequest(input)),

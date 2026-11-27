@@ -18,7 +18,7 @@ import { pinnedMergeGateBody, pinnedMergeQueueReadBody } from "./mergeGateGraphq
  *                  repository's REST paths. Token: metadata:read, contents:read (GraphQL refs need it), pull_requests:write,
  *                  one repository. Because contents:read could otherwise reach file contents, this kind has its own exact list:
  *                  `POST /graphql`, `GET` the repository, `GET` and `POST` its `/pulls`, and `PATCH /pulls/<digits>`; every other
- *                  method and path is `path_refused`. Which GraphQL documents and bodies are sent is `localOnlyGithub`'s job
+ *                  method and path is `path_refused` (D#845 ON-27d3 adds one read: `GET compare/<40 hex>...<40 hex>`, no query). Which GraphQL documents and bodies are sent is `localOnlyGithub`'s job
  *                  (runner-cloud's `createRunPullRequestPort` applies it itself), since this package cannot see them.
  *
  *   - `repo_map`   D#600 CX-3a: the repository's file tree at one commit, for the prompt's repository map. Token: metadata:read and
@@ -168,6 +168,12 @@ export function mergeGateCompareAllowed(method: string, path: string, query: Rea
   return keys.length === 0 || (keys.length === 1 && keys[0] === "per_page" && query!["per_page"] === "1");
 }
 
+/** D#845 ON-27d3 (A32): the one compare a `runner_pr` client may read, `compare/<40 hex>...<40 hex>` with no query. The token already holds contents:read, so it reaches nothing the token could not. */
+const RUNNER_PR_COMPARE_RE = /^compare\/[0-9a-f]{40}\.\.\.[0-9a-f]{40}$/;
+export function runnerPrCompareAllowed(method: string, path: string, query: Readonly<Record<string, string>> | undefined, body: unknown, prefix: string): boolean {
+  return method === "GET" && body === undefined && (query === undefined || Object.keys(query).length === 0) && path.startsWith(prefix) && RUNNER_PR_COMPARE_RE.test(path.slice(prefix.length));
+}
+
 /** The only REST calls a `runner_pr` client may make (the allowlist A2 to A5 of runner-cloud's `localOnlyGithub`, at path level). */
 function runnerPrAllowed(method: string, path: string, prefix: string): boolean {
   const repoRoot = prefix.slice(0, -1);
@@ -298,12 +304,12 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
         const pinnedBody = (kind === "merge_gate" || kind === "read") && req.method === "POST" && req.path === GRAPHQL_PATH && req.query === undefined ? (kind === "merge_gate" ? pinnedMergeGateBody : pinnedMergeQueueReadBody)(req.body, { owner: target.owner, name: target.name }) : undefined;
         const pinnedGate = pinnedBody !== undefined;
         const allowed = graphql || pinnedGate || (kind === "revert_pr" && req.method === "POST" && req.path === GRAPHQL_PATH) || (req.method === "GET" && req.path === repoRoot) || (req.path.startsWith(prefix) && PATH_RE.test(req.path));
-        if (!allowed || (req.path.includes("..") && !(kind === "merge_gate" && mergeGateCompareAllowed(req.method, req.path, req.query, req.body, prefix)))) throw new InstallationHttpError("path_refused");
+        if (!allowed || (req.path.includes("..") && !((kind === "merge_gate" && mergeGateCompareAllowed(req.method, req.path, req.query, req.body, prefix)) || (kind === "runner_pr" && runnerPrCompareAllowed(req.method, req.path, req.query, req.body, prefix))))) throw new InstallationHttpError("path_refused");
         // `plane_parity` holds contents:read, so it gets its own EXACT list (no compare, no contents, no other ref).
         if (kind === "plane_parity" && !planeParityAllowed(req.method, req.path, req.query, prefix)) throw new InstallationHttpError("path_refused");
         // `runner_pr` holds contents:read, so it gets its own EXACT list rather than the prefix rule above (CWE-284): a caller that
         // names this kind must not be able to read file contents, patches or commits. Everything else is refused here, PUT included.
-        if (kind === "runner_pr" && !(graphql || runnerPrAllowed(req.method, req.path, prefix))) throw new InstallationHttpError("path_refused");
+        if (kind === "runner_pr" && !(graphql || runnerPrAllowed(req.method, req.path, prefix) || runnerPrCompareAllowed(req.method, req.path, req.query, req.body, prefix))) throw new InstallationHttpError("path_refused");
         // `setup_finish` holds issues and discussions write, so it gets an exact list too: `POST /graphql`, `GET` and `POST` of the repository's issues. Nothing else, PUT and PATCH included.
         if (kind === "setup_finish" && !(graphql || setupFinishAllowed(req.method, req.path, prefix))) throw new InstallationHttpError("path_refused");
         // `setup_labels` holds issues:write, so it gets the narrowest list there is: create a label, with exactly the three fields of one label row.
@@ -312,7 +318,9 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
           const create =
             req.method === "POST" && req.path === `${prefix}labels` && req.query === undefined && isRecord(b) && Object.keys(b).sort().join() === "color,description,name" &&
             typeof b["name"] === "string" && typeof b["color"] === "string" && typeof b["description"] === "string";
-          if (!create) throw new InstallationHttpError("path_refused");
+          // D#845 ON-27d3: and the one label the twin's sync pull request carries, put on a pull request of this repository.
+          const label = req.method === "POST" && req.path.startsWith(`${prefix}issues/`) && req.path.endsWith("/labels") && /^[1-9][0-9]{0,9}$/.test(req.path.slice(`${prefix}issues/`.length, -"/labels".length)) && req.query === undefined && isRecord(b) && Object.keys(b).join() === "labels" && Array.isArray(b["labels"]) && b["labels"].length === 1 && b["labels"][0] === "fx-twin-sync";
+          if (!create && !label) throw new InstallationHttpError("path_refused");
         }
         // `repo_map` holds contents:read, so it too gets an exact list (no `contents`, commits, archives or `..`).
         if (kind === "repo_map" && !repoMapAllowed(req.method, req.path, prefix)) throw new InstallationHttpError("path_refused");

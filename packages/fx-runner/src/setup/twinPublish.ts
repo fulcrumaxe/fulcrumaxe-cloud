@@ -170,10 +170,12 @@ export function createTwinPublishHandler(deps: TwinPublishDeps): MachineJobHandl
         {
           repoDir: work, privateBase: prv.base, privateHead: prv.head, privateDefaultTip: prv.head, own: { owner: prv.owner, name: prv.name }, defaultBranch: "main", branch: job.args.branch,
           title: text.title, body: text.body, identity: TWIN_PUBLISH_IDENTITY, commitTime: Math.floor(now().getTime() / 1000), mode: "export",
+          // An open publish pull request is updated in place: the push is D#598's compare-and-swap on the head the cloud recorded, and no second pull request is opened.
+          ...(job.args.replaces_head === undefined ? {} : { updateOf: job.args.replaces_head }),
         },
         { loadPairing: async () => pairing, loadOwn: async () => ({ owner: prv.owner, name: prv.name }), api, transport },
       );
-      if (result.plane !== "paired") throw new Stop("push", "bad_input", "plane");
+      if (result.plane !== (job.args.replaces_head === undefined ? "paired" : "updated")) throw new Stop("push", "bad_input", "plane");
       await reporter.report({ sub_step: "push", state: "ok", head_sha: result.commit });
       at = "pr_open";
       await reporter.report({ sub_step: "pr_open", state: "ok" });

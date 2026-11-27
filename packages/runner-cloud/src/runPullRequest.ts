@@ -2,7 +2,7 @@ import { COPY } from "@fulcrumaxe/runner-protocol";
 import { safeChildTitle } from "@fx/core/src/work-items/childTitle.js";
 import { cleanWorkItemTitle } from "@fx/core/src/work-items/title.js";
 import type { TenantQueryable } from "./acceptanceScope.js";
-import { LocalOnlyGithubError, SETUP_INSTALL_LABELS, TEAM_LOG_LABEL, localOnlyGithub, type GithubClient, type GithubGraphqlOperation, type GithubResponse, type InstallMergePin, type LocalOnlyGithub } from "./localOnlyGithub.js";
+import { LocalOnlyGithubError, SETUP_INSTALL_LABELS, TEAM_LOG_LABEL, TWIN_SYNC_LABEL, localOnlyGithub, type GithubClient, type GithubGraphqlOperation, type GithubResponse, type InstallMergePin, type LocalOnlyGithub } from "./localOnlyGithub.js";
 
 /**
  * D#6 R2b-3e (C21 section 5, C22 section 6): the GitHub port the `done` route will use for a `runner_local` repo. There is no
@@ -119,6 +119,16 @@ export interface PullRequestText {
   body: string;
 }
 
+/**
+ * One commit's changes against its base (D#845 ON-27d3, A32). `path` is the file's path after the change; `previousPath` is the path before it for a rename or copy (GitHub's `previous_filename`) and null for any other change.
+ * `status` is GitHub's own string (`added`, `removed`, `modified`, `renamed`, `copied`, `changed`, `unchanged`), verbatim: the port does not classify. `complete` is true only when the answer holds exactly one commit and fewer
+ * files than GitHub's cap of 300, so a list that may have been cut short is never read as the whole change.
+ */
+export interface CommitChanges {
+  files: Array<{ path: string; previousPath: string | null; status: string }>;
+  complete: boolean;
+}
+
 /** The port the install step uses: the run port plus the one read of a commit's parents (A25, a client of its own that no other call shares). */
 export interface SetupInstallPort extends RunPullRequestPort {
   /** The parent commit ids of the commit `sha` in the repository, or null when GitHub has no commit of that id. */
@@ -127,6 +137,10 @@ export interface SetupInstallPort extends RunPullRequestPort {
   ensureLabels(input: { repo: PullRequestRepo }): Promise<void>;
   /** D#845 ON-20a (A30): the install pull request as GitHub shows it now (state, head commit, per-file line counts), or null when there is none of that number. The install merge route is its only caller. */
   installPullRequest(input: { repo: PullRequestRepo; number: number }): Promise<InstallPullRequest | null>;
+  /** D#845 ON-27d3 (A32): the changes of commit `head` against `base` (REST compare, `base...head`; both 40 hex), with a renamed file's old path. The twin sync's scope check is its caller. */
+  commitChanges(input: { repo: PullRequestRepo; base: string; head: string }): Promise<CommitChanges>;
+  /** D#845 ON-27d3 (A26, A31): makes the twin sync label in the repository (one that exists counts as made) and puts it on pull request `number`, through the `setup_labels` client. */
+  labelTwinSync(input: { repo: PullRequestRepo; number: number }): Promise<void>;
   /**
    * D#845 ON-20a (A10): squash-merges pull request `number` at head `sha`, on a client pinned to exactly that number and sha (any other call is refused before it is sent). `merged`; `changed` when GitHub says
    * the head moved (409); `blocked` when it will not merge yet (405: a required check or review, or a conflict). The install merge route is its ONLY caller: the install step, the watch and the reconcile never merge.
@@ -206,6 +220,9 @@ export const MAX_FILE_PAGES = 30;
 export const VISIBILITY_WAITS_MS: readonly number[] = [300, 600, 1200];
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const OID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+const HEX40 = /^[0-9a-f]{40}$/;
+/** The most files GitHub lists in one compare answer. */
+const COMPARE_FILES_CAP = 300;
 
 /** The work item's title as a pull request title: whitespace and control characters collapsed, at most 256 characters (never half a surrogate pair), or the fixed fallback. */
 export function pullRequestTitle(workItemTitle: string | null): string {
@@ -481,6 +498,36 @@ export function createRunPullRequestPort(deps: {
       const parents = need(isObject(object.parents) && object.parents);
       if (!isCount(parents.totalCount) || !Array.isArray(parents.nodes) || parents.nodes.length !== parents.totalCount || parents.totalCount > 5) return malformed();
       return (parents.nodes as unknown[]).map((n) => (isObject(n) && typeof n.oid === "string" && OID.test(n.oid) ? n.oid : malformed()));
+    },
+
+    async commitChanges({ repo, base, head }) {
+      if (!HEX40.test(base) || !HEX40.test(head)) return malformed();
+      const gh = await client(repo, { setupInstall: true });
+      const res = await guarded(() => gh.request({ method: "GET", path: `${repoPath(repo)}/compare/${base}...${head}` }));
+      checkStatus(res, [200]);
+      const body = res.body;
+      if (!isObject(body) || !isCount(body.total_commits) || !Array.isArray(body.files)) return malformed();
+      const files = (body.files as unknown[]).map((f) => {
+        if (!isObject(f) || typeof f.filename !== "string" || f.filename.length === 0 || typeof f.status !== "string") return malformed();
+        const prev = f.previous_filename;
+        if (prev !== undefined && (typeof prev !== "string" || prev.length === 0)) return malformed();
+        return { path: f.filename, previousPath: prev ?? null, status: f.status };
+      });
+      // GitHub lists at most 300 files of a compare; a list that long may be a cut one. More than one commit is not the one verified commit on its parent.
+      return { files, complete: body.total_commits === 1 && files.length < COMPARE_FILES_CAP };
+    },
+
+    async labelTwinSync({ repo, number }) {
+      if (!isCount(number) || number < 1) return malformed();
+      const gh = await client(repo, { setupInstall: true, purpose: "setup_labels" });
+      try {
+        const made = await guarded(() => gh.request({ method: "POST", path: `${repoPath(repo)}/labels`, body: { name: TWIN_SYNC_LABEL.name, color: TWIN_SYNC_LABEL.color, description: TWIN_SYNC_LABEL.description } }));
+        if (!(made.status === 422 && isLabelExists(made.body))) checkStatus(made, [201]);
+        checkStatus(await guarded(() => gh.request({ method: "POST", path: `${repoPath(repo)}/issues/${number}/labels`, body: { labels: [TWIN_SYNC_LABEL.name] } })), [200]);
+      } finally {
+        // The `setup_labels` token holds an issues write: it is revoked as soon as the call ends, whatever its answer.
+        await gh.close?.();
+      }
     },
 
     async ensureLabels({ repo }) {

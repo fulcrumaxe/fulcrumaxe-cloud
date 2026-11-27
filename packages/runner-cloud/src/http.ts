@@ -244,6 +244,8 @@ export interface PlanePushHostedPort {
   verifyPushed(input: { accountId: string; codeRepo: string; branch: string; headSha: string; tipSha: string }): Promise<boolean>;
   /** D#845 ON-27c2: the one open pull request for exactly `headSha` on `branch` in `codeRepo` itself against `main`, or null. Absent from an older port: a twin publish cannot be checked, and stays where it is. */
   findOpenPullRequest?(input: { accountId: string; codeRepo: string; branch: string; headSha: string }): Promise<{ number: number; url: string } | null>;
+  /** D#845 ON-27d3: the distinct logins of the authors of the public commits from `base` (exclusive) to `head`, or null when GitHub has no such comparison. Absent from an older port: the sync pull request lists none. */
+  commitAuthors?(input: { accountId: string; codeRepo: string; base: string; head: string }): Promise<string[] | null>;
   /** A branch head on the public repository (a token minted and revoked per read), or null when the branch does not exist. Absent from an older port: a conflict round then cannot be judged and its republish is refused. */
   branchHead?(input: { accountId: string; codeRepo: string; branch: string }): Promise<string | null>;
   /** The pull request's address if it is OPEN with head ref `branch` in `codeRepo` itself, base `main` and an address in `codeRepo`; otherwise null. */
