@@ -53209,6 +53209,181 @@
                               }
                             ]
                           },
+                          "machine_name": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "setup": {
+                            "type": "object",
+                            "properties": {
+                              "status": {
+                                "type": "string",
+                                "enum": [
+                                  "none",
+                                  "open",
+                                  "done"
+                                ]
+                              },
+                              "phase": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "sub_step": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "state": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "enum": [
+                                      "started",
+                                      "ok",
+                                      "failed"
+                                    ]
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              },
+                              "failure_code": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              }
+                            },
+                            "required": [
+                              "status",
+                              "phase",
+                              "sub_step",
+                              "state",
+                              "failure_code"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "session": {
+                            "type": "object",
+                            "properties": {
+                              "state": {
+                                "type": "string",
+                                "enum": [
+                                  "never",
+                                  "starting",
+                                  "running",
+                                  "stale",
+                                  "stopped",
+                                  "halted",
+                                  "runner_removed"
+                                ]
+                              },
+                              "last_start_mode": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "enum": [
+                                      "created",
+                                      "resumed",
+                                      "fresh"
+                                    ]
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              },
+                              "last_start_at": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "stopped_reason": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "enum": [
+                                      "person",
+                                      "halt",
+                                      "move",
+                                      "remove",
+                                      "operate_off",
+                                      "plan"
+                                    ]
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              },
+                              "state_at": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              }
+                            },
+                            "required": [
+                              "state",
+                              "last_start_mode",
+                              "last_start_at",
+                              "stopped_reason",
+                              "state_at"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "quota": {
+                            "type": "object",
+                            "properties": {
+                              "state": {
+                                "type": "string",
+                                "enum": [
+                                  "ok",
+                                  "session_full",
+                                  "repo_full"
+                                ]
+                              },
+                              "session_used": {
+                                "type": "integer",
+                                "minimum": -9007199254740991,
+                                "maximum": 9007199254740991
+                              },
+                              "session_limit": {
+                                "type": "integer",
+                                "minimum": -9007199254740991,
+                                "maximum": 9007199254740991
+                              },
+                              "repo_used": {
+                                "type": "integer",
+                                "minimum": -9007199254740991,
+                                "maximum": 9007199254740991
+                              },
+                              "repo_limit": {
+                                "type": "integer",
+                                "minimum": -9007199254740991,
+                                "maximum": 9007199254740991
+                              },
+                              "resets_at": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "state",
+                              "session_used",
+                              "session_limit",
+                              "repo_used",
+                              "repo_limit",
+                              "resets_at"
+                            ],
+                            "additionalProperties": false
+                          },
                           "engine_update": {
                             "anyOf": [
                               {
@@ -53333,6 +53508,10 @@
                           "halted_by",
                           "halt_epoch",
                           "stop_failed",
+                          "machine_name",
+                          "setup",
+                          "session",
+                          "quota",
                           "engine_update"
                         ],
                         "additionalProperties": false

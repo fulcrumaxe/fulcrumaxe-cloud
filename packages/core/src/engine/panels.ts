@@ -3,6 +3,7 @@ import { round } from '@fx/stats';
 import type { EngineRepoFreshness } from '@fx/db/src/engineBridge.js';
 import { haltPending } from '@fx/db/src/engineHalt.js';
 import { readEngineAgentStats, type EngineAgentStats } from './read.js';
+import { readRepoSessionFacts, type RepoSessionFacts } from './sessionFacts.js';
 import { SANDBOX_UP_SQL, SESSION_JOB_LATERAL, jobFactOf, needsPlanRead, planHasEnded, stopFailedOf, type StopFacts, type StopFailed } from './stopFailed.js';
 
 /**
@@ -166,6 +167,11 @@ export interface RepoRow {
   halt_epoch: number;
   /** A stop that did not finish while the engine's sandbox is still up (ON-13c4a), derived from the repo's newest session job; null otherwise. Never stored. */
   stop_failed: StopFailed | null;
+  /** The placed machine's name (or the newest session's runner when the repo is not placed), the setup, the session and the day's event quota (ON-14b). Derived on read, never stored. */
+  machine_name: RepoSessionFacts['machine_name'];
+  setup: RepoSessionFacts['setup'];
+  session: RepoSessionFacts['session'];
+  quota: RepoSessionFacts['quota'];
 }
 
 /** Every ticked repo of the account with the runner that serves it and its liveness. The newest session names the runner; liveness uses the newest word from any session. */
@@ -204,6 +210,13 @@ export async function readEngineRepos(client: PoolClient, accountId?: string): P
   const planEnded = planFor < 0 ? false : await planHasEnded(client, rows[planFor]!.account_id as string);
   const now = new Date();
   const seen = accountId === undefined ? new Map<string, Date>() : await readRepoWakeSeen(client, accountId, rows.map((r) => r.repo_id as string), now);
+  const liveness = rows.map((r) => {
+    const dbAge = r.heard === null ? null : Math.round(r.heard);
+    const seenAt = seen.get(r.repo_id as string) ?? null;
+    return livenessOf({ sessionCount: r.sessions, revoked: r.revoked === true, heardAgeS: heardAgeWithSeen(dbAge, seenAt, now) });
+  });
+  const runnerNames = rows.map((r) => (r.runner_id === null ? null : ((r.runner_set_name ?? `Unnamed runner (${r.registrant})`) as string)));
+  const sessionFacts = await readRepoSessionFacts(client, rows.map((r, i) => ({ accountId: r.account_id as string, repoId: r.repo_id as string, liveness: liveness[i]!, halted: r.halted === true, runnerName: runnerNames[i]! })), UNNAMED_MEMBER);
   return rows.map((r, i) => {
     const seenAt = seen.get(r.repo_id as string) ?? null;
     const dbAge = r.heard === null ? null : Math.round(r.heard);
@@ -218,7 +231,7 @@ export async function readEngineRepos(client: PoolClient, accountId?: string): P
     session_id: r.session_id,
     last_event_at: iso(r.last_event_at),
     last_heard_at: iso(heardAt),
-    liveness: livenessOf({ sessionCount: r.sessions, revoked: r.revoked === true, heardAgeS: heardAge }),
+    liveness: liveness[i]!,
     watch_enabled: r.watch_enabled ?? false,
     operate_enabled: r.operate_enabled ?? false,
     halted: r.halted === true,
@@ -227,6 +240,10 @@ export async function readEngineRepos(client: PoolClient, accountId?: string): P
     halted_by: r.halted_by_id === null || r.halted_by_id === undefined ? null : { id: r.halted_by_id, display_name: r.halted_by_name },
     halt_epoch: Number(r.halt_epoch),
     stop_failed: stopFailedOf(facts[i]!, planEnded),
+    machine_name: sessionFacts[i]!.machine_name,
+    setup: sessionFacts[i]!.setup,
+    session: sessionFacts[i]!.session,
+    quota: sessionFacts[i]!.quota,
     };
   });
 }

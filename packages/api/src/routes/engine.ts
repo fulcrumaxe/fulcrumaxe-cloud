@@ -66,6 +66,14 @@ const repoItem = z.object({
   liveness: z.enum(["live", "stale", "runner_removed", "never"]), watch_enabled: z.boolean(), operate_enabled: z.boolean(), halted: z.boolean(), halt_pending: z.boolean(),
   halted_at: nstr, halted_by: z.object({ id: z.string(), display_name: z.string() }).nullable(), halt_epoch: z.number().int(),
   stop_failed: z.object({ reason: z.enum(["person", "halt", "move", "remove", "operate_off", "plan"]).nullable(), code: nstr, at: z.string() }).nullable(),
+  machine_name: nstr,
+  setup: z.object({ status: z.enum(["none", "open", "done"]), phase: nstr, sub_step: nstr, state: z.enum(["started", "ok", "failed"]).nullable(), failure_code: nstr }),
+  session: z.object({
+    state: z.enum(["never", "starting", "running", "stale", "stopped", "halted", "runner_removed"]),
+    last_start_mode: z.enum(["created", "resumed", "fresh"]).nullable(), last_start_at: nstr,
+    stopped_reason: z.enum(["person", "halt", "move", "remove", "operate_off", "plan"]).nullable(), state_at: nstr,
+  }),
+  quota: z.object({ state: z.enum(["ok", "session_full", "repo_full"]), session_used: z.number().int(), session_limit: z.number().int(), repo_used: z.number().int(), repo_limit: z.number().int(), resets_at: z.string() }),
   engine_update: z.object({
     behind: z.object({ from: z.string(), to: z.string() }).nullable(),
     update: z.object({ from_version: z.string(), to_version: z.string(), phase: z.enum(["push", "pr", "await_merge", "restart", "done", "failed"]), sub_step: nstr, state: z.enum(["started", "ok", "failed", "skipped"]), failure_code: nstr, pr: nnum }).nullable(),
