@@ -6010,6 +6010,29 @@ export interface Operations {
           code: string | null;
           at: string;
         }) | (null);
+        machine_name: string | null;
+        setup: {
+          status: "none" | "open" | "done";
+          phase: string | null;
+          sub_step: string | null;
+          state: ("started" | "ok" | "failed") | (null);
+          failure_code: string | null;
+        };
+        session: {
+          state: "never" | "starting" | "running" | "stale" | "stopped" | "halted" | "runner_removed";
+          last_start_mode: ("created" | "resumed" | "fresh") | (null);
+          last_start_at: string | null;
+          stopped_reason: ("person" | "halt" | "move" | "remove" | "operate_off" | "plan") | (null);
+          state_at: string | null;
+        };
+        quota: {
+          state: "ok" | "session_full" | "repo_full";
+          session_used: number;
+          session_limit: number;
+          repo_used: number;
+          repo_limit: number;
+          resets_at: string;
+        };
         engine_update: ({
           behind: ({
             from: string;

@@ -40,7 +40,7 @@ const NAME = /^([A-Za-z0-9._-]+\/[A-Za-z0-9._-]+|Unnamed (runner|repository) \([
  * Keys the walker does not read. `row_key` is a roadmap row key; `runner_name` is the runner's stored name or its registrant's name, typed by a person of the
  * account and checked by `runner_name_valid` (its own test below), never text the engine wrote.
  */
-const EXEMPT_KEYS = new Set(['row_key', 'runner_name']);
+const EXEMPT_KEYS = new Set(['row_key', 'runner_name', 'machine_name']);
 
 /** Every string in a response must be an id, an enum word, a uuid, an ISO date or a cloud-side name: nothing a person or the engine could have typed. */
 function freeText(v: unknown, at = '$'): string[] {
@@ -152,6 +152,15 @@ describe('engine read routes and settings [pg]', () => {
     expect(r.body.items[0]).toMatchObject({ repo_id: A.repoId, liveness: 'live', watch_enabled: true, operate_enabled: false, session_id: bridgeSession });
     expect(r.body.items[0].runner_name).toMatch(/^Unnamed runner \(/);
     expect(freeText(r.body)).toEqual([]);
+    // ON-14b: the session, setup and quota facts ride on the same item, for a member as for an owner.
+    expect(r.body.items[0]).toMatchObject({
+      machine_name: r.body.items[0].runner_name, setup: { status: 'none', phase: null }, session: { state: 'running', last_start_mode: null, stopped_reason: null },
+      quota: { state: 'ok', session_limit: 5000, repo_limit: 20000 },
+    });
+    expect(r.body.items[0].quota.resets_at).toMatch(/T00:00:00\.000Z$/);
+    const asMember = await call(member, 'GET', '/engine/repos');
+    expect(asMember.body.items[0].session).toEqual(r.body.items[0].session);
+    expect(asMember.body.items[0].quota).toEqual(r.body.items[0].quota);
     await q(`UPDATE runners SET revoked_at = now() WHERE id = $1`, [runnerId]);
     expect((await call(owner(), 'GET', '/engine/repos')).body.items[0].liveness).toBe('runner_removed');
     await q(`UPDATE runners SET revoked_at = NULL WHERE id = $1`, [runnerId]);

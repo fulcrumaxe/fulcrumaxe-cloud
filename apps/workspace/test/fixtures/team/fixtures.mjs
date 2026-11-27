@@ -18,7 +18,11 @@ export function makeFixtures(nowMs) {
   });
   const repo = (over = {}) => ({
     repo_id: REPO_A, full_name: "acme-labs/widgets", runner_id: "9d2c7b1e-5f3a-4e8b-8a6d-1c2b3a4d5e66", runner_name: "Workshop laptop",
-    session_id: SESSION, last_event_at: iso(30), last_heard_at: iso(20), liveness: "live", watch_enabled: true, operate_enabled: false, halted: false, halt_pending: false, ...over,
+    session_id: SESSION, last_event_at: iso(30), last_heard_at: iso(20), liveness: "live", watch_enabled: true, operate_enabled: false, halted: false, halt_pending: false,
+    // ON-14b: the setup, the session and the day's event quota, as GET /api/v1/engine/repos serves them.
+    machine_name: "Workshop laptop", setup: { status: "done", phase: "done", sub_step: null, state: "ok", failure_code: null },
+    session: { state: "running", last_start_mode: "created", last_start_at: iso(3600), stopped_reason: null, state_at: iso(3600) },
+    quota: { state: "ok", session_used: 120, session_limit: 5000, repo_used: 340, repo_limit: 20000, resets_at: new Date(Math.floor(nowMs / 86_400_000) * 86_400_000 + 86_400_000).toISOString() }, ...over,
   });
   const settingsRepo = (over = {}) => ({ repo_id: REPO_A, full_name: "acme-labs/widgets", enabled: true, eligible: true, refusal: null, bridged_runner_id: null, ...over });
   const settings = (over = {}) => ({
