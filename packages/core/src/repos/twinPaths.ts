@@ -1,6 +1,6 @@
 import type { Pool, PoolClient } from 'pg';
 import { uncoveredRuleFiles } from '@fulcrumaxe/runner-protocol/repoPairing';
-import { TWIN_FIXED_PRIVATE } from '@fulcrumaxe/runner-protocol';
+import { TWIN_FIXED_PRIVATE, twinPrivateOverlay } from '@fulcrumaxe/runner-protocol';
 import { InvalidRoleSettingsInputError } from '../role-settings/errors.js';
 import { assertActiveMembership } from '../tenancy/scopedAccess.js';
 import { requireOwnerOrAdmin, type MembershipRole } from '../tenancy/authorize.js';
@@ -36,7 +36,7 @@ export type TwinPathsPatch = Partial<Pick<TwinPaths, 'overlayGlobs' | 'binaryGlo
 
 /** The paths that never reach the public repo: the fixed roots and secret defaults, the person's globs and the install's files. */
 export function twinPrivateGlobs(p: Pick<TwinPaths, 'overlayGlobs' | 'installPaths'>): string[] {
-  return [...TWIN_FIXED_PRIVATE, ...p.overlayGlobs, ...p.installPaths];
+  return twinPrivateOverlay(p);
 }
 
 /** The twin was removed, so its paths cannot change. */

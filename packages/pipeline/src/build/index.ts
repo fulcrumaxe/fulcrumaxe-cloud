@@ -9,6 +9,7 @@ export * from "./mergeGate.js";
 export * from "./githubMergePort.js";
 export * from "./authorTrust.js";
 export * from "./planeParity.js";
+export * from "./twinParity.js";
 // The two `...Locked` entry points are test-only and live behind `@fx/pipeline/testing/continuation`.
 export {
   AUTO_CONTINUE_HASH,

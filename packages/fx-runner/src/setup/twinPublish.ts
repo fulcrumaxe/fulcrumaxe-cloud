@@ -17,7 +17,7 @@
  */
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import path from "node:path";
-import { TWIN_FIXED_PRIVATE, buildTwinPublishText, type MachineJobOf } from "@fulcrumaxe/runner-protocol";
+import { buildTwinPublishText, twinPrivateOverlay, type MachineJobOf } from "@fulcrumaxe/runner-protocol";
 import {
   PLANE_REFUSAL_CODES,
   PlaneRouteError,
@@ -37,7 +37,7 @@ import type { PlanePushGithub } from "../daemon/planePushGithub.js";
 export interface TwinPublishDeps {
   mirrors: Pick<Mirrors, "sync">;
   client: Pick<RunnerClient, "setupPushToken">;
-  github: Pick<PlanePushGithub, "branchExists" | "branchHead" | "openPullRequest" | "revokeToken">;
+  github: Pick<PlanePushGithub, "branchExists" | "branchHead" | "openPullRequest" | "deleteBranch" | "revokeToken">;
   /** The public repository's `main` tip and the push. Production: `createGitTransport()`. */
   transport: PublicGitTransport;
   /** A directory in the runner's own state where the throwaway repositories are built (absolute; made 0700). */
@@ -86,7 +86,7 @@ export function pairingOf(job: MachineJobOf<"twin_publish">): RepoPairing & { en
   return {
     enabled: true,
     codeRepo: `${job.args.public.owner}/${job.args.public.name}`,
-    overlayGlobs: [...TWIN_FIXED_PRIVATE, ...set.overlay_globs, ...set.install_paths],
+    overlayGlobs: twinPrivateOverlay({ overlayGlobs: set.overlay_globs, installPaths: set.install_paths }),
     identifierRulesPath: set.identifier_rules_path,
     planDataRulesPath: set.plan_data_rules_path,
     binaryGlobs: [...set.blob_globs],
@@ -185,7 +185,20 @@ export function createTwinPublishHandler(deps: TwinPublishDeps): MachineJobHandl
       else if (error instanceof PlaneRouteError) {
         // A branch that was pushed and has no pull request is reported on the pull request's step, so the cloud can tell it from a refusal that pushed nothing.
         const first = error.refusals[0]?.kind;
-        stop = new Stop(error.code === "pr_failed" ? "pr_open" : at, error.code, first !== undefined && WORD.test(first) ? first : undefined);
+        let reason: string | undefined = first !== undefined && WORD.test(first) ? first : undefined;
+        // The branch the pull request could not be opened for is ours alone (it did not exist before this push) and a later publish of the same head names it again, so it is removed, but only while it is still the
+        // commit we pushed. Left behind it would make every retry `branch_exists`. The reason word says which it was.
+        if (error.code === "pr_failed" && error.pushed && error.commit !== null && token !== undefined) {
+          const input = { codeRepo: pairingOf(job).codeRepo, branch: job.args.branch, token };
+          let gone = false;
+          try {
+            gone = (await deps.github.branchHead(input)) === error.commit && (await deps.github.deleteBranch(input));
+          } catch {
+            // fx-swallow-ok: a head that could not be read leaves the branch where it is, which the reason word below says
+          }
+          reason = gone ? "branch_deleted" : "branch_kept";
+        }
+        stop = new Stop(error.code === "pr_failed" ? "pr_open" : at, error.code, reason);
       } else {
         const code = typeof error === "object" && error !== null ? (error as { code?: unknown }).code : undefined;
         stop = new Stop(at, typeof code === "string" && (PLANE_REFUSAL_CODES as readonly string[]).includes(code) ? (code as PlaneRefusalCode) : at === "twin_fetch" ? "twin_fetch_failed" : "push_failed");

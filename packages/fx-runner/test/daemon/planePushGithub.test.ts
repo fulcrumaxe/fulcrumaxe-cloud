@@ -104,6 +104,31 @@ describe("openPullRequest", () => {
   });
 });
 
+describe("deleteBranch", () => {
+  it("is a DELETE of the branch's ref with a User-Agent and the bearer, true on 204 and on 404 (already gone), false on any other answer, and never throws", async () => {
+    const origin = await start();
+    handler = (req, res) => (req.url!.endsWith("/fx/p-1") ? void res.writeHead(204).end() : req.url!.endsWith("/fx/p-2") ? json(res, 404, { message: "Reference does not exist" }) : req.url!.endsWith("/fx/p-3") ? json(res, 422, { message: "Cannot delete" }) : json(res, 500, {}));
+    const gh = createPlanePushGithub({ apiOrigin: origin });
+    expect(await gh.deleteBranch({ codeRepo: "acme/widgets", branch: "fx/p-1", token: TOKEN })).toBe(true);
+    expect(seen[0]).toMatchObject({ method: "DELETE", path: "/repos/acme/widgets/git/refs/heads/fx/p-1", authorization: `Bearer ${TOKEN}`, userAgent: "fulcrumaxe-runner" });
+    expect(await gh.deleteBranch({ codeRepo: "acme/widgets", branch: "fx/p-2", token: TOKEN })).toBe(true);
+    expect(await gh.deleteBranch({ codeRepo: "acme/widgets", branch: "fx/p-3", token: TOKEN })).toBe(false);
+    expect(await gh.deleteBranch({ codeRepo: "acme/widgets", branch: "fx/p-4", token: TOKEN })).toBe(false);
+    expect(await gh.deleteBranch({ codeRepo: "acme/widgets", branch: "fx/p-1", token: "not-the-live-token" })).toBe(false);
+  });
+
+  it("makes no call for a repository or branch that is not well formed, and a transport failure is false", async () => {
+    const origin = await start();
+    handler = (_q, res) => void res.writeHead(204).end();
+    const gh = createPlanePushGithub({ apiOrigin: origin });
+    for (const bad of [{ codeRepo: "acme", branch: "fx/p" }, { codeRepo: "acme/widgets/x", branch: "fx/p" }, { codeRepo: "acme/widgets", branch: "../main" }, { codeRepo: "acme/widgets", branch: "fx/..x" }, { codeRepo: "acme/widgets", branch: "-x" }]) {
+      expect(await gh.deleteBranch({ ...bad, token: TOKEN })).toBe(false);
+    }
+    expect(seen).toEqual([]);
+    expect(await createPlanePushGithub({ fetchFn: (async () => { throw new Error("down"); }) as unknown as typeof fetch }).deleteBranch({ codeRepo: "acme/widgets", branch: "fx/p", token: TOKEN })).toBe(false);
+  });
+});
+
 describe("revokeToken", () => {
   it("is true on 204, then true on the 401 of an already revoked token (nothing is left to revoke)", async () => {
     const origin = await start();

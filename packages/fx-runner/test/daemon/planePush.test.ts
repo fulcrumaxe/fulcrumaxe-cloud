@@ -501,7 +501,7 @@ describe("the pairing is the cloud's alone (P1f-3-a, P1f-3-b; P1f-2b acceptance 
     const twin = readFileSync(path.join(src, "setup/twinPublish.ts"), "utf8");
     expect(twin).not.toMatch(/process\.env|readFileSync|readFile\(|JSON\.parse|loadSettings|import\(/);
     const twinSet = [...twin.matchAll(/(?:overlayGlobs|identifierRulesPath|planDataRulesPath|binaryGlobs):\s*([^,}]+)/g)].map((m) => m[1]!.trim());
-    expect(twinSet.every((a) => /^(\[\.\.\.TWIN_FIXED_PRIVATE|set\.identifier_rules_path|set\.plan_data_rules_path|\[\.\.\.set\.blob_globs\]|string\[\]|string \| null)/.test(a))).toBe(true);
+    expect(twinSet.every((a) => /^(\[\.\.\.TWIN_FIXED_PRIVATE|twinPrivateOverlay\(\{ overlayGlobs: set\.overlay_globs|set\.identifier_rules_path|set\.plan_data_rules_path|\[\.\.\.set\.blob_globs\]|string\[\]|string \| null)/.test(a))).toBe(true);
     const merge = readFileSync(path.join(src, "daemon/planeMerge.ts"), "utf8");
     expect(merge).not.toMatch(/process\.env|readFileSync|readFile\(|JSON\.parse|loadSettings|import\(/);
     expect(merge.match(/order\.overlay_globs/g)?.length).toBe(1);

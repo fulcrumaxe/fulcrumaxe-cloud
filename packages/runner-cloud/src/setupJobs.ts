@@ -53,7 +53,7 @@ async function loadInputs(client: PoolClient, accountId: string, setupId: string
     await client.query<{ id: string; repo_id: string; phase: string; state: string; kind: "existing" | "new"; retryable: boolean }>(
       `SELECT s.id, s.repo_id, s.phase, s.state, s.kind,
               (s.phase = 'install' AND (s.state = 'failed' OR COALESCE((SELECT j.state IN ('expired', 'failed')
-                  FROM machine_jobs j WHERE j.account_id = s.account_id AND j.setup_id = s.id ORDER BY j.attempt DESC LIMIT 1), false))) AS retryable
+                  FROM machine_jobs j WHERE j.account_id = s.account_id AND j.setup_id = s.id AND j.kind = 'project_setup' ORDER BY j.attempt DESC LIMIT 1), false))) AS retryable
          FROM project_setups s WHERE s.account_id = $1 AND s.id = $2`,
       [accountId, setupId],
     )

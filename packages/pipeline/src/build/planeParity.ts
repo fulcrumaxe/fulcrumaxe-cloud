@@ -58,7 +58,7 @@ type Json = Record<string, unknown>;
 const isObj = (v: unknown): v is Json => v !== null && typeof v === "object" && !Array.isArray(v);
 
 /** Thrown inside the check to end it with a result; never escapes. */
-class Stop extends Error {
+export class Stop extends Error {
   constructor(
     readonly result: "too_large" | "unavailable" | "unsupported_branch",
     readonly side: "private" | "public" | null = null,
@@ -67,15 +67,15 @@ class Stop extends Error {
   }
 }
 
-export async function computePlaneParity(input: PlaneParityInput): Promise<PlaneParityOutcome> {
+/**
+ * The bounded reads both parity checks share: one counted, timed GET (`get`), a default branch's tip (`tipOf`) and a recursive tree (`readTree`). The call count, the per-call timeout and the deadline are the check's
+ * own; every failure to get an answer is `Stop("unavailable")`, a tree that is not plainly untruncated is `Stop("too_large")` and a default branch other than `main` is `Stop("unsupported_branch")`.
+ */
+export function parityReads(input: Pick<PlaneParityInput, "deadline" | "now" | "limits">) {
   const now = input.now ?? Date.now;
   const deadline = input.deadline ?? now() + PARITY_DEADLINE_MS;
   const maxCalls = input.limits?.maxCalls ?? MAX_PARITY_CALLS;
   const callTimeoutMs = input.limits?.callTimeoutMs ?? PARITY_CALL_TIMEOUT_MS;
-  const out: PlaneParityOutcome = { result: "unavailable", privateSha: null, publicSha: null, syncSha: null, paths: [], pathCount: 0, overlayOnPublicCount: 0, limitSide: null };
-  const overlay = compileOverlay(input.pairing.overlayGlobs);
-  if ("error" in overlay) return { ...out, result: "invalid_overlay" };
-
   let calls = 0;
   /** One counted, bounded GET. Every failure to get an answer is `unavailable`. */
   const get = async (http: GitHubHttp, repo: PlaneParityRepo, rest: string, query?: Record<string, string | number>): Promise<{ status: number; body: unknown }> => {
@@ -113,6 +113,15 @@ export async function computePlaneParity(input: PlaneParityInput): Promise<Plane
     if (tree === null) throw new Stop("unavailable");
     return tree;
   };
+  return { get, tipOf, readTree };
+}
+
+export async function computePlaneParity(input: PlaneParityInput): Promise<PlaneParityOutcome> {
+  const out: PlaneParityOutcome = { result: "unavailable", privateSha: null, publicSha: null, syncSha: null, paths: [], pathCount: 0, overlayOnPublicCount: 0, limitSide: null };
+  const overlay = compileOverlay(input.pairing.overlayGlobs);
+  if ("error" in overlay) return { ...out, result: "invalid_overlay" };
+  const { get, tipOf, readTree } = parityReads(input);
+
   /** The ids in private main's history, newest first: at most PARITY_HISTORY_PAGES pages of PARITY_HISTORY_PER_PAGE commits (a commit list holds no file data). */
   const privateHistory = async (p: string, wanted: string): Promise<Set<string>> => {
     const ids = new Set<string>();

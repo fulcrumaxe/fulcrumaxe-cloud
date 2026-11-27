@@ -256,6 +256,31 @@ describe("issuing project_setup and the plan route [pg]", () => {
     expect(await refusal(retryInstall(depsFor(), { accountId: r.who.accountId, userId: member }, r.setupId))).toEqual({ status: 403, code: "forbidden" });
   });
 
+  it("retry: only the install's own jobs decide whether it can be retried; a newer failed job of another kind on the same setup does not (FU-306)", async () => {
+    await h.admin.query("DELETE FROM engine_releases");
+    await release("2.0.0");
+    const r = await rig();
+    await issue(r);
+    const live = await lastJob(r.setupId);
+    expect(live.state).toBe("issued");
+    // A later job of another kind that failed (an engine update, a twin job): newest by attempt, but not the install's.
+    for (const [attempt, kind] of [[2, "engine_update"], [3, "twin_publish"]] as const) {
+      const id = randomUUID();
+      const issued = new Date(Date.now() - 5 * 60_000).toISOString();
+      const expires = new Date(Date.now() + 5 * 60_000).toISOString();
+      const bytes = { job: { job_id: id, kind, runner_id: r.runnerId, setup_id: r.setupId, issued_at: issued, expires_at: expires }, key_id: "job-key-1" };
+      await h.admin.query(
+        "INSERT INTO machine_jobs (id, account_id, runner_id, repo_id, setup_id, kind, job, attempt, state, issued_at, expires_at, delivered_at) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, 'failed', $9, $10, $9)",
+        [id, r.who.accountId, r.runnerId, r.who.repoId, r.setupId, kind, JSON.stringify(bytes), attempt, issued, expires],
+      );
+    }
+    expect(await refusal(retryInstall(depsFor(), principal(r), r.setupId))).toEqual({ status: 409, code: "not_retryable" });
+    expect((await h.admin.query("SELECT count(*)::int AS n FROM machine_jobs WHERE setup_id = $1", [r.setupId])).rows[0]!.n).toBe(3);
+    // The install's own job failing still makes it retryable.
+    await h.admin.query("UPDATE machine_jobs SET state = 'failed', delivered_at = issued_at WHERE id = $1", [live.id]);
+    expect((await retryInstall(depsFor(), principal(r), r.setupId)).status).toBe(200);
+  });
+
   /** Moves a job's life into the past, in the row and in the signed bytes the row is bound to. */
   async function lapse(jobId: string, o: { delivered?: boolean; lastSeq?: number; progressAgoS?: number } = {}) {
     const t0 = Date.now();

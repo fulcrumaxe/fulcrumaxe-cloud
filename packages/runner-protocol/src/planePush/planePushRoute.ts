@@ -85,6 +85,8 @@ export class PlaneRouteError extends Error {
     readonly refusals: readonly Refusal[] = [],
     /** True once a branch was sent to the public repo (`pr_failed` only): the branch exists and only the PR is missing. */
     readonly pushed = false,
+    /** For `pr_failed`: the commit that was pushed to the branch, so a caller can tell its own branch from one somebody else moved. */
+    readonly commit: string | null = null,
   ) {
     super(message);
     this.name = "PlaneRouteError";
@@ -517,6 +519,6 @@ async function routeAndPushOnce(input: PlaneRouteInput, deps: PlaneRouteDeps): P
     return { plane: "paired", repo: codeRepo, number: pr.number, url: pr.url, branch: input.branch, commit, tip: freshTip };
   } catch (err) {
     const e = failure(err, "pr_failed", "the branch was pushed but the pull request could not be opened");
-    throw new PlaneRouteError("pr_failed", e.message, [], true);
+    throw new PlaneRouteError("pr_failed", e.message, [], true, commit);
   }
 }

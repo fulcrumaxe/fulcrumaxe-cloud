@@ -4,6 +4,7 @@
  *   branchExists     `GET /repos/<o>/<n>/git/ref/heads/<branch>`: a branch that exists is never pushed over.
  *   branchHead       the same read, answering the head: an update of a branch the platform pushed checks it before and after.
  *   openPullRequest  `POST /repos/<o>/<n>/pulls`: the one call that makes the pushed branch a pull request.
+ *   deleteBranch     `DELETE /repos/<o>/<n>/git/refs/heads/<branch>`: the twin publish removes a branch it pushed when the pull request could not be opened. True on 204 and on 404 (already gone); never throws.
  *   revokeToken      `DELETE /installation/token` with the token itself as the bearer: 204, and the token answers 401 afterwards.
  *
  * D#6 PUBLIC-MERGE PR3 adds the two calls of a merge order, made with the order's single-use write token:
@@ -113,6 +114,8 @@ export interface PlanePushGithub {
   openPullRequest(input: { codeRepo: string; branch: string; base: string; title: string; body: string; token: string }): Promise<{ number: number; url: string }>;
   /** The branch's head (a full commit id), or null when it does not exist. */
   branchHead(input: { codeRepo: string; branch: string; token: string }): Promise<string | null>;
+  /** Removes a branch of the code repository. True when it is gone (204, or 404 because it already was); false on anything else. Never throws. */
+  deleteBranch(input: { codeRepo: string; branch: string; token: string }): Promise<boolean>;
   /** The pull request as GitHub has it now; throws `public_unavailable` on anything but a 200 with the expected shape. */
   getPull(input: { codeRepo: string; number: number; token: string }): Promise<PullState>;
   /** The code repository's merge mode on `branch`, from the queue read and the branch rules, which must agree. Never throws: anything unreadable is `unknown`. */
@@ -181,6 +184,18 @@ export function createPlanePushGithub(deps: PlanePushGithubDeps = {}): PlanePush
       const object = res.body !== null && typeof res.body === "object" ? (res.body as { object?: { sha?: unknown } }).object : undefined;
       if (res.status !== 200 || typeof object?.sha !== "string" || !/^[0-9a-f]{40}$/.test(object.sha)) throw new PlanePushGithubError("public_unavailable");
       return object.sha;
+    },
+
+    async deleteBranch({ codeRepo, branch, token }) {
+      try {
+        const { owner, name } = split(codeRepo);
+        if (!BRANCH.test(branch) || branch.includes("..")) return false;
+        const res = await call("DELETE", `/repos/${owner}/${name}/git/refs/heads/${branch.split("/").map(encodeURIComponent).join("/")}`, token);
+        return res.status === 204 || res.status === 404;
+      } catch {
+        // fx-swallow-ok: a delete that could not be made is `false`: the branch stays, as it did before this call, and the caller says so with a closed word
+        return false;
+      }
     },
 
     async openPullRequest({ codeRepo, branch, base, title, body, token }) {

@@ -31,6 +31,10 @@ interface Opts {
   set?: Partial<typeof SET>;
   /** Writes the twin's later work into the private working copy before it is committed. */
   changes?: (dir: string) => void;
+  /** GitHub refuses to open the pull request (after the branch was pushed): what a revoked permission or a closed repository looks like. `beforeAnswer` runs first (another party's push to the branch); `off` lets it work again. */
+  openFails?: { beforeAnswer?: (pubRepo: string, branch: string) => void; off?: boolean };
+  /** The branch delete answers false (GitHub refused it or could not be asked). */
+  deleteFails?: boolean;
 }
 
 async function world(o: Opts = {}) {
@@ -68,6 +72,7 @@ async function world(o: Opts = {}) {
   const workRoot = path.join(scratchDir("fxw-tpub-work-"), "twin-publish");
   const asked: Array<{ setupId: string; jobId: string }> = [];
   const revoked: string[] = [];
+  const deleted: string[] = [];
   const opened: Array<{ codeRepo: string; branch: string; base: string; title: string; body: string; token: string }> = [];
   const syncs: Array<{ id: string; owner: string; name: string }> = [];
   const client: Pick<RunnerClient, "setupPushToken"> = {
@@ -89,8 +94,20 @@ async function world(o: Opts = {}) {
       expect(i.token).toBe(TOKEN);
       expect(i.codeRepo).toBe("acme/widgets");
       expect(git(pub, "for-each-ref", `refs/heads/${i.branch}`, "--format=%(objectname)")).not.toBe("");
+      if (o.openFails !== undefined && o.openFails.off !== true) {
+        o.openFails.beforeAnswer?.(pub, i.branch);
+        throw Object.assign(new Error("pr_failed"), { code: "pr_failed" });
+      }
       opened.push(i);
       return { number: 7, url: "https://github.com/acme/widgets/pull/7" };
+    },
+    async deleteBranch(i: { codeRepo: string; branch: string; token: string }) {
+      expect(i.token).toBe(TOKEN);
+      expect(i.codeRepo).toBe("acme/widgets");
+      if (o.deleteFails === true) return false;
+      git(pub, "update-ref", "-d", `refs/heads/${i.branch}`);
+      deleted.push(i.branch);
+      return true;
     },
     revokeToken: async (t: string) => (revoked.push(t), true),
   };
@@ -115,7 +132,7 @@ async function world(o: Opts = {}) {
       },
       ...jobOver,
     }) as unknown as MachineJob;
-  return { fx, root, pub, mirror, server, workRoot, asked, revoked, opened, syncs, handler, base, head, pubTip, job };
+  return { fx, root, pub, mirror, server, workRoot, asked, revoked, opened, deleted, syncs, handler, base, head, pubTip, job };
 }
 
 function reporterOf(): { reporter: StepReporter; steps: Step[] } {
@@ -210,6 +227,72 @@ describe("the publish", () => {
     });
     expect(pairingOf(job as never)).toEqual({ enabled: true, codeRepo: "acme/widgets", overlayGlobs: [...TWIN_FIXED_PRIVATE, "docs/plan/**", ".github/workflows/engine.yml"], identifierRulesPath: ".autonomous-team/ids.txt", planDataRulesPath: null, binaryGlobs: ["assets/**"] });
   });
+});
+
+describe("FU-306: what a failed publish leaves behind, and install paths a glob cannot name", () => {
+  const branchOf = (w: Awaited<ReturnType<typeof world>>): string => `fx/publish-${w.head.slice(0, 12)}`;
+
+  it("a pull request that could not be opened removes the branch that was just pushed, so the next publish of the same head is not branch_exists", async () => {
+    const openFails = {} as { off?: boolean };
+    const w = await world({ openFails });
+    const branch = branchOf(w);
+    const steps = await run(w);
+    expect(steps.at(-1)).toMatchObject({ sub_step: "pr_open", state: "failed", failure_code: "pr_failed", failure_reason: "branch_deleted" });
+    expect(w.deleted).toEqual([branch]);
+    expect(refs(w.pub)).toEqual([`refs/heads/main ${w.pubTip}`]);
+    expect(w.revoked).toEqual([TOKEN]);
+    // The same head again, now that GitHub answers: the branch is pushed afresh (not branch_exists) and the one pull request is opened.
+    openFails.off = true;
+    expect((await run(w)).at(-1)).toEqual({ sub_step: "pr_open", state: "ok" });
+    expect(w.opened).toHaveLength(1);
+    expect(refs(w.pub).some((r) => r.startsWith(`refs/heads/${branch} `))).toBe(true);
+  }, 120_000);
+
+  it("a branch somebody else moved since our push is not ours to delete: it stays, and the reason word says so", async () => {
+    let base = "";
+    const w = await world({ openFails: { beforeAnswer: (pubRepo, branch) => git(pubRepo, "update-ref", `refs/heads/${branch}`, base) } });
+    base = w.base;
+    const steps = await run(w);
+    expect(steps.at(-1)).toMatchObject({ failure_code: "pr_failed", failure_reason: "branch_kept" });
+    expect(w.deleted).toEqual([]);
+    expect(git(w.pub, "rev-parse", branchOf(w))).toBe(w.base);
+  }, 120_000);
+
+  it("a delete that GitHub refuses leaves the branch and says branch_kept; the credential is still revoked", async () => {
+    const w = await world({ openFails: {}, deleteFails: true });
+    const steps = await run(w);
+    expect(steps.at(-1)).toMatchObject({ failure_code: "pr_failed", failure_reason: "branch_kept" });
+    expect(refs(w.pub).some((r) => r.startsWith(`refs/heads/${branchOf(w)} `))).toBe(true);
+    expect(w.revoked).toEqual([TOKEN]);
+  }, 120_000);
+
+  it("a failure that pushed nothing deletes nothing: the branch of a branch_exists refusal is somebody else's", async () => {
+    const w = await world({ openFails: {} });
+    const branch = branchOf(w);
+    git(w.fx.repo, "push", "-q", w.pub, `${w.base}:refs/heads/${branch}`);
+    const steps = await run(w);
+    expect(steps.at(-1)).toMatchObject({ sub_step: "push", state: "failed", failure_code: "branch_exists" });
+    expect(steps.at(-1)).not.toHaveProperty("failure_reason", "branch_deleted");
+    expect(w.deleted).toEqual([]);
+    expect(git(w.pub, "rev-parse", branch)).toBe(w.base);
+  }, 120_000);
+
+  it("an install path with brackets (a route folder) compiles as a private entry and is never published", async () => {
+    const w = await world({
+      set: { install_paths: ["app/[id]/page.tsx"] },
+      changes: (dir) => {
+        mkdirSync(path.join(dir, "app/[id]"), { recursive: true });
+        writeFileSync(path.join(dir, "app/[id]/page.tsx"), "export default 1;\n");
+        writeFileSync(path.join(dir, "README.md"), "hello, again\n");
+      },
+    });
+    const steps = await run(w);
+    expect(steps.at(-1)).toEqual({ sub_step: "pr_open", state: "ok" });
+    const tree = git(w.pub, "ls-tree", "-r", "--name-only", branchOf(w)).split("\n");
+    expect(tree).toContain("README.md");
+    expect(tree.some((f) => f.startsWith("app/"))).toBe(false);
+    expect(pairingOf(MachineJobSchema.parse(w.job()) as never).overlayGlobs).toContain("app/?id?/page.tsx");
+  }, 120_000);
 });
 
 describe("the refusals: each one pushes nothing", () => {
