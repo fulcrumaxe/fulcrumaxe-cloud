@@ -161,6 +161,7 @@ async function bootPipeline(page: Page, canMake: boolean, follow404 = false, ava
     if (url.pathname === "/api/v1/repos") return json(route, 200, REPOS);
     if (url.pathname === "/api/v1/work-items") return json(route, 200, url.searchParams.get("stage") === "needs_human" ? { data: [], next_cursor: null } : LIST);
     if (url.pathname.endsWith("/timeline")) return json(route, 200, TIMELINE);
+    if (url.pathname.endsWith("/corrections")) return json(route, 200, { data: [] });
     if (url.pathname === `/api/v1/work-items/${ITEM}/follow-ups`) return w.follow404 ? json(route, 404, { error: { code: "not_found", message: "server text" } }) : json(route, 200, followUps(canMake, w.made, available));
     if (method === "POST" && url.pathname === `/api/v1/work-items/${ITEM}/follow-ups/${FU[1]}/make-item`) {
       w.writes.push({ method, path: url.pathname, body: route.request().postData(), key: route.request().headers()["idempotency-key"] });
