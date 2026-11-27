@@ -9,6 +9,15 @@
  */
 export const TWIN_FIXED_PRIVATE: readonly string[] = [".autonomous-team/**", ".claude/**", "CLAUDE.md", "CLAUDE.project.md", "docs/PRD.md", "epics/**", ".env", ".env.*", "**/*.pem", "**/*.key"];
 
+/**
+ * An exact install path as an overlay entry. The overlay compiler refuses a bracket expression and a backslash, so a path with `[` or `]` (a route folder such as `app/[id]/page.tsx`) cannot be listed as it is: each
+ * bracket becomes `?`, one any character. The entry still matches the path itself and can only cover a few more files, never fewer, so a private file is never published (stricter, never looser).
+ */
+export const installPathGlob = (path: string): string => path.replace(/[[\]]/g, "?");
+
+/** The list the publish and the parity check compile as the twin's private set: the fixed roots, the person's globs and the install's exact paths. The one place it is put together. */
+export const twinPrivateOverlay = (set: { overlayGlobs: readonly string[]; installPaths: readonly string[] }): string[] => [...TWIN_FIXED_PRIVATE, ...set.overlayGlobs, ...set.installPaths.map(installPathGlob)];
+
 /** The most paths the body lists; the rest are counted. */
 export const TWIN_PUBLISH_MAX_LISTED = 200;
 export const TWIN_PUBLISH_FOOTER = "Opened by the publisher. Look through the files above, then merge to publish them. Nothing else from the private working copy is in this change.";

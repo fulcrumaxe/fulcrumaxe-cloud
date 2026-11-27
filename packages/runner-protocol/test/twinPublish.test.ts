@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { TWIN_FIXED_PRIVATE, TWIN_PUBLISH_FOOTER, TWIN_PUBLISH_MAX_LISTED, buildTwinPublishText } from "../src/twinPublish.js";
+import { TWIN_FIXED_PRIVATE, TWIN_PUBLISH_FOOTER, TWIN_PUBLISH_MAX_LISTED, buildTwinPublishText, installPathGlob, twinPrivateOverlay } from "../src/twinPublish.js";
 import { PLANE_TITLE_LINE } from "../src/planePush/planePushText.js";
-import { scanText } from "../src/planePush/planePush.js";
+import { compileOverlay, scanText } from "../src/planePush/planePush.js";
 
 /** D#845 ON-27c2: the fixed template of a publish pull request. Nothing but a count, a date and the published paths is an input. */
 describe("twin publish text", () => {
@@ -47,5 +47,26 @@ describe("twin publish text", () => {
 
   it("keeps one list of the paths that are private on every twin", () => {
     expect(TWIN_FIXED_PRIVATE).toEqual([".autonomous-team/**", ".claude/**", "CLAUDE.md", "CLAUDE.project.md", "docs/PRD.md", "epics/**", ".env", ".env.*", "**/*.pem", "**/*.key"]);
+  });
+
+  it("names an install path with brackets so the overlay compiler takes it: the path itself stays private, and the raw path would have refused the whole list (FU-306)", () => {
+    const path = "app/[id]/page.tsx";
+    expect(compileOverlay([path])).toEqual({ error: expect.stringContaining("bracket") });
+    expect(installPathGlob(path)).toBe("app/?id?/page.tsx");
+    expect(installPathGlob("a/[[slug]]/x.ts")).toBe("a/??slug??/x.ts");
+    expect(installPathGlob("plain/file.ts")).toBe("plain/file.ts");
+    const overlay = compileOverlay(twinPrivateOverlay({ overlayGlobs: ["docs/plan/**"], installPaths: [path, "tools/x.sh"] }));
+    if ("error" in overlay) throw new Error(overlay.error);
+    expect(overlay.match(path)).toBe(true);
+    expect(overlay.match("tools/x.sh")).toBe(true);
+    expect(overlay.match(".autonomous-team/notes.md")).toBe(true);
+    // stricter, never looser: a sibling that differs only where the brackets were is covered too, and an unrelated file is not
+    expect(overlay.match("app/xidx/page.tsx")).toBe(true);
+    expect(overlay.match("app/other/page.tsx")).toBe(false);
+    expect(overlay.match("src/index.ts")).toBe(false);
+  });
+
+  it("puts the private set together in one order: the fixed roots, the person's globs, the install's paths", () => {
+    expect(twinPrivateOverlay({ overlayGlobs: ["a/**"], installPaths: ["tools/x.sh"] })).toEqual([...TWIN_FIXED_PRIVATE, "a/**", "tools/x.sh"]);
   });
 });
