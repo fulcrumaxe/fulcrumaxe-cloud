@@ -71,8 +71,29 @@ describe("R-P1d-1: the merge gate is the only way the product merges", () => {
     expect(fn.match(/\/pulls\/\$\{[^}]+\}\/merge/g)).toHaveLength(1);
     expect(fn).toMatch(/body: \{ sha, merge_method: "squash" \}/);
     expect(fn.indexOf("installMerge:")).toBeLessThan(fn.indexOf("/merge`"));
-    expect(mentioning(/\bmergeInstall\b/)).toEqual([file, "packages/runner-cloud/src/setupInstallMerge.ts"]);
+    expect(mentioning(/\bmergeInstall\b/)).toEqual([file, "packages/runner-cloud/src/setupInstallMerge.ts", "packages/runner-cloud/src/twinMerge.ts"]);
     expect(mentioning(/\binstallMergeRun\b/)).toEqual(["apps/web/app/api/v1/setups/[id]/install/merge/handler.ts", "packages/runner-cloud/src/index.ts", "packages/runner-cloud/src/setupInstallMerge.ts"]);
+  });
+
+  // D#845 ON-27d4c: a person's click on a private twin's card merges the twin's PUBLISH pull request, through the same `mergeInstall` port call (no work item or queue slot exists for it either). Its one call is pinned here: a single site, on the
+  // number and head the cloud recorded for the publish pull request (`publish_pr`, `publish_head`), only after the head GitHub shows equals the recorded one, and after the owner or admin check; `mergeTwinPr` is named by its own
+  // file, the package index and the one wiring module, which hands it to the twin merge route (`mergePr` is named by that route module and the wiring only).
+  it("the twin merge is one mergeInstall call, on the recorded publish pull request and head, after the role check, reached from the twin merge route only", () => {
+    const file = "packages/runner-cloud/src/twinMerge.ts";
+    const src = readFileSync(path.join(REPO_ROOT, file), "utf8");
+    expect(src.match(/\.mergeInstall\(/g)).toHaveLength(1);
+    expect(src).toMatch(/t\.publish_pr AS pr, t\.publish_head AS head/);
+    expect(src).not.toMatch(/sync_pr|sync_head/);
+    const role = src.indexOf('role !== "owner" && role !== "admin"');
+    const pinned = src.indexOf("found.head === null || pr.headSha !== found.head");
+    const call = src.indexOf(".mergeInstall(");
+    expect(role).toBeGreaterThan(0);
+    expect(pinned).toBeGreaterThan(role);
+    expect(call).toBeGreaterThan(pinned);
+    expect(src).toMatch(/\.mergeInstall\(\{ repo, number, sha: pr\.headSha \}\)/);
+    expect(mentioning(/\bmergeTwinPr\b/)).toEqual(["apps/web/app/api/v1/[...path]/route.ts", "packages/runner-cloud/src/index.ts", file]);
+    expect(mentioning(/\bmergePr\b/)).toEqual(["apps/web/app/api/v1/[...path]/route.ts", "packages/api/src/routes/repoTwins.ts"]);
+    expect(mentioning(/\btwinRouteDeps\.mergePr\(/)).toEqual(["packages/api/src/routes/repoTwins.ts"]);
   });
 
   it("only the runner API's go phase and the token builders mint the plane_merge credential", () => {

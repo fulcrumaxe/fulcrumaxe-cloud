@@ -8,7 +8,9 @@ import { handleApiRequest } from '../src/handler.js';
 import { ROUTES } from '../src/routes/index.js';
 import { githubRouteDeps } from '../src/routes/github.js';
 import { repoPairingDeps, type PairingRepoInspector } from '../src/routes/repoPairing.js';
-import { twinRouteDeps } from '../src/routes/repoTwins.js';
+import { TWIN_ENABLED } from '@fx/core/src/repos/twins.js';
+import { mergeTwinPr } from '@fx/runner-cloud';
+import { twinRouteDeps, type TwinMergeAnswer } from '../src/routes/repoTwins.js';
 import { seedAccountWithMember, seedUser } from './helpers/seed.js';
 
 interface Identity {
@@ -59,6 +61,7 @@ describe('repo twins API', () => {
     twinRouteDeps.enabled = true;
     twinRouteDeps.closePublishPr = null;
     twinRouteDeps.closeSyncPr = null;
+    twinRouteDeps.mergePr = null;
   });
   afterAll(async () => {
     repoPairingDeps.getInspector = () => null;
@@ -119,16 +122,142 @@ describe('repo twins API', () => {
     }
   };
 
-  it('is off until ON-27d: every twin route answers 503 not_configured and writes nothing', async () => {
+  it('the kill switch is on in the build (ON-27d4c), and still works: with it off every twin route answers 503 not_configured and writes nothing', async () => {
+    expect(TWIN_ENABLED).toBe(true);
     twinRouteDeps.enabled = false;
     const owner = await account();
     const repo = await seedRepo(owner.accountId);
-    for (const [method, path, body] of [['POST', `/repos/${repo}/twin`, {}], ['GET', `/repos/${repo}/twin`, undefined], ['POST', `/twins/${randomUUID()}/pause`, undefined], ['POST', `/twins/${randomUUID()}/resume`, undefined], ['DELETE', `/twins/${randomUUID()}`, undefined]] as const) {
+    for (const [method, path, body] of [['POST', `/repos/${repo}/twin`, {}], ['GET', `/repos/${repo}/twin`, undefined], ['POST', `/twins/${randomUUID()}/pause`, undefined], ['POST', `/twins/${randomUUID()}/resume`, undefined], ['DELETE', `/twins/${randomUUID()}`, undefined], ['POST', `/twins/${randomUUID()}/check`, undefined], ['POST', `/twins/${randomUUID()}/merge`, { pr: 'publish' }]] as const) {
       const res = await call(owner, method, path, body);
       expect(res.status).toBe(503);
       expect(((await res.json()) as { error: { code: string } }).error.code).toBe('not_configured');
     }
     expect(asked).toEqual([]);
+  });
+
+  /** A ready twin with both repos, optionally with the counts of its last parity check (a row in twin_parity_checks, as the sweep's record writes it). */
+  const readyTwin = async (who: Identity, check?: { result: string; publish?: number; sync?: number }, names: [string, string] = ['widgets', 'widgets-private']) => {
+    const pub = await seedRepo(who.accountId, names[0]);
+    const priv = await seedRepo(who.accountId, names[1]);
+    const id = await makeTwin(who, pub, priv);
+    await admin.query("UPDATE repo_twins SET state = 'ready' WHERE id = $1", [id]);
+    if (check) {
+      await admin.query('INSERT INTO twin_parity_checks (twin_id, account_id, last_result, publish_count, sync_count, path_count) VALUES ($1, $2, $3, $4, $5, $6)', [id, who.accountId, check.result, check.publish ?? 0, check.sync ?? 0, check.publish ?? check.sync ?? 0]);
+    }
+    return { id, pub, priv };
+  };
+  const twinOf = async (who: Identity, repo: string) => ((await (await call(who, 'GET', `/repos/${repo}/twin`)).json()) as { twin: { merged_count: number | null; new_changes_count: number | null } }).twin;
+
+  it('the twin item carries the merged count and the new-changes count of its last parity check, null before any check, and never another twin\'s', async () => {
+    const owner = await account();
+    const fresh = await readyTwin(owner);
+    expect(await twinOf(owner, fresh.pub)).toMatchObject({ merged_count: null, new_changes_count: null });
+    const waiting = await readyTwin(owner, { result: 'publish_pending', publish: 3 }, ['gadgets', 'gadgets-private']);
+    const incoming = await readyTwin(owner, { result: 'sync_pending', sync: 2 }, ['gizmos', 'gizmos-private']);
+    const parity = await readyTwin(owner, { result: 'in_parity' }, ['sprockets', 'sprockets-private']);
+    // the SAME account's other twins keep their own counts
+    expect(await twinOf(owner, fresh.pub)).toMatchObject({ merged_count: null, new_changes_count: null });
+    expect(await twinOf(owner, waiting.pub)).toMatchObject({ merged_count: 3, new_changes_count: 0 });
+    expect(await twinOf(owner, incoming.pub)).toMatchObject({ merged_count: 0, new_changes_count: 2 });
+    expect(await twinOf(owner, parity.pub)).toMatchObject({ merged_count: 0, new_changes_count: 0 });
+    // a second account's read of the first one's twin is a 404, and its own twin with no check reads null (not the first account's counts)
+    const other = await account();
+    expect((await call(other, 'GET', `/repos/${waiting.pub}/twin`)).status).toBe(404);
+    const theirs = await readyTwin(other);
+    expect(await twinOf(other, theirs.pub)).toMatchObject({ merged_count: null, new_changes_count: null });
+    // pause / resume answer the same item shape
+    const paused = (await (await call(owner, 'POST', `/twins/${waiting.id}/pause`)).json()) as { merged_count: number | null };
+    expect(paused.merged_count).toBe(3);
+  });
+
+  it('Check again marks the twin due now for the sweep (owner or admin only), and only a ready or conflicting twin has anything to check', async () => {
+    const owner = await account();
+    const t = await readyTwin(owner, { result: 'publish_pending', publish: 1 });
+    const due = async () => (await admin.query<{ due: boolean | null; mark_seq: string }>('SELECT due_at IS NOT NULL AND due_at <= now() + interval \'61 seconds\' AS due, mark_seq FROM twin_parity_checks WHERE twin_id = $1', [t.id])).rows[0]!;
+    expect(await due()).toMatchObject({ due: false, mark_seq: '0' });
+    const member = await addMember(owner.accountId, 'member');
+    expect((await call(member, 'POST', `/twins/${t.id}/check`)).status).toBe(403);
+    expect(await due()).toMatchObject({ due: false, mark_seq: '0' });
+    const res = await call(await addMember(owner.accountId, 'admin'), 'POST', `/twins/${t.id}/check`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ id: t.id, state: 'ready', merged_count: 1 });
+    expect(await due()).toMatchObject({ due: true, mark_seq: '1' });
+    expect((await call(owner, 'POST', `/twins/${t.id}/check`)).status).toBe(200);
+    expect((await due()).mark_seq).toBe('2');
+    // a conflicting twin is checked again too; the others have nothing to compare and change nothing
+    await admin.query("UPDATE repo_twins SET state = 'conflict' WHERE id = $1", [t.id]);
+    expect((await call(owner, 'POST', `/twins/${t.id}/check`)).status).toBe(200);
+    for (const state of ['seeding', 'paused', 'refused', 'failed']) {
+      await admin.query('UPDATE repo_twins SET state = $2 WHERE id = $1', [t.id, state]);
+      const before = (await due()).mark_seq;
+      const bad = await call(owner, 'POST', `/twins/${t.id}/check`);
+      expect(bad.status).toBe(409);
+      expect(await bad.json()).toMatchObject({ error: { code: 'twin_state' }, data: { state } });
+      expect((await due()).mark_seq).toBe(before);
+    }
+    // a second account's twin is not found, and a twin of no one is too
+    expect((await call(await account(), 'POST', `/twins/${t.id}/check`)).status).toBe(404);
+    expect((await call(owner, 'POST', `/twins/${randomUUID()}/check`)).status).toBe(404);
+  });
+
+  it('a Merge through the route writes one twin.merged audit row for the person, and a merge the app refuses or finds already done writes none', async () => {
+    const owner = await account();
+    const t = await readyTwin(owner);
+    await admin.query('UPDATE repo_twins SET publish_pr = 7, publish_head = $2 WHERE id = $1', [t.id, 'd'.repeat(40)]);
+    const sha = 'd'.repeat(40);
+    let pr: { state: string; merged: boolean; headSha: string } = { state: 'OPEN', merged: false, headSha: sha };
+    let merge: 'merged' | 'blocked' = 'merged';
+    const setupInstall = { installPullRequest: async () => ({ ...pr, mergedByApp: false, files: [], totalCount: 0, complete: true }), mergeInstall: async () => merge } as never;
+    twinRouteDeps.mergePr = (input) => mergeTwinPr({ appUserPool, setupInstall }, { accountId: input.accountId, userId: input.userId }, input.twinId);
+    const rows = async () => (await admin.query<{ actor: string; payload: unknown }>("SELECT actor, payload FROM audit_log WHERE account_id = $1 AND action = 'twin.merged'", [owner.accountId])).rows;
+    merge = 'blocked';
+    expect((await call(owner, 'POST', `/twins/${t.id}/merge`, { pr: 'publish' })).status).toBe(409);
+    pr = { state: 'MERGED', merged: true, headSha: sha };
+    expect(await (await call(owner, 'POST', `/twins/${t.id}/merge`, { pr: 'publish' })).json()).toEqual({ merged: true, already: true, pr: 7 });
+    expect(await rows()).toEqual([]);
+    pr = { state: 'OPEN', merged: false, headSha: sha };
+    merge = 'merged';
+    expect(await (await call(owner, 'POST', `/twins/${t.id}/merge`, { pr: 'publish' })).json()).toEqual({ merged: true, already: false, pr: 7 });
+    expect(await rows()).toEqual([{ actor: owner.userId, payload: { twin_id: t.id, pr: 'publish', number: 7 } }]);
+  });
+
+  it('Merge asks the app to merge the publish pull request, for an owner or admin; each answer has its own code', async () => {
+    const owner = await account();
+    const t = await readyTwin(owner);
+    const calls: Array<{ accountId: string; userId: string; twinId: string }> = [];
+    let answer: TwinMergeAnswer = { result: 'merged', pr: 7 };
+    twinRouteDeps.mergePr = async (input) => (calls.push(input), answer);
+    const merge = (who: Identity, body: unknown = { pr: 'publish' }) => call(who, 'POST', `/twins/${t.id}/merge`, body);
+    expect(await (await merge(owner)).json()).toEqual({ merged: true, already: false, pr: 7 });
+    expect(calls).toEqual([{ accountId: owner.accountId, userId: owner.userId, twinId: t.id }]);
+    answer = { result: 'already', pr: 7 };
+    expect(await (await merge(owner)).json()).toEqual({ merged: true, already: true, pr: 7 });
+    const refusals: Array<[TwinMergeAnswer, number, string]> = [
+      [{ result: 'not_found' }, 404, 'not_found'],
+      [{ result: 'twin_state', state: 'seeding' }, 409, 'twin_state'],
+      [{ result: 'no_open_pr' }, 409, 'twin_no_pr'],
+      [{ result: 'pr_changed' }, 409, 'twin_pr_changed'],
+      [{ result: 'pr_blocked' }, 409, 'twin_pr_blocked'],
+      [{ result: 'github_unavailable' }, 503, 'github_unavailable'],
+    ];
+    for (const [a, status, code] of refusals) {
+      answer = a;
+      const res = await merge(owner);
+      expect(res.status).toBe(status);
+      expect(((await res.json()) as { error: { code: string } }).error.code).toBe(code);
+    }
+    // a member, a body that names a pull request number or nothing, and another account never reach the app
+    const before = calls.length;
+    expect((await merge(await addMember(owner.accountId, 'member'))).status).toBe(403);
+    for (const body of [{}, { pr: 'sync' }, { pr: 'other' }, { pr: 'publish', number: 9 }]) expect((await merge(owner, body)).status, JSON.stringify(body)).toBe(422);
+    expect((await call(owner, 'POST', `/twins/${t.id}/merge`)).status).toBe(422);
+    expect(calls).toHaveLength(before);
+    // a twin id that is no uuid is a 404 before the app is asked
+    expect((await call(owner, 'POST', '/twins/not-a-uuid/merge', { pr: 'publish' })).status).toBe(404);
+    expect(calls).toHaveLength(before);
+    // no app wired: a fixed 503
+    twinRouteDeps.mergePr = null;
+    expect((await merge(owner)).status).toBe(503);
   });
 
   it('the create asks for a state naming the public repo, its owner, private, no auto-init and Discussions only by the twin purpose', async () => {

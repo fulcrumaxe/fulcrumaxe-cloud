@@ -8,7 +8,7 @@ import { publicChangeDeps, queueActionDeps } from "@fx/api/src/routes/work-item-
 import { setupRequestDeps } from "@fx/api/src/routes/setupRequests.js";
 import { repoPairingDeps } from "@fx/api/src/routes/repoPairing.js";
 import { twinRouteDeps } from "@fx/api/src/routes/repoTwins.js";
-import { closeTwinPublishPr, closeTwinSyncPr } from "@fx/runner-cloud";
+import { closeTwinPublishPr, closeTwinSyncPr, mergeTwinPr } from "@fx/runner-cloud";
 import { createLivePlanePushPort } from "../../../../lib/github/planePushHosted";
 import { mergeQueueModeDeps } from "@fx/api/src/routes/mergeQueueMode.js";
 import { createMergeQueueModeReader } from "../../../../lib/mergeQueueMode";
@@ -90,6 +90,8 @@ repoPairingDeps.getInspector = () => getPairingInspector();
 twinRouteDeps.closePublishPr = ({ accountId, userId, twinId }) => closeTwinPublishPr({ appUserPool: appUserPool(), planePush: createLivePlanePushPort() }, { accountId, userId }, twinId);
 // D#845 ON-27d3: and the sync pull request it still has open on the private repository (closed through the App, as the install's pull request is).
 twinRouteDeps.closeSyncPr = ({ accountId, userId, twinId }) => closeTwinSyncPr({ appUserPool: appUserPool(), setupInstall: createAppRunPullRequestPort() }, { accountId, userId }, twinId);
+// D#845 ON-27d4c: Merge on the card merges the twin's open publish pull request through the App, as the install pull request's Merge does (one squash at the head it read).
+twinRouteDeps.mergePr = ({ accountId, userId, twinId }) => mergeTwinPr({ appUserPool: appUserPool(), setupInstall: createAppRunPullRequestPort() }, { accountId, userId }, twinId);
 // D#694 B7-2: the Repos screen's merge queue line, read through the hosted `read` client (one reader per process, so its five-minute cache is shared).
 let mergeQueueReader: ReturnType<typeof createMergeQueueModeReader> | undefined;
 mergeQueueModeDeps.getReader = () => (mergeQueueReader ??= createMergeQueueModeReader(appUserPool()));

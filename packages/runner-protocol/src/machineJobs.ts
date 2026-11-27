@@ -289,9 +289,9 @@ export const MACHINE_JOB_CAPABILITY: Readonly<Record<MachineJobKind, RunnerCapab
   engine_session_start: ENGINE_SESSION_CAPABILITY,
   engine_session_stop: ENGINE_SESSION_CAPABILITY,
   engine_session_delete: ENGINE_SESSION_CAPABILITY,
-  // D#845 ON-27c2: last, and only because fx-runner registers the handler (run.ts). No build lists `twin_v1` before ON-27d, so no runner is offered it until then.
+  // D#845 ON-27c2: last, and only because fx-runner registers the handler (run.ts). Every build lists `twin_v1` (last) since ON-27d4c, because every twin handler is registered.
   twin_publish: TWIN_CAPABILITY,
-  // D#845 ON-27d2: same rule as the two above; the sync's handler is registered in run.ts and no build lists `twin_v1` before ON-27d4.
+  // D#845 ON-27d2: same rule as the two above; the sync's handler is registered in run.ts and every build lists `twin_v1` since ON-27d4c.
   twin_sync: TWIN_CAPABILITY,
 });
 

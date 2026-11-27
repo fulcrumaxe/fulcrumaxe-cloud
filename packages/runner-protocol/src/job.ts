@@ -96,7 +96,7 @@ export const SURVEY_CAPABILITY = "survey_v1" as const;
 export const SURVEY_PUBLIC_CAPABILITY = "survey_public_v1" as const;
 /**
  * D#845 ON-27b: a runner that lists `twin_v1` accepts the private twin's machine jobs (`twin_seed` now; publish and sync later), which read a public repo anonymously and push to the twin alone. It gates no role and needs
- * protocol 22. A build lists it only when ON-27d turns the twin on, so no runner is offered a twin job before then.
+ * protocol 22. A build lists it (last) only because its run command registers a handler for each of the three twin jobs (ON-27d4c).
  */
 export const TWIN_CAPABILITY = "twin_v1" as const;
 export const publicRepoAllowed = (role: string, taskKind: string): boolean => role === SURVEY_ROLE && taskKind === "survey";

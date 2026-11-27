@@ -18438,6 +18438,30 @@
                                 "null"
                               ]
                             },
+                            "merged_count": {
+                              "anyOf": [
+                                {
+                                  "type": "integer",
+                                  "minimum": -9007199254740991,
+                                  "maximum": 9007199254740991
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "new_changes_count": {
+                              "anyOf": [
+                                {
+                                  "type": "integer",
+                                  "minimum": -9007199254740991,
+                                  "maximum": 9007199254740991
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
                             "created_at": {
                               "type": "string"
                             },
@@ -18457,6 +18481,8 @@
                             "publish_pr",
                             "sync_pr",
                             "failure_code",
+                            "merged_count",
+                            "new_changes_count",
                             "created_at",
                             "updated_at"
                           ],
@@ -18644,6 +18670,30 @@
                         "null"
                       ]
                     },
+                    "merged_count": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "new_changes_count": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
                     "created_at": {
                       "type": "string"
                     },
@@ -18663,6 +18713,8 @@
                     "publish_pr",
                     "sync_pr",
                     "failure_code",
+                    "merged_count",
+                    "new_changes_count",
                     "created_at",
                     "updated_at"
                   ],
@@ -18868,6 +18920,30 @@
                         "null"
                       ]
                     },
+                    "merged_count": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "new_changes_count": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
                     "created_at": {
                       "type": "string"
                     },
@@ -18887,6 +18963,8 @@
                     "publish_pr",
                     "sync_pr",
                     "failure_code",
+                    "merged_count",
+                    "new_changes_count",
                     "created_at",
                     "updated_at"
                   ],
@@ -18976,6 +19054,421 @@
           },
           "503": {
             "description": "`not_configured`: private twins are not on yet.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/twins/{id}/check": {
+      "post": {
+        "operationId": "checkRepoTwinAgain",
+        "summary": "Check again: compare the twin and its public repo on the next sweep",
+        "description": "Owner or admin. Marks the twin's parity check due; the sweep compares the two repositories within a minute or two and the card's counts and state follow. Nothing is sent to GitHub by this call. Answers the twin as it reads now.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Check again: compare the twin and its public repo on the next sweep",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "public_repo_id": {
+                      "type": "string"
+                    },
+                    "private_repo_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "private_name": {
+                      "type": "string"
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "creating",
+                        "not_connected",
+                        "seeding",
+                        "ready",
+                        "paused",
+                        "conflict",
+                        "refused",
+                        "failed",
+                        "removed"
+                      ]
+                    },
+                    "overlay_globs": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "published_private_sha": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "synced_public_sha": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "publish_pr": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "sync_pr": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "failure_code": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "merged_count": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "new_changes_count": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "created_at": {
+                      "type": "string"
+                    },
+                    "updated_at": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "public_repo_id",
+                    "private_repo_id",
+                    "private_name",
+                    "state",
+                    "overlay_globs",
+                    "published_private_sha",
+                    "synced_public_sha",
+                    "publish_pr",
+                    "sync_pr",
+                    "failure_code",
+                    "merged_count",
+                    "new_changes_count",
+                    "created_at",
+                    "updated_at"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`twin_state`: the twin's state does not allow this (`data.state` is what it is). Nothing changed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`not_configured`: private twins are not on yet.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/twins/{id}/merge": {
+      "post": {
+        "operationId": "mergeRepoTwinPr",
+        "summary": "Merge the twin's open publish pull request through the GitHub App",
+        "description": "Owner or admin; `{id}` is the twin. `pr` must be `publish`: the publish pull request on the public repo (the sync pull request is the engine's to merge, so a `sync` request is a validation error). The number and repository are the cloud's own records, never the request's. A publish pull request whose head the cloud has not recorded, or whose head moved, is `twin_pr_changed`. The App makes the merge as one squash at the head it just read, so a pull request that moved is refused. A pull request GitHub will not merge yet (a required check or review) is `twin_pr_blocked`: finish it on GitHub.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "pr": {
+                    "type": "string",
+                    "const": "publish"
+                  }
+                },
+                "required": [
+                  "pr"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Merge the twin's open publish pull request through the GitHub App",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "merged": {
+                      "type": "boolean"
+                    },
+                    "already": {
+                      "type": "boolean"
+                    },
+                    "pr": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "merged",
+                    "already",
+                    "pr"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`not_found`: no such twin.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`twin_state` (the twin is not ready, paused or in conflict; `data.state` is what it is), `twin_no_pr` (no such pull request is open), `twin_pr_changed` (it was closed or its head moved: look at it again) or `twin_pr_blocked` (GitHub will not merge it yet).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`not_configured` (private twins are not on yet, or no GitHub App) or `github_unavailable`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -19092,6 +19585,30 @@
                         "null"
                       ]
                     },
+                    "merged_count": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "new_changes_count": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
                     "created_at": {
                       "type": "string"
                     },
@@ -19111,6 +19628,8 @@
                     "publish_pr",
                     "sync_pr",
                     "failure_code",
+                    "merged_count",
+                    "new_changes_count",
                     "created_at",
                     "updated_at"
                   ],

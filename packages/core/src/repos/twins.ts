@@ -10,11 +10,13 @@ import { assertRepoIdShape } from './read.js';
  * We never delete a GitHub repo: "remove" ends the row's life here and leaves the private repo on GitHub for the person to delete there.
  */
 
-/** The kill switch (a server constant). Until ON-27d turns it on, every twin route answers 503 `not_configured` and no card shows. */
-export const TWIN_ENABLED = false;
+/** The kill switch (a server constant). On since ON-27d4c; set to false, every twin route answers 503 `not_configured` and no card shows. */
+export const TWIN_ENABLED = true;
 
 export type TwinState = 'creating' | 'not_connected' | 'seeding' | 'ready' | 'paused' | 'conflict' | 'refused' | 'failed' | 'removed';
 export type TwinAction = 'pause' | 'resume' | 'remove';
+/** What a refused twin action names: the three changes, and Check again. */
+export type TwinStateAction = TwinAction | 'check' | 'merge';
 
 export interface RepoTwin {
   id: string;
@@ -29,6 +31,10 @@ export interface RepoTwin {
   publishPr: number | null;
   syncPr: number | null;
   failureCode: string | null;
+  /** Changes merged on the twin that the last parity check found waiting to publish; null before any check has run. */
+  mergedCount: number | null;
+  /** Changes on the public repo that the last parity check found waiting to come in; null before any check has run. */
+  newChangesCount: number | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -41,7 +47,7 @@ export interface RepoTwinCtx {
 
 /** `twin_change` refused: the twin's state does not allow the action (`state` is what it is now). */
 export class TwinStateError extends Error {
-  constructor(readonly state: TwinState | null, readonly action: TwinAction) {
+  constructor(readonly state: TwinState | null, readonly action: TwinStateAction) {
     super(`twin: cannot ${action} a twin that is ${state}`);
     this.name = 'TwinStateError';
   }
@@ -55,8 +61,11 @@ export class TwinExistsError extends Error {
   }
 }
 
-const COLUMNS = `id, public_repo_id, private_repo_id, private_name, state, overlay_globs, published_private_sha, synced_public_sha, publish_pr, sync_pr, failure_code,
-  to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS updated_at`;
+/** The twin's row with the counts of its last parity check (`twin_parity_checks`, 1112; app users read it under row security). No row, or a check that has not run, reads as null counts, never as zero. */
+const COLUMNS = `t.id, t.public_repo_id, t.private_repo_id, t.private_name, t.state, t.overlay_globs, t.published_private_sha, t.synced_public_sha, t.publish_pr, t.sync_pr, t.failure_code,
+  CASE WHEN c.last_result IS NULL THEN NULL ELSE c.publish_count END AS merged_count, CASE WHEN c.last_result IS NULL THEN NULL ELSE c.sync_count END AS new_changes_count,
+  to_char(t.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at, to_char(t.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS updated_at`;
+const FROM = 'repo_twins t LEFT JOIN twin_parity_checks c ON c.account_id = t.account_id AND c.twin_id = t.id';
 
 interface Row {
   id: string;
@@ -70,13 +79,15 @@ interface Row {
   publish_pr: number | null;
   sync_pr: number | null;
   failure_code: string | null;
+  merged_count: number | null;
+  new_changes_count: number | null;
   created_at: string;
   updated_at: string;
 }
 
 const toTwin = (r: Row): RepoTwin => ({
   id: r.id, publicRepoId: r.public_repo_id, privateRepoId: r.private_repo_id, privateName: r.private_name, state: r.state, overlayGlobs: r.overlay_globs,
-  publishedPrivateSha: r.published_private_sha, syncedPublicSha: r.synced_public_sha, publishPr: r.publish_pr, syncPr: r.sync_pr, failureCode: r.failure_code,
+  publishedPrivateSha: r.published_private_sha, syncedPublicSha: r.synced_public_sha, publishPr: r.publish_pr, syncPr: r.sync_pr, failureCode: r.failure_code, mergedCount: r.merged_count, newChangesCount: r.new_changes_count,
   createdAt: r.created_at, updatedAt: r.updated_at,
 });
 
@@ -87,7 +98,7 @@ export async function getRepoTwin(ctx: RepoTwinCtx, publicRepoId: string): Promi
   return withTenant(ctx.pool, accountId, userId, async (client) => {
     await assertActiveMembership(client, accountId, userId);
     if ((await client.query('SELECT 1 FROM repos WHERE account_id = $1 AND id = $2', [accountId, publicRepoId])).rows.length === 0) throw new NotFoundError(`repos ${publicRepoId} not found`);
-    const { rows } = await client.query<Row>(`SELECT ${COLUMNS} FROM repo_twins WHERE account_id = $1 AND public_repo_id = $2 AND state <> 'removed'`, [accountId, publicRepoId]);
+    const { rows } = await client.query<Row>(`SELECT ${COLUMNS} FROM ${FROM} WHERE t.account_id = $1 AND t.public_repo_id = $2 AND t.state <> 'removed'`, [accountId, publicRepoId]);
     return rows[0] ? toTwin(rows[0]) : null;
   });
 }
@@ -120,7 +131,28 @@ export async function changeRepoTwin(ctx: RepoTwinCtx, twinId: string, action: T
     const r = rows[0];
     if (!r || r.o_result === 'not_found') throw new NotFoundError(`twins ${twinId} not found`);
     if (r.o_result === 'bad_state') throw new TwinStateError(r.o_state, action);
-    const after = await client.query<Row>(`SELECT ${COLUMNS} FROM repo_twins WHERE account_id = $1 AND id = $2`, [accountId, twinId]);
+    const after = await client.query<Row>(`SELECT ${COLUMNS} FROM ${FROM} WHERE t.account_id = $1 AND t.id = $2`, [accountId, twinId]);
+    return toTwin(after.rows[0]!);
+  });
+}
+
+/**
+ * Owner or admin. "Check again": marks the twin's parity check due through `twin_parity_mark_due` (1112), the same definer a push to either repository calls, naming the public repository as the pushed side. The twin sweep
+ * lists what is marked and compares the two repositories on its next tick (the mark's own delay is 60 seconds). Only a ready or conflicting twin has a comparison to run: any other state is a TwinStateError and nothing changes.
+ * A twin that is not the caller's is a NotFoundError. The answer is the twin as it now reads.
+ */
+export async function checkRepoTwinAgain(ctx: RepoTwinCtx, twinId: string): Promise<RepoTwin> {
+  assertRepoIdShape(twinId);
+  const { accountId, userId } = ctx.principal;
+  return withTenant(ctx.pool, accountId, userId, async (client) => {
+    const own = await client.query<{ public_repo_id: string; state: TwinState }>('SELECT public_repo_id, state FROM repo_twins WHERE account_id = $1 AND id = $2', [accountId, twinId]);
+    const twin = own.rows[0];
+    if (!twin) throw new NotFoundError(`twins ${twinId} not found`);
+    const { rows } = await client.query<{ o_result: string }>('SELECT o_result FROM twin_parity_mark_due($1::uuid, $2::uuid, NULL)', [twinId, twin.public_repo_id]);
+    const result = rows[0]?.o_result;
+    if (result === 'not_found') throw new NotFoundError(`twins ${twinId} not found`);
+    if (result !== 'ok') throw new TwinStateError(twin.state, 'check');
+    const after = await client.query<Row>(`SELECT ${COLUMNS} FROM ${FROM} WHERE t.account_id = $1 AND t.id = $2`, [accountId, twinId]);
     return toTwin(after.rows[0]!);
   });
 }

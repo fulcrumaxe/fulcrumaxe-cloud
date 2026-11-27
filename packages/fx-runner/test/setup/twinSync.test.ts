@@ -451,8 +451,8 @@ describe("the refusals: each one pushes nothing", () => {
 });
 
 describe("what the build advertises, and where the set comes from", () => {
-  it("twin_v1 is not in the capabilities a runner build lists, so no runner is offered a twin job yet", () => {
-    expect(RUNNER_BUILD_CAPABILITIES as string[]).not.toContain("twin_v1");
+  it("twin_v1 is the last capability a runner build lists (D#845 ON-27d4c), and run.ts registers all three twin handlers", () => {
+    expect((RUNNER_BUILD_CAPABILITIES as string[]).at(-1)).toBe("twin_v1");
   });
 
   it("the private patterns come from the signed job alone: the fixed roots, the person's globs, the install paths and the two rule files", () => {

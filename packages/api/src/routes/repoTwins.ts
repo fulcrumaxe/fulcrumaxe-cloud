@@ -3,7 +3,8 @@ import { reportError } from "@fx/telemetry";
 import type { Pool } from "pg";
 import { descriptionHash } from "@fx/core/src/github/createRepoState.js";
 import { validateNewRepo } from "@fx/core/src/github/repoName.js";
-import { changeRepoTwin, getRepoTwin, getTwinCreateFacts, TWIN_ENABLED, TwinStateError, type RepoTwin, type TwinAction } from "@fx/core/src/repos/twins.js";
+import { assertRepoIdShape } from "@fx/core/src/repos/read.js";
+import { changeRepoTwin, checkRepoTwinAgain, getRepoTwin, getTwinCreateFacts, TWIN_ENABLED, TwinStateError, type RepoTwin, type TwinAction } from "@fx/core/src/repos/twins.js";
 import type { RouteEntry } from "../registry.js";
 import { ApiError } from "../errors.js";
 import { SESSION_LIMITS } from "../ratelimit/session.js";
@@ -11,10 +12,22 @@ import { authorizeCreate } from "./github.js";
 import { repoPairingDeps } from "./repoPairing.js";
 
 /**
- * The kill switch. Production never sets it: it is the constant, which ON-27d turns on. Tests flip it.
+ * The kill switch. Production never sets it: it is the constant (on since ON-27d4c). Tests flip it.
  * `closePublishPr` (D#845 ON-27c2, set by the app) closes the publish pull request a removed twin still has open on the public repository; with none, nothing is closed.
  */
-export const twinRouteDeps: { enabled: boolean; closePublishPr: ((input: { accountId: string; userId: string; twinId: string }) => Promise<unknown>) | null; closeSyncPr: ((input: { accountId: string; userId: string; twinId: string }) => Promise<unknown>) | null } = { enabled: TWIN_ENABLED, closePublishPr: null, closeSyncPr: null };
+export const twinRouteDeps: {
+  enabled: boolean;
+  closePublishPr: ((input: { accountId: string; userId: string; twinId: string }) => Promise<unknown>) | null;
+  closeSyncPr: ((input: { accountId: string; userId: string; twinId: string }) => Promise<unknown>) | null;
+  /** D#845 ON-27d4c: Merge. Merges the open publish pull request through the App (set by the app). With none, the route answers 503 `not_configured`. */
+  mergePr: ((input: { accountId: string; userId: string; twinId: string }) => Promise<TwinMergeAnswer>) | null;
+} = { enabled: TWIN_ENABLED, closePublishPr: null, closeSyncPr: null, mergePr: null };
+
+/** The answer `mergePr` gives (the shape of runner-cloud's `TwinMerge`, which this package cannot import). */
+export type TwinMergeAnswer =
+  | { result: "merged" | "already"; pr: number }
+  | { result: "not_found" | "no_open_pr" | "pr_changed" | "pr_blocked" | "github_unavailable" }
+  | { result: "twin_state"; state: string };
 
 const enabled = (): void => {
   if (!twinRouteDeps.enabled) throw new ApiError(503, "not_configured", "private twins are not available yet");
@@ -22,6 +35,7 @@ const enabled = (): void => {
 
 const idParams = z.object({ id: z.string() });
 const createBody = z.object({ name: z.string().optional() }).strict();
+const mergeBody = z.object({ pr: z.literal("publish") }).strict();
 
 const twinSchema = z.object({
   id: z.string(),
@@ -36,13 +50,17 @@ const twinSchema = z.object({
   publish_pr: z.number().int().nullable(),
   sync_pr: z.number().int().nullable(),
   failure_code: z.string().nullable(),
+  /** Changes merged on the twin that the last parity check found waiting to publish; null before any check has run. */
+  merged_count: z.number().int().nullable(),
+  /** Changes on the public repo that the last parity check found waiting to come in; null before any check has run. */
+  new_changes_count: z.number().int().nullable(),
   created_at: z.string(),
   updated_at: z.string(),
 });
 
 const toItem = (t: RepoTwin): z.infer<typeof twinSchema> => ({
   id: t.id, public_repo_id: t.publicRepoId, private_repo_id: t.privateRepoId, private_name: t.privateName, state: t.state, overlay_globs: t.overlayGlobs,
-  published_private_sha: t.publishedPrivateSha, synced_public_sha: t.syncedPublicSha, publish_pr: t.publishPr, sync_pr: t.syncPr, failure_code: t.failureCode,
+  published_private_sha: t.publishedPrivateSha, synced_public_sha: t.syncedPublicSha, publish_pr: t.publishPr, sync_pr: t.syncPr, failure_code: t.failureCode, merged_count: t.mergedCount, new_changes_count: t.newChangesCount,
   created_at: t.createdAt, updated_at: t.updatedAt,
 });
 
@@ -161,6 +179,66 @@ export const repoTwinRoutes: RouteEntry[] = [
     extraResponses: stateExtra,
     ...common,
     handler: (ctx, input) => change(ctx, input.params.id!, "resume"),
+  },
+  {
+    method: "POST",
+    path: "/api/v1/twins/{id}/check",
+    operationId: "checkRepoTwinAgain",
+    summary: "Check again: compare the twin and its public repo on the next sweep",
+    description: "Owner or admin. Marks the twin's parity check due; the sweep compares the two repositories within a minute or two and the card's counts and state follow. Nothing is sent to GitHub by this call. Answers the twin as it reads now.",
+    extraResponses: stateExtra,
+    ...common,
+    handler: async (ctx, input) => {
+      enabled();
+      try {
+        return toItem(await checkRepoTwinAgain({ pool: ctx.pool, principal: ctx.principal }, input.params.id!));
+      } catch (err) {
+        if (err instanceof TwinStateError) throw new ApiError(409, "twin_state", `a twin that is ${err.state} cannot be checked again`, undefined, { state: err.state });
+        throw err;
+      }
+    },
+  },
+  {
+    method: "POST",
+    path: "/api/v1/twins/{id}/merge",
+    operationId: "mergeRepoTwinPr",
+    summary: "Merge the twin's open publish pull request through the GitHub App",
+    description:
+      "Owner or admin; `{id}` is the twin. `pr` must be `publish`: the publish pull request on the public repo (the sync pull request is the engine's to merge, so a `sync` request is a validation error). The number and repository are the cloud's own records, never the request's. A publish pull request whose head the cloud has not recorded, or whose head moved, is `twin_pr_changed`. The App makes the merge as one squash at the head it just read, so a pull request that moved is refused. A pull request GitHub will not merge yet (a required check or review) is `twin_pr_blocked`: finish it on GitHub.",
+    extraResponses: {
+      "404": "`not_found`: no such twin.",
+      "409": "`twin_state` (the twin is not ready, paused or in conflict; `data.state` is what it is), `twin_no_pr` (no such pull request is open), `twin_pr_changed` (it was closed or its head moved: look at it again) or `twin_pr_blocked` (GitHub will not merge it yet).",
+      "503": "`not_configured` (private twins are not on yet, or no GitHub App) or `github_unavailable`.",
+    },
+    minRole: "admin",
+    idempotency: "never",
+    rateClass: "write",
+    paramsSchema: idParams,
+    bodySchema: mergeBody,
+    responseSchema: z.object({ merged: z.boolean(), already: z.boolean(), pr: z.number().int() }),
+    async handler(ctx, input) {
+      enabled();
+      assertRepoIdShape(input.params.id!);
+      if (twinRouteDeps.mergePr === null) throw new ApiError(503, "not_configured", "merging is not available now");
+      const out = await twinRouteDeps.mergePr({ accountId: ctx.principal.accountId, userId: ctx.principal.userId, twinId: input.params.id! });
+      switch (out.result) {
+        case "merged":
+        case "already":
+          return { merged: true, already: out.result === "already", pr: out.pr };
+        case "not_found":
+          throw new ApiError(404, "not_found", "no such twin");
+        case "twin_state":
+          throw new ApiError(409, "twin_state", `a twin that is ${out.state} cannot be merged into`, undefined, { state: out.state });
+        case "no_open_pr":
+          throw new ApiError(409, "twin_no_pr", "no such pull request is open on this twin");
+        case "pr_changed":
+          throw new ApiError(409, "twin_pr_changed", "the pull request was closed or changed on GitHub; look at it again");
+        case "pr_blocked":
+          throw new ApiError(409, "twin_pr_blocked", "GitHub will not merge this yet; it may need a passing check or a review first. Finish those on GitHub, then try again");
+        default:
+          throw new ApiError(503, "github_unavailable", "GitHub could not be reached; try again");
+      }
+    },
   },
   {
     method: "DELETE",
