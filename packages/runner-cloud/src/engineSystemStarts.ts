@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Pool } from "pg";
-import { MACHINE_JOB_MAX_LIFE_S, type MachineJob } from "@fulcrumaxe/runner-protocol";
+import { ENGINE_VERSION_PATTERN, MACHINE_JOB_MAX_LIFE_S, type MachineJob } from "@fulcrumaxe/runner-protocol";
 import type { EngineCommandSigner } from "./engineCommands.js";
 import { engineSessionSpendGuard } from "./engineSpendGuard.js";
 import { RunPullRequestError, type RunPullRequestPort } from "./runPullRequest.js";
@@ -73,9 +73,11 @@ async function issueOne(deps: SystemStartDeps, sign: (job: MachineJob) => unknow
   const jobId = randomUUID();
   const issued = (deps.now ?? (() => new Date()))();
   const expires = new Date(issued.getTime() + MACHINE_JOB_MAX_LIFE_S * 1000);
+  // ON-14a2: platform_ops cannot read project_setups, so the version the install recorded comes through a definer (this account's, this repo's newest). No version, or one the runner would refuse, goes unsigned and the runner refuses the start closed.
+  const version = (await deps.pool.query<{ v: string | null }>("SELECT engine_start_version($1::uuid, $2::uuid) AS v", [row.o_account, row.o_repo])).rows[0]?.v ?? null;
   const signed = sign({
     v: 1, job_id: jobId, runner_id: row.o_runner, repo_gh_id: Number(row.o_repo_gh_id), requires_engine: "any", issued_at: issued.toISOString(), expires_at: expires.toISOString(),
-    kind: "engine_session_start", args: { at_sha: head, resume: row.o_resume, operate_epoch: row.o_epoch },
+    kind: "engine_session_start", args: { at_sha: head, resume: row.o_resume, operate_epoch: row.o_epoch, ...(version !== null && ENGINE_VERSION_PATTERN.test(version) ? { engine_version: version } : {}) },
   } as MachineJob);
   const client = await deps.pool.connect();
   try {

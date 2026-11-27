@@ -199,6 +199,58 @@ describe("system engine first start [pg]", () => {
     });
   });
 
+  describe("the engine version of a start (engine_start_version)", () => {
+    /** A finished setup of the repo at an exact creation time; `version` null is a setup that never recorded one. */
+    async function addSetup(r: Rig, repoId: string, version: string | null, createdAt: string): Promise<void> {
+      const id = (await h.admin.query<{ id: string }>("INSERT INTO project_setups (account_id, repo_id, kind, created_by, phase, state, sub_step, engine_version, created_at) VALUES ($1, $2, 'existing', $3, 'finish', 'ok', 'pr_merged', $4, $5::timestamptz) RETURNING id", [r.who.accountId, repoId, r.who.userId, version, createdAt])).rows[0]!.id;
+      await h.admin.query("UPDATE project_setups SET phase = 'done', start_pending = false WHERE id = $1", [id]);
+    }
+    const versionOf = async (accountId: string, repoId: string, pool = h.opsPool) => (await pool.query<{ v: string | null }>("SELECT engine_start_version($1::uuid, $2::uuid) AS v", [accountId, repoId])).rows[0]!.v;
+
+    it("is the newest versioned setup of this account's repo; a newer setup with no version does not hide it", async () => {
+      const r = await rig();
+      await h.admin.query("UPDATE project_setups SET created_at = '2026-01-01T00:00:00Z' WHERE id = $1", [r.setupId]);
+      expect(await versionOf(r.who.accountId, r.who.repoId)).toBe("1.2.3");
+      await addSetup(r, r.who.repoId, "2.0.0", "2026-03-01T00:00:00Z");
+      await addSetup(r, r.who.repoId, "1.5.0", "2026-02-01T00:00:00Z");
+      expect(await versionOf(r.who.accountId, r.who.repoId)).toBe("2.0.0");
+      await addSetup(r, r.who.repoId, null, "2026-04-01T00:00:00Z");
+      expect(await versionOf(r.who.accountId, r.who.repoId)).toBe("2.0.0");
+    });
+    it("never reads a sibling repo's setup of the same account, nor another account's", async () => {
+      const r = await rig({ plan: 2 });
+      const sibling = await addPlacement(r, "now()");
+      await h.admin.query("UPDATE project_setups SET engine_version = '9.9.9' WHERE repo_id = $1", [sibling.repoId]);
+      await h.admin.query("UPDATE project_setups SET engine_version = NULL WHERE id = $1", [r.setupId]);
+      expect(await versionOf(r.who.accountId, r.who.repoId)).toBeNull();
+      expect(await versionOf(r.who.accountId, sibling.repoId)).toBe("9.9.9");
+      const other = await rig();
+      await h.admin.query("UPDATE project_setups SET engine_version = '7.7.7' WHERE id = $1", [other.setupId]);
+      expect(await versionOf(r.who.accountId, other.who.repoId)).toBeNull();
+      expect(await versionOf(other.who.accountId, r.who.repoId)).toBeNull();
+      expect(await versionOf(randomUUID(), randomUUID())).toBeNull();
+    });
+    it("is NULL for a repo with no versioned setup, and the platform_ops role alone may ask", async () => {
+      const r = await rig();
+      await h.admin.query("UPDATE project_setups SET engine_version = NULL WHERE repo_id = $1", [r.who.repoId]);
+      expect(await versionOf(r.who.accountId, r.who.repoId)).toBeNull();
+      for (const pool of [h.appPool, h.adminPool]) {
+        expect(await code(versionOf(r.who.accountId, r.who.repoId, pool))).toMatch(/^(42501|error:)/);
+      }
+      for (const setting of ["app.runner_id", "app.user_id"]) {
+        const c = await h.opsPool.connect();
+        try {
+          await c.query("SELECT set_config($1, $2, false)", [setting, randomUUID()]);
+          expect(await code(c.query("SELECT engine_start_version($1::uuid, $2::uuid)", [r.who.accountId, r.who.repoId])), setting).toBe("42501");
+        } finally {
+          await c.query("RESET ALL");
+          c.release();
+        }
+      }
+      expect(await h.opsPool.query("SELECT engine_start_version(NULL, $1::uuid)", [r.who.repoId]).then(() => "ok", (e: { code: string }) => e.code)).toBe("22023");
+    });
+  });
+
   describe("the issuer (engine_system_start_issue)", () => {
     it("issues one start with no setup, clears the cause, and writes one audit row whose actor is the login", async () => {
       const r = await rig({ sandbox: true });
@@ -425,6 +477,24 @@ describe("system engine first start [pg]", () => {
       const gh = fakeGithub();
       expect(await issueSystemStarts(deps(gh), { accountId: r.who.accountId, msLeft: () => 0 })).toEqual({ not_configured: false, issued: 0, results: [] });
       expect(gh.calls.defaultBranch).toBe(0);
+    });
+    it("signs the version of this account's repo into the start, and none when the repo has no versioned setup (the start is still issued)", async () => {
+      const a = await rig();
+      const b = await rig();
+      await h.admin.query("UPDATE project_setups SET engine_version = '3.4.5' WHERE id = $1", [a.setupId]);
+      await h.admin.query("UPDATE project_setups SET engine_version = NULL WHERE id = $1", [b.setupId]);
+      for (const r of [a, b]) {
+        expect((await issueSystemStarts(deps(fakeGithub()), { accountId: r.who.accountId })).results).toEqual([{ account_id: r.who.accountId, repo_id: r.who.repoId, result: "issued" }]);
+      }
+      expect((await jobs(a.who.accountId)).map((j) => j.job.job.args)).toEqual([{ at_sha: HEAD, resume: false, operate_epoch: 1, engine_version: "3.4.5" }]);
+      expect((await jobs(b.who.accountId)).map((j) => j.job.job.args)).toEqual([{ at_sha: HEAD, resume: false, operate_epoch: 1 }]);
+    });
+    it("signs no version when the newest setup's version is one the runner would refuse (1.2.3.4 is legal in the table, not for the job)", async () => {
+      const r = await rig();
+      await h.admin.query("UPDATE project_setups SET engine_version = '1.2.3.4' WHERE id = $1", [r.setupId]);
+      expect(await h.opsPool.query<{ v: string }>("SELECT engine_start_version($1::uuid, $2::uuid) AS v", [r.who.accountId, r.who.repoId]).then((q) => q.rows[0]!.v)).toBe("1.2.3.4");
+      expect((await issueSystemStarts(deps(fakeGithub()), { accountId: r.who.accountId })).results).toEqual([{ account_id: r.who.accountId, repo_id: r.who.repoId, result: "issued" }]);
+      expect((await jobs(r.who.accountId)).map((j) => j.job.job.args)).toEqual([{ at_sha: HEAD, resume: false, operate_epoch: 1 }]);
     });
     it("refuses a hosted sandbox before GitHub is read or anything is signed, and never reaches a sandbox factory", async () => {
       const r = await rig();
