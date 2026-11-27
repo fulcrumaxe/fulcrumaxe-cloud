@@ -99,7 +99,7 @@ function mountOnboarding(host) {
     return null;
   }
 
-  const render = (reread) => { renderBody(); syncPicker(); syncInstall(); syncSurvey(); syncPlan(reread === true); };
+  const render = (reread) => { renderBody(); syncPicker(); syncInstall(); syncSurvey(); syncPlan(reread === true); restoreFocus(); };
   /** D#845 ON-20b: the install panel is mounted for one setup's open pull request and goes when the step moves on or the pull request is another's. */
   function syncInstall() {
     const step = st.parsed && st.parsed.engine && shownTracks(st.parsed).includes("engine") ? st.parsed.engine.find((s) => s.step === "install") : null;
@@ -212,18 +212,53 @@ function mountOnboarding(host) {
   };
   // D#845 ON-20b: the install step's pull request (number and state) from the engine track, into the view-model's `install.pr`.
   const installCtx = () => { const pr = st.parsed && st.parsed.engine && st.eng ? st.eng.installPr(st.parsed.engine) : null; return pr ? { ...(st.ctx.install || {}), pr } : st.ctx.install; };
-  const engineEnv = () => ({ projectHost, installHost, planHost, surveyHost, ctx: { ...st.ctx, install: installCtx(), setup: st.parsed ? st.parsed.setup : null, machine: machineFacts(), origin: window.location.origin, isAdmin: window.currentIsAdmin !== false, price: st.price, planBusy: st.planBusy, planNote: st.planNote, planAdded: st.planAdded === true, planLink: st.planLink }, price: st.price, announce: (t) => (live.textContent = t), canOpen, openApp, runAction: runPlanAction });
+  const engineEnv = () => ({ projectHost, installHost, planHost, surveyHost, ctx: { ...st.ctx, install: installCtx(), setup: st.parsed ? st.parsed.setup : null, machine: machineFacts(), origin: window.location.origin, isAdmin: window.currentIsAdmin !== false, price: st.price, planBusy: st.planBusy, installNote: st.installNote, planNote: st.planNote, planAdded: st.planAdded === true, planLink: st.planLink }, price: st.price, announce: (t) => (live.textContent = t), canOpen, openApp, runAction: runPlanAction });
   // D#845 ON-22: the project step's purchase buttons. Checkout is the existing one (the server never sells a second subscription: an account that already pays gets the item added, and the answer is its own success path).
   // Returning from Stripe reloads the app, which reads the step again. "Add an engine" changes the quantity on the subscription and reads now; the account follows the provider's confirmation, so the step says so and refreshes when the app is shown again (no timer here).
 const HELD_NOTE = "You already have the Engine plan.";
 const ADDED_NOTE = "Engine added. This step updates when the provider confirms the change.";
+  // A retry redraws the install step and drops focus to body. Put it back on the retry button (or the step when the button is gone) for the action's own redraw and the next one, within 1.5 s; after that, or on any key or click, background redraws never move focus.
+  let refocus = 0;
+  let refocusUntil = 0;
+  const armFocus = () => { refocus = 2; refocusUntil = Date.now() + 1500; };
+  const restoreFocus = () => {
+    if (!refocus) return;
+    refocus--;
+    if (Date.now() > refocusUntil) { refocus = 0; return; }
+    if (document.activeElement && document.activeElement !== document.body) { refocus = 0; return; }
+    const t = body.querySelector('[data-testid="ob-engine-retry_install"]:not([disabled])') || body.querySelector('[data-testid="ob-engine-install"]');
+    if (t) t.focus(); else refocus = 0;
+  };
+  host.addEventListener("pointerdown", () => { refocus = 0; }, true);
+  host.addEventListener("keydown", () => { refocus = 0; }, true);
   async function runPlanAction(id) {
     if (st.planBusy) return;
     st.planBusy = true;
     st.planNote = "";
     st.planAdded = false;
     st.planLink = false;
+    st.installNote = "";
     render();
+    if (id === "retry_install") {
+      // FU-313: the failed install's Try again. The server issues the next attempt; the step then reads as running.
+      try {
+        await api("POST", "/api/v1/setups/" + st.parsed.setup.id + "/install/retry", undefined, abort.signal);
+      } catch (e) {
+        if (e && e.name === "AbortError") return;
+        const r = (await loadEngine()).retryRefusal(e instanceof ApiFailure ? e : null);
+        st.installNote = r.text;
+        st.planBusy = false;
+        armFocus();
+        live.textContent = r.text;
+        if (r.reread) await load(); else render();
+        return;
+      }
+      st.planBusy = false;
+      armFocus();
+      live.textContent = "The install is running on " + ((st.ctx && st.ctx.name) || "your machine") + ".";
+      await load();
+      return;
+    }
     try {
       if (id === "add_engine") {
         const project = st.parsed && st.parsed.engine ? st.parsed.engine.find((x) => x.step === "project") : null;

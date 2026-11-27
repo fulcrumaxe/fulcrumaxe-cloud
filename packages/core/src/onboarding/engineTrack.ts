@@ -138,8 +138,15 @@ export async function readEngineSources(
   ).rows;
   const one = async (sql: string): Promise<string | null> => iso((await client.query<{ t: Date | null }>(sql, [accountId])).rows[0]?.t);
   const project = await one(`SELECT min(placed_at) AS t FROM project_placements WHERE account_id = $1`);
-  const plan = await one(`SELECT min(approved_at) AS t FROM project_drafts WHERE account_id = $1 AND status = 'approved'`);
-  const install = await one(`SELECT min(updated_at) AS t FROM project_setups WHERE account_id = $1 AND phase IN ('finish', 'done')`);
+  // D#845 Ruling 102.1: the one live setup (any phase but done or removed, the newest), else null. After `done` the track's own step states carry the history.
+  const setup = (await client.query<EngineSetup>(`SELECT id, phase, state, survey_run_id, repo_id FROM project_setups WHERE account_id = $1 AND phase NOT IN ('done', 'removed') ORDER BY created_at DESC, id LIMIT 1`, [accountId])).rows[0] ?? null;
+  // FU-308: the plan and install steps read the CURRENT setup only. With a live setup that is its own approved draft and its own phase; with none, the history of setups that were not removed (a removed project's approval is not this one's).
+  const plan = setup
+    ? iso((await client.query<{ t: Date | null }>(`SELECT min(approved_at) AS t FROM project_drafts WHERE account_id = $1 AND status = 'approved' AND setup_id = $2`, [accountId, setup.id])).rows[0]?.t)
+    : await one(`SELECT min(d.approved_at) AS t FROM project_drafts d WHERE d.account_id = $1 AND d.status = 'approved' AND NOT EXISTS (SELECT 1 FROM project_setups s WHERE s.account_id = d.account_id AND s.id = d.setup_id AND s.phase = 'removed')`);
+  const install = setup
+    ? iso((await client.query<{ t: Date | null }>(`SELECT min(updated_at) AS t FROM project_setups WHERE account_id = $1 AND id = $2 AND phase IN ('finish', 'done')`, [accountId, setup.id])).rows[0]?.t)
+    : await one(`SELECT min(updated_at) AS t FROM project_setups WHERE account_id = $1 AND phase IN ('finish', 'done')`);
   const live = await one(`SELECT min(last_heartbeat_at) AS t FROM engine_sessions WHERE account_id = $1 AND session_kind = 'engine' AND last_heartbeat_at IS NOT NULL`);
   const setups = (
     await client.query<{ phase: string; failure_code: string; failure_at: Date }>(
@@ -162,8 +169,6 @@ export async function readEngineSources(
   const installPr: EngineSources['installPr'] = pr
     ? { setup_id: pr.id, pr_number: pr.install_pr, pr_state: pr.phase !== 'await_merge' ? 'merged' : pr.failure_code === 'pr_closed' ? 'closed' : 'open' }
     : null;
-  // D#845 Ruling 102.1: the one live setup (any phase but done or removed, the newest), else null. After `done` the track's own step states carry the history.
-  const setup = (await client.query<EngineSetup>(`SELECT id, phase, state, survey_run_id, repo_id FROM project_setups WHERE account_id = $1 AND phase NOT IN ('done', 'removed') ORDER BY created_at DESC, id LIMIT 1`, [accountId])).rows[0] ?? null;
   const tier = rn[0]?.sandbox_engine === 'microvm' ? 'microvm' : rn[0]?.sandbox_engine === 'os_sandbox' ? 'standard' : null;
   const runners = rn.map((r) => ({ id: r.id, heardAt: r.last_seen_at.toISOString() }));
   const read: { sources: EngineSources; runners: { id: string; heardAt: string }[] } = {

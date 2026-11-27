@@ -204,12 +204,46 @@ describe('engine track (pg)', () => {
     expect((await engine(a)).filter((x) => x.failure)).toEqual([]);
   });
 
+  // D#845 FU-308: Remove then a new project left the removed setup's approval showing on the new setup's Approve the plan step.
+  it('plan and install follow the current setup only: a removed setup\'s approval, and an older setup\'s, never show on a new one', async () => {
+    const a = await account();
+    await runner(a, { engine: 'microvm' });
+    const approve = (acct: Acct, setupId: string) =>
+      admin.query(`INSERT INTO project_drafts (account_id, repo_id, setup_id, source, status, approved_by, approved_at, final_at, version) VALUES ($1, $2, $3, 'survey', 'approved', $4, now(), now(), (SELECT COALESCE(max(m.version), 0) + 1 FROM project_drafts m WHERE m.account_id = $1 AND m.repo_id = $2))`, [acct.accountId, acct.repoId, setupId, acct.userId]);
+    const first = await setup(a, 'install');
+    await approve(a, first);
+    expect((await states(a)).plan).toBe('done');
+    await admin.query(`UPDATE project_setups SET phase = 'finish' WHERE id = $1`, [first]);
+    expect((await states(a)).install).toBe('done');
+    // Remove: the setup is removed, and with no live setup the removed project's approval is gone, not carried.
+    await admin.query(`UPDATE project_setups SET phase = 'removed' WHERE id = $1`, [first]);
+    expect(await states(a)).toMatchObject({ plan: 'pending', install: 'pending' });
+    // A new project: its setup sits at the survey, and nothing of the removed one shows.
+    const second = await setup(a, 'survey');
+    expect(await states(a)).toMatchObject({ plan: 'pending', install: 'pending' });
+    expect((await engine(a)).find((x) => x.step === 'plan')!.completed_at).toBeNull();
+    // The new setup's own approval counts.
+    await approve(a, second);
+    expect((await states(a)).plan).toBe('done');
+    await admin.query(`UPDATE project_setups SET phase = 'install' WHERE id = $1`, [second]);
+    expect((await states(a)).install).not.toBe('done');
+    // A finished older setup does not make a newer live one's steps done: it has its own approval to give.
+    await admin.query(`UPDATE project_setups SET phase = 'done' WHERE id = $1`, [second]);
+    await setup(a, 'survey');
+    expect(await states(a)).toMatchObject({ plan: 'pending', install: 'pending' });
+    // Another account's approved setup never counts here.
+    const b = await account();
+    const bSetup = await setup(b, 'finish');
+    await approve(b, bSetup);
+    expect((await states(a)).plan).not.toBe('done');
+  });
+
   it('tenant scoping: a second repo of the same account does not hide the first, and another account\'s rows never show', async () => {
     const a = await account();
     const b = await account();
     await runner(b, { engine: 'microvm', auth: true });
-    await setup(b, 'finish', 'seed_failed');
-    await admin.query(`INSERT INTO project_drafts (account_id, repo_id, source, status, approved_by, approved_at, final_at) VALUES ($1, $2, 'blank', 'approved', $3, now(), now())`, [b.accountId, b.repoId, b.userId]);
+    const bSetup = await setup(b, 'finish', 'seed_failed');
+    await admin.query(`INSERT INTO project_drafts (account_id, repo_id, setup_id, source, status, approved_by, approved_at, final_at) VALUES ($1, $2, $3, 'blank', 'approved', $4, now(), now())`, [b.accountId, b.repoId, bSetup, b.userId]);
     expect(Object.values(await states(a))[0]).toBe('active');
     expect((await engine(a)).every((s) => s.completed_at === null && s.failure === null)).toBe(true);
     // Through the RLS-bypassing admin client, asking as A: every query's own account predicate must hold on its own. B has a row for every source.

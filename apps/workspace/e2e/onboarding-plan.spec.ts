@@ -323,6 +323,11 @@ test.describe("the plan review (D#845 ON-11b)", () => {
     await expect(t(page, "result")).toHaveText("Approved. GitHub couldn't be reached. Start the install again in a minute. Choose Start the install to try again.");
     expect(m.calls.at(-1)).toEqual({ method: "POST", action: "approve", body: { version: 4 } });
     await expect(t(page, "install")).toBeVisible();
+    // FU-307: a public repo's install refusal speaks of the install and its private repo, never of the survey.
+    m.post = () => ({ json: { approved: true, draft_id: D1, version: 4, review_mode: "standard", install: null, gate: null, install_error: { code: "public_repo", message: "SERVER WORDS" } } });
+    await t(page, "install").click();
+    await expect(t(page, "result")).toHaveText("Approved. This repo is public, so the engine installs into its private repo instead. Set that up first, then start the install again. Choose Start the install to try again.");
+    await expect(ob(page)).not.toContainText("survey");
     await axe(page);
   });
 

@@ -29,6 +29,7 @@ export const NO_KVM = "This machine has no KVM, so jobs run in the OS sandbox. T
 export const OPERATE_OFF = "The engine runs only while operate is on. Operate lets the cloud send commands to the engine, and your dials decide what it may do by itself.";
 export const ASK_OWNER = "Ask an owner or admin to turn on operate";
 export const ASK_PICK = "Ask an owner or admin to pick the project";
+const ASK_RETRY = "Ask an owner or admin to try again";
 const GENERIC_FAIL = "This step stopped. Try again.";
 const CLAUDE_INSTALL = "curl -fsSL https://claude.ai/install.sh | bash";
 const SUB_STEPS = {
@@ -93,6 +94,17 @@ const FIXES = {
   populate_failed: (nm, d) => ["Engine install stopped" + (d.sub_step ? " at " + d.sub_step : "") + ". Try again (it picks up where it stopped)"],
   provision_failed: (nm, d) => FIXES.populate_failed(nm, d),
   deps_failed: (nm, d) => FIXES.populate_failed(nm, d),
+  bootstrap_failed: (nm, d) => FIXES.populate_failed(nm, d),
+  finalize_failed: (nm, d) => FIXES.populate_failed(nm, d),
+  engine_fetch_failed: (nm) => ["The engine files couldn't be fetched on " + nm + ". Try again"],
+  plan_fetch_failed: (nm) => FIXES.engine_fetch_failed(nm),
+  job_silent: (nm) => [(nm === "your machine" ? "Your machine" : nm) + " stopped answering during the install. Try again"],
+  job_expired: (nm) => FIXES.job_silent(nm),
+  job_overran: (nm) => FIXES.job_silent(nm),
+  push_failed: () => ["Couldn't push the install branch. Try again"],
+  direct_raced: () => ["The repo changed while the install ran. Try again"],
+  pr_open_failed: () => FIXES.pr_failed(),
+  install_head_changed: () => ["The install branch changed on GitHub, so its pull request was closed. Try again"],
   bundle_refused: (nm, d) => ["The install produced changes we couldn't accept" + par(d.reason) + ". Nothing was pushed"],
   push_denied: (nm, d) => ["The GitHub App can't push to " + (d.repo || "the repository") + ". Check its write access in Repos"],
   pr_failed: () => ["Couldn't open the install PR. Try again"],
@@ -261,7 +273,15 @@ export function describeStep(steps, i, ctx = {}) {
     v.lines.push(f.text);
     if (f.cmd) v.commands.push({ label: "", text: f.cmd });
   };
-  if (step.state === "failed") { fix(step.failure.code, ctx.detail); return v; }
+  if (step.state === "failed") {
+    fix(step.failure.code, ctx.detail);
+    // FU-313: a failed install is retried in place (the cloud takes the retry only while the setup sits at the install step; a member reads the reason and is told who can retry).
+    if (step.step === "install" && ctx.setup && ctx.setup.phase === "install") {
+      if (ctx.isAdmin === false) v.lines.push(ASK_RETRY); else v.actions.push(run("retry_install", "Try again"));
+      if (ctx.installNote) v.lines.push(ctx.installNote);
+    }
+    return v;
+  }
   if (step.state === "pending") {
     const before = steps.slice(0, i).find((s) => s.state !== "done");
     if (before) v.lines.push("Finish " + labelOf(steps, before.step) + " first");
@@ -323,6 +343,7 @@ export function describeStep(steps, i, ctx = {}) {
       const n = ctx.install || {};
       if (n.pr && Number.isInteger(n.pr.number) && n.pr.state === "open") v.lines.push("Review and merge the install PR #" + n.pr.number);
       else if (n.pr && n.pr.state === "closed") v.lines.push("The install PR was closed. Reopen it, or start install again");
+      else if (step.state === "active" && ctx.setup && ctx.setup.phase === "install" && ctx.setup.state === "started") v.lines.push("The install is running on " + nm + ".");
       else if (Array.isArray(n.sub_steps)) for (const s of n.sub_steps) if (s && SUB_STEPS[s.id] && SUB_WORDS[s.state]) v.list.push({ label: SUB_STEPS[s.id], word: SUB_WORDS[s.state] });
       if (step.state === "done") v.lines.push("The engine is installed");
       break;
@@ -371,7 +392,7 @@ export function engineSection(steps, env) {
   const items = steps.map((s, i) => {
     const v = describeStep(steps, i, env.ctx);
     const buttons = v.actions.filter((a) => a.run || env.canOpen(a.app)).map((a) => h("button", { type: "button", class: "ob-btn ob-btn-primary", "data-testid": "ob-engine-" + a.id, disabled: a.run && env.ctx.planBusy === true, onClick: () => (a.run ? env.runAction(a.id) : env.openApp(a.app)) }, a.label));
-    return h("li", { class: "ob-step ob-engine-step" + (s.state === "done" ? " ob-done" : "") + (i === first ? " ob-current" : "") + (v.failed ? " ob-failed" : ""), "data-testid": "ob-engine-" + s.step, "data-state": s.state, "aria-current": i === first ? "step" : null },
+    return h("li", { class: "ob-step ob-engine-step" + (s.state === "done" ? " ob-done" : "") + (i === first ? " ob-current" : "") + (v.failed ? " ob-failed" : ""), "data-testid": "ob-engine-" + s.step, "data-state": s.state, "aria-current": i === first ? "step" : null, tabindex: -1 },
       h("div", { class: "ob-step-head" }, h("strong", null, v.label),
         h("span", { class: "ob-state", "data-testid": "ob-engine-state" }, v.word, s.completed_at ? [" ", timeNode(s.completed_at, true)] : null)),
       v.lines.map((t) => h("p", { class: "ob-muted", "data-testid": "ob-engine-line" }, env.ctx.planLink && t === env.ctx.planNote && env.canOpen(BUDGET_APP) && t.includes(BUDGET_PHRASE) ? budgetLinked(t, env) : lineNodes(t, env.ctx.name))),
@@ -878,11 +899,16 @@ export function draftRefusal(e) {
   return { text: own ? e.message : DRAFT_FAILED, conflict: false, reload: false };
 }
 const INSTALL_BY_ERROR = {
-  public_repo: PLAN_BY_ERROR.public_repo, repo_visibility_unknown: PLAN_BY_ERROR.repo_visibility_unknown, setup_phase: PLAN_BY_ERROR.setup_phase, forbidden: PLAN_MEMBER,
+  public_repo: "This repo is public, so the engine installs into its private repo instead. Set that up first, then start the install again.", repo_visibility_unknown: PLAN_BY_ERROR.repo_visibility_unknown, setup_phase: PLAN_BY_ERROR.setup_phase, forbidden: "Only owners and admins can start the install again.",
   setup_not_placed: "The project isn't placed on a machine yet.", engine_release_unset: "No engine release is available for this machine yet.",
   boss_login_missing: "Your GitHub login couldn't be read, so the install can't be signed. Reconnect GitHub, then start the install again.",
   github_unavailable: "GitHub couldn't be reached. Start the install again in a minute.", github_refused: "GitHub refused the read. Check the GitHub App's access to this repo, then start the install again.",
   not_configured: "The install can't be issued from here right now.",
+};
+/** FU-313: a refused retry in words (the server's closed code, never its message); `reread` means the setup moved on, so the steps are read again. */
+export const retryRefusal = (e) => {
+  const code = e && typeof e.code === "string" ? e.code : "";
+  return { text: Object.hasOwn(INSTALL_BY_ERROR, code) ? INSTALL_BY_ERROR[code] : "The install couldn't be started again. Try again.", reread: code === "not_retryable" || code === "setup_phase" || code === "not_found" };
 };
 const GATE_NAMES = { plan_required: "plan_required", engine_quantity: "engine_quantity", account_held: "account_held", engine_plan_unavailable: "unavailable" };
 /** What Approve's answer says beside the approval: the install started, or why it did not (the Engine plan's gate, or an install that could not be issued), in words. `lines` and the purchase `actions` are the project step's own. */
