@@ -29,7 +29,7 @@ Sources:
 - [`@fx/billing`](packages/billing.md) — Stripe billing: the hosted plans, the Engine plan's per-engine quantity item on the same subscription, and the pinned customer portal.
 - [`@fx/partners`](packages/partners.md) — partner layer.
 - [`@fx/decisions`](packages/decisions.md) — decision-type catalogue, presets, and the pure `decide()` resolver.
-- [`@fx/runner`](packages/runner.md) — per-role sandbox orchestration and the `ExecutionTarget` seam; also the local runner's engine bridge (including how `engine-bridge enable` finds the engine's checkout) and engine host (`fx-runner engine-host`), its platform support, the microVM engine (VM helper and its install plan, sandbox daemon and SDK adapter, egress proxy, the per-job VM lifecycle and the job's model token inside a VM), the clone size watch, sandbox inventory and signed sandbox commands, the project setup job, in a microVM or in the OS sandbox, with its push and the install pull request, the engine update job, the project survey run, the Claude sign-in link on a machine, the engine session jobs on both tiers, the cloud's own stops of them and the lease that ends a session the cloud no longer covers, the Servers tab's actions and Hetzner wording, and how the runner is installed and updated from signed release metadata.
+- [`@fx/runner`](packages/runner.md) — per-role sandbox orchestration and the `ExecutionTarget` seam; also the local runner's engine bridge (including how `engine-bridge enable` finds the engine's checkout) and engine host (`fx-runner engine-host`), its platform support, the microVM engine (VM helper and its install plan, sandbox daemon and SDK adapter, egress proxy, the per-job VM lifecycle and the job's model token inside a VM), the clone size watch, sandbox inventory and signed sandbox commands, the project setup job, in a microVM or in the OS sandbox, with its push and the install pull request, the engine update job, the project survey run, the Claude sign-in link on a machine, the engine session jobs on both tiers, the cloud's own stops of them and the lease that ends a session the cloud no longer covers, the Servers tab's actions and Hetzner wording, how the runner is installed and updated from signed release metadata, and how it prunes the workspaces of finished runs.
 - [`@fx/runtime`](packages/runtime.md) — model/runtime adapters.
 - [`@fx/model-router`](packages/model-router.md) — data-driven model routing, escalation, floors.
 - [`@fx/model-connection`](packages/model-connection.md) — customer bring-your-own-key model connections.
@@ -45,8 +45,8 @@ Sources:
 
 ## Apps
 
-- [`apps/web`](apps/web.md) — the Next.js App Router console, including the `/link` page where a person approves a machine, the Machines routes, the install pull request, plan draft, survey and engine update routes and the `/install.sh` route for the runner.
-- [`apps/workspace`](apps/workspace.md) — the imported fulcrumaxe workspace UI, filtered to a cloud build profile; its first-party apps (onboarding, with its engine track, pipeline, needs-you, team, runs and others) are under `apps/workspace/apps/`.
+- [`apps/web`](apps/web.md) — the Next.js App Router console, including the `/link` page where a person approves a machine, the Machines routes, the install pull request, plan draft, survey, engine update and engine stop retry routes and the `/install.sh` route for the runner.
+- [`apps/workspace`](apps/workspace.md) — the imported fulcrumaxe workspace UI, filtered to a cloud build profile; its first-party apps (onboarding, with its engine track and the retry of a failed install, pipeline, needs-you, team, with its failed-stop row and engine update card, runs and others) are under `apps/workspace/apps/`.
 - [`apps/live-e2e`](apps/live-e2e.md) — live end-to-end packs: manifest, selection, targets and the `plan` command.
 
 ## Cross-cutting

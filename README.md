@@ -39,7 +39,7 @@ decisions and a halt marker come back, and the workspace's Team app and the
 engine items in Needs you show and answer them. It is off until an owner or
 admin turns it on, and what it shows is information, never spend
 (`packages/fx-runner/src/engineBridge/`, `packages/api/src/routes/engine.ts`,
-`apps/workspace/apps/team/`; see `docs/architecture.md`). It uploads the engine's
+`apps/workspace/apps/team/`; see `docs/architecture.md`). When an engine stop did not finish, the Team app says so and an owner or admin can ask again (`POST /api/v1/engine/repos/{id}/retry-stop`, #1293, #1295), and an installed project whose engine is behind gets an update card with progress and a link to the pull request (#1304). It uploads the engine's
 own events file and the engine host's, each with its own cursor. A person can also run the
 engine's Team Lead on the machine as a supervised headless process (`fx-runner
 engine-host start | stop | status | resume`), which gets scheduled messages and the
@@ -109,7 +109,7 @@ and can retry a failed install (`packages/runner-cloud/src/setupJobs.ts`,
 (`packages/runner-cloud/src/setupInstallMerge.ts`, #1263); the cloud then makes the plan's first Discussions and
 the team-log issue (`packages/runner-cloud/src/setupFinish.ts`, #1258) and signs the project's first engine session
 (`packages/runner-cloud/src/engineSystemStarts.ts`, #1284). A later engine release reaches an installed project
-through `engine_update` (`packages/runner-cloud/src/engineUpdate.ts`, #1284). For an existing project it first surveys the repository in a
+through `engine_update` (`packages/runner-cloud/src/engineUpdate.ts`, #1284): the cloud then opens the update's pull request, a person merges it and the session restarts on the new version (`packages/runner-cloud/src/engineUpdatePr.ts`, #1301). The install pull request is opened right after the runner's `push ok` report and the finish runs right after the merge, with the reconcile tick as backstop (`apps/web/lib/onboardingHandoff.ts`, #1313). Turning operate on or off queues the start or stop, which the reconcile job drains (`packages/runner-cloud/src/engineOperateQueue.ts`, #1296). The runner can also take the three jobs of a private twin (seed, publish and sync), but no build offers them and `TWIN_ENABLED` is off (`packages/fx-runner/src/commands/run.ts`, `packages/core/src/repos/twins.ts`, #1300, #1306, #1311). For an existing project it first surveys the repository in a
 read-only run on the placed machine (`packages/runner-cloud/src/surveyJobs.ts`); a public repository's survey
 starts only with the person's consent and on a runner that lists `survey_public_v1`. The cloud does keep what
 each machine last said about its free memory, free disk, running setups and whether it holds
@@ -155,6 +155,8 @@ app's engine track uses to word the machine step. The cloud already takes a runn
 inventory and host limits, and an owner or admin can queue signed stop, delete and reap
 commands for a runner's sandboxes (`packages/runner-cloud/src/sandboxCommands.ts`; see
 `docs/packages/runner.md`).
+
+The runner removes the workspaces of finished runs that nothing holds and that have not changed for 7 days, or 1 day when the disk is under 10% free, hourly by itself and on demand with `fx-runner prune` (`packages/fx-runner/src/job/workspacePrune.ts`, `packages/fx-runner/src/commands/prune.ts`, #1318).
 
 The runner is installed with the script the cloud serves at `/install.sh`. The server verifies the signed release
 metadata through the runner's own TUF client (`packages/release-verify`, shared with the runner's updater) and writes
@@ -345,6 +347,7 @@ Numbering blocks with files at HEAD:
 | `1050`–`1064` | the rented-server work and the machine jobs: the address a provisioning token is bound to (`1050`), the preflight codes a runner reports (`1051`), the heartbeat sandbox inventory (`1052`), the machine job claim path (`1053_machine_jobs.sql`), a create key on a managed server (`1054`), server lifecycle, orphans and delete (`1055`), who may issue `project_setup` (`1057`), the survey draft (`1059`), the index behind each Team panel's own time (`1061`), the machine-linked notice (`1062_machine_link_notice.sql`), the usage rollup into `machine_usage_daily` (`1063_machine_usage_rollup.sql`) and the staging fake provider's state (`1064_fake_provider_state.sql`); `1056`, `1058` and `1060` are not used |
 | `1065`–`1068` | the interview sessions table and its definer role (`1065_interview_sessions.sql`), the session job report facts and the account's operate epoch (`1066_session_job_contract.sql`) and the engine session sandboxes view (`1068_engine_session_sandboxes.sql`); `1067` is not used |
 | `1070`–`1100` | the Claude sign-in link, cloud side (`1070_machine_login.sql`), the setup's push (`1071_setup_push.sql`), the install pull request step and its watch (`1072_setup_install_pr.sql`, `1073_setup_install_watch.sql`), the orphan "kept" mark and the hourly IPv4 price on a managed server (`1074`, `1076`), system stops of engine sessions (`1077_engine_system_stops.sql`), the machine cleanups a removed or moved project leaves (`1082`, `1083`), the finish phase that makes the first Discussions (`1085_setup_finish.sql`), the read of an install's base commit for the merge (`1088`), the engine session lease (`1092_engine_session_lease.sql`), engine updates (`1093_engine_updates.sql`), a server row following a reconnected Hetzner token (`1095`), the public survey's capability and consent (`1096`, `1098`), private repo twins (`1097_repo_twins.sql`, `1099_twin_exclusion_connect.sql`) and the system first start of an engine session (`1100_engine_system_start.sql`); `1069`, `1075`, `1078`, `1079`, `1080`, `1081`, `1084`, `1086`, `1087`, `1089`, `1090`, `1091` and `1094` are not used |
+| `1101`–`1115` | a private twin's paths and plan adoption (`1103_twin_paths_adopt_draft.sql`), the operate queue (`1105_engine_operate_queue.sql`), the twin's install files at the finish (`1107_setup_finish_twin_paths.sql`), the twin's seed, publish, sync, parity check and sync pull request (`1108_twin_seed.sql`, `1110_twin_publish.sql`, `1111_twin_sync.sql`, `1112_twin_parity.sql`, `1115_twin_sync_pr.sql`), the engine update's pull request and restart (`1109_engine_update_pr.sql`) and the wait a job is given while the cloud opens its pull request (`1114_machine_job_cloud_window.sql`); `1101`, `1102`, `1104`, `1106` and `1113` are not used |
 
 **Ordering rule:** every migration file a pull request adds has to sort after
 every file already on its base, and no two files share a four-digit prefix.
@@ -440,6 +443,12 @@ Sources:
 - `scripts/ci/full-run-triggers.json`
 - `.github/workflows/ci-full-label.yml`
 - `packages/db/scripts/check-migration-order.sh`
+- `apps/web/lib/onboardingHandoff.ts`
+- `packages/runner-cloud/src/engineUpdatePr.ts`
+- `packages/runner-cloud/src/engineOperateQueue.ts`
+- `packages/fx-runner/src/job/workspacePrune.ts`
+- `packages/fx-runner/src/commands/prune.ts`
+- `packages/core/src/repos/twins.ts`
 - `packages/db/migrations/README.md`
 - `packages/db/migrations/1003_verify_stage.sql`
 - `packages/db/migrations/1017_sitekit_role_routing.sql`
