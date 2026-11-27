@@ -24,7 +24,10 @@ export const BOOT_BUDGET = Object.freeze({
   // correction, D#37 C46): main sat at 324,530 of 327,680 and the remaining
   // Launch UI needs about 55-100 KB more. Lowered again after WS-D4 (comment
   // stripping) lands.
-  maxBrotliBytes: 448 * 1024,
+  // Raised again from 448 KB to 472 KB by owner ruling 2026-11-27 (PM
+  // correction, D#845 R125): main sat at 457,427 of 458,752, and the private
+  // twin screens and Team chips need about 16 KB more.
+  maxBrotliBytes: 472 * 1024,
   // Boot files a single first-party app may ship under apps/<id>/.
   // Raised from 4 to 5 by owner ruling 2026-09-30 (D#37 C40, WS-F15b: the
   // Developer app's API reference tab).
