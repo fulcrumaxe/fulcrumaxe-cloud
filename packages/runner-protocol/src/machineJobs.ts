@@ -9,6 +9,7 @@
 import { createPublicKey, sign, verify, type KeyObject } from "node:crypto";
 import { z } from "zod";
 import { SHA40_PATTERN, ENGINE_VERSION_PATTERN } from "./engineEvents.js";
+import { TWIN_SYNC_MAX_PATHS, isTwinSyncPath, twinSyncBranch } from "./twinSync.js";
 import { canonicalJson, JobSignatureError, type JobKeyring } from "./jobSignature.js";
 import { DEVICE_REGISTER_CAPABILITY, ENGINE_SESSION_CAPABILITY, MACHINE_LOGIN_CAPABILITY, PROJECT_SETUP_CAPABILITY, TASK_KIND_CAPABILITY, TWIN_CAPABILITY, type RunnerCapability, type TASK_KINDS } from "./job.js";
 import { MACHINE_ONBOARDING_MIN_PROTOCOL } from "./messages.js";
@@ -17,7 +18,7 @@ import { ColdstartCode, ColdstartState } from "./coldstartStatus.js";
 const safeInt = z.number().int().safe();
 const sha256Hex = z.string().regex(/^[0-9a-f]{64}$/);
 
-export const MACHINE_JOB_KINDS = ["project_setup", "engine_update", "engine_session_start", "engine_session_stop", "engine_session_delete", "project_remove", "twin_seed", "twin_publish"] as const;
+export const MACHINE_JOB_KINDS = ["project_setup", "engine_update", "engine_session_start", "engine_session_stop", "engine_session_delete", "project_remove", "twin_seed", "twin_publish", "twin_sync"] as const;
 export type MachineJobKind = (typeof MACHINE_JOB_KINDS)[number];
 /** The longest a machine job lives after it was issued, in seconds. */
 export const MACHINE_JOB_MAX_LIFE_S = 1800;
@@ -73,6 +74,14 @@ const BASE = {
 };
 const job = <K extends MachineJobKind, A extends z.ZodTypeAny>(kind: K, args: A) => strict({ ...BASE, kind: z.literal(kind), args });
 
+const TwinPrivateSet = strict({
+  overlay_globs: z.array(z.string().min(1).max(512)).max(100),
+  install_paths: z.array(z.string().min(1).max(1024)).max(5000),
+  blob_globs: z.array(z.string().min(1).max(512)).max(100),
+  identifier_rules_path: z.string().min(1).max(200).nullable(),
+  plan_data_rules_path: z.string().min(1).max(200).nullable(),
+});
+
 /** One machine job. `args` belongs to its `kind` and nothing else's. */
 export const MachineJob = z
   .discriminatedUnion("kind", [
@@ -97,13 +106,17 @@ export const MachineJob = z
       public: strict({ owner: GH_OWNER, name: GH_NAME, gh_id: safeInt.min(1), tip: z.string().regex(SHA40_PATTERN) }),
       private: strict({ owner: GH_OWNER, name: GH_NAME, gh_id: safeInt.min(1), base: z.string().regex(SHA40_PATTERN), head: z.string().regex(SHA40_PATTERN) }),
       branch: z.string().regex(/^fx\/publish-[0-9a-f]{12}$/),
-      private_set: strict({
-        overlay_globs: z.array(z.string().min(1).max(512)).max(100),
-        install_paths: z.array(z.string().min(1).max(1024)).max(5000),
-        blob_globs: z.array(z.string().min(1).max(512)).max(100),
-        identifier_rules_path: z.string().min(1).max(200).nullable(),
-        plan_data_rules_path: z.string().min(1).max(200).nullable(),
-      }),
+      private_set: TwinPrivateSet,
+    })),
+    // D#845 ON-27d2: the twin's sync, the public repository's change coming in. Homed on the twin's private repository and setup like the others; it READS the public repository anonymously and pushes ONE commit (the listed
+    // `paths` set to the public tip's blobs, on the twin's tip `private.base`) to a branch of the TWIN, so the only token ever minted is the twin's. The private set rides in the signed bytes so the runner can refuse a path of it.
+    job("twin_sync", strict({
+      twin_id: z.string().uuid(),
+      public: strict({ owner: GH_OWNER, name: GH_NAME, gh_id: safeInt.min(1), tip: z.string().regex(SHA40_PATTERN) }),
+      private: strict({ owner: GH_OWNER, name: GH_NAME, gh_id: safeInt.min(1), base: z.string().regex(SHA40_PATTERN) }),
+      branch: z.string().regex(/^fx\/twin-sync-[0-9a-f]{12}$/),
+      paths: z.array(z.string().refine(isTwinSyncPath, "not a path the sync may name")).min(1).max(TWIN_SYNC_MAX_PATHS),
+      private_set: TwinPrivateSet,
     })),
   ])
   .superRefine((j, ctx) => {
@@ -116,6 +129,10 @@ export const MachineJob = z
     // A publish is homed on the twin's private repository and setup; it pushes to the other repository, the public one, to a branch named from the private head. One that names the public repository as its home is refused here and at issue.
     if (j.kind === "twin_publish" && (j.args.private.gh_id !== j.repo_gh_id || j.args.public.gh_id === j.repo_gh_id || j.setup_id === undefined || j.requires_engine !== "any" || j.args.private.base === j.args.private.head || j.args.branch !== `fx/publish-${j.args.private.head.slice(0, 12)}`)) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a twin publish is homed on the private twin, through its setup, and goes from its base to its head", path: ["args"] });
+    }
+    // A sync is homed on the twin and its setup, reads the other repository (the public one) and goes to a branch named from the public tip; its paths are listed once each.
+    if (j.kind === "twin_sync" && (j.args.private.gh_id !== j.repo_gh_id || j.args.public.gh_id === j.repo_gh_id || j.setup_id === undefined || j.requires_engine !== "any" || j.args.branch !== twinSyncBranch(j.args.public.tip) || new Set(j.args.paths).size !== j.args.paths.length)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a twin sync is homed on the private twin, through its setup, and brings the listed paths of the public tip in", path: ["args"] });
     }
   });
 export type MachineJob = z.infer<typeof MachineJob>;
@@ -167,6 +184,8 @@ export const SETUP_FAILURE_CODES = [
   "bad_input", "pairing_self", "pairing_changed", "base_diverged", "no_changes", "scan_refused", "private_path_change", "scan_identity_mismatch", "public_unavailable", "public_tip_moved", "app_not_installed", "token_scope_mismatch",
   "branch_exists", "pr_failed", "unsafe_git_config", "public_branch_moved", "republish_base_missing", "rule_files_not_private", "private_read_failed", "base_not_ancestor", "base_unavailable", "base_not_on_default", "base_not_on_parent", "merge_in_change",
   "republish_pr_closed", "republish_pr_merged", "republish_pairing_off",
+  // D#845 ON-27d2: what a twin sync may fail with besides the codes above (a path of the private set is `private_path_change`; a public tip that moved is `public_tip_moved`).
+  "private_tip_moved", "sync_unsafe_path",
   "engine_fetch_failed", "engine_checksum", "engine_archive_refused", "plan_fetch_failed", "plan_checksum", "plan_invalid", "setup_status_refused", "bootstrap_failed", "finalize_failed",
   "bundle_refused", "push_failed", "direct_raced", "pr_open_failed", "install_head_changed", "pr_scope_refused", "labels_failed", "kind_unsupported", "job_expired", "job_silent", "job_overran", "engine_unsupported", ...SETUP_VM_JOB_CODES,
 ] as const;
@@ -270,6 +289,8 @@ export const MACHINE_JOB_CAPABILITY: Readonly<Record<MachineJobKind, RunnerCapab
   engine_session_delete: ENGINE_SESSION_CAPABILITY,
   // D#845 ON-27c2: last, and only because fx-runner registers the handler (run.ts). No build lists `twin_v1` before ON-27d, so no runner is offered it until then.
   twin_publish: TWIN_CAPABILITY,
+  // D#845 ON-27d2: same rule as the two above; the sync's handler is registered in run.ts and no build lists `twin_v1` before ON-27d4.
+  twin_sync: TWIN_CAPABILITY,
 });
 
 /** What the claim knows about a runner when it decides what to offer: its stored protocol version, the capabilities of its latest hello and the sandbox engine of its facts (absent when it sent none). */

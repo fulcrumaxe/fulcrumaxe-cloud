@@ -497,7 +497,11 @@ describe("the pairing is the cloud's alone (P1f-3-a, P1f-3-b; P1f-2b acceptance 
     const naming = files.filter((f) => NAMES.test(readFileSync(f, "utf8"))).map((f) => path.relative(src, f).split(path.sep).join("/"));
     // D#6 PUBLIC-MERGE PR3: the merge-order handler is the one other reader, and it takes the list from the claim reply's order alone (the cloud's own row).
     // D#845 ON-27c2: the twin publish handler is the third, and takes the set from the signed job alone (`job.args.private_set`), which the cloud's token route holds against its own rows before any credential.
-    expect(naming).toEqual(["daemon/planeMerge.ts", "daemon/planePush.ts", "setup/twinPublish.ts"]);
+    // D#845 ON-27d2: the twin sync handler is the fourth, and takes the set from the signed job alone too (only to refuse a path of it).
+    expect(naming).toEqual(["daemon/planeMerge.ts", "daemon/planePush.ts", "setup/twinPublish.ts", "setup/twinSync.ts"]);
+    const sync = readFileSync(path.join(src, "setup/twinSync.ts"), "utf8");
+    expect(sync).not.toMatch(/process\.env|readFileSync|readFile\(|JSON\.parse|loadSettings|import\(/);
+    expect(sync.match(/private_set/g)?.length).toBe(1);
     const twin = readFileSync(path.join(src, "setup/twinPublish.ts"), "utf8");
     expect(twin).not.toMatch(/process\.env|readFileSync|readFile\(|JSON\.parse|loadSettings|import\(/);
     const twinSet = [...twin.matchAll(/(?:overlayGlobs|identifierRulesPath|planDataRulesPath|binaryGlobs):\s*([^,}]+)/g)].map((m) => m[1]!.trim());

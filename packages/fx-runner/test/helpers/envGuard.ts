@@ -153,6 +153,7 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/engines/claude/kit.ts": ["path"], // the engine's file layout under the state directory
   "src/setup/twinSeed.ts": ["crypto", "fs", "path"], // D#845 ON-27b: the per-job scratch repository is named from random bytes under the runner's own workspace root, and removed after the job
   "src/setup/twinPublish.ts": ["fs", "path"], // D#845 ON-27c2: the per-job throwaway repository is made under the runner's own state directory (a real 0700 directory, never a link) and removed after the job
+  "src/setup/twinSync.ts": ["crypto", "fs", "path"], // D#845 ON-27d2: the per-job scratch repository is made 0700 under the runner's own state directory (a real directory, never a link), holds the mirror's object path and is removed after the job
   "src/setup/setupPush.ts": ["path"], // D#845 ON-8f1: the snapshot of the setup workspace is made under the runner's own snapshots directory, resolved from absolute paths
   "src/daemon/push.ts": ["path"], // the workspace's git directory is `<workspace>/.git`, resolved from an absolute path
   "src/daemon/workspaceExclude.ts": ["fs", "path"], // D#6 C44-3: no-follow append to the workspace's own `.git/info/exclude`
