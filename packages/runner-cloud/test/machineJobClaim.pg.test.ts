@@ -93,8 +93,9 @@ describe("machine job claim and setup progress [pg]", () => {
     // a twin seed is bound to its setup and to the twin's own repository (`private`); the public side is another repository
     const seed = { twin_id: randomUUID(), public: { owner: "acme", name: "widgets", gh_id: gh + 1, default_branch: "main", head_sha: "a".repeat(40) }, private: { owner: "acme", name: "widgets-private", gh_id: gh } };
     for (const kind of MACHINE_JOB_KINDS) {
-      const setupId = kind === "project_setup" || kind === "twin_seed" ? r.setupId : null;
-      const job = await issue(r, { kind, setupId, ...(kind === "twin_seed" ? { args: seed } : {}) });
+      const setupId = kind === "project_setup" || kind === "twin_seed" || kind === "twin_publish" ? r.setupId : null;
+      const publish = { twin_id: randomUUID(), public: { owner: "acme", name: "widgets", gh_id: gh + 1, tip: "a".repeat(40) }, private: { owner: "acme", name: "widgets-private", gh_id: gh, base: "a".repeat(40), head: "c".repeat(40) }, branch: `fx/publish-${"c".repeat(12)}`, private_set: { overlay_globs: [], install_paths: [], blob_globs: [], identifier_rules_path: null, plan_data_rules_path: null } };
+      const job = await issue(r, { kind, setupId, ...(kind === "twin_seed" ? { args: seed } : kind === "twin_publish" ? { args: publish } : {}) });
       const got = MachineJobClaimReply.parse((await pickup(r)).body);
       expect("signed_job" in got && got.signed_job.job.kind).toBe(kind);
       await h.admin.query("UPDATE machine_jobs SET state = 'done' WHERE id = $1", [job.id]);

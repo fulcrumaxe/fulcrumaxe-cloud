@@ -4,6 +4,7 @@ import { ENGINE_COMMAND_PURPOSE, signEngineCommand } from "../src/engineCommands
 import { JobSignatureError, canonicalJson } from "../src/jobSignature.js";
 import { HelloMessage, MACHINE_ONBOARDING_MIN_PROTOCOL, MIN_SUPPORTED_PROTOCOL_VERSION } from "../src/messages.js";
 import { COLDSTART_STEPS } from "../src/coldstartStatus.js";
+import { PLANE_REFUSAL_CODES } from "../src/planePush/planePushRoute.js";
 import { MACHINE_JOB_CAPABILITY, MACHINE_JOB_KINDS, MACHINE_JOB_MAX_LIFE_S, ENGINE_TARBALL_HOSTS, MachineJob, MachineJobClaimMessage, MachineJobClaimReply, MACHINE_JOB_FINAL_STEP, SETUP_FAILURE_CODES, SETUP_RUNNER_STEPS, SETUP_SUB_STEPS, SetupProgressBody, ENGINE_STOP_REASONS, SESSION_FAILURE_CODES, SESSION_JOB_KINDS, SESSION_JOB_STEPS, SESSION_JOB_STEP_ORDER, SESSION_START_MODES, SessionJobProgressBody, machineJobProgressPath, deviceFlowOffered, isEngineTarballUrl, loginCommandOffered, machineJobOffered, signMachineJob, taskKindOffered, verifyMachineJob, type MachineJob as Job, type RunnerOffer } from "../src/machineJobs.js";
 import { DEVICE_REGISTER_CAPABILITY, ENGINE_SESSION_CAPABILITY, MACHINE_LOGIN_CAPABILITY, PROJECT_SETUP_CAPABILITY, REPO_TOKEN_REFRESH_CAPABILITY, RUNNER_CAPABILITIES, SURVEY_CAPABILITY, TASK_KINDS, TASK_KIND_CAPABILITY } from "../src/job.js";
 
@@ -26,8 +27,9 @@ const ARGS: Record<string, unknown> = {
   engine_session_delete: { operate_epoch: 0 },
   project_remove: { delete_sandbox: true, removal_pr: false },
   twin_seed: { twin_id: ID, public: { owner: "acme", name: "widgets", gh_id: 78, default_branch: "main", head_sha: SHA }, private: { owner: "acme", name: "widgets-private", gh_id: 77 } },
+  twin_publish: { twin_id: ID, public: { owner: "acme", name: "widgets", gh_id: 78, tip: SHA }, private: { owner: "acme", name: "widgets-private", gh_id: 77, base: SHA, head: "c".repeat(40) }, branch: `fx/publish-${"c".repeat(12)}`, private_set: { overlay_globs: ["docs/private/**"], install_paths: [".github/workflows/engine.yml"], blob_globs: ["assets/**"], identifier_rules_path: ".autonomous-team/ids.json", plan_data_rules_path: null } },
 };
-const jobOf = (kind: string, over: Record<string, unknown> = {}): Job => ({ ...base, ...(kind === "twin_seed" ? { setup_id: ID } : {}), kind, args: ARGS[kind], ...over }) as Job;
+const jobOf = (kind: string, over: Record<string, unknown> = {}): Job => ({ ...base, ...(kind === "twin_seed" || kind === "twin_publish" ? { setup_id: ID } : {}), kind, args: ARGS[kind], ...over }) as Job;
 const failsWith = (run: () => unknown, code: string): void => {
   try {
     run();
@@ -62,6 +64,26 @@ describe("machine job schema", () => {
     expect(ok(jobOf("twin_seed", { args: { ...args, private: { ...args.private, default_branch: "main" } } }))).toBe(false);
     expect(ok(jobOf("twin_seed", { args: { ...args, repo: "acme/other" } }))).toBe(false);
     expect(ok(jobOf("twin_seed", { args: { ...args, public: { ...args.public, default_branch: "release/1.x" } } }))).toBe(true);
+  });
+  it("holds a twin publish to its one home: the private twin through its setup, going from its base to its head, on a branch named from the head", () => {
+    const args = ARGS["twin_publish"] as { public: Record<string, unknown>; private: Record<string, unknown>; private_set: Record<string, unknown> };
+    expect(ok(jobOf("twin_publish"))).toBe(true);
+    // the job names the PUBLIC repository as its own, or the twin's gh id is not the job's, or the two repositories are one
+    expect(ok(jobOf("twin_publish", { repo_gh_id: 78 }))).toBe(false);
+    expect(ok(jobOf("twin_publish", { repo_gh_id: 99 }))).toBe(false);
+    expect(ok(jobOf("twin_publish", { args: { ...args, public: { ...args.public, gh_id: 77 } } }))).toBe(false);
+    expect(ok(jobOf("twin_publish", { setup_id: undefined }))).toBe(false);
+    expect(ok(jobOf("twin_publish", { requires_engine: "microvm" }))).toBe(false);
+    // a publish that goes nowhere, and a branch that is not the head's
+    expect(ok(jobOf("twin_publish", { args: { ...args, private: { ...args.private, base: "c".repeat(40) } } }))).toBe(false);
+    for (const branch of ["main", "fx/publish-" + "d".repeat(12), "fx/publish-" + "c".repeat(11), "fx/publish-" + "c".repeat(13), "../fx/publish-" + "c".repeat(12)]) expect(ok(jobOf("twin_publish", { args: { ...args, branch } })), branch).toBe(false);
+    // the closed shapes: the public tip and the commits are full ids, the set's lists are bounded, and nothing else is carried
+    for (const bad of [{ tip: "abc" }, { tip: SHA.toUpperCase() }, { owner: "a/b" }, { token: "x" }]) expect(ok(jobOf("twin_publish", { args: { ...args, public: { ...args.public, ...bad } } })), JSON.stringify(bad)).toBe(false);
+    for (const bad of [{ overlay_globs: Array.from({ length: 101 }, (_, n) => `a${n}`) }, { install_paths: Array.from({ length: 5001 }, (_, n) => `a${n}`) }, { blob_globs: [""] }, { identifier_rules_path: "" }, { extra: 1 }]) expect(ok(jobOf("twin_publish", { args: { ...args, private_set: { ...args.private_set, ...bad } } })), JSON.stringify(bad).slice(0, 40)).toBe(false);
+    expect(ok(jobOf("twin_publish", { args: { ...args, token: "x" } }))).toBe(false);
+  });
+  it("lists every refusal the push route can throw as a failure code a publish may report", () => {
+    for (const code of PLANE_REFUSAL_CODES) expect(SETUP_FAILURE_CODES as readonly string[], code).toContain(code);
   });
   it("gives the seed its own steps and codes, and the seed's capability goes to no build yet", () => {
     expect(SETUP_RUNNER_STEPS.indexOf("twin_fetch")).toBeLessThan(SETUP_RUNNER_STEPS.indexOf("push"));
@@ -154,7 +176,7 @@ describe("what a runner is offered", () => {
     const six = [DEVICE_REGISTER_CAPABILITY, PROJECT_SETUP_CAPABILITY, SURVEY_CAPABILITY, ENGINE_SESSION_CAPABILITY, MACHINE_LOGIN_CAPABILITY, REPO_TOKEN_REFRESH_CAPABILITY];
     expect(six).toEqual(["device_register_v1", "project_setup_v1", "survey_v1", "engine_session_v1", "machine_login_v1", "repo_token_refresh_v1"]);
     for (const capability of six) expect(RUNNER_CAPABILITIES).toContain(capability);
-    expect(MACHINE_JOB_CAPABILITY).toEqual({ project_setup: "project_setup_v1", engine_update: "project_setup_v1", project_remove: "project_setup_v1", engine_session_start: "engine_session_v1", engine_session_stop: "engine_session_v1", engine_session_delete: "engine_session_v1", twin_seed: "twin_v1" });
+    expect(MACHINE_JOB_CAPABILITY).toEqual({ project_setup: "project_setup_v1", engine_update: "project_setup_v1", project_remove: "project_setup_v1", engine_session_start: "engine_session_v1", engine_session_stop: "engine_session_v1", engine_session_delete: "engine_session_v1", twin_seed: "twin_v1", twin_publish: "twin_v1" });
     expect(TASK_KIND_CAPABILITY).toEqual({ survey: "survey_v1" });
   });
   it("offers each kind of work to a runner with its capability and to no other", () => {

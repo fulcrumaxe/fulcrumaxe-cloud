@@ -57,6 +57,7 @@ describe('repo twins API', () => {
     world = PUBLIC;
     asked.length = 0;
     twinRouteDeps.enabled = true;
+    twinRouteDeps.closePublishPr = null;
   });
   afterAll(async () => {
     repoPairingDeps.getInspector = () => null;
@@ -225,6 +226,42 @@ describe('repo twins API', () => {
     // We never delete a GitHub repo: the repo row is still there, and the only calls GitHub saw were none.
     expect((await admin.query('SELECT 1 FROM repos WHERE id = $1', [priv])).rows).toHaveLength(1);
     expect(asked).toEqual([]);
+  });
+
+  it('stopping a twin closes its open publish pull request after the removal, and only then; a close that fails never undoes the removal', async () => {
+    const owner = await account();
+    const closed: Array<{ accountId: string; userId: string; twinId: string }> = [];
+    const states: Array<string | undefined> = [];
+    twinRouteDeps.closePublishPr = async (input) => {
+      closed.push(input);
+      states.push(await stateOf(input.twinId));
+    };
+    // pause and resume close nothing
+    const repo = await seedRepo(owner.accountId);
+    const priv = await seedRepo(owner.accountId, 'widgets-private');
+    const id = await makeTwin(owner, repo, priv);
+    await call(owner, 'POST', `/twins/${id}/pause`);
+    await call(owner, 'POST', `/twins/${id}/resume`);
+    expect(closed).toEqual([]);
+    // a member is refused before anything is closed, and a wrong state is a 409 that closes nothing
+    expect((await call(await addMember(owner.accountId, 'member'), 'DELETE', `/twins/${id}`)).status).toBe(403);
+    expect(closed).toEqual([]);
+    expect((await call(owner, 'DELETE', `/twins/${id}`)).status).toBe(200);
+    // asked once, by the person who stopped it, and the twin was already removed when it was
+    expect(closed).toEqual([{ accountId: owner.accountId, userId: owner.userId, twinId: id }]);
+    expect(states).toEqual(['removed']);
+    expect((await call(owner, 'DELETE', `/twins/${id}`)).status).toBe(409);
+    expect(closed).toHaveLength(1);
+    // a hook that throws is reported and the removal stands
+    twinRouteDeps.closePublishPr = async () => {
+      throw new Error('github is down');
+    };
+    const repo2 = await seedRepo(owner.accountId, 'gadgets');
+    const priv2 = await seedRepo(owner.accountId, 'gadgets-private');
+    const id2 = await makeTwin(owner, repo2, priv2);
+    const stopped = await call(owner, 'DELETE', `/twins/${id2}`);
+    expect(stopped.status).toBe(200);
+    expect(await stateOf(id2)).toBe('removed');
   });
 
   it("a second account cannot pause, resume or stop the first one's twin, or read it", async () => {

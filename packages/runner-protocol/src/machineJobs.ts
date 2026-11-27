@@ -17,7 +17,7 @@ import { ColdstartCode, ColdstartState } from "./coldstartStatus.js";
 const safeInt = z.number().int().safe();
 const sha256Hex = z.string().regex(/^[0-9a-f]{64}$/);
 
-export const MACHINE_JOB_KINDS = ["project_setup", "engine_update", "engine_session_start", "engine_session_stop", "engine_session_delete", "project_remove", "twin_seed"] as const;
+export const MACHINE_JOB_KINDS = ["project_setup", "engine_update", "engine_session_start", "engine_session_stop", "engine_session_delete", "project_remove", "twin_seed", "twin_publish"] as const;
 export type MachineJobKind = (typeof MACHINE_JOB_KINDS)[number];
 /** The longest a machine job lives after it was issued, in seconds. */
 export const MACHINE_JOB_MAX_LIFE_S = 1800;
@@ -89,6 +89,22 @@ export const MachineJob = z
       public: strict({ owner: GH_OWNER, name: GH_NAME, gh_id: safeInt.min(1), default_branch: GH_BRANCH, head_sha: z.string().regex(SHA40_PATTERN) }),
       private: strict({ owner: GH_OWNER, name: GH_NAME, gh_id: safeInt.min(1) }),
     })),
+    // D#845 ON-27c2: the twin's publish, the private default branch's change from `private.base` to `private.head` as ONE commit on the public tip, with a pull request. The job is bound to the twin's private repository and setup
+    // (the same home as the seed); the public repository is the push target and the only one a token is ever minted for, named by our own rows at the token route, never by this job. The private set the commit is scanned and
+    // cut by rides in the signed bytes, and the token route holds it against the live rows: a set that changed between the issue and the push mints no token.
+    job("twin_publish", strict({
+      twin_id: z.string().uuid(),
+      public: strict({ owner: GH_OWNER, name: GH_NAME, gh_id: safeInt.min(1), tip: z.string().regex(SHA40_PATTERN) }),
+      private: strict({ owner: GH_OWNER, name: GH_NAME, gh_id: safeInt.min(1), base: z.string().regex(SHA40_PATTERN), head: z.string().regex(SHA40_PATTERN) }),
+      branch: z.string().regex(/^fx\/publish-[0-9a-f]{12}$/),
+      private_set: strict({
+        overlay_globs: z.array(z.string().min(1).max(512)).max(100),
+        install_paths: z.array(z.string().min(1).max(1024)).max(5000),
+        blob_globs: z.array(z.string().min(1).max(512)).max(100),
+        identifier_rules_path: z.string().min(1).max(200).nullable(),
+        plan_data_rules_path: z.string().min(1).max(200).nullable(),
+      }),
+    })),
   ])
   .superRefine((j, ctx) => {
     const life = Date.parse(j.expires_at) - Date.parse(j.issued_at);
@@ -96,6 +112,10 @@ export const MachineJob = z
     // A seed names the twin as its one target and has the twin's setup; one that names the public repository as its target is refused here and again at issue.
     if (j.kind === "twin_seed" && (j.args.private.gh_id !== j.repo_gh_id || j.args.public.gh_id === j.repo_gh_id || j.setup_id === undefined || j.requires_engine !== "any")) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a twin seed targets the private twin only, through its setup", path: ["args"] });
+    }
+    // A publish is homed on the twin's private repository and setup; it pushes to the other repository, the public one, to a branch named from the private head. One that names the public repository as its home is refused here and at issue.
+    if (j.kind === "twin_publish" && (j.args.private.gh_id !== j.repo_gh_id || j.args.public.gh_id === j.repo_gh_id || j.setup_id === undefined || j.requires_engine !== "any" || j.args.private.base === j.args.private.head || j.args.branch !== `fx/publish-${j.args.private.head.slice(0, 12)}`)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a twin publish is homed on the private twin, through its setup, and goes from its base to its head", path: ["args"] });
     }
   });
 export type MachineJob = z.infer<typeof MachineJob>;
@@ -143,6 +163,10 @@ export const SETUP_VM_JOB_CODES = ["vm_admission_refused", "vm_boot_failed", "vm
 /** What a setup may fail with besides the engine's own coldstart codes: a closed list of the runner's and the cloud's steps. */
 export const SETUP_FAILURE_CODES = [
   "twin_head_moved", "twin_too_large", "twin_not_empty", "twin_fetch_failed",
+  // D#845 ON-27c2: the publish route's refusals (`PLANE_REFUSAL_CODES`; a test keeps the two lists equal) that no other list here names.
+  "bad_input", "pairing_self", "pairing_changed", "base_diverged", "no_changes", "scan_refused", "private_path_change", "scan_identity_mismatch", "public_unavailable", "public_tip_moved", "app_not_installed", "token_scope_mismatch",
+  "branch_exists", "pr_failed", "unsafe_git_config", "public_branch_moved", "republish_base_missing", "rule_files_not_private", "private_read_failed", "base_not_ancestor", "base_unavailable", "base_not_on_default", "base_not_on_parent", "merge_in_change",
+  "republish_pr_closed", "republish_pr_merged", "republish_pairing_off",
   "engine_fetch_failed", "engine_checksum", "engine_archive_refused", "plan_fetch_failed", "plan_checksum", "plan_invalid", "setup_status_refused", "bootstrap_failed", "finalize_failed",
   "bundle_refused", "push_failed", "direct_raced", "pr_open_failed", "install_head_changed", "pr_scope_refused", "labels_failed", "kind_unsupported", "job_expired", "job_silent", "job_overran", "engine_unsupported", ...SETUP_VM_JOB_CODES,
 ] as const;
@@ -244,6 +268,8 @@ export const MACHINE_JOB_CAPABILITY: Readonly<Record<MachineJobKind, RunnerCapab
   engine_session_start: ENGINE_SESSION_CAPABILITY,
   engine_session_stop: ENGINE_SESSION_CAPABILITY,
   engine_session_delete: ENGINE_SESSION_CAPABILITY,
+  // D#845 ON-27c2: last, and only because fx-runner registers the handler (run.ts). No build lists `twin_v1` before ON-27d, so no runner is offered it until then.
+  twin_publish: TWIN_CAPABILITY,
 });
 
 /** What the claim knows about a runner when it decides what to offer: its stored protocol version, the capabilities of its latest hello and the sandbox engine of its facts (absent when it sent none). */

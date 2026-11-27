@@ -527,6 +527,8 @@ describe('audit_write / audit_write_system: append-only, unforgeable audit_log (
         '1108_twin_seed.sql',
         // 1109 (D#845 ON-15c) restates 1105's issuer and extends 1093's role and table, so it goes with them.
         '1109_engine_update_pr.sql',
+        // 1110 (D#845 ON-27c2) restates 1108's machine_job_expire (which reads engine_updates) and reads 1097's repo_twins, so it goes with them.
+        '1110_twin_publish.sql',
       ];
       const AUDIT_WRITE_MIGRATIONS = allFiles.filter(
         (f) => BUILDS_ON_HELD_BACK.includes(f) || isAuditWriteMigration(readFileSync(path.join(DEFAULT_MIGRATIONS_DIR, f), 'utf8')),

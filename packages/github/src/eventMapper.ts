@@ -147,6 +147,8 @@ export interface CreateWorkItemEvent {
 const SETUP_INSTALL_BRANCH = /^fx\/engine-install-[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}$/;
 /** D#845 ON-15c: the head branch of an engine update's pull request (the release it brings in its name). */
 const ENGINE_UPDATE_BRANCH = /^fx\/engine-update-[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}$/;
+/** D#845 ON-27c2: the branch a private twin's publish pushes to the public repository (named from the private head). */
+const TWIN_PUBLISH_BRANCH = /^fx\/publish-[0-9a-f]{12}$/;
 
 /** pull_request.opened / .closed: transitions an existing, linked work item. */
 export interface TransitionPrEvent {
@@ -661,6 +663,7 @@ export type ApplyResult =
   | { applied: 'pr_push_recorded'; workItemId: string; recorded: boolean }
   | { applied: 'setup_install_pr_closed'; outcome: 'finished' | 'failed' | 'recorded' }
   | { applied: 'engine_update_pr_closed'; outcome: 'finished' | 'failed' | 'recorded' }
+  | { applied: 'twin_publish_pr_closed'; outcome: 'merged' | 'closed' }
   | { applied: 'queue_event_recorded'; workItemId: string; recorded: boolean }
   | { applied: 'mcp_config_routed' }
   | { applied: 'repo_names_written'; count: number }
@@ -978,6 +981,13 @@ export async function applyMappedEvent(client: PoolClient, ctx: ApplyEventCtx, m
         const { rows } = await client.query<{ r: string }>('SELECT engine_update_pr_closed($1::uuid, $2::int, $3::boolean, $4) AS r', [ctx.repoId, mapped.prNumber, mapped.toStage === 'merged', mapped.headRef]);
         const outcome = rows[0]?.r;
         if (outcome === 'finished' || outcome === 'failed' || outcome === 'recorded') return { applied: 'engine_update_pr_closed', outcome };
+      }
+      // D#845 ON-27c2: the watch on a private twin's publish pull request, on the PUBLIC repository (the twin's public repo is this repository). A close or merge of a pull request from the publish branch, in this repository, from this
+      // repository's own branch (never a fork), into the default branch: the definer checks the branch against the twin's own publish job and the number against the one it recorded. A pull request it does not know goes on as any other.
+      if ((mapped.toStage === 'merged' || mapped.toStage === 'closed_unmerged') && !mapped.isFork && mapped.baseIsDefault === true && typeof mapped.headRef === 'string' && TWIN_PUBLISH_BRANCH.test(mapped.headRef)) {
+        const { rows } = await client.query<{ r: string }>('SELECT twin_publish_pr_closed($1::uuid, $2::int, $3::boolean, $4) AS r', [ctx.repoId, mapped.prNumber, mapped.toStage === 'merged', mapped.headRef]);
+        const outcome = rows[0]?.r;
+        if (outcome === 'merged' || outcome === 'closed') return { applied: 'twin_publish_pr_closed', outcome };
       }
       // D#483 P1: a close or merge also finds the item a runner run opened this pull request for (its body carries no "Closes #N"). An open or a push never does: those keep the body link.
       const closing = mapped.toStage === 'merged' || mapped.toStage === 'closed_unmerged';

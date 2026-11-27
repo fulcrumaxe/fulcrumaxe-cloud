@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { reportError } from "@fx/telemetry";
 import type { Pool } from "pg";
 import { descriptionHash } from "@fx/core/src/github/createRepoState.js";
 import { validateNewRepo } from "@fx/core/src/github/repoName.js";
@@ -9,8 +10,11 @@ import { SESSION_LIMITS } from "../ratelimit/session.js";
 import { authorizeCreate } from "./github.js";
 import { repoPairingDeps } from "./repoPairing.js";
 
-/** The kill switch. Production never sets it: it is the constant, which ON-27d turns on. Tests flip it. */
-export const twinRouteDeps = { enabled: TWIN_ENABLED };
+/**
+ * The kill switch. Production never sets it: it is the constant, which ON-27d turns on. Tests flip it.
+ * `closePublishPr` (D#845 ON-27c2, set by the app) closes the publish pull request a removed twin still has open on the public repository; with none, nothing is closed.
+ */
+export const twinRouteDeps: { enabled: boolean; closePublishPr: ((input: { accountId: string; userId: string; twinId: string }) => Promise<unknown>) | null } = { enabled: TWIN_ENABLED, closePublishPr: null };
 
 const enabled = (): void => {
   if (!twinRouteDeps.enabled) throw new ApiError(503, "not_configured", "private twins are not available yet");
@@ -45,7 +49,16 @@ const toItem = (t: RepoTwin): z.infer<typeof twinSchema> => ({
 async function change(ctx: { pool: Pool; principal: { accountId: string; userId: string } }, id: string, action: TwinAction): Promise<z.infer<typeof twinSchema>> {
   enabled();
   try {
-    return toItem(await changeRepoTwin({ pool: ctx.pool, principal: ctx.principal }, id, action));
+    const twin = toItem(await changeRepoTwin({ pool: ctx.pool, principal: ctx.principal }, id, action));
+    // The removal stands whatever follows: a publish pull request that cannot be closed now stays open on GitHub, and the removed twin ignores its merge.
+    if (action === "remove" && twinRouteDeps.closePublishPr !== null) {
+      try {
+        await twinRouteDeps.closePublishPr({ accountId: ctx.principal.accountId, userId: ctx.principal.userId, twinId: id });
+      } catch (closeError) {
+        reportError(closeError, { stage: "twin.close_publish_pr" });
+      }
+    }
+    return twin;
   } catch (err) {
     if (err instanceof TwinStateError) throw new ApiError(409, "twin_state", `a twin that is ${err.state} cannot be ${action === "remove" ? "removed" : `${action}d`}`, undefined, { state: err.state });
     throw err;
