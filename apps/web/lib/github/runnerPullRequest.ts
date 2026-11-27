@@ -37,8 +37,9 @@ export function createAppRunPullRequestPort(deps: { open?: typeof openInstallati
       // D#845 ON-8f2b: the install step's labels need `issues: write` and `POST /labels`, which the pull request kind holds neither of; they go through the `setup_labels` kind (the one write, exact list).
       // D#845 ON-13a4: the finish phase's Discussions and issues go through the `setup_finish` kind (Discussions and Issues write, no contents), never the pull request token.
       const target = { repoId: repo.id, owner: repo.owner, name: repo.name };
+      // D#845 ON-24a (FU-322): the install and engine-update pull request's mark-ready goes through the `setup_ready` kind (contents write, `POST /graphql` only); the port fences it to the one MarkReady document.
       // D#845 ON-20a: the install merge (A10) goes through the merge gate's client, the only pull request kind whose token holds contents write; the port's `installMerge` pin leaves it that one call.
-      const http = purpose === "setup_labels" ? await open("setup_labels", target) : purpose === "setup_finish" ? await open("setup_finish", target) : purpose === "setup_merge" ? await open("merge_gate", target) : await openRunnerPrHttp(open, target);
+      const http = purpose === "setup_labels" ? await open("setup_labels", target) : purpose === "setup_finish" ? await open("setup_finish", target) : purpose === "setup_ready" ? await open("setup_ready", target) : purpose === "setup_merge" ? await open("merge_gate", target) : await openRunnerPrHttp(open, target);
       return {
         request(req: GithubRequest) {
           if (!METHODS.has(req.method)) return Promise.reject(new Error("method_refused"));

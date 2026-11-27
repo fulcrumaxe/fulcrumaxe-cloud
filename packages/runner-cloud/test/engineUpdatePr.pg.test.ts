@@ -169,7 +169,7 @@ describe("the engine update's pull request, watch and restart [pg]", () => {
       const again = await rig();
       const k = github();
       const first = await k.port.openDraft({ repo: { id: "r", owner: "acme", name: "widgets" }, branch: BRANCH, base: "main", text: engineUpdatePullRequestText("1.0.0", "1.2.0") });
-      await k.port.markReady({ repo: { id: "r", owner: "acme", name: "widgets" }, pullRequest: first });
+      await k.port.markReady({ repo: { id: "r", owner: "acme", name: "widgets" }, pullRequest: first, setup: true });
       k.fake.inject = { label: /^A1 MarkReady$/, reply: forbidden };
       const quiet: string[] = [];
       expect(await completeEngineUpdatePr({ pool: h.opsPool, port: k.port, log: (l) => quiet.push(l) }, await claimOf(again))).toBe("opened");

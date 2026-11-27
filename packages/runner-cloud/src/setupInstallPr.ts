@@ -169,7 +169,7 @@ async function pullRequest(deps: SetupInstallDeps, claim: SetupInstallClaim, rep
     await deps.port.close({ repo, number: ref.number });
     return fail("pr_scope_refused");
   }
-  await deps.port.markReady({ repo, pullRequest: ref });
+  await deps.port.markReady({ repo, pullRequest: ref, setup: true });
   const { rows } = await deps.pool.query<{ ok: boolean }>("SELECT setup_install_pr_record($1::uuid, $2::int, $3, $4::int) AS ok", [claim.setupId, claim.attempt, claim.headSha, ref.number]);
   return rows[0]?.ok === true ? "opened" : "skipped";
 }

@@ -149,7 +149,7 @@ export interface SetupInstallPort extends RunPullRequestPort {
 }
 
 /** The clients the install flow opens besides the pull request client: the one that creates labels, and the one that merges (the merge gate's token). */
-export type InstallPurpose = "setup_labels" | "setup_finish" | "setup_merge";
+export type InstallPurpose = "setup_labels" | "setup_finish" | "setup_merge" | "setup_ready";
 export interface InstallPullRequest {
   state: "OPEN" | "CLOSED" | "MERGED";
   merged: boolean;
@@ -186,7 +186,11 @@ export interface RunPullRequestPort {
   /** `run` fills the run pull request's fixed title and body; `text` (D#845 ON-8f2a, the install pull request) gives them directly. One of the two is required. */
   openDraft(input: { repo: PullRequestRepo; branch: string; base: string; run?: RunPullRequestText; text?: PullRequestText }): Promise<PullRequestRef>;
   changedFiles(input: { repo: PullRequestRepo; number: number }): Promise<ChangedFiles>;
-  markReady(input: { repo: PullRequestRepo; pullRequest: PullRequestRef }): Promise<void>;
+  /**
+   * `setup: true` (D#845 ON-24a, FU-322, Ruling 127) is the install pull request's and the engine update's: GitHub refuses the mutation to the pull request token (contents read), so it goes through a client of its
+   * own (the `setup_ready` token, fenced to the one `MarkReady` document, revoked as soon as the call ends). Without it (the run's) the call is the pull request client's, as before.
+   */
+  markReady(input: { repo: PullRequestRepo; pullRequest: PullRequestRef; setup?: boolean }): Promise<void>;
   close(input: { repo: PullRequestRepo; number: number }): Promise<void>;
 }
 
@@ -355,7 +359,7 @@ export function createRunPullRequestPort(deps: {
    */
   appLogin(repo: PullRequestRepo): Promise<string>;
 }): SetupFinishPort {
-  const client = async (repo: PullRequestRepo, options: { setupInstall?: boolean; setupFinish?: boolean; purpose?: InstallPurpose; installMerge?: InstallMergePin } = {}): Promise<LocalOnlyGithub> => {
+  const client = async (repo: PullRequestRepo, options: { setupInstall?: boolean; setupFinish?: boolean; markReadyOnly?: boolean; purpose?: InstallPurpose; installMerge?: InstallMergePin } = {}): Promise<LocalOnlyGithub> => {
     let inner: GithubClient;
     try {
       inner = await (options.purpose === undefined ? deps.open(repo) : deps.open(repo, options.purpose));
@@ -683,7 +687,7 @@ export function createRunPullRequestPort(deps: {
     },
 
     changedFiles: ({ repo, number }) => settle(() => readChangedFiles(repo, number)),
-    markReady: ({ repo, pullRequest }) => (pullRequest.draft ? settle(() => markReadyOnce(repo, pullRequest)) : Promise.resolve()),
+    markReady: ({ repo, pullRequest, setup }) => (pullRequest.draft ? settle(() => markReadyOnce(repo, pullRequest, setup === true)) : Promise.resolve()),
 
     async close({ repo, number }) {
       const gh = await client(repo);
@@ -719,12 +723,17 @@ export function createRunPullRequestPort(deps: {
     return { files, totalCount, complete: false };
   }
 
-  async function markReadyOnce(repo: PullRequestRepo, pullRequest: PullRequestRef): Promise<void> {
-    const gh = await client(repo);
-    const data = await query(gh, "MarkReady", { id: pullRequest.nodeId });
-    const result = need(isObject(data.markPullRequestReadyForReview) && data.markPullRequestReadyForReview);
-    const pr = need(isObject(result.pullRequest) && result.pullRequest);
-    if (pr.number !== pullRequest.number || pr.isDraft !== false) malformed();
+  async function markReadyOnce(repo: PullRequestRepo, pullRequest: PullRequestRef, setup = false): Promise<void> {
+    const gh = await (setup ? client(repo, { purpose: "setup_ready", markReadyOnly: true }) : client(repo));
+    try {
+      const data = await query(gh, "MarkReady", { id: pullRequest.nodeId });
+      const result = need(isObject(data.markPullRequestReadyForReview) && data.markPullRequestReadyForReview);
+      const pr = need(isObject(result.pullRequest) && result.pullRequest);
+      if (pr.number !== pullRequest.number || pr.isDraft !== false) malformed();
+    } finally {
+      // The `setup_ready` token holds contents write: it is revoked as soon as the call ends, whatever its answer.
+      if (setup) await gh.close?.().catch(() => undefined);
+    }
   }
 
   // Every failure says which port call it came from, unless a GraphQL document already named itself.

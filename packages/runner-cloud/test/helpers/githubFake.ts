@@ -122,6 +122,11 @@ export class FakeGithub implements GithubClient {
    * (D#6 C37). Off here (a token that may mark ready); the end-to-end harness turns it on because that is the token the product really uses on this path.
    */
   markReadyForbidden = false;
+  /**
+   * D#845 ON-24a (FU-322): whether the token behind the call in flight holds `contents: write`. GitHub refuses `markPullRequestReadyForReview` to a token that does not (the pull request token holds contents
+   * read), so the fake does too: HTTP 200, `data` null and one FORBIDDEN error. A client that is not an installation kind (a test calling the fake directly) holds it.
+   */
+  private contentsWrite = true;
 
   addRepo(owner: string, name: string, over: Partial<Pick<FakeRepo, "defaultBranch" | "supportsDrafts" | "id" | "discussionsEnabled">> & { categories?: string[] } = {}): FakeRepo {
     const repo: FakeRepo = { id: over.id ?? 1234567, owner, name, defaultBranch: over.defaultBranch ?? "main", supportsDrafts: over.supportsDrafts ?? true, branches: new Map(), pulls: [], commits: new Map(), commitFiles: new Map(), labels: new Map(), discussionsEnabled: over.discussionsEnabled ?? true, categories: [], discussions: [], issues: [], nextNumber: 100 };
@@ -155,8 +160,9 @@ export class FakeGithub implements GithubClient {
     return pr;
   }
 
-  async request(req: GithubRequest): Promise<GithubResponse> {
+  async request(req: GithubRequest, token: { contentsWrite: boolean } = { contentsWrite: true }): Promise<GithubResponse> {
     this.before?.(req);
+    this.contentsWrite = token.contentsWrite;
     const { label, handler } = this.route(req);
     this.calls.push({ method: req.method, path: req.path, query: { ...req.query }, label });
     const accept = Object.entries(req.headers ?? {}).filter(([k]) => k.toLowerCase() === "accept");
@@ -496,7 +502,7 @@ export class FakeGithub implements GithubClient {
   }
 
   private gqlMarkReady(v: Record<string, unknown>): GithubResponse {
-    if (this.markReadyForbidden) return ok({ data: { markPullRequestReadyForReview: null }, errors: [{ type: "FORBIDDEN", path: ["markPullRequestReadyForReview"], locations: [{ line: 2, column: 3 }], message: "Resource not accessible by integration" }] });
+    if (this.markReadyForbidden || !this.contentsWrite) return ok({ data: { markPullRequestReadyForReview: null }, errors: [{ type: "FORBIDDEN", path: ["markPullRequestReadyForReview"], locations: [{ line: 2, column: 3 }], message: "Resource not accessible by integration" }] });
     for (const repo of this.repos.values()) {
       const pr = repo.pulls.find((p) => p.nodeId === v.id);
       if (!pr) continue;
@@ -512,11 +518,12 @@ export class FakeGithub implements GithubClient {
  * The live installation client's exact path lists (packages/github `installationHttp.ts`), written out here WITHOUT importing them, as the kinds the install step opens:
  *   - `runner_pr`:    `POST /graphql`, `GET` the repository, `GET` and `POST` its `/pulls`, `PATCH /pulls/<digits>`. Nothing else, so no `/labels`.
  *   - `setup_labels`: `POST /repos/<o>/<r>/labels` with a body of exactly name, color and description, no query. Nothing else.
+ *   - `setup_ready`:  (D#845 ON-24a) `POST /graphql` and nothing else. Its token holds contents write, the only one of the pull request kinds besides `merge_gate` that does.
  *   - `setup_finish`: (D#845 ON-13a4) `POST /graphql`, and `GET` and `POST` of `/repos/<o>/<r>/issues`. Nothing else: no repository read, no pulls, no labels.
  * A request outside the kind's list is rejected `path_refused` (as the live client does, before anything is sent) and counts in `denied`; one inside it is answered by the strict fake. The live lists are proven
  * against the real client in packages/github (setupLabels.test.ts) and apps/web (runnerPullRequest.test.ts); this keeps the port tests from passing on a path the live kind would refuse.
  */
-export type FakeInstallationKind = "runner_pr" | "setup_labels" | "setup_finish" | "merge_gate";
+export type FakeInstallationKind = "runner_pr" | "setup_labels" | "setup_finish" | "merge_gate" | "setup_ready";
 export function installationKindClient(fake: FakeGithub, kind: FakeInstallationKind): GithubClient {
   const repoRoot = /^\/repos\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+/;
   const allowed = (req: GithubRequest): boolean => {
@@ -524,6 +531,7 @@ export function installationKindClient(fake: FakeGithub, kind: FakeInstallationK
     // `merge_gate` (D#845 ON-20a, the install merge): its live path rule is any path under the repository, so here too (the strict fake then answers or refuses by its own table). Its token holds contents write.
     if (kind === "merge_gate") return rest !== null;
     if (kind === "setup_labels") return req.method === "POST" && req.query === undefined && ((rest === "/labels" && keysAre(req.body, ["name", "color", "description"])) || (rest !== null && /^\/issues\/[1-9]\d*\/labels$/.test(rest) && keysAre(req.body, ["labels"])));
+    if (kind === "setup_ready") return req.method === "POST" && req.path === "/graphql";
     if (kind === "setup_finish") return (req.method === "POST" && req.path === "/graphql") || (rest === "/issues" && (req.method === "GET" || req.method === "POST"));
     if (req.method === "POST" && req.path === "/graphql") return true;
     if (rest === null) return false;
@@ -539,10 +547,10 @@ export function installationKindClient(fake: FakeGithub, kind: FakeInstallationK
         fake.denied++;
         return Promise.reject(new Error(`installationHttp: path_refused (${kind}: ${req.method} ${req.path})`));
       }
-      return fake.request(req);
+      return fake.request(req, { contentsWrite: kind === "setup_ready" || kind === "merge_gate" });
     },
   };
 }
 /** What `createRunPullRequestPort` is given as `open`: the pull request kind, or `setup_labels` / `setup_finish` / `setup_merge` when the port asks for it (`setup_merge` is the merge gate's installation kind). */
-export const openInstallationKinds = (fake: FakeGithub) => async (_repo: unknown, purpose?: "setup_labels" | "setup_finish" | "setup_merge"): Promise<GithubClient> =>
+export const openInstallationKinds = (fake: FakeGithub) => async (_repo: unknown, purpose?: "setup_labels" | "setup_finish" | "setup_merge" | "setup_ready"): Promise<GithubClient> =>
   installationKindClient(fake, purpose === "setup_merge" ? "merge_gate" : (purpose ?? "runner_pr"));

@@ -35,6 +35,17 @@ describe("createAppRunPullRequestPort", () => {
     expect((t.sent[0]!.body as { variables: unknown }).variables).toEqual({ owner: "acme", name: "widgets", number: 4 });
   });
 
+  it("opens the setup_ready kind for the install's mark-ready (D#845 ON-24a), and the runner_pr kind for the run's", async () => {
+    const ready = { status: 200, body: { data: { markPullRequestReadyForReview: { pullRequest: { number: 4, isDraft: false } } } } };
+    const t = setup(() => ready);
+    const pullRequest = { number: 4, nodeId: "PR_kwDOAbCd123", draft: true, headSha: "a".repeat(40), reused: false };
+    await t.port.markReady({ repo: REPO, pullRequest, setup: true });
+    await t.port.markReady({ repo: REPO, pullRequest });
+    expect(t.opened).toEqual([["setup_ready", { repoId: REPO.id, owner: "acme", name: "widgets" }], ["runner_pr", { repoId: REPO.id, owner: "acme", name: "widgets" }]]);
+    // the setup_ready client may send only the one MarkReady document: any other call on it is refused by the port's fence before the client is asked
+    expect(t.sent.map((r) => [r.method, r.path])).toEqual([["POST", "/graphql"], ["POST", "/graphql"]]);
+  });
+
   it("a call outside the allowlist never reaches the client (the fence is applied by the port, not by this file)", async () => {
     const t = setup(() => ({ status: 200, body: {} }));
     // Closing is allowed, but pull request number -1 is not a number the allowlist accepts: the wrapper throws before the client is asked.
