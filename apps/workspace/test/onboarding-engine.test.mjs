@@ -490,6 +490,13 @@ describe("the machine named in the copy (ruling 26.2)", () => {
   it("gives nothing for no runner, a bad body or a runner never heard", () => {
     for (const body of [null, {}, { runners: [] }, { runners: [r("a", 1, { last_seen_at: null })] }, { runners: [r("a", 1, { last_seen_at: "x" })] }, { runners: [null, 3] }, { runners: [r("a", 1, { state: "revoked" })] }]) expect(machineContext(body, NOW)).toEqual({});
   });
+  it("the placeholder name of an unnamed runner (has_name false) reads as no name, so the copy says your machine", () => {
+    const ctx = machineContext({ runners: [r("a", 1, { name: "Unnamed runner (jp)", has_name: false })] }, NOW);
+    expect(ctx.name).toBe("");
+    expect(machineContext({ runners: [r("a", 1, { has_name: true })] }, NOW).name).toBe("m-a");
+    const steps = track({ machine: "done", claude: "done", github_app: "done", project: "done", plan: "done", install: "active" });
+    expect(text(describeStep(steps, IDS.indexOf("install"), { ...ctx, origin: ORIGIN, setup: { id: "3c1c0b7e-5f0a-4c1e-9b1f-0a1b2c3d4e5f", phase: "install", state: "started" } }))).toBe("The install is running on your machine.");
+  });
   it("a name that is not a string reads as no name, and a clock that went backwards never gives a negative age", () => {
     expect(machineContext({ runners: [r("a", 1, { name: 7 })] }, NOW).name).toBe("");
     expect(machineContext({ runners: [r("a", -5)] }, NOW).last_seen_min).toBe(0);
@@ -990,6 +997,12 @@ describe("the failed install step (FU-313, FU-307)", () => {
     expect(text(v)).toBe("The install is running on box-1.");
     expect(v.actions).toEqual([]);
     expect(text(at(steps, "install", { setup: { ...installSetup, phase: "plan", state: "ok" } }))).toBe("");
+  });
+  it("names the machine while the install runs, and says \"your machine\" when it has no name (never an empty clause)", () => {
+    const steps = track({ machine: "done", claude: "done", github_app: "done", project: "done", plan: "done", install: "active" });
+    const setup = { ...installSetup, state: "started" };
+    expect(text(at(steps, "install", { setup, name: "box-1" }))).toBe("The install is running on box-1.");
+    for (const name of ["", undefined, null]) expect(text(at(steps, "install", { setup, name }))).toBe("The install is running on your machine.");
   });
   it("says a refused retry in words, never the server's own, and rereads when the setup moved on", () => {
     expect(retryRefusal({ code: "github_unavailable", message: "SERVER" })).toEqual({ text: "GitHub couldn't be reached. Start the install again in a minute.", reread: false });

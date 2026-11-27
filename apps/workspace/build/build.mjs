@@ -171,8 +171,11 @@ function walkAll(dir, base = dir, acc = []) {
   return acc;
 }
 
-// Walks the static (not dynamic import()) import graph starting from
-// `seeds` (shell-root-relative POSIX paths already known to exist).
+// Walks the import graph starting from `seeds`. A first-party file's
+// string-literal import("./x.js") is followed like a static import (it counts
+// in bootFiles and is modulepreloaded); a shell file is read line by line,
+// so only a line that starts with import/export is seen. `seeds` are
+// shell-root-relative POSIX paths already known to exist.
 // Returns { reachable: Set<string>, dangling: Array<{from, spec, resolved}>,
 // traversal: Array<{from, spec}> } -- `dangling` is a resolved-but-missing
 // file (a broken import), `traversal` is a specifier resolveImport()
