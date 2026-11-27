@@ -5,7 +5,7 @@ import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { setPendingHooks } from "@fx/core/src/pendingWork.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { HELLO_PATH, machineJobClaimRun, runnerHello, setupProgressRun } from "../src/index.js";
-import { claimSetupInstall, completeSetupInstall, installPathRefused, installPullRequestText, type SetupInstallClaim } from "../src/setupInstallPr.js";
+import { SETUP_PR_FAILURE_EVENT, claimSetupInstall, completeSetupInstall, installPathRefused, installPullRequestText, type SetupInstallClaim } from "../src/setupInstallPr.js";
 import { createRunPullRequestPort } from "../src/runPullRequest.js";
 import { SETUP_INSTALL_LABELS, LocalOnlyGithubError } from "../src/localOnlyGithub.js";
 import { harness, newKey, registerKey, respond, signed, type Harness, type TestKey } from "./helpers.js";
@@ -313,6 +313,68 @@ describe("the install pull request step [pg]", () => {
       g.fake.inject = { label: /^A4$/, reply: { status: 403, body: { message: "Resource not accessible by integration" } } };
       expect(await completeSetupInstall({ pool: h.opsPool, port: g.port }, await claimOf(refused))).toBe("failed");
       expect(await setup(refused.setupId)).toMatchObject({ state: "failed", failure_code: "pr_open_failed" });
+    });
+  });
+
+  describe("a pull request that cannot be marked ready (FU-317)", () => {
+    const REPO = { id: "r", owner: "acme", name: "widgets" };
+    const FORBIDDEN = { status: 200, body: { data: { markPullRequestReadyForReview: null }, errors: [{ type: "FORBIDDEN", path: ["markPullRequestReadyForReview"], message: "Resource not accessible by integration" }] } };
+
+    it("a FORBIDDEN answer to MarkReady fails the setup pr_open_failed and logs the call, the status and the type, with nothing GitHub wrote", async () => {
+      const r = await rig();
+      const g = github();
+      g.fake.inject = { label: /^A1 MarkReady$/, reply: FORBIDDEN };
+      const lines: string[] = [];
+      expect(await completeSetupInstall({ pool: h.opsPool, port: g.port, log: (l) => lines.push(l) }, await claimOf(r))).toBe("failed");
+      expect(await setup(r.setupId)).toMatchObject({ state: "failed", failure_code: "pr_open_failed", install_pr: null });
+      expect(lines.map((l) => JSON.parse(l))).toEqual([{ event: SETUP_PR_FAILURE_EVENT, step: "setup_install_pr", id: r.setupId, op: "MarkReady", reason: "rejected", status: 200, graphql_types: ["FORBIDDEN"] }]);
+      expect(lines.join("")).not.toMatch(/Resource not accessible|acme|widgets|ghs_/);
+    });
+
+    it("a malformed answer to MarkReady is logged as malformed with its call; a GitHub that cannot be asked logs nothing and retries", async () => {
+      const r = await rig();
+      const g = github();
+      g.fake.inject = { label: /^A1 MarkReady$/, reply: { status: 200, body: { data: { markPullRequestReadyForReview: { pullRequest: { number: 99, isDraft: false } } } } } };
+      const lines: string[] = [];
+      expect(await completeSetupInstall({ pool: h.opsPool, port: g.port, log: (l) => lines.push(l) }, await claimOf(r))).toBe("failed");
+      expect(lines.map((l) => JSON.parse(l))).toMatchObject([{ op: "markReady", reason: "malformed", status: null, graphql_types: [] }]);
+
+      const later = await rig();
+      const t = github();
+      t.fake.inject = { label: /^A2$/, reply: { status: 502, body: { message: "Bad Gateway" } } };
+      const quiet: string[] = [];
+      expect(await completeSetupInstall({ pool: h.opsPool, port: t.port, log: (l) => quiet.push(l) }, await claimOf(later))).toBe("retry");
+      expect(quiet).toEqual([]);
+    });
+
+    it("a reused pull request that is already ready counts as success: the mutation is not sent again", async () => {
+      const r = await rig();
+      const g = github();
+      const first = await g.port.openDraft({ repo: REPO, branch: BRANCH, base: "main", text: installPullRequestText("1.2.3") });
+      await g.port.markReady({ repo: REPO, pullRequest: first });
+      expect(g.repo.pulls[0]!.draft).toBe(false);
+      // a refusal of the mutation would fail the setup, so a success proves it was not asked
+      g.fake.inject = { label: /^A1 MarkReady$/, reply: FORBIDDEN };
+      const lines: string[] = [];
+      expect(await completeSetupInstall({ pool: h.opsPool, port: g.port, log: (l) => lines.push(l) }, await claimOf(r))).toBe("opened");
+      expect(await setup(r.setupId)).toMatchObject({ install_pr: 1 });
+      expect(lines).toEqual([]);
+    });
+
+    it("a call the fence refuses is logged by its rule and fails the setup pr_open_failed", async () => {
+      const r = await rig();
+      const g = github();
+      const lines: string[] = [];
+      const port = { ...g.port, markReady: async () => { throw new LocalOnlyGithubError("not_allowlisted"); } };
+      expect(await completeSetupInstall({ pool: h.opsPool, port, log: (l) => lines.push(l) }, await claimOf(r))).toBe("failed");
+      expect(lines.map((l) => JSON.parse(l))).toMatchObject([{ step: "setup_install_pr", op: "fence", rule: "not_allowlisted" }]);
+    });
+
+    it("a log writer that throws changes nothing", async () => {
+      const r = await rig();
+      const g = github();
+      g.fake.inject = { label: /^A1 MarkReady$/, reply: FORBIDDEN };
+      expect(await completeSetupInstall({ pool: h.opsPool, port: g.port, log: () => { throw new Error("sink down"); } }, await claimOf(r))).toBe("failed");
     });
   });
 

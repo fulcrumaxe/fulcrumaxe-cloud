@@ -72,10 +72,39 @@ export function installPullRequestText(version: string | null): { title: string;
   };
 }
 
+export const SETUP_PR_FAILURE_EVENT = "runner.setup_pr.failure";
+const LOG_LABEL = /^[A-Za-z][A-Za-z0-9_]{0,39}$/;
+const LOG_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The one line a failure that no retry fixes leaves in the logs (FU-317), for the install and the engine update step. The failure code the database
+ * stores is a fixed word (`pr_open_failed`, a closed list in migrations 1072 and 1109, so a finer word would need a migration) that cannot say which
+ * call failed, so this says it: the step, our own row's id, the call, the reason, the HTTP status and the GraphQL error type codes. No token, no name,
+ * no message and no response body is in it: every value is a number, a label we chose or a type code held to a shape. A writer that throws changes nothing.
+ */
+export function logSetupPrFailure(write: (line: string) => void, input: { step: "setup_install_pr" | "engine_update_pr"; id: string; error: RunPullRequestError | LocalOnlyGithubError }): void {
+  try {
+    const { error } = input;
+    const base = { event: SETUP_PR_FAILURE_EVENT, step: input.step, id: LOG_ID.test(input.id) ? input.id.toLowerCase() : null };
+    if (error instanceof LocalOnlyGithubError) {
+      write(JSON.stringify({ ...base, op: "fence", reason: "refused", status: null, graphql_types: [], rule: LOG_LABEL.test(error.rule) ? error.rule : "unknown" }));
+      return;
+    }
+    const op = error.op !== undefined && LOG_LABEL.test(error.op) ? error.op : "unknown";
+    write(JSON.stringify({ ...base, op, reason: error.reason, status: typeof error.status === "number" ? error.status : null, graphql_types: error.graphqlTypes }));
+  } catch {
+    // fx-swallow-ok: diagnostics never change the outcome
+  }
+}
+
+export const defaultSetupPrLog = (line: string): void => console.log(line);
+
 export interface SetupInstallDeps {
   /** The platform_ops pool: the claim and the two recording definers are its alone. */
   pool: Pick<Pool, "query">;
   port: SetupInstallPort;
+  /** Where the one-line JSON diagnostics go (default: `console.log`). Never the database. */
+  log?: (line: string) => void;
   /** Called with a code for a failure the step swallowed on purpose (a stop, not an error). Optional. */
   onNote?: (note: string) => void;
 }
@@ -91,9 +120,17 @@ export async function completeSetupInstall(deps: SetupInstallDeps, claim: SetupI
     if (claim.mode === "direct") return await direct(deps, claim, repo, fail);
     return await pullRequest(deps, claim, repo, fail);
   } catch (error) {
-    if (error instanceof RunPullRequestError) return error.retryable ? "retry" : fail("pr_open_failed");
+    const write = deps.log ?? defaultSetupPrLog;
+    if (error instanceof RunPullRequestError) {
+      if (error.retryable) return "retry";
+      logSetupPrFailure(write, { step: "setup_install_pr", id: claim.setupId, error });
+      return fail("pr_open_failed");
+    }
     // D#845 ON-8f2b (FU-235): a call the fence refused is a bug in this step, not a GitHub failure, and no retry fixes it. It is recorded as a failure, so the setup does not sit leased and unseen.
-    if (error instanceof LocalOnlyGithubError) return fail("pr_open_failed");
+    if (error instanceof LocalOnlyGithubError) {
+      logSetupPrFailure(write, { step: "setup_install_pr", id: claim.setupId, error });
+      return fail("pr_open_failed");
+    }
     throw error;
   }
 }
