@@ -437,6 +437,25 @@ describe("a merged install pull request marks the reconciler pending", () => {
     expect(afterSetupFinished).toHaveBeenCalledOnce();
   });
 
+  it("logs one coded line for a delivery of an install branch, handled or not, and none for other branches", async () => {
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((l: unknown) => void lines.push(String(l)));
+    const withRef = (ref: string, merged: boolean) => JSON.stringify({ action: "closed", installation: { id: 42 }, sender: { id: 7001 }, repository: { id: 5, name: "r", full_name: "o/r" }, pull_request: { merged, head: { ref } } });
+    try {
+      install();
+      await githubWebhookHandler(requestWithBody(withRef("fx/engine-install-1.2.3", true), { event: "pull_request" }), fakeDeps(), reply("setup_install_pr_closed", "finished"));
+      await githubWebhookHandler(requestWithBody(withRef("fx/engine-install-1.2.3", true), { event: "pull_request" }), fakeDeps(), vi.fn(async (): Promise<HandleWebhookResult> => ({ handled: false, reason: "unknown_tenant" })));
+      await githubWebhookHandler(requestWithBody(withRef("feature/x", true), { event: "pull_request" }), fakeDeps(), reply("skipped"));
+    } finally {
+      spy.mockRestore();
+    }
+    const mine = lines.filter((l) => l.includes("onboarding.install_pr_webhook")).map((l) => JSON.parse(l));
+    expect(mine).toEqual([
+      { event: "onboarding.install_pr_webhook", action: "closed", merged: true, handled: true, applied: "setup_install_pr_closed", outcome: "finished" },
+      { event: "onboarding.install_pr_webhook", action: "closed", merged: true, handled: false, applied: "unknown_tenant", outcome: null },
+    ]);
+  });
+
   it("answers the delivery 200 and keeps the marker when the immediate finish throws", async () => {
     const hit = install();
     const res = await githubWebhookHandler(requestWithBody(body, { event: "pull_request" }), fakeDeps({ afterSetupFinished: () => { throw new Error("boom"); } }), reply("setup_install_pr_closed", "finished"));

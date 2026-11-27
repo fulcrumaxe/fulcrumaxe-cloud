@@ -1,5 +1,6 @@
 import type { PoolClient } from "pg";
 import { summarizeInstall } from "@fx/core/src/onboarding/installSummary.js";
+import { markWorkPending } from "@fx/core/src/pendingWork.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { RunnerHttpError, pgCode, type RunnerCloudDeps, type RunnerHttpResponse, type SessionPrincipal } from "./http.js";
 import { requireMemberRole } from "./memberRole.js";
@@ -100,8 +101,9 @@ async function record(client: PoolClient, principal: SessionPrincipal, f: Facts)
 export async function installMergeRun(deps: RunnerCloudDeps, principal: SessionPrincipal, setupId: string): Promise<RunnerHttpResponse> {
   const port = need(deps, setupId);
   const id = setupId.toLowerCase();
+  let res: RunnerHttpResponse;
   try {
-    return await withTenant(deps.appUserPool, principal.accountId, principal.userId, async (client) => {
+    res = await withTenant(deps.appUserPool, principal.accountId, principal.userId, async (client) => {
       const role = await requireMemberRole(client);
       if (role !== "owner" && role !== "admin") throw refuse(403, "forbidden", "only an owner or admin can merge the install");
       const f = await loadFacts(client, principal.accountId, id, true);
@@ -129,4 +131,26 @@ export async function installMergeRun(deps: RunnerCloudDeps, principal: SessionP
     if (pgCode(error) === "42501") throw refuse(403, "forbidden", "only an owner or admin can merge the install");
     throw error;
   }
+  // D#845 Ruling 122.1: GitHub answered merged, so the setup moves to the finish phase now, the same move the webhook's definer makes, bound to the pull request this request verified (whichever runs second finds it
+  // moved and answers `none`). Only a request whose own call moved the setup marks the reconciler and starts the hand-off: a repeated click, a merge the webhook already acted on and a setup with a newer pull request start nothing.
+  // A failure here is the webhook's and the tick's to cover; the merge itself is already answered.
+  let moved = false;
+  try {
+    const pr = (res.body as { pr_number: number }).pr_number;
+    moved = await withTenant(deps.appUserPool, principal.accountId, principal.userId, async (client) => (await client.query<{ r: string }>("SELECT setup_install_merged($1::uuid, $2::int) AS r", [id, pr])).rows[0]?.r === "finished");
+    if (moved) void markWorkPending("reconcile");
+  } catch {
+    // fx-swallow-ok: the webhook and the reconcile tick are the backstops, and the merge is already answered; one coded log line
+    (deps.log ?? console.warn)(JSON.stringify({ event: "onboarding.install_merge_phase_failed", code: "definer_failed" }));
+  }
+  // D#845 Ruling 122: the person is waiting on the finish phase, so it starts now, for this setup alone (the transactions above have committed). A hook that throws is logged by code; the webhook and the tick still act.
+  if (moved) {
+    try {
+      deps.afterInstallMerge?.(id);
+    } catch {
+      // fx-swallow-ok: the hand-off is best effort; the webhook and the reconcile tick are the backstops, and the merge is already answered
+      (deps.log ?? console.warn)(JSON.stringify({ event: "onboarding.install_merge_handoff_failed", code: "hook_threw" }));
+    }
+  }
+  return res;
 }

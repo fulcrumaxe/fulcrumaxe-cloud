@@ -6,6 +6,8 @@ import { classTwo, presetDisposition } from "@fx/db/src/dialPreset.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { HELLO_PATH, machineJobClaimRun, runnerHello, setupProgressRun } from "../src/index.js";
 import { installMergeRun, installSummaryRun } from "../src/setupInstallMerge.js";
+import { claimSetupFinish, completeSetupFinish } from "../src/setupFinish.js";
+import type { SetupFinishPort } from "../src/runPullRequest.js";
 import { claimSetupInstall, completeSetupInstall, type SetupInstallClaim } from "../src/setupInstallPr.js";
 import { createRunPullRequestPort, type SetupInstallPort } from "../src/runPullRequest.js";
 import { harness, newKey, registerKey, respond, signed, type Harness, type TestKey } from "./helpers.js";
@@ -131,6 +133,181 @@ describe("the install summary and merge [pg]", () => {
     });
   });
 
+  describe("the merge moves the setup to the finish phase itself (Ruling 122.1)", () => {
+    // setups other tests left at `finish` would be claimed first by a global claim: lease them
+    beforeEach(async () => {
+      await h.admin.query("UPDATE project_setups SET finish_claim_at = now() WHERE phase = 'finish'");
+    });
+    const row = async (id: string) => (await h.admin.query("SELECT * FROM project_setups WHERE id = $1", [id])).rows[0] as Record<string, unknown>;
+    const phase = async (id: string) => { const x = await row(id); return { phase: x.phase, sub_step: x.sub_step, state: x.state }; };
+    const webhook = (r: Rig) => withTenant(h.appPool, r.who.accountId, r.who.userId, async (c) => (await c.query<{ r: string }>("SELECT setup_install_pr_closed($1::uuid, $2::int, true, $3) AS r", [r.who.repoId, r.number, BRANCH])).rows[0]!.r);
+    const definer = (r: Rig, o: { userId?: string; pr?: number; setup?: string; accountId?: string } = {}) =>
+      withTenant(h.appPool, o.accountId ?? r.who.accountId, o.userId ?? r.who.userId, async (c) => (await c.query<{ r: string }>("SELECT setup_install_merged($1::uuid, $2::int) AS r", [o.setup ?? r.setupId, o.pr ?? r.number])).rows[0]!.r);
+    /** The finish step the hand-off runs: one claim of THIS setup under the lease, completed over the fake GitHub; null when it was not claimable. */
+    const finishPass = async (r: Rig): Promise<string | null> => {
+      const claim = await claimSetupFinish(h.opsPool, r.setupId);
+      if (claim === null) return null;
+      if (claim === "malformed") throw new Error("malformed claim");
+      expect(claim.setupId).toBe(r.setupId);
+      return completeSetupFinish({ pool: h.opsPool, port: r.port as unknown as SetupFinishPort }, claim);
+    };
+
+    it("a person's merge with no webhook and no tick reaches done through the immediate pass", async () => {
+      const r = await rig();
+      let pass: Promise<string | null> = Promise.resolve(null);
+      const res = await installMergeRun(depsFor(r, { afterInstallMerge: () => { pass = finishPass(r); } }), as(r), r.setupId);
+      expect(res.status).toBe(200);
+      expect(await pass).toBe("done");
+      expect(await phase(r.setupId)).toMatchObject({ phase: "done" });
+    });
+
+    it("the route alone moves the setup to finish at sub_step pr_merged, and the definer is the only thing that did", async () => {
+      const r = await rig();
+      expect(await phase(r.setupId)).toMatchObject({ phase: "await_merge" });
+      await installMergeRun(depsFor(r), as(r), r.setupId);
+      expect(await phase(r.setupId)).toEqual({ phase: "finish", sub_step: "pr_merged", state: "ok" });
+    });
+
+    it("only the call that moved the setup starts the hand-off: a second click, and a click after the webhook, start none", async () => {
+      const r = await rig();
+      const seen: string[] = [];
+      const deps = depsFor(r, { afterInstallMerge: (id: string) => void seen.push(id) });
+      await installMergeRun(deps, as(r), r.setupId);
+      await installMergeRun(deps, as(r), r.setupId);
+      await installMergeRun(deps, as(r), r.setupId);
+      expect(seen).toEqual([r.setupId]);
+      const late = await rig();
+      Object.assign(late.repo.pulls[0]!, { state: "closed", merged: true });
+      expect(await webhook(late)).toBe("finished");
+      const lateSeen: string[] = [];
+      expect((await installMergeRun(depsFor(late, { afterInstallMerge: (id: string) => void lateSeen.push(id) }), as(late), late.setupId)).status).toBe(200);
+      expect(lateSeen).toEqual([]);
+    });
+
+    it("the immediate pass claims its own setup only: another account's due setup is left alone", async () => {
+      const mine = await rig();
+      const theirs = await rig();
+      expect(await definer(theirs)).toBe("finished");
+      expect(await definer(mine)).toBe("finished");
+      await h.admin.query("UPDATE project_setups SET finish_claim_at = NULL, updated_at = now() - interval '1 hour' WHERE id = $1", [theirs.setupId]);
+      const claim = await claimSetupFinish(h.opsPool, mine.setupId);
+      expect(claim).toMatchObject({ setupId: mine.setupId });
+      expect((await row(theirs.setupId)).finish_claim_at).toBeNull();
+      expect(await claimSetupFinish(h.opsPool, mine.setupId)).toBeNull();
+      expect(await claimSetupFinish(h.opsPool)).toMatchObject({ setupId: theirs.setupId });
+    });
+
+    it("the route then the webhook, and the webhook then the route, finish the setup once", async () => {
+      const first = await rig();
+      await installMergeRun(depsFor(first), as(first), first.setupId);
+      expect(await webhook(first)).toBe("none");
+      expect(await finishPass(first)).toBe("done");
+      expect(await finishPass(first)).toBeNull();
+
+      const second = await rig();
+      Object.assign(second.repo.pulls[0]!, { state: "closed", merged: true });
+      expect(await webhook(second)).toBe("finished");
+      expect((await installMergeRun(depsFor(second), as(second), second.setupId)).status).toBe(200);
+      expect(await finishPass(second)).toBe("done");
+      expect(await finishPass(second)).toBeNull();
+      expect(await phase(second.setupId)).toMatchObject({ phase: "done" });
+    });
+
+    it("the definer is idempotent: after the setup has moved on it answers none and moves nothing back", async () => {
+      const r = await rig();
+      expect(await definer(r)).toBe("finished");
+      expect(await definer(r)).toBe("none");
+      expect(await finishPass(r)).toBe("done");
+      expect(await definer(r)).toBe("none");
+      expect(await phase(r.setupId)).toMatchObject({ phase: "done" });
+    });
+
+    it("is bound to the pull request the route verified: another number moves nothing", async () => {
+      const r = await rig();
+      expect(await definer(r, { pr: r.number + 1 })).toBe("none");
+      expect(await phase(r.setupId)).toMatchObject({ phase: "await_merge" });
+      await expect(definer(r, { pr: 0 })).resolves.toBe("none");
+      expect(await definer(r)).toBe("finished");
+    });
+
+    it("moves nothing for a setup still at phase install, even with a pull request number recorded", async () => {
+      const r = await rig();
+      await h.admin.query("UPDATE project_setups SET phase = 'install' WHERE id = $1", [r.setupId]);
+      expect(await definer(r)).toBe("none");
+      expect(await phase(r.setupId)).toMatchObject({ phase: "install" });
+    });
+
+    it("moves nothing for a setup with no pull request recorded", async () => {
+      const r = await rig();
+      await h.admin.query("UPDATE project_setups SET install_pr = NULL WHERE id = $1", [r.setupId]);
+      expect(await definer(r)).toBe("none");
+      expect(await phase(r.setupId)).toMatchObject({ phase: "await_merge" });
+    });
+
+    it("refuses a member and answers none for another account's setup", async () => {
+      const r = await rig();
+      const member = await person(r.who.accountId, "member");
+      await expect(definer(r, { userId: member })).rejects.toMatchObject({ code: "42501" });
+      const other = await rig();
+      expect(await definer(r, { accountId: other.who.accountId, userId: other.who.userId })).toBe("none");
+      await expect(h.opsPool.query("SELECT setup_install_merged($1::uuid, $2::int)", [r.setupId, r.number])).rejects.toThrow();
+      expect(await phase(r.setupId)).toMatchObject({ phase: "await_merge" });
+    });
+
+    it("the definer's own view of account_members is the caller's row and no other", async () => {
+      const r = await rig();
+      const member = await person(r.who.accountId, "member");
+      const seen = async (userId: string) => {
+        const c = h.admin;
+        try {
+          await c.query("BEGIN");
+          await c.query("SET LOCAL ROLE setup_install_definer");
+          await c.query("SELECT set_config('app.account_id', $1, true), set_config('app.user_id', $2, true)", [r.who.accountId, userId]);
+          return (await c.query<{ user_id: string }>("SELECT user_id FROM account_members")).rows.map((x) => x.user_id).sort();
+        } finally {
+          await c.query("ROLLBACK");
+        }
+      };
+      expect(await seen(member)).toEqual([member]);
+      expect(await seen(r.who.userId)).toEqual([r.who.userId]);
+    });
+
+    it("a released claim is claimable straight away; a held one is not; only the reconcile login may release, at the claimed attempt and claim", async () => {
+      const r = await rig();
+      await definer(r);
+      const claim = await claimSetupFinish(h.opsPool, r.setupId);
+      if (claim === null || claim === "malformed") throw new Error("no claim");
+      expect(await claimSetupFinish(h.opsPool, r.setupId)).toBeNull();
+      const release = (attempt: number, at: string) => h.opsPool.query<{ r: boolean }>("SELECT setup_finish_release($1::uuid, $2::int, $3::text) AS r", [r.setupId, attempt, at]).then((x) => x.rows[0]!.r);
+      await expect(h.appPool.query("SELECT setup_finish_release($1::uuid, $2::int, $3::text)", [r.setupId, claim.attempt, claim.claimAt])).rejects.toThrow();
+      expect(await release(claim.attempt + 1, claim.claimAt)).toBe(false);
+      expect(await release(claim.attempt, "2020-01-01 00:00:00+00")).toBe(false);
+      await expect(release(claim.attempt, "not a time")).rejects.toThrow();
+      expect(await claimSetupFinish(h.opsPool, r.setupId)).toBeNull();
+      expect(await release(claim.attempt, claim.claimAt)).toBe(true);
+      const again = await claimSetupFinish(h.opsPool, r.setupId);
+      expect(again).toMatchObject({ setupId: r.setupId });
+      // the first pass's late release must not give back the second pass's claim
+      expect(await release(claim.attempt, claim.claimAt)).toBe(false);
+      expect(await claimSetupFinish(h.opsPool, r.setupId)).toBeNull();
+    });
+
+    it("a release changes finish_claim_at and nothing else on the setup", async () => {
+      const r = await rig();
+      await definer(r);
+      const claim = await claimSetupFinish(h.opsPool, r.setupId);
+      if (claim === null || claim === "malformed") throw new Error("no claim");
+      const before = await row(r.setupId);
+      await h.opsPool.query("SELECT setup_finish_release($1::uuid, $2::int, $3::text)", [r.setupId, claim.attempt, claim.claimAt]);
+      const after = await row(r.setupId);
+      const { finish_claim_at: was, ...restBefore } = before;
+      const { finish_claim_at: now, ...restAfter } = after;
+      expect(was).not.toBeNull();
+      expect(now).toBeNull();
+      expect(restAfter).toEqual(restBefore);
+    });
+  });
+
   describe("the merge", () => {
     it("an owner's click merges at exactly the pushed commit and writes who, which setup, which pull request and which commit, in the same transaction", async () => {
       const r = await rig();
@@ -140,6 +317,32 @@ describe("the install summary and merge [pg]", () => {
       expect(merges(r)).toBe(1);
       expect(r.fake.denied).toBe(0);
       expect(await audit(r.who.accountId)).toEqual([{ actor: r.who.userId, payload: { actor: r.who.userId, setup_id: r.setupId, pr_number: r.number, head_sha: HEAD } }]);
+    });
+
+    it("starts the finish hand-off once the merge has committed, and only for a merge that answered 200", async () => {
+      const r = await rig();
+      const seen: Array<{ id: string }> = [];
+      // the hook runs after the transaction: the audit row it wrote is already committed (visible to a read on another connection)
+      const hook = (id: string) => void seen.push({ id });
+      const out = await installMergeRun(depsFor(r, { afterInstallMerge: hook }), as(r), r.setupId);
+      expect(out.status).toBe(200);
+      expect(seen.map((x) => x.id)).toEqual([r.setupId]);
+      expect(await audit(r.who.accountId)).toHaveLength(1);
+      const member = await person(r.who.accountId, "member");
+      const other = await rig();
+      expect(await refusal(installMergeRun(depsFor(other, { afterInstallMerge: hook }), as(other, member), other.setupId))).toEqual({ status: 403, code: "forbidden" });
+      other.repo.mergeBlocked = true;
+      expect((await refusal(installMergeRun(depsFor(other, { afterInstallMerge: hook }), as(other), other.setupId))).status).toBe(409);
+      expect(seen).toHaveLength(1);
+    });
+
+    it("a hand-off that throws is logged by code and the merge is still answered", async () => {
+      const r = await rig();
+      const lines: string[] = [];
+      const res = await installMergeRun(depsFor(r, { afterInstallMerge: () => { throw new Error("boom"); }, log: (l: string) => void lines.push(l) }), as(r), r.setupId);
+      expect(res).toMatchObject({ status: 200, body: { merged: true, already: false } });
+      expect(lines.map((l) => JSON.parse(l))).toEqual([{ event: "onboarding.install_merge_handoff_failed", code: "hook_threw" }]);
+      expect(lines.join("")).not.toContain("boom");
     });
 
     it("an admin may merge; a member may not, and then nothing is asked of GitHub's merge and nothing is written", async () => {

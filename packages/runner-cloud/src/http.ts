@@ -120,6 +120,11 @@ export interface RunnerCloudDeps {
    * the backstop. Absent: only the tick acts.
    */
   afterSetupPush?: ((setupId: string) => void) | null;
+  /**
+   * D#845 Ruling 122: called after the install merge route's own call moved the setup to the finish phase (never for a repeated click or a setup the webhook already moved), so the finish phase starts at once instead of on the webhook
+   * or the reconcile tick, for that setup alone. It runs after the request's transactions have committed; it must not wait, and one that throws is logged and the merge is still answered. The webhook and the tick stay as backstops.
+   */
+  afterInstallMerge?: ((setupId: string) => void) | null;
   /** D#845 ON-20a: the install pull request's summary and merge read and write GitHub through this port (the run port plus the install step's calls). Null while it is not configured; the two routes then answer 503 `not_configured`. */
   setupInstall?: SetupInstallPort | null;
   /** Engine bridge EB-4: prices the tokens an engine batch reports (the worker's `recordEngineUsage`). Absent: the tokens are kept and no figure is recorded. */
