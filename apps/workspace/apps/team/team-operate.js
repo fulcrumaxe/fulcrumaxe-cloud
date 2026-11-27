@@ -10,6 +10,7 @@
 //  - Nothing here counts, adds up or estimates: the lists show what the cloud sent.
 import { isRateLimited, retryWords, waitSeconds } from "../_lib/api.js";
 import { h } from "../_lib/dom.js";
+import { readFleet } from "../runners/runners-fleet.js";
 
 export const COMMAND_LIFE_MIN = 10;
 export const ENGINE_DIALS = ["engine_spawn", "engine_merge", "engine_spec_ready"];
@@ -231,7 +232,122 @@ export function updateNodes(v, start) {
   ];
 }
 
-export const NO_OP = { commands: null, commandsAt: "", commandsFailed: false, dials: null, dialsAt: "", dialsFailed: false, saving: false, notice: "", confirmStop: null, confirmHalt: null, haltNote: "", stopBusy: false, stopNote: "", updateBusy: false, updateNote: "", updateRepo: "" };
+// ── the next step of the open repo (D#845 ON-14c) ───────────────────────────────────────────────────────────────────────────────
+// The cloud sends the facts (`machine_name`, `setup`, `session`, `quota` on the repo list); which sentence and which button show is chosen here, by closed values only. First match wins:
+// the machine was removed, the engine is halted, its session is stopped, it is starting, then (a repo never heard from) its setup, then (a stale one) its runner.
+const ASK = (v) => "Ask an owner or admin to " + v;
+export const NEXT_WORDS = {
+  move: "Move to another machine", stopped: (at) => (at ? "Stopped " + at : "The engine is stopped."),
+  operateOff: (at) => (at ? "Stopped at " + at + " because operate was turned off" : "Stopped because operate was turned off"),
+  idleOperateOff: ["Operate is off, so the engine isn't running on ", ""], idle: ["The engine isn't running on ", ""], starting: ["Starting the engine on ", "…"], runner: ["Start the runner on ", ""],
+  fresh: (at) => "Started fresh at " + at, quota: (inw) => "Today's event limit is reached. Updates resume at 00:00 UTC (" + inw + ")",
+  ask: { turnOn: ASK("turn on operate"), start: ASK("start the engine"), setup: ASK("set up the engine"), renew: "Ask an owner to renew the plan", move: ASK("move it") },
+  phases: { survey: "surveying the project", plan: "writing the plan", install: "installing the engine", await_merge: "waiting for the install pull request", finish: "finishing the install" },
+  sent: "Asked the machine to start the engine.", already: "A start is already on its way.", moved: "Moved. The engine starts on the new machine.", held: "You already have the Engine plan.", added: "Engine added. This updates when the provider confirms the change.",
+  alias: { project_not_placed: "not_placed", machine_single_project: "machine_not_eligible" },
+  errors: {
+    signedOut: "Your session has ended. Sign in again.", other: "That didn't go through. Try again.", forbidden: "Only an owner or admin can do that.", notFound: "That repository or machine no longer exists.",
+    plan_required: "The engine needs the Engine plan. Choose it in Onboarding.", engine_quantity: "Every engine on your plan is in use. Add an engine in Onboarding.", plan_ended: "The Engine plan ended. Renew it first.",
+    account_held: "This account is on hold.", operate_off: "Operate is off. Turn it on first.", start_pending: "A start is already waiting for the machine.", not_placed: "This project isn't on a machine.",
+    machine_not_eligible: "That machine can't take the project right now. Pick another.",
+  },
+};
+const FACT_STATES = ["never", "starting", "running", "stale", "stopped", "halted", "runner_removed"], FACT_MODES = ["created", "resumed", "fresh"], FACT_QUOTA = ["ok", "session_full", "repo_full"];
+const FACT_REASONS = ["person", "halt", "move", "remove", "operate_off", "plan"], FACT_SETUP = ["none", "open", "done"], FACT_WORD = /^[a-z][a-z0-9_]{0,63}$/;
+/** The closed shape of a repo's session facts; a list without them (an older server) reads as null and shows no next step (fail closed). */
+export function readFacts(r) {
+  if (!isObj(r)) return null;
+  const se = r.session, qu = r.quota, su = r.setup;
+  const session = isObj(se) && FACT_STATES.includes(se.state) ? {
+    state: se.state, mode: FACT_MODES.includes(se.last_start_mode) ? se.last_start_mode : "", startAt: typeof se.last_start_at === "string" ? se.last_start_at : "",
+    reason: FACT_REASONS.includes(se.stopped_reason) ? se.stopped_reason : "", at: typeof se.state_at === "string" ? se.state_at : "",
+  } : null;
+  const quota = isObj(qu) && FACT_QUOTA.includes(qu.state) && stamp(qu.resets_at) !== null ? { state: qu.state, resetsAt: qu.resets_at } : null;
+  const setup = isObj(su) && FACT_SETUP.includes(su.status) ? { status: su.status, phase: typeof su.phase === "string" && FACT_WORD.test(su.phase) ? su.phase : "", failed: su.state === "failed" } : { status: "none", phase: "", failed: false };
+  return session || quota ? { machine: typeof r.machine_name === "string" ? r.machine_name : "", setup, session, quota } : null;
+}
+const clock = (iso) => { const t = stamp(iso); if (t === null) return ""; const d = new Date(t), p = (n) => String(n).padStart(2, "0"); return p(d.getHours()) + ":" + p(d.getMinutes()); };
+/** Under a minute "in under a minute", under an hour "in N min", else "in N h"; each rounded up. */
+export function untilWords(iso, nowMs) {
+  const left = (stamp(iso) ?? nowMs) - nowMs;
+  if (left < 60000) return "in under a minute";
+  return left < 3600000 ? "in " + Math.ceil(left / 60000) + " min" : "in " + Math.ceil(left / 3600000) + " h";
+}
+/** The chip's own word while the session is stopped or starting: never "Live" or "Stale" for an engine that is not running. */
+export const sessionChip = (repo) => {
+  const s = repo && repo.facts ? repo.facts.session : null;
+  if (!s) return "";
+  if (s.at !== "" && repo.operate !== true && (s.state === "running" || s.state === "stale" || s.state === "starting")) return "Operate off"; // a cloud session with operate off is winding down: never Live or Stale
+  return s.state === "stopped" ? "Stopped" : s.state === "starting" ? "Starting" : "";
+};
+
+/** The next-step card of the open repo, or null. `parts` is the sentence with a machine name in its own run ({bdi}); `action` is {id, label} or null; a member gets the sentence and the line that says who can act. */
+export function describeNext(st, repo, nowMs) {
+  const f = repo && repo.facts;
+  if (!st.settings || !f) return null;
+  const can = st.settings.canEdit === true, W = NEXT_WORDS, m = f.machine, s = f.session;
+  const named = (pair) => (m ? [pair[0], { bdi: m }, pair[1]] : null);
+  let parts = null, action = null, ask = "";
+  const owner = st.fleet && st.fleet.role === "owner"; // the checkout route takes an owner only; the role is read from the machines list
+  const act = (id, label, askKey) => { if (id === "renew" ? can && owner : can) action = { id, label }; else ask = W.ask[askKey]; };
+  // Operate is off while a cloud session (a listed sandbox) is still up or stopped: the engine is being or has been stopped, so a start or a runner start would only be refused (409 operate_off).
+  const winding = s && s.at !== "" && repo.operate !== true && s.state !== "never" && !(s.state === "stopped" && s.reason === "plan");
+  if (winding) {
+    if (s.state === "stale") parts = m ? ["Stopping when ", { bdi: m }, " comes back"] : ["Stopping when the machine comes back"];
+    else if (s.state === "stopped" && s.reason === "operate_off") { parts = [W.operateOff(clock(s.at))]; act("operate", "Turn on operate", "turnOn"); }
+    else if (s.state === "runner_removed") { parts = ["Its machine was removed, and operate is off"]; act("operate", "Turn on operate", "turnOn"); }
+    else { parts = named(W.idleOperateOff) || ["Operate is off, so the engine isn't running"]; act("operate", "Turn on operate", "turnOn"); }
+  } else if (s) {
+    if (s.state === "runner_removed") { parts = ["Its machine was removed"]; act("move", W.move, "move"); }
+    else if (s.state === "halted") { parts = [s.at ? W.stopped(clock(s.at)) : "The engine is halted."]; act("start", "Start engine", "start"); }
+    else if (s.state === "stopped") {
+      if (s.reason === "operate_off") { parts = [W.operateOff(clock(s.at))]; act("operate", "Turn on operate", "turnOn"); }
+      else if (s.reason === "plan") { parts = ["Plan ended: the engine is stopped"]; act("renew", "Renew", "renew"); }
+      else { parts = [W.stopped(clock(s.at))]; if (s.reason !== "remove") act("start", "Start engine", "start"); }
+    } else if (s.state === "starting") parts = named(W.starting) || ["Starting the engine…"];
+    else if (s.state === "never" && f.setup.status === "open") { parts = ["Setting up: " + (Object.hasOwn(W.phases, f.setup.phase) ? W.phases[f.setup.phase] : "the install") + (f.setup.failed ? " (it stopped; open Onboarding to try again)" : "")]; action = { id: "onboarding", label: "Open Onboarding" }; }
+    else if (s.state === "never" && f.setup.status === "none") { parts = ["This repo isn't set up on a machine yet"]; act("setup", "Set up the engine", "setup"); }
+    else if (s.state === "never" && f.setup.status === "done") {
+      if (repo.operate) { parts = named(W.idle) || ["The engine isn't running"]; act("start", "Start engine", "start"); } else { parts = named(W.idleOperateOff) || ["Operate is off, so the engine isn't running"]; act("operate", "Turn on operate", "turnOn"); }
+    } else if (s.state === "stale") { parts = named(W.runner) || ["Start the runner on your machine"]; action = { id: "machines", label: "Open Machines" }; }
+  }
+  const fresh = s && s.state === "running" && s.mode === "fresh" && clock(s.startAt) ? W.fresh(clock(s.startAt)) : "";
+  const quota = f.quota && f.quota.state !== "ok" ? W.quota(untilWords(f.quota.resetsAt, nowMs)) : "";
+  if (!parts && !fresh && !quota) return null;
+  const mine = st.op.nextRepo === repo.id;
+  const move = mine ? st.op.move : null;
+  return {
+    id: repo.id, parts: parts || [], text: parts ? parts.map((p) => (typeof p === "string" ? p : p.bdi)).join("") : "", action: move ? null : action, ask, fresh, quota,
+    busy: st.op.nextBusy === true, note: mine ? st.op.nextNote : "", move,
+  };
+}
+/** Every refusal of Start engine, Renew and Move in words, chosen by the status and the closed code; never the server's text. */
+export function nextFailure(e) {
+  if (isRateLimited(e)) return retryWords(waitSeconds(e));
+  const st = e && Number.isInteger(e.status) ? e.status : 0, W = NEXT_WORDS.errors;
+  const code = e && typeof e.code === "string" ? NEXT_WORDS.alias[e.code] || e.code : "";
+  return st === 401 ? W.signedOut : st === 403 ? W.forbidden : st === 404 ? W.notFound : Object.hasOwn(W, code) && !["forbidden", "notFound", "signedOut", "other"].includes(code) ? W[code] : W.other;
+}
+/** The card's nodes. A button is aria-disabled (not disabled) while a call is out, so it keeps its place in the Tab order; a click calls `go(id)`, and the move picker calls `mv.pick(id)`, `mv.go()` and `mv.cancel()`. */
+export function nextNodes(v, go, mv) {
+  const btn = v.action ? h("button", { type: "button", class: "tm-btn", "data-testid": "tm-next-" + v.action.id, "data-focus": "next-" + v.action.id, "aria-disabled": v.busy ? "true" : "false", onClick: () => { if (btn.getAttribute("aria-disabled") !== "true") go(v.action.id); } }, v.action.label) : null;
+  const mvs = v.move, none = mvs && (mvs.loading || mvs.choices.length === 0);
+  const picker = mvs ? h("div", { class: "tm-move", role: "group", "aria-label": NEXT_WORDS.move, "data-testid": "tm-move" },
+    none ? h("p", { class: "tm-muted", "data-testid": "tm-move-note" }, mvs.loading ? "Looking for machines…" : "No other machine is online to move it to.")
+      : h("select", { class: "tm-select", "aria-label": "Machine to move it to", "data-testid": "tm-move-pick", "data-focus": "next-move-pick", onChange: (e) => mv.pick(e.target.value) }, mvs.choices.map((c) => h("option", { value: c.id, selected: c.id === mvs.pick }, c.name))),
+    none ? null : h("button", { type: "button", class: "tm-btn", "data-testid": "tm-move-go", "data-focus": "next-move-go", "aria-disabled": v.busy ? "true" : "false", onClick: () => { if (!v.busy) mv.go(); } }, "Move"),
+    h("button", { type: "button", class: "tm-btn", "data-testid": "tm-move-cancel", "data-focus": "next-move-cancel", onClick: () => mv.cancel() }, "Cancel")) : null;
+  return [
+    v.parts.length ? h("p", { class: "tm-next-text", "data-testid": "tm-next-text" }, v.parts.map((p) => (typeof p === "string" ? p : h("bdi", null, p.bdi)))) : null,
+    btn, picker,
+    v.ask ? h("p", { class: "tm-muted", "data-testid": "tm-next-ask" }, v.ask) : null,
+    v.fresh ? h("p", { class: "tm-next-text", "data-testid": "tm-fresh" }, v.fresh) : null,
+    v.quota ? h("p", { class: "tm-next-text", "data-testid": "tm-quota" }, v.quota) : null,
+    v.note ? h("p", { class: "tm-halt-note", role: "note", "data-testid": "tm-next-note" }, v.note) : null,
+  ];
+}
+
+export const NO_OP = { commands: null, commandsAt: "", commandsFailed: false, dials: null, dialsAt: "", dialsFailed: false, saving: false, notice: "", confirmStop: null, confirmHalt: null, haltNote: "", stopBusy: false, stopNote: "", updateBusy: false, updateNote: "", updateRepo: "", nextBusy: false, nextNote: "", nextRepo: "", move: null };
 
 const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const stamp = (v) => (typeof v === "string" && Number.isFinite(Date.parse(v)) ? Date.parse(v) : null);
@@ -393,7 +509,7 @@ export function dialFailure(e) {
 
 // ── the controller half ─────────────────────────────────────────────────────────────────────────────────────────────────────
 /** `get()` is the Team state, `set(patch)` changes it, `refresh()` reads everything again, `aborted(e)` is true for a closed window. */
-export function createOperate({ client, signal, get, set, refresh, aborted }) {
+export function createOperate({ client, signal, get, set, refresh, aborted, assign = (u) => window.location.assign(u) }) {
   const patch = (p) => set({ op: { ...get().op, ...p } });
   const locked = () => {
     const st = get();
@@ -430,7 +546,7 @@ export function createOperate({ client, signal, get, set, refresh, aborted }) {
     return clearing === (repo.halted || repo.haltPending);
   };
   const send = (kind, args) => run((id) => client.issue(id, kind, args, signal), OP_WORDS.sent, sendFailure);
-  return {
+  const api = {
     async read(repoId, stale) {
       const [c, d] = await Promise.allSettled([client.commands(repoId, signal), client.dials(repoId, signal)]);
       if (stale()) return;
@@ -476,6 +592,62 @@ export function createOperate({ client, signal, get, set, refresh, aborted }) {
       await refresh();
       return true;
     },
+    // The next-step card's buttons (D#845 ON-14c): each is one existing route, called only by an owner or admin, and says its answer in fixed words.
+    async nextCall(call, ok, fail = nextFailure) {
+      const st = get();
+      const repo = st.repos.find((r) => r.id === st.selectedId);
+      if (!st.settings || st.settings.canEdit !== true || !repo || st.op.nextBusy) return false;
+      patch({ nextBusy: true, nextNote: "", nextRepo: repo.id });
+      let r;
+      try { r = await call(repo); } catch (e) {
+        if (aborted(e)) return false;
+        patch({ nextBusy: false, nextNote: fail(e) });
+        if (e && (e.status === 404 || e.status === 409 || e.status === 402)) await refresh(); // what was shown is out of date: show what is true now
+        return false;
+      }
+      patch({ nextBusy: false, nextNote: ok(r), move: null });
+      await refresh();
+      return true;
+    },
+    startEngine() { return api.nextCall((repo) => client.startEngine(repo.id, signal), (r) => (r && r.already_issued === true ? NEXT_WORDS.already : NEXT_WORDS.sent)); },
+    /** Renew goes to the same checkout route Onboarding's Renew uses: the answer is an item added to the held subscription, or the provider's own page (https only). */
+    renew() {
+      let url = "";
+      return api.nextCall(() => client.checkout(signal), (r) => {
+        if (r && r.already_held === true) return NEXT_WORDS.held;
+        if (r && r.added === true) return NEXT_WORDS.added;
+        if (r && typeof r.url === "string" && r.url.startsWith("https://")) { url = r.url; return ""; }
+        return NEXT_WORDS.errors.other;
+      }, (e) => (e && e.status === 403 ? "Only an owner can renew the plan." : nextFailure(e))).then((ok) => { if (ok && url) assign(url); return ok; });
+    },
+    /** Turn on operate from the card: says why when it cannot (engine watch is off, or a save is out), instead of doing nothing. */
+    turnOnOperate() {
+      const st = get();
+      const repo = st.repos.find((r) => r.id === st.selectedId);
+      if (!st.settings || st.settings.canEdit !== true || !repo) return Promise.resolve(false);
+      if (!st.settings.watch) { patch({ nextRepo: repo.id, nextNote: OP_WORDS.watchFirst }); return Promise.resolve(false); }
+      if (st.op.saving || st.saving) { patch({ nextRepo: repo.id, nextNote: "A change is being saved. Try again in a moment." }); return Promise.resolve(false); }
+      patch({ nextNote: "" });
+      return api.setOperate(true);
+    },
+    async askMove() {
+      const st = get();
+      const repo = st.repos.find((r) => r.id === st.selectedId);
+      if (!st.settings || st.settings.canEdit !== true || !repo || st.op.nextBusy) return false;
+      patch({ nextRepo: repo.id, nextNote: "", move: { loading: true, choices: [], pick: "" } });
+      let fleet = null;
+      try { fleet = readFleet(await client.runners(signal)); } catch (e) { if (aborted(e)) return false; } // fx-swallow-ok: an unreadable list shows "no other machine", and the card still has its way back
+      if (get().op.move === null || get().selectedId !== repo.id) return false;
+      const choices = fleet ? fleet.runners.filter((r) => r.state === "online_idle" || r.state === "busy").map((r) => ({ id: r.id, name: r.name })) : [];
+      patch({ move: { loading: false, choices, pick: choices.length ? choices[0].id : "" } });
+      return true;
+    },
+    pickMove(id) { const mv = get().op.move; if (mv && mv.choices.some((c) => c.id === id)) patch({ move: { ...mv, pick: id } }); },
+    cancelMove() { patch({ move: null }); },
+    moveNow() {
+      const mv = get().op.move;
+      return mv && mv.pick ? api.nextCall((repo) => client.moveProject(repo.id, mv.pick, signal), () => NEXT_WORDS.moved) : Promise.resolve(false);
+    },
     async startUpdate() {
       const st = get();
       const repo = st.repos.find((r) => r.id === st.selectedId);
@@ -506,4 +678,5 @@ export function createOperate({ client, signal, get, set, refresh, aborted }) {
       );
     },
   };
+  return api;
 }

@@ -51,10 +51,10 @@ async function until(fn) {
   throw new Error("timed out");
 }
 
-function mount(wait) {
+function mount(wait, extra = {}) {
   const host = { root: null, replaceChildren(...n) { this.root = n[0] ?? null; }, querySelector: () => null };
   const waits = [];
-  const env = { signal: undefined, search: "", clearReturn() {}, announce() {}, canOpen: () => false, openApp() {}, onPlaced() {}, wait: wait ?? ((ms) => { waits.push(ms); return Promise.resolve(); }) };
+  const env = { ...extra, signal: undefined, search: "", clearReturn() {}, announce() {}, canOpen: () => false, openApp() {}, onPlaced() {}, wait: wait ?? ((ms) => { waits.push(ms); return Promise.resolve(); }) };
   const picker = mountProjectPicker(host, env);
   const byId = (id) => host.root?.find((e) => e.attrs["data-testid"] === id)[0];
   const click = (id) => byId(id).listeners.click({ type: "click", isTrusted: true });
@@ -120,5 +120,35 @@ describe("Confirm in the project picker, clicked with a real event", () => {
     expect(places()).toHaveLength(5);
     expect(m.byId("ob-pick-error").textContent).toMatch(/hasn't reported its free memory and disk yet/);
     expect(m.byId("ob-pick-note")).toBeUndefined();
+  });
+});
+
+describe("a repo another app asked for (D#845 ON-14c)", () => {
+  const R1 = "11111111-1111-4111-8111-111111111111";
+  const asked = (id) => { const st = { id, done: false }; return { wanted: () => (st.done ? "" : st.id), wantedDone: () => { st.done = true; }, st }; };
+  it("opens on the confirm step for that repo when this read lists it, and asks for it once", async () => {
+    const a = asked(R1);
+    const m = mount(undefined, a);
+    await until(() => m.byId("ob-pick-confirm"));
+    expect(m.host.root.textContent).toContain("acme/api");
+    expect(a.st.done).toBe(true);
+    expect(places()).toHaveLength(0); // nothing is sent until Confirm
+  });
+  it("an id the read does not list is ignored: the list shows", async () => {
+    const a = asked("99999999-9999-4999-8999-999999999999");
+    const m = mount(undefined, a);
+    await until(() => m.byId("ob-pick-repo"));
+    expect(m.byId("ob-pick-confirm")).toBeUndefined();
+    expect(a.st.done).toBe(false);
+  });
+  it("preselect() on an open list picks the repo, and does nothing once a repo is being confirmed", async () => {
+    const a = asked("");
+    const m = mount(undefined, a);
+    await until(() => m.byId("ob-pick-repo"));
+    a.st.id = R1;
+    m.picker.preselect();
+    await until(() => m.byId("ob-pick-confirm"));
+    m.picker.preselect();
+    expect(a.st.done).toBe(true);
   });
 });

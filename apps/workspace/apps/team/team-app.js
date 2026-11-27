@@ -6,7 +6,7 @@
 import { h } from "../_lib/dom.js";
 import { on, onRefresh } from "../../core/cloud-live.js";
 import { WORDS, createTeam, describe } from "./team-model.js";
-import { DIAL_CLASSES, HALT_WORDS, OP_WORDS, ROLES, STOP_WORDS, TTL, stopFailNodes, updateNodes } from "./team-operate.js";
+import { DIAL_CLASSES, HALT_WORDS, OP_WORDS, ROLES, STOP_WORDS, TTL, nextNodes, stopFailNodes, updateNodes } from "./team-operate.js";
 
 const FULC = window.FULC;
 if (!FULC || typeof FULC.register !== "function") {
@@ -44,7 +44,7 @@ function mountApp(contentEl) {
     }
     if (hadFocus && !parent.contains(document.activeElement)) heading.focus();
   };
-  const said = { n: "", b: "", r: "", l: "", f: "", o: "", w: "", g: "", s: "", e: "" };
+  const said = { n: "", b: "", r: "", l: "", f: "", o: "", w: "", g: "", s: "", e: "", x: "" };
   const hear = (k, v) => (said[k] === v ? "" : (said[k] = v));
   const setText = (el, value) => { if (el.textContent !== value) el.textContent = value; };
 
@@ -103,7 +103,9 @@ function mountApp(contentEl) {
   stopBox.hidden = true;
   const updateBox = h("div", { class: "tm-panel tm-update", "data-testid": "tm-update" });
   updateBox.hidden = true;
-  root.replaceChildren(h("div", { class: "tm-page" }, heading, bar, stopBox, updateBox, watchBar, live, banner, notices, note, haltBox, sheet, body, opWrap));
+  const nextBox = h("div", { class: "tm-panel tm-next", role: "group", "aria-label": "Next step", "data-testid": "tm-next" });
+  nextBox.hidden = true;
+  root.replaceChildren(h("div", { class: "tm-page" }, heading, bar, nextBox, stopBox, updateBox, watchBar, live, banner, notices, note, haltBox, sheet, body, opWrap));
 
   // A control that cannot be used right now keeps its place in the Tab order (aria-disabled, not disabled): focus stays on it through a save, and a member who tabs to it hears why.
   const box = (attrs, checked, enabled, why, set) => h("input", { type: "checkbox", checked, "aria-disabled": enabled ? null : "true", "aria-describedby": enabled ? null : why, onClick: (e) => { if (!enabled) e.preventDefault(); }, onChange: (e) => set(e.target.checked), ...attrs });
@@ -407,6 +409,22 @@ function mountApp(contentEl) {
     if ((want === "update-start" || onButton) && !(uc && uc.button)) want = uc ? "update-title" : null; // the button is going: focus goes to the title, not to the page heading
     swap("update", updateBox, uc, () => (uc ? updateNodes(uc, () => start()) : null));
   }
+  // The next-step card: the sentence for the repo's state and its one button. Each button calls one existing route (Start engine, Turn on operate, Renew, Move), or opens the app that owns the step (Onboarding, Machines).
+  const openApp = (id, arg) => window.FULCWM && window.FULCWM.open(id, arg);
+  const go = (id) => {
+    want = "next-" + id;
+    if (id === "start") ops.startEngine();
+    else if (id === "operate") ops.turnOnOperate();
+    else if (id === "renew") ops.renew();
+    else if (id === "move") { want = "next-move-pick"; ops.askMove(); }
+    else if (id === "machines") openApp("runners");
+    else openApp("onboarding", id === "setup" ? { step: "project", repo_id: team.state.selectedId } : undefined);
+  };
+  const mv = { pick: (id) => ops.pickMove(id), go: () => { want = "next-move"; ops.moveNow(); }, cancel: () => { want = "next-move"; ops.cancelMove(); } };
+  function paintNext(nx) {
+    nextBox.hidden = !nx;
+    swap("next", nextBox, nx, () => (nx ? nextNodes(nx, go, mv) : null));
+  }
   // A change of state is said once; the first state of a repo is a baseline, not news.
   let haltSeen = null, haltRepo = null;
   function haltWords(hl) {
@@ -451,7 +469,8 @@ function mountApp(contentEl) {
     // Said once, when it changes: a poll that finds the same banner or the same failure says nothing. A notice is cleared when a save starts, so the same sentence again is a change.
     const o = d.operate && d.operate.show ? d.operate : null;
     const broken = hasRepos ? Object.keys(TITLE).filter((k) => d[k].failed && d.failedKeys.includes(k)).map((k) => TITLE[k] + " panel couldn't be read.").join(" ") : ""; // a panel that fails is announced too, not only drawn; only once a read has reported the failure, so a panel not yet read is not
-    const msg = [hear("n", d.sheet ? d.sheet.notice : ""), hear("o", o ? o.notice : ""), outcomeWords(o && o.commands), hear("w", d.halt ? d.halt.note : ""), haltWords(d.halt || null), hear("s", d.stopFail ? d.stopFail.note : ""), hear("e", d.updateCard ? [d.updateCard.said, d.updateCard.note].filter(Boolean).join(" ") : ""), hear("b", hasRepos ? d.banner : ""), hear("r", d.refreshFailed || ""), hear("l", hasRepos ? d.log.said : ""), hear("f", broken), hear("g", hasRepos ? d.log.olderFailed : "")].filter(Boolean).join(" ");
+    const msg = [hear("n", d.sheet ? d.sheet.notice : ""), hear("o", o ? o.notice : ""), outcomeWords(o && o.commands), hear("w", d.halt ? d.halt.note : ""), haltWords(d.halt || null), hear("s", d.stopFail ? d.stopFail.note : ""), hear("e", d.updateCard ? [d.updateCard.said, d.updateCard.note].filter(Boolean).join(" ") : ""), hear("x", d.next ? [d.next.note, d.next.text, d.next.fresh, d.next.quota].filter(Boolean).join(" ") : ""), // the click's answer and the card's sentence are one announcement, so a later refresh cannot replace the answer
+    hear("b", hasRepos ? d.banner : ""), hear("r", d.refreshFailed || ""), hear("l", hasRepos ? d.log.said : ""), hear("f", broken), hear("g", hasRepos ? d.log.olderFailed : "")].filter(Boolean).join(" ");
     if (msg) live.replaceChildren(h("span", null, msg));
     swap("body", body, d.kind === "ready" ? { k: "ready" } : { k: d.kind, c: d.sheet && d.sheet.canEdit, w: d.sheet && d.sheet.watch, s: d.sheet && d.sheet.saving, r: d.rv }, () => {
       if (d.kind === "ready") {
@@ -478,6 +497,7 @@ function mountApp(contentEl) {
     paintHalt(d.halt || null);
     paintStop(d.stopFail || null);
     paintUpdate(d.updateCard || null);
+    paintNext(d.next || null);
     if (want) { // a control that closed a part asks for focus on one that lives in another part
       const el = [...root.querySelectorAll("[data-focus]")].find((e) => e.getAttribute("data-focus") === want);
       if (el) { el.focus(); want = null; }

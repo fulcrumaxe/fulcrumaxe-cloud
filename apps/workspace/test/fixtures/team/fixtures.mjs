@@ -21,7 +21,7 @@ export function makeFixtures(nowMs) {
     session_id: SESSION, last_event_at: iso(30), last_heard_at: iso(20), liveness: "live", watch_enabled: true, operate_enabled: false, halted: false, halt_pending: false,
     // ON-14b: the setup, the session and the day's event quota, as GET /api/v1/engine/repos serves them.
     machine_name: "Workshop laptop", setup: { status: "done", phase: "done", sub_step: null, state: "ok", failure_code: null },
-    session: { state: "running", last_start_mode: "created", last_start_at: iso(3600), stopped_reason: null, state_at: iso(3600) },
+    session: { state: "running", last_start_mode: null, last_start_at: null, stopped_reason: null, state_at: null },
     quota: { state: "ok", session_used: 120, session_limit: 5000, repo_used: 340, repo_limit: 20000, resets_at: new Date(Math.floor(nowMs / 86_400_000) * 86_400_000 + 86_400_000).toISOString() }, ...over,
   });
   const settingsRepo = (over = {}) => ({ repo_id: REPO_A, full_name: "acme-labs/widgets", enabled: true, eligible: true, refusal: null, bridged_runner_id: null, ...over });
@@ -39,7 +39,7 @@ export function makeFixtures(nowMs) {
   const list = (items) => ({ items });
   /** One runner of GET /api/runners, in the shape the Runners app reads. */
   const runner = (over = {}) => ({ id: RUNNER_A, name: "Workshop laptop", has_name: true, state: "online_idle", last_seen_at: iso(120), binary_version: "1.2.3", registered_by: { id: "u1", name: "Ada" }, repos: [], labels: [], ...over });
-  const fleet = (runners) => ({ runners, viewer: { role: "owner" }, account: { limit: 16, capacity: 8, running: 0, runner_count: runners.length, runner_limit: 5 } });
+  const fleet = (runners, role = "owner") => ({ runners, viewer: { role }, account: { limit: 16, capacity: 8, running: 0, runner_count: runners.length, runner_limit: 5 } });
   // The command channel and the decision dials, in the shapes engine-commands.ts and decision-settings.ts document.
   const command = (over = {}) => ({
     id: "c0000000-0000-4000-8000-000000000001", command_seq: 1, kind: "pause_loop", args: {}, state: "pending", refusal: null, issued_by: "u0000000-0000-4000-8000-000000000009",

@@ -124,3 +124,11 @@
 .tm-update-title { margin: 0; font-weight: 700; }
 .tm-update-text { margin: 0; }
 .tm-update[hidden] { display: none; }
+
+/* D#845 ON-14c: the next-step card. Long machine names wrap; the move picker's controls stack on a narrow window. */
+.tm-next { box-sizing: border-box; max-width: 100%; min-width: 0; margin: 8px 0; padding: 8px 10px; border: 3px double var(--accent, #1aff80); overflow-wrap: anywhere; }
+.tm-next > * + * { margin-top: 8px; }
+.tm-next-text { margin: 0; font-weight: 700; }
+.tm-move { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; }
+.tm-move .tm-select { max-width: 100%; }
+.tm-next[hidden] { display: none; }
