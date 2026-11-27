@@ -19,10 +19,13 @@ function cloud(unknown: string[]) {
   return { client: createRunnerClient({ origin: "https://cloud.example.test", key: generateRunnerKey(), now: () => new Date(), fetchFn }), sent };
 }
 
+/** The build behind `engine_session_v1` (D#845 ON-13b2), which is listed last of all and dropped first. */
+const BUILD = RUNNER_BUILD_CAPABILITIES.filter((c) => c !== "engine_session_v1");
+
 describe("twin_v1 on the build and on the hello", () => {
-  it("is last on the build and the hello it makes is a valid one", () => {
-    expect(RUNNER_BUILD_CAPABILITIES.at(-1)).toBe(TWIN_CAPABILITY);
-    expect(HelloMessage.safeParse({ ...base, capabilities: [...RUNNER_BUILD_CAPABILITIES] }).success).toBe(true);
+  it("is last on the build behind engine_session_v1 and the hello it makes is a valid one", () => {
+    expect(BUILD.at(-1)).toBe(TWIN_CAPABILITY);
+    expect(HelloMessage.safeParse({ ...base, capabilities: [...BUILD] }).success).toBe(true);
   });
 
   it("is listed only while run.ts registers a handler for every job kind it gates (seed, publish and sync)", () => {
@@ -35,16 +38,16 @@ describe("twin_v1 on the build and on the hello", () => {
 
   it("a cloud that does not know it costs one retry that drops it alone and keeps project_setup_v1 and every other capability", async () => {
     const { client, sent } = cloud([TWIN_CAPABILITY]);
-    const answer = await client.hello({ ...base, capabilities: [...RUNNER_BUILD_CAPABILITIES] });
+    const answer = await client.hello({ ...base, capabilities: [...BUILD] });
     expect(answer).toEqual({ kind: "ok", dropped: [TWIN_CAPABILITY] });
     expect(sent).toHaveLength(2);
-    expect(sent[1]).toEqual(RUNNER_BUILD_CAPABILITIES.filter((c) => c !== TWIN_CAPABILITY));
+    expect(sent[1]).toEqual(BUILD.filter((c) => c !== TWIN_CAPABILITY));
     expect(sent[1]).toContain(PROJECT_SETUP_CAPABILITY);
   });
 
   it("a cloud that knows it keeps it: one hello, nothing dropped", async () => {
     const { client, sent } = cloud([]);
-    expect(await client.hello({ ...base, capabilities: [...RUNNER_BUILD_CAPABILITIES] })).toEqual({ kind: "ok" });
+    expect(await client.hello({ ...base, capabilities: [...BUILD] })).toEqual({ kind: "ok" });
     expect(sent).toHaveLength(1);
     expect(sent[0]).toContain(TWIN_CAPABILITY);
   });

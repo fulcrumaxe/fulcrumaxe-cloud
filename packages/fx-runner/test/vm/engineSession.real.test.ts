@@ -85,12 +85,12 @@ describe.skipIf(!ready)("an engine session's VM, real (persistence through the p
     await vmPort.startEgress(name);
     await vmPort.waitGuest(name, new AbortController().signal);
     const first = await port.guestOf(handleOf(name));
-    await first.writeFiles([{ path: "/home/ubuntu/kept-by-b3.txt", content: "written before the stop\n" }]);
+    await first.writeFiles([{ path: "/vercel/sandbox/kept-by-b3.txt", content: "written before the stop\n" }]);
     await vmPort.stop(name); // a persistent VM keeps a snapshot
     expect(await port.sandboxState?.(handleOf(name))).toBe("stopped");
     await vmPort.resume(name);
     const woken = await port.guestOf(handleOf(name));
-    const cat = await woken.runCommand({ cmd: "cat", args: ["/home/ubuntu/kept-by-b3.txt"], detached: true });
+    const cat = await woken.runCommand({ cmd: "cat", args: ["/vercel/sandbox/kept-by-b3.txt"], detached: true });
     let out = "";
     for await (const log of cat.logs()) if (log.stream === "stdout") out += typeof log.data === "string" ? log.data : Buffer.from(log.data as Uint8Array).toString("utf8");
     expect((await cat.wait()).exitCode).toBe(0);

@@ -32,7 +32,8 @@ ENV = {"PATH": "/opt/fx/bin:/usr/local/bin:/usr/bin:/bin", "HOME": "/vercel", "L
 SLOTS = threading.BoundedSemaphore(MAX_CONNECTIONS)
 
 
-def pump(src, dst):
+def pump(src, dst, whole=False):
+    """Copies src to dst until src ends. Then dst's write side is shut; with `whole`, both of its sides are (the connection is over)."""
     try:
         while True:
             data = src.recv(CHUNK)
@@ -42,7 +43,7 @@ def pump(src, dst):
     except OSError:
         pass
     try:
-        dst.shutdown(socket.SHUT_WR)
+        dst.shutdown(socket.SHUT_RDWR if whole else socket.SHUT_WR)
     except OSError:
         pass
 
@@ -58,7 +59,9 @@ def serve(conn):
         conn.close()
         SLOTS.release()
         return
-    back = threading.Thread(target=pump, args=(up, conn), daemon=True)
+    # One request per connection (the channel's own rule): when the supervisor has answered and closed, the host's connection is shut in BOTH directions. A half close (SHUT_WR only) does not
+    # end the host's side over vsock, and the host's client waits for the end of the reply before it parses it; a copy of the host's side that waits for the host to end first would deadlock.
+    back = threading.Thread(target=pump, args=(up, conn, True), daemon=True)
     back.start()
     pump(conn, up)
     back.join()

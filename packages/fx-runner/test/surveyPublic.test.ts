@@ -50,10 +50,10 @@ describe("the hello ladder", () => {
       return new Response(JSON.stringify(refuse ? { error: { code: "invalid_message", message: "x" } } : {}), { status: refuse ? 400 : 200, headers: { "content-type": "application/json" } });
     }) as unknown as typeof fetch;
     const client = createRunnerClient({ origin: "https://cloud.example.test", key: generateRunnerKey(), now: () => new Date(), fetchFn });
-    const answer = await client.hello({ protocol_version: RUNNER_PROTOCOL_VERSION, binary_version: RUNNER_VERSION, model_auth_present: false, isolation: "host_sandbox", capabilities: [...RUNNER_BUILD_CAPABILITIES] });
+    const answer = await client.hello({ protocol_version: RUNNER_PROTOCOL_VERSION, binary_version: RUNNER_VERSION, model_auth_present: false, isolation: "host_sandbox", capabilities: RUNNER_BUILD_CAPABILITIES.filter((c) => c !== "engine_session_v1") });
     expect(answer).toEqual({ kind: "ok", dropped: ["twin_v1", "project_setup_v1", "survey_public_v1"] });
     expect(sent).toHaveLength(4);
-    expect(sent[3]).toEqual(RUNNER_BUILD_CAPABILITIES.filter((c) => c !== "survey_public_v1" && c !== "project_setup_v1" && c !== "twin_v1"));
+    expect(sent[3]).toEqual(RUNNER_BUILD_CAPABILITIES.filter((c) => c !== "survey_public_v1" && c !== "project_setup_v1" && c !== "twin_v1" && c !== "engine_session_v1"));
     expect(sent[2]).toContain("survey_v1");
   });
 });

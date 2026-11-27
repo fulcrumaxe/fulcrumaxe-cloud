@@ -4,7 +4,7 @@
 // start, the real signal source and this program's own path are handed to `run`, `doctor` and `service`, so that nothing under
 // src/ has to name them. The two Anthropic variables reach `doctor` as names only, never as values.
 import { execFile, spawn, spawnSync } from "node:child_process";
-import { lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync, realpathSync, statfsSync } from "node:fs";
 import { userInfo } from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -45,6 +45,9 @@ import { startReverseEndpoint } from "../src/vm/egress/reverse.js";
 import { liveMicrovmComplete } from "../src/vm/sandboxd/live.js";
 import { createMicrovmParts } from "../src/vm/liveParts.js";
 import { LAYOUT } from "../src/vm/installPlan.js";
+import { completeCaps } from "../src/vm/limits.js";
+import { productionSnapshots } from "../src/vm/sandboxd/snapshots.js";
+import { ensurePrivateDir } from "../src/engineBridge/stateFiles.js";
 import { readInstalledManifest } from "../scripts/vm-read-manifest.mjs";
 import { loadSettings, omitsDevToken } from "../src/runnerSettings.js";
 import { hostRefusal } from "../src/vm/rootApply.js";
@@ -384,6 +387,28 @@ const vmTufPort = { listTargets: (...args) => vmTuf().listTargets(...args), fetc
 // D#587 B-5b-3c-iii: every part of the live microVM stack. `createLiveMicrovm` wires it only when all of them are usable (`microvm_build_unwired` otherwise, so a runner set to `microvm`
 // claims nothing and never falls back to the OS sandbox). The boot facts come from the signed release listing (the TUF client above) and the installed manifest; the model token is
 // read in `readToken` and nowhere else, as a fresh buffer on each call.
+// D#845 ON-13b2 (Ruling 81.1a): the snapshot deps from the runner's two snapshot limits, the file system's free space and the daemon's own 0700 state directory. Any part that cannot be had (no home directory, a limit not set) leaves none.
+function sessionSnapshots() {
+  try {
+    const dir = stateDirFor(process.env.HOME, process.env.FX_RUNNER_HOME);
+    return productionSnapshots({
+      sandboxdDir: path.join(dir, "sandboxd"),
+      uid: process.getuid?.(),
+      caps: completeCaps(loadSettings(dir).microvm),
+      freeBytes: (target) => {
+        try {
+          const stats = statfsSync(target);
+          return stats.bavail * stats.bsize;
+        } catch {
+          return undefined; // the snapshot is then refused: the free space could not be read
+        }
+      },
+      ensureDir: ensurePrivateDir,
+    });
+  } catch {
+    return undefined;
+  }
+}
 const microvmParts = createMicrovmParts({
   euid: process.geteuid?.(),
   uid: process.getuid?.(),
@@ -398,6 +423,8 @@ const microvmParts = createMicrovmParts({
   // The one read of the model token for a VM run: a fresh buffer per call, zeroed by the token step after the send. Absent or empty is an empty buffer, which the token step refuses.
   // The file `fx-runner credentials set-vm-token` wrote first; the environment variable only when that file is missing (a foreground dev run). Read at job start, so a new token applies from the next job.
   readToken: () => readVmToken(stateDirFor(process.env.HOME, process.env.FX_RUNNER_HOME), process.getuid?.(), devVmToken),
+  // D#845 ON-13b2 (Ruling 81.1a): what lets an engine session's VM keep a snapshot at a stop; undefined (no snapshots, so a session's stop ends `snapshot_failed`) when the limits or the state directory are not usable.
+  snapshots: sessionSnapshots(),
 });
 // The dev fallback's one environment read, by name (this line only): the value is handed to `readVmToken` (the file comes first) and, as a yes or no, to `doctor`; `run` gets the same getter for the hello.
 const devVmToken = () => process.env[SUBSCRIPTION_TOKEN_VAR];

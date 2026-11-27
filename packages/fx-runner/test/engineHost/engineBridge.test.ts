@@ -94,6 +94,27 @@ describe.skipIf(skip)("engine-bridge.py", () => {
     expect(await Promise.all([one("a"), one("b"), one("c")])).toEqual(["echo:a", "echo:b", "echo:c"]);
   });
 
+  it("shuts the host's connection in both directions once the supervisor has answered and closed, so a host that keeps its own side open (over vsock a half close does not end it) never holds a slot", async () => {
+    const { sock, dir } = start();
+    await until(() => existsSync(sock) && existsSync(path.join(dir, "run", "channel.sock")), "the bridge and the stand-in to listen");
+    const open: net.Socket[] = [];
+    // twelve requests in a row, more than the bridge's eight slots: the client reads the answer to its end but never ends its own side
+    for (let i = 0; i < 12; i++) {
+      const answer = await new Promise<string>((resolve, reject) => {
+        const c = net.connect({ path: sock, allowHalfOpen: true });
+        open.push(c);
+        let got = "";
+        c.on("error", reject);
+        c.on("data", (d) => (got += d.toString()));
+        c.on("end", () => resolve(got));
+        c.on("close", () => resolve(got));
+        c.write(`n${i}`);
+      });
+      expect(answer).toBe(`echo:n${i}`);
+    }
+    for (const c of open) c.destroy();
+  });
+
   it("ends, with a failing status, when the supervisor ends, so the guest's init loop starts both again", async () => {
     const { child } = start(300);
     const code = await new Promise<number | null>((resolve) => child.on("exit", (c) => resolve(c)));
@@ -123,7 +144,7 @@ describe.skipIf(skip)("the bundled fx-engine-supervisor", () => {
     child.stdout?.on("data", (d: Buffer) => (said += d.toString()));
     await until(() => said.includes(SESSION_READY_LINE), "the ready line");
     writeFileSync(path.join(dir, "session.json"), JSON.stringify({ repo_gh_id: "424242", repo_checkout: checkout }), { mode: 0o600 });
-    expect(await ask(sock, { op: "tick", text: "go" })).toEqual({ ok: true, started: true });
+    expect(await ask(sock, { op: "tick", kind: "loop" })).toEqual({ ok: true, started: true });
     let lines: string[] = [];
     await until(() => {
       void ask(sock, { op: "events_read", after: 0 }).then((r) => (lines = (r as unknown as { lines: string[] }).lines));

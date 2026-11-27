@@ -56,14 +56,14 @@ sup = subprocess.Popen(["/opt/fx/bin/node", "/usr/lib/fx/fx-engine-supervisor.mj
 try:
     report["ready"] = until(lambda: os.path.exists(sock_path), 20)
     report["mode_0600"] = report["ready"] and (os.stat(sock_path).st_mode & 0o777) == 0o600
-    report["no_config"] = ask({"op": "tick", "text": "x"}) == {"ok": False, "code": "no_session_config"}
+    report["no_config"] = ask({"op": "tick", "kind": "loop"}) == {"ok": False, "code": "no_session_config"}
     report["unverified"] = ask({"op": "command", "command": {}}) == {"ok": False, "code": "command_unverified"}
     report["bad_request"] = ask({"op": "exec"}) == {"ok": False, "code": "bad_request"}
     with open(state + "/session.json", "w") as f:
         json.dump({"repo_gh_id": "424242", "repo_checkout": checkout}, f)
     os.chmod(state + "/session.json", 0o600)
     report["token_put"] = ask({"op": "token_put", "name": "claude", "size": len(canary)}, canary.encode()) == {"ok": True}
-    report["tick"] = ask({"op": "tick", "text": "dry run"}) == {"ok": True, "started": True}
+    report["tick"] = ask({"op": "tick", "kind": "loop"}) == {"ok": True, "started": True}
     report["usage_tick"] = until(lambda: any(e.get("kind") == "usage_tick" for e in lines()), 30)
     ticks = [e for e in lines() if e.get("kind") == "usage_tick"]
     report["usage_exact"] = bool(ticks) and [ticks[0].get(k) for k in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "model_tier")] == [11, 22, 33, 44, "claude-haiku-4-5"]
@@ -89,7 +89,7 @@ try:
     # the program ENDS after a channel stop (no copy of the token may outlive it): the socket goes away, so a tick after the stop either gets `stopped` or finds no listener
     report["supervisor_exited"] = until(lambda: sup.poll() is not None, 15)
     try:
-        report["tick_after_stop"] = ask({"op": "tick", "text": "again"}) == {"ok": False, "code": "stopped"}
+        report["tick_after_stop"] = ask({"op": "tick", "kind": "loop"}) == {"ok": False, "code": "stopped"}
     except OSError:
         report["tick_after_stop"] = True
     leaked = False

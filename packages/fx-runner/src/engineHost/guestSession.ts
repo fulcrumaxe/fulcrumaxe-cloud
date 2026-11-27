@@ -3,10 +3,12 @@
  * unix socket below) and as the program held in an engine session's systemd unit on the standard tier (`fx-runner __engine-supervise`, which replaces the idle holder). It wraps EB-12a's `createSupervisor` and adds only:
  *  - the channel: ONE request per connection on a private unix socket, the frame being a 4-byte big-endian length and that many bytes of JSON (the guest agent's own frame; at most `FRAME_MAX`), and for `token_put` `size` raw bytes
  *    after it. The operations are a closed list, an unknown one or a key outside its shape is `bad_request`, and every reply is `{ok:true,...}` or `{ok:false,code}` with a code of `ChannelCode`: never text of the stream, a path or an error.
- *      - `tick {text}`: starts the host on the first one (the session config is read, every EB-12a refusal still applies) and sends it one user message. Single flight and the tick kinds are ON-13b2's.
- *      - `command {command}`: refused `command_unverified` until `verifyCommand` is given (ON-13b2 re-verifies the signed command with the pinned key); never forwarded unverified.
+ *      - `tick {kind, name?}` (ON-13b2): `kind` is `loop`, `start_day` or `checkin` (with a row key as `name`); the first one starts the host (the session config is read, every EB-12a refusal still applies) and the ticker
+ *        (`guestTicks.ts`: EB-12b's single flight, queued kinds and fixed templates; the loop, check-in and start-of-day ticks then come from its own timers). No text travels: every message the host gets is a template of `prompts.ts`.
+ *      - `command {command}`: the signed `EngineCommand` the runner forwards is checked again here against the key this build pins for the cloud address `session.json` names (`verifyCommandWith`); anything that does not
+ *        check out is `command_unverified` and reaches nothing. A verified one goes to the ticker, and its outcome is a line of `engine-host-outcomes.jsonl`.
  *      - `stop {reason?}`: wipes the credential FIRST, then ends the host through the supervisor's own stop (close stdin, then the kill path). A stopped session takes no further tick: the next start is a new supervisor.
- *      - `events_read {after}`: the engine events the supervisor wrote (`engine-host-events.jsonl`), whole lines from byte `after`, at most `EVENTS_READ_MAX` bytes; `reset` when the file is shorter than `after` (it rotated).
+ *      - `events_read {after, stream?}`: the engine events the supervisor wrote (`engine-host-events.jsonl`; `stream: "outcomes"` reads the command outcomes instead), whole lines from byte `after`, at most `EVENTS_READ_MAX` bytes; `reset` when the file is shorter than `after` (it rotated).
  *      - `token_put {name:"claude", size}`: 1..4096 printable ASCII bytes follow the frame (no JSON field carries them). They are held in ONE buffer that is zeroed by the next `token_put` and by every `stop`, handed to the host's
  *        environment at launch as the subscription variable and nowhere else, and never logged, echoed, spooled or put in an event. Node cannot zero the copies it makes (the latin1 string, the merged environment object and libuv's envp copy), so zeroing the buffer is NOT enough on its own. The guarantee the snapshot needs is that the PROGRAM ENDS:
  *        after a channel `stop` and after `crash_loop` the supervisor exits (`finished()`, which `runEngineSupervise` waits for), the bridge kills the group, the guest kernel's `init_on_free=1` zeroes the pages and init starts a fresh
@@ -18,12 +20,16 @@
 import { chmodSync, closeSync, constants, fstatSync, lstatSync, openSync, readSync, unlinkSync } from "node:fs";
 import net from "node:net";
 import path from "node:path";
-import { ENGINE_DURATION_S_MAX, MODEL_TIER_PATTERN } from "@fulcrumaxe/runner-protocol";
+import { ENGINE_DURATION_S_MAX, MODEL_TIER_PATTERN, ROW_KEY_PATTERN, type EngineCommandAck } from "@fulcrumaxe/runner-protocol";
 import { SUBSCRIPTION_TOKEN_VAR } from "../job/cleanEnv.js";
 import type { EngineHostHandle } from "../engineBridge/halt.js";
 import { ensurePrivateDir, readJsonNoFollow } from "../engineBridge/stateFiles.js";
-import { createEventSpool, SPOOL_FILE } from "./hostFeeds.js";
+import { keyringFor, type PinnedKeyrings } from "../keyring.js";
+import { openAnsweredStore } from "./answered.js";
+import { credentialModeOf, tickSettingsOf } from "./hostConfig.js";
+import { createAgentFeed, createEventSpool, SPOOL_FILE, SPOOL_MAX_BYTES } from "./hostFeeds.js";
 import { acquireHostLock, isRepoGhId, openHostLog, type BridgeState } from "./hostFiles.js";
+import { createGuestTicks, OUTCOMES_FILE, verifyCommandWith, type GuestTicks } from "./guestTicks.js";
 import { openSessionStore } from "./session.js";
 import { createSupervisor, type HostChild, type HostSpawnSpec, type StopReason, type Supervisor, type TurnResult } from "./supervisor.js";
 
@@ -31,8 +37,11 @@ import { createSupervisor, type HostChild, type HostSpawnSpec, type StopReason, 
 export const CHANNEL_PORT = 5255;
 export const CHANNEL_OPS = ["tick", "command", "stop", "events_read", "token_put"] as const;
 export type ChannelOp = (typeof CHANNEL_OPS)[number];
+export const TICK_KINDS = ["loop", "start_day", "checkin"] as const;
+/** The reasons a channel `stop` may carry: the supervisor's own words, so the `host_stopped` event says which. A halt is `halted`. */
+export const STOP_REASONS = ["stopped_by_person", "machine_shutdown", "halted", "operate_off"] as const;
+export type ChannelStopReason = (typeof STOP_REASONS)[number];
 export const FRAME_MAX = 128 * 1024;
-export const TICK_TEXT_MAX = 64 * 1024;
 export const TOKEN_MAX = 4096;
 export const EVENTS_READ_MAX = 64 * 1024;
 export const CONNECTION_IDLE_MS = 30_000;
@@ -64,8 +73,8 @@ export interface GuestSessionOptions {
   /** The session's state directory (0700, owned by `runtime.uid`). */
   dir: string;
   runtime: GuestRuntime;
-  /** ON-13b2: the signed command's in-guest re-verification. Returns the text to send the host, or undefined to refuse. Left out, every `command` is refused. */
-  verifyCommand?: ((command: unknown) => string | undefined) | undefined;
+  /** ON-13b2: the pinned keys a signed command is checked against, by cloud address (the build's own table by default; a test hands in its own). */
+  keyrings?: PinnedKeyrings | undefined;
 }
 
 export interface GuestSession {
@@ -78,7 +87,7 @@ export interface GuestSession {
   finished(): Promise<void>;
 }
 
-const KEYS: Record<ChannelOp, readonly string[]> = { tick: ["text"], command: ["command"], stop: ["reason"], events_read: ["after"], token_put: ["name", "size"] };
+const KEYS: Record<ChannelOp, readonly string[]> = { tick: ["kind", "name"], command: ["command"], stop: ["reason"], events_read: ["after", "stream"], token_put: ["name", "size"] };
 const PRINTABLE = /^[\x21-\x7e]+$/;
 const fail = (code: ChannelCode, reason?: string): ChannelReply => (reason === undefined ? { ok: false, code } : { ok: false, code, reason });
 const isInt = (v: unknown, min: number, max: number): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= min && v <= max;
@@ -99,12 +108,16 @@ export function createGuestSession(options: GuestSessionOptions): GuestSession {
     secret?.fill(0);
     secret = undefined;
   };
-  const config = (): { repo_gh_id: string; repo_checkout: string } | undefined => {
+  let ticks: GuestTicks | undefined;
+  const outcomes = openHostLog(dir, rt.uid, SPOOL_MAX_BYTES, OUTCOMES_FILE);
+  const config = (): { repo_gh_id: string; repo_checkout: string; runner_id?: string; cloud_origin?: string } | undefined => {
     try {
-      const raw = readJsonNoFollow(dir, SESSION_CONFIG_FILE, rt.uid) as { repo_gh_id?: unknown; repo_checkout?: unknown } | null | undefined;
+      const raw = readJsonNoFollow(dir, SESSION_CONFIG_FILE, rt.uid) as { repo_gh_id?: unknown; repo_checkout?: unknown; runner_id?: unknown; cloud_origin?: unknown } | null | undefined;
       const id = raw?.repo_gh_id;
       const checkout = raw?.repo_checkout;
-      return typeof id === "string" && isRepoGhId(id) && typeof checkout === "string" && path.isAbsolute(checkout) && path.normalize(checkout) === checkout ? { repo_gh_id: id, repo_checkout: checkout } : undefined;
+      const short = (v: unknown): string | undefined => (typeof v === "string" && v.length > 0 && v.length <= 256 ? v : undefined);
+      const [runner, origin] = [short(raw?.runner_id), short(raw?.cloud_origin)];
+      return typeof id === "string" && isRepoGhId(id) && typeof checkout === "string" && path.isAbsolute(checkout) && path.normalize(checkout) === checkout ? { repo_gh_id: id, repo_checkout: checkout, ...(runner === undefined ? {} : { runner_id: runner }), ...(origin === undefined ? {} : { cloud_origin: origin }) } : undefined;
     } catch {
       // fx-swallow-ok: a config that cannot be read safely is no config; the tick answers `no_session_config` and nothing is started
       return undefined;
@@ -146,40 +159,88 @@ export function createGuestSession(options: GuestSessionOptions): GuestSession {
     killHost: rt.killHost,
     killScope: rt.killScope,
     sessionStore: openSessionStore(dir, rt.uid),
-    observer: { onTurn: usageTick, onExit: () => undefined },
+    observer: {
+      onTurn: (turn) => {
+        usageTick(turn);
+        ticks?.ticker.onTurn(turn);
+      },
+      onExit: () => ticks?.ticker.onHostExit(),
+      onCompaction: () => ticks?.ticker.onCompaction(),
+    },
   });
   void supervisor.stopped.then((reason) => {
     ended = reason;
     wipe();
+    ticks?.ticker.close();
+    outcomes.close();
     finish();
   });
+  /** The ticker, made once the host is up: it needs the repository id the config names. */
+  function startTicks(repoGhId: number, checkout: string): GuestTicks {
+    const feed = createAgentFeed({ dir, uid: rt.uid });
+    const made = createGuestTicks({
+      send: (text) => supervisor.send(text),
+      touch: () => supervisor.touch(),
+      emit: (e) => void spool.write(e),
+      now: rt.now,
+      after: rt.after,
+      settings: () => tickSettingsOf(checkout, rt.uid),
+      credentialMode: () => credentialModeOf(supervisor.keySource()),
+      repoGhId,
+      // the VM or the unit is the boundary; what can stop a command here is the session's own end (a halt is a stop of the session: nothing is applied after it)
+      gate: () => (operating ? undefined : "operate_off"),
+      answered: openAnsweredStore(dir, rt.uid),
+      agentEvents: feed.poll,
+      log: (line) => void log.write(`${line}\n`),
+      outcome: (name, ack: EngineCommandAck) => outcomes.write(`${JSON.stringify({ name, ack })}\n`),
+    });
+    made.ticker.start();
+    return made;
+  }
 
-  async function tick(text: string): Promise<ChannelReply> {
+  async function tick(kind: (typeof TICK_KINDS)[number], name: string | undefined): Promise<ChannelReply> {
     if (!operating) return fail("stopped");
     if (ended !== undefined) return fail("host_ended", ended);
     let first = false;
     if (!started) {
-      if (config() === undefined) return fail("no_session_config");
+      const cfg = config();
+      if (cfg === undefined) return fail("no_session_config");
       const result = await supervisor.start();
       if (!result.ok) return fail("refused", result.reason);
       started = first = true;
+      ticks = startTicks(Number(cfg.repo_gh_id), cfg.repo_checkout);
     }
-    return supervisor.send(text) ? { ok: true, started: first } : fail("host_not_running");
+    return ticks?.ticker.request(kind, name) === true ? { ok: true, started: first } : fail("bad_request");
   }
 
-  async function stop(reason: "stopped_by_person" | "machine_shutdown"): Promise<ChannelReply> {
+  /** The signed command, checked again here (see `guestTicks.ts`), then applied by the ticker. `command_unverified` for everything that does not check out, and for a session with no key pinned for its cloud. */
+  function command(raw: unknown): ChannelReply {
+    const cfg = config();
+    const keyring = cfg?.cloud_origin === undefined ? undefined : keyringFor(cfg.cloud_origin, options.keyrings);
+    const verified = cfg?.runner_id === undefined || keyring === undefined ? undefined : verifyCommandWith(raw, { keyring, runnerId: cfg.runner_id, repoGhId: Number(cfg.repo_gh_id), now: new Date(rt.now()) });
+    if (verified === undefined) return fail("command_unverified");
+    if (!operating) return fail("stopped");
+    if (ended !== undefined) return fail("host_ended", ended);
+    return ticks === undefined ? fail("host_not_running") : { ok: true, name: ticks.submit(verified) };
+  }
+
+  async function stop(reason: ChannelStopReason): Promise<ChannelReply> {
     operating = false;
     wipe(); // before the host is touched: nothing that can still launch it holds the credential
     if (started) await supervisor.stop(reason);
-    else supervisor.cleanup();
+    else {
+      supervisor.cleanup();
+      outcomes.close();
+    }
     finish();
-    return { ok: true, survivors: supervisor.survivors(), token_wiped: secret === undefined };
+    // `pid` is this program's own: the guest answers before it exits, and the runner confirms it is gone (through the guest agent) before anything is snapshotted
+    return { ok: true, survivors: supervisor.survivors(), token_wiped: secret === undefined, pid: rt.ownPid };
   }
 
-  function eventsRead(after: number): ChannelReply {
+  function eventsRead(after: number, file: string): ChannelReply {
     let fd = -1;
     try {
-      fd = openSync(path.join(dir, SPOOL_FILE), constants.O_RDONLY | constants.O_NOFOLLOW);
+      fd = openSync(path.join(dir, file), constants.O_RDONLY | constants.O_NOFOLLOW);
       const st = fstatSync(fd);
       if (!st.isFile() || st.uid !== rt.uid || (st.mode & 0o022) !== 0) return { ok: true, lines: [], next: 0, reset: false };
       const reset = after > st.size;
@@ -204,19 +265,23 @@ export function createGuestSession(options: GuestSessionOptions): GuestSession {
     if (Object.keys(h).some((k) => k !== "op" && !KEYS[op as ChannelOp].includes(k))) return fail("bad_request");
     try {
       switch (op as ChannelOp) {
-        case "tick":
-          return typeof h["text"] === "string" && h["text"].length > 0 && h["text"].length <= TICK_TEXT_MAX ? await tick(h["text"]) : fail("bad_request");
-        case "command": {
-          if (options.verifyCommand === undefined) return fail("command_unverified");
-          const text = options.verifyCommand(h["command"]);
-          return text === undefined ? fail("command_unverified") : await tick(text);
+        case "tick": {
+          const kind = h["kind"];
+          const name = h["name"];
+          const known = (TICK_KINDS as readonly unknown[]).includes(kind);
+          const shaped = kind === "checkin" ? typeof name === "string" && ROW_KEY_PATTERN.test(name) : name === undefined;
+          return known && shaped ? await tick(kind as (typeof TICK_KINDS)[number], name as string | undefined) : fail("bad_request");
         }
+        case "command":
+          return command(h["command"]);
         case "stop": {
           const reason = h["reason"] ?? "stopped_by_person";
-          return reason === "stopped_by_person" || reason === "machine_shutdown" ? await stop(reason) : fail("bad_request");
+          return (STOP_REASONS as readonly unknown[]).includes(reason) ? await stop(reason as ChannelStopReason) : fail("bad_request");
         }
-        case "events_read":
-          return isInt(h["after"], 0, Number.MAX_SAFE_INTEGER) ? eventsRead(h["after"]) : fail("bad_request");
+        case "events_read": {
+          const stream = h["stream"] ?? "events";
+          return isInt(h["after"], 0, Number.MAX_SAFE_INTEGER) && (stream === "events" || stream === "outcomes") ? eventsRead(h["after"], stream === "events" ? SPOOL_FILE : OUTCOMES_FILE) : fail("bad_request");
+        }
         case "token_put": {
           const size = h["size"];
           if (h["name"] !== "claude" || !isInt(size, 1, TOKEN_MAX) || body === undefined || body.length !== size || !PRINTABLE.test(body.toString("latin1"))) return fail("bad_request");

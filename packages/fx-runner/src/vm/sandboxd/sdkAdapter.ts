@@ -17,7 +17,7 @@
  *    signal aborts does not abandon a boot or a policy half way: it leaves the sandbox as it was (a wake that was given up on is stopped again).
  *  - A failed policy. When `apply` rejects, the VM is destroyed (or stopped again, on a wake) and `release` is still called, because an `apply` that
  *    failed part way (one listener up, the next refused) may have left something in force. A `PolicyPort` therefore accepts a `release` after a failed `apply`.
- *  - Persistence. The daemon keeps no disk across a stop (B-3), so `persistent` is only echoed back; a resumed sandbox boots fresh.
+ *  - Persistence. `persistent` (and the count of snapshots to keep) is handed to the daemon as the sandbox's retention: a stop then keeps a RAM snapshot and a wake restores it (B-3). A daemon built without snapshot limits refuses to make a persistent sandbox (never silently non-persistent).
  *  - Timeout. The sandbox is stopped when its timeout runs out, and `extendTimeout` moves that. Without it a VM nobody stops would hold its slot forever.
  *  - Usage. Memory, duration and region are reported; CPU time and egress bytes are left out, never reported as 0 (not measured yet).
  */
@@ -298,7 +298,7 @@ export function createDaemonSdk(config: AdapterConfig): DaemonSdk {
     metas.set(id, meta); // before the boot, so a list or get during it sees the sandbox as pending
     return exclusive(id, async () => {
       try {
-        await daemon.create({ name: id, template, vcpus: params.resources.vcpus, memMb });
+        await daemon.create({ name: id, template, vcpus: params.resources.vcpus, memMb, ...(params.persistent && { retention: { persistent: true, ...(params.keepLastSnapshots?.count !== undefined && { keepLastSnapshots: params.keepLastSnapshots.count }) } }) });
       } catch (err) {
         metas.delete(id);
         throw translated(err);

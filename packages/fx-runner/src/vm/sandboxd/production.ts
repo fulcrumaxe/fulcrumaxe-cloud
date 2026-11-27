@@ -4,11 +4,11 @@
  */
 import net from "node:net";
 import type { Duplex } from "node:stream";
-import { agentAtVsockDir } from "./guestAgent.js";
+import { agentAtVsockDir, viaFirecrackerVsock } from "./guestAgent.js";
 import { createHelperClient } from "./helperClient.js";
 import { Sandboxd, type SandboxdDeps } from "./sandboxd.js";
 import type { SnapshotDeps } from "./snapshots.js";
-import { fdInspectDir, hasForeignListener, realFdOps, removeOwnVsockSocket, type FdOps, type HostFacts } from "./vsockFd.js";
+import { dialVsockDir, fdInspectDir, hasForeignListener, realFdOps, removeOwnVsockSocket, type FdOps, type HostFacts } from "./vsockFd.js";
 
 const connectUnix = (file: string) => (): Promise<Duplex> =>
   new Promise((resolve, reject) => {
@@ -80,6 +80,7 @@ export function productionDepsBase(config: Omit<ProductionConfig, "boot">): Omit
       return ops === undefined ? true : hasForeignListener(dir, ops);
     },
     agentFor: (dir) => agentAtVsockDir(dir, fdOps(config.host) ?? REFUSING_OPS),
+    dial: (dir, port) => viaFirecrackerVsock(() => dialVsockDir(dir, fdOps(config.host) ?? REFUSING_OPS), port)(),
     removeVsockSocket: (dir) => removeOwnVsockSocket(dir, fdOps(config.host) ?? REFUSING_OPS),
     ...(config.snapshots === undefined ? {} : { snapshots: config.snapshots }),
     now: () => Math.floor(Date.now() / 1000),

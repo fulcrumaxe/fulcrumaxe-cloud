@@ -221,7 +221,7 @@ describe("the refusals", () => {
 });
 
 describe("what the build advertises", () => {
-  it("twin_v1 is the last capability a runner build lists (D#845 ON-27d4c), and run.ts registers all three twin handlers", () => {
-    expect((RUNNER_BUILD_CAPABILITIES as string[]).at(-1)).toBe("twin_v1");
+  it("twin_v1 is listed just before engine_session_v1, the last capability a runner build lists (D#845 ON-27d4c), and run.ts registers all three twin handlers", () => {
+    expect((RUNNER_BUILD_CAPABILITIES as string[]).at(-2)).toBe("twin_v1");
   });
 });
