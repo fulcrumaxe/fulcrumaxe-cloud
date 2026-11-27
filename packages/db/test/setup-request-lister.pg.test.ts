@@ -15,6 +15,8 @@ const EXPECTED_PRIVILEGES = [
   ...['account_id', 'user_id', 'role', 'created_at'].map((c) => `column account_members.${c} SELECT`),
   ...['repo_id', 'account_id', 'due_at'].map((c) => `column plane_parity_checks.${c} SELECT`),
   ...['repo_id', 'path', 'account_id', 'due_at'].map((c) => `column repo_instruction_files.${c} SELECT`),
+  ...['id', 'account_id', 'state', 'private_repo_id', 'sync_pr'].map((c) => `column repo_twins.${c} SELECT`),
+  ...['twin_id', 'account_id', 'due_at', 'last_result', 'work_lease_until'].map((c) => `column twin_parity_checks.${c} SELECT`),
   'schema public USAGE',
 ].sort();
 
@@ -43,13 +45,13 @@ describe(`migration 0874: ${ROLE} and setup_request_list_due [pg]`, () => {
   });
 
   describe('the role', () => {
-    it('is NOLOGIN and unprivileged, has no member and is a member of nothing, and owns exactly its three listers (0874, 0951, 0998)', async () => {
+    it('is NOLOGIN and unprivileged, has no member and is a member of nothing, and owns exactly its five listers (0874, 0951, 0998, 1116)', async () => {
       const { rows } = await admin.query(`SELECT rolcanlogin, rolsuper, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls FROM pg_roles WHERE rolname = $1`, [ROLE]);
       expect(rows[0]).toEqual({ rolcanlogin: false, rolsuper: false, rolcreatedb: false, rolcreaterole: false, rolreplication: false, rolbypassrls: false });
       expect((await admin.query(`SELECT 1 FROM pg_auth_members WHERE roleid = $1::regrole`, [ROLE])).rowCount, 'members').toBe(0);
       expect((await admin.query(`SELECT 1 FROM pg_auth_members WHERE member = $1::regrole`, [ROLE])).rowCount, 'member of').toBe(0);
       const owned = await admin.query<{ sig: string }>(`SELECT p.oid::regprocedure::text AS sig FROM pg_proc p WHERE p.proowner = $1::regrole`, [ROLE]);
-      expect(owned.rows.map((r) => r.sig).sort()).toEqual(['plane_parity_list_due(integer)', 'repo_instruction_list_due(integer)', FN]);
+      expect(owned.rows.map((r) => r.sig).sort()).toEqual(['plane_parity_list_due(integer)', 'repo_instruction_list_due(integer)', FN, 'twin_parity_list_due(integer)', 'twin_work_list(integer)']);
       const objects = await admin.query(`SELECT 1 FROM pg_class WHERE relowner = $1::regrole UNION ALL SELECT 1 FROM pg_namespace WHERE nspowner = $1::regrole`, [ROLE]);
       expect(objects.rowCount, 'other objects').toBe(0);
       expect((await admin.query(`SELECT has_schema_privilege($1, 'public', 'CREATE') AS ok`, [ROLE])).rows[0].ok).toBe(false);
@@ -67,12 +69,12 @@ describe(`migration 0874: ${ROLE} and setup_request_list_due [pg]`, () => {
       expect(rows.map((r) => r.x).sort()).toEqual(EXPECTED_PRIVILEGES);
     });
 
-    it('has one row policy on each of account_members, accounts, plane_parity_checks, repo_instruction_files and setup_requests, each for this role alone', async () => {
+    it('has one row policy on each of account_members, accounts, plane_parity_checks, repo_instruction_files, repo_twins, setup_requests and twin_parity_checks, each for this role alone', async () => {
       const { rows } = await admin.query<{ tablename: string; cmd: string; roles: string[] }>(
         `SELECT tablename, cmd, roles::text[] AS roles FROM pg_policies WHERE schemaname = 'public' AND $1 = ANY(roles) ORDER BY tablename, cmd`,
         [ROLE],
       );
-      expect(rows.map((r) => `${r.tablename} ${r.cmd}`)).toEqual(['account_members SELECT', 'accounts SELECT', 'plane_parity_checks SELECT', 'repo_instruction_files SELECT', 'setup_requests SELECT']);
+      expect(rows.map((r) => `${r.tablename} ${r.cmd}`)).toEqual(['account_members SELECT', 'accounts SELECT', 'plane_parity_checks SELECT', 'repo_instruction_files SELECT', 'repo_twins SELECT', 'setup_requests SELECT', 'twin_parity_checks SELECT']);
       for (const r of rows) expect(r.roles).toEqual([ROLE]);
     });
   });

@@ -64,7 +64,7 @@ describe("twin sync pull request and publish update [pg]", () => {
       },
     }) as unknown as SetupInstallPort;
   const depsFor = (over: Partial<RunnerCloudDeps> = {}): RunnerCloudDeps =>
-    h.deps({ setupPush: setupPort(), planePush: hosted(), pullRequests: github(TIPS), setupInstall: install(), engineCommandSigner: async () => ({ keyId: "k1", signMachineJob: (job: MachineJob) => signMachineJob(job, "k1", jobKeys.privateKey) }) as never, ...over });
+    h.deps({ repoVisibility: async () => "private", setupPush: setupPort(), planePush: hosted(), pullRequests: github(TIPS), setupInstall: install(), engineCommandSigner: async () => ({ keyId: "k1", signMachineJob: (job: MachineJob) => signMachineJob(job, "k1", jobKeys.privateKey) }) as never, ...over });
 
   interface Rig {
     who: SeedRefs;
@@ -882,6 +882,23 @@ describe("twin sync pull request and publish update [pg]", () => {
       expect(await publish(a, HEAD2)).toMatchObject({ outcome: "issued" });
       expect(await jobRows(b.setupId)).toEqual([]);
       expect(await jobRows(a.setupId)).toHaveLength(2);
+    });
+  });
+
+  /** FU-311 (migration 1116): what the visibility port answers for each repository of the rig; any repository not listed reads as unknown. */
+  const seeing = (r: Rig, priv: "private" | "public" | "unknown", pub: "private" | "public" | "unknown" = "public"): Partial<RunnerCloudDeps> => ({ repoVisibility: async (_accountId: string, repoId: string) => (repoId === r.privateId ? priv : repoId === r.publicId ? pub : "unknown") });
+
+  describe("the private repository must stay private (FU-311)", () => {
+    it("opens no pull request for a twin whose private repository is public: refused, and nothing is sent to GitHub", async () => {
+      const r = await rig();
+      const gh = twinGithub();
+      await verified(r, gh);
+      const before = gh.calls.length;
+      expect(await open(r, gh, seeing(r, "unknown"))).toBe("github_unavailable");
+      expect(await open(r, gh, seeing(r, "public"))).toBe("refused");
+      expect(gh.calls.length).toBe(before);
+      expect(gh.prs).toHaveLength(0);
+      expect(await twinRow(r.twinId)).toMatchObject({ state: "refused", failure_code: "twin_not_private" });
     });
   });
 });

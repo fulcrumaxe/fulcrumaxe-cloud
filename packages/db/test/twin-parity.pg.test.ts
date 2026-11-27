@@ -23,6 +23,7 @@ interface Rec {
   sync?: number;
   conflict?: number;
   advance?: string | null;
+  anchor?: string | null;
 }
 /** A consistent argument set for each result, as the pipeline's TwinParityOutcome would give it. */
 const OUTCOMES: Record<string, Rec> = {
@@ -77,9 +78,9 @@ describe('twin parity storage [pg]', () => {
   const mark = (acct: SeedRefs, user: string | null, twin: string, repo: string | null, name: string | null) =>
     as(acct, user, async (c) => (await c.query<{ o_result: string }>('SELECT o_result FROM twin_parity_mark_due($1, $2, $3)', [twin, repo, name])).rows[0]!.o_result);
   const argsOf = (twin: string, o: Rec) => [
-    twin, o.seq ?? 0, o.result ?? 'in_parity', o.priv === undefined ? PRIV0 : o.priv, o.pub === undefined ? PUB0 : o.pub, o.paths ?? [], o.pathCount ?? (o.paths ?? []).length, o.publish ?? 0, o.sync ?? 0, o.conflict ?? 0, o.advance ?? null,
+    twin, o.seq ?? 0, o.anchor === undefined ? PUB0 : o.anchor, o.result ?? 'in_parity', o.priv === undefined ? PRIV0 : o.priv, o.pub === undefined ? PUB0 : o.pub, o.paths ?? [], o.pathCount ?? (o.paths ?? []).length, o.publish ?? 0, o.sync ?? 0, o.conflict ?? 0, o.advance ?? null,
   ];
-  const RECORD_SQL = 'SELECT o_result, o_state FROM twin_parity_record($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)';
+  const RECORD_SQL = 'SELECT o_result, o_state FROM twin_parity_record($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)';
   const record = (acct: SeedRefs, user: string | null, twin: string, o: Rec) =>
     as(acct, user, async (c) => (await c.query<{ o_result: string; o_state: string | null }>(RECORD_SQL, argsOf(twin, o))).rows[0]!);
   const twin = async (id: string) => (await admin.query('SELECT * FROM repo_twins WHERE id = $1', [id])).rows[0];
