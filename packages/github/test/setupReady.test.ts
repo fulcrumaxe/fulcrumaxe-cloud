@@ -88,6 +88,7 @@ describe("setup_ready installation kind", () => {
       { metadata: "read", contents: "write" },
       { metadata: "read", pull_requests: "write" },
       { metadata: "read" },
+      { metadata: "write", contents: "write", pull_requests: "write" },
     ];
     for (const answer of answers) {
       const t = setup({ answer: () => answer });

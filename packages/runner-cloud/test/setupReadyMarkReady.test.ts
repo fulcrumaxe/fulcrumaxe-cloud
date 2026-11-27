@@ -99,6 +99,30 @@ describe("the strict fake's contents-write rule", () => {
     expect(t.repo.pulls[0]!.draft).toBe(false);
   });
 
+  it("refuses a pull request node outside the client's repository the way GitHub answers a node it cannot see: HTTP 200, data null, NOT_FOUND", async () => {
+    const t = rig();
+    const other = t.fake.addRepo("acme", "gadgets");
+    const foreign = t.fake.addForeignPull(other, { head: "feature", draft: true });
+    const client = installationKindClient(t.fake, "setup_ready", { owner: "acme", name: "widgets" });
+    const refused = await client.request(body(foreign.nodeId));
+    expect(refused.status).toBe(200);
+    expect(refused.body).toMatchObject({ data: { markPullRequestReadyForReview: null }, errors: [{ type: "NOT_FOUND" }] });
+    expect(foreign.draft).toBe(true);
+    // the same call from a client covering that repository goes through, so the refusal is the scope and nothing else
+    const own = await installationKindClient(t.fake, "setup_ready", { owner: "acme", name: "gadgets" }).request(body(foreign.nodeId));
+    expect(own.body).toMatchObject({ data: { markPullRequestReadyForReview: { pullRequest: { isDraft: false } } } });
+    expect(foreign.draft).toBe(false);
+  });
+
+  it("the port's mark-ready of a pull request in another repository is refused (GitHub shows it as not found, so the port answers unavailable) and leaves it a draft", async () => {
+    const t = rig();
+    const other = t.fake.addRepo("acme", "gadgets");
+    const foreign = t.fake.addForeignPull(other, { head: "feature", draft: true });
+    const ref = await t.port.openDraft({ repo: REPO, branch: BRANCH, base: "main", text: TEXT });
+    expect(await reasonOf(t.port.markReady({ repo: REPO, pullRequest: { ...ref, nodeId: foreign.nodeId }, setup: true }))).toBe("unavailable");
+    expect(foreign.draft).toBe(true);
+  });
+
   it("the setup_ready kind sends POST /graphql and nothing else", async () => {
     const t = rig();
     const client = installationKindClient(t.fake, "setup_ready");
