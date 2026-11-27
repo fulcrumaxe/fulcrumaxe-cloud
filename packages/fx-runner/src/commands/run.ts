@@ -95,6 +95,8 @@ import { abortOnSignals, pollLoop, type PollEvent } from "../daemon/pollLoop.js"
 import { createMachineJobDispatcher, effectiveEngine, type MachineJobDispatcher } from "../daemon/machineJobs.js";
 import { WakeTracker } from "../daemon/wake.js";
 import { removeStaleLedgerTemp } from "../daemon/staleTemp.js";
+import { startWorkspacePruner, stopWithin } from "../daemon/workspacePruner.js";
+import { createLiveWorkspaces, writeLiveFile } from "../job/workspacePrune.js";
 import { spillRootFor, sweepStaleSpill } from "../job/spillFiles.js";
 import { cleanEnv, type CleanEnvOptions, type CredentialMode } from "../job/cleanEnv.js";
 import { createWorkspaceStore } from "../job/workspace.js";
@@ -409,6 +411,14 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
   // start on the same state directory exits above and touches nothing), and only in this state directory's own spill root, so another daemon's live runs are never reached.
   const ownSpillRoot = spillRootFor(spillRoot, stateDir);
   sweepStaleSpill(ownSpillRoot);
+  // D#587 FU-318: the workspaces this daemon holds. A setup copy is held while any job is in hand (`jobCount`, fail-closed until the counter exists). The saved list starts empty: this daemon holds the ledger lock, so a list left by a crashed one is stale.
+  let jobCount = (): number => 1;
+  const liveWorkspaces = createLiveWorkspaces({ persist: (names) => writeLiveFile(stateDir, names), setupsRunning: () => jobCount(), disk: { root: workspaceRoot, pid: host.pid } });
+  try {
+    writeLiveFile(stateDir, []);
+  } catch {
+    // fx-swallow-ok: the list only serves `prune --dry-run`; the command refuses a list it cannot read
+  }
   let pushLog: PushLog | undefined;
   try {
     // Closed (damaged or quarantined): nothing that is not on the ledger runs, so no claim is made. One message, one exit, no polling.
@@ -598,6 +608,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       events: relay,
       shutdown: stopped.signal,
       spillRoot: ownSpillRoot,
+      liveWorkspaces,
       run: { workspaces: createWorkspaceStore(workspaceRoot), credentials, envOptions, planSession: (continues) => host.engine.planSession(stateDir, continues), defaultModel: DEFAULT_MODEL },
       recordSession: (sessionId, workspace) => host.engine.recordSession(stateDir, sessionId, workspace),
     });
@@ -631,7 +642,9 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       return block !== undefined;
     };
     // Self-update (D#6 R6-2b): checked at the top of the claim loop, and never while any job is in hand. A count, so one job ending does not clear the others (C43-3).
-    const jobs = createJobsInHand();
+    const jobs = createJobsInHand(() => liveWorkspaces.syncSetups());
+    jobCount = () => jobs.count();
+    liveWorkspaces.syncSetups();
     const updater = updateHost === undefined ? undefined : createUpdater(ctx, updateHost, hooks.updateTuf === undefined ? {} : { tuf: hooks.updateTuf });
     const autoUpdate = updater === undefined ? undefined : createAutoUpdate({ updater, hasLease: () => jobs.any(), now: ctx.now });
     const detach = abortOnSignals(stopped, host.signals);
@@ -650,6 +663,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     };
     const vmStatTimer = host.platform === "darwin" && hooks.probe === undefined ? setInterval(() => void refreshVmStat(), 5000) : undefined;
     vmStatTimer?.unref();
+    // D#587 FU-318: finished runs' workspaces are pruned an hour apart (the first pass a minute after start); never while held, and only what has been idle for the retention.
+    const pruner = startWorkspacePruner({ root: workspaceRoot, live: liveWorkspaces, retentionDays: () => loadSettings(stateDir).workspaceRetentionDays, now: () => ctx.now(), log: (line) => ctx.out(line), isAlive: (pid) => pidIsAlive(host.kill, pid) });
     try {
       // A previous run that stopped between staging and switching left a partial version directory: gone before anything else.
       await updater?.cleanup().catch(() => undefined);
@@ -964,6 +979,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       leaseEnd.abort();
       await leaseLook;
       if (vmStatTimer !== undefined) clearInterval(vmStatTimer);
+      // A pass in progress is told to stop and awaited, within a bound: what it leaves is a tombstone, never a workspace a later run could resume.
+      await stopWithin(pruner);
       detach();
     }
   } finally {

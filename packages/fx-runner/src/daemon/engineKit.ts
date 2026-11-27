@@ -74,7 +74,7 @@ export interface EngineKit {
    */
   foreground(command: string, args: readonly string[], env: Record<string, string>): Promise<number | null>;
   /** Resumes a taken-over run's agent session interactively, in its workspace, under the job's own settings (D#6 R4a-7). Throws an `EngineRefusal` if the run has no session left to resume. */
-  takeOver(input: { binaryPath: string; credentials: CredentialMode; envOptions: CleanEnvOptions; stateDir: string; runId: string; role: string; browserMethod?: BrowserMethod | undefined }): Promise<number | null>;
+  takeOver(input: { /** The pid that holds the workspace for the session (the take-over pane process). */ pid: number; binaryPath: string; credentials: CredentialMode; envOptions: CleanEnvOptions; stateDir: string; runId: string; role: string; browserMethod?: BrowserMethod | undefined }): Promise<number | null>;
   /** D#6 C44-4: runs the host-side dependency install in a directory, in its own process group that is ended on the time limit or the stop signal. Absent: no install is wired. */
   installCapture?: InstallCapture;
   /** The same capture with a short piece of the error output kept too: what the sandbox probe (`doctor`) reads its reason from. */

@@ -160,6 +160,15 @@ export function takeLock(lock: string, pid: number, alive: (pid: number) => bool
   throw new LedgerLockedError();
 }
 
+/** Removes the lock taken with `takeLock` by this pid. A lock that now holds another pid belongs to a new holder and is left alone. */
+export function releaseLock(lock: string, pid: number): void {
+  try {
+    if (readFileSync(lock, "utf8").trim() === String(pid)) unlinkSync(lock);
+  } catch {
+    // fx-swallow-ok: a lock that is already gone or cannot be read is not ours to remove
+  }
+}
+
 export function createFileLedger(file: string, options: LedgerOptions): FileLedger {
   const now = options.now ?? ((): Date => new Date());
   const dir = path.dirname(file);

@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -11,6 +11,7 @@ import { doctorCommand, type DoctorHost } from "../../src/commands/doctor.js";
 import { createClaudeKit } from "../../src/engines/claude/kit.js";
 import { MIN_CLAUDE_VERSION } from "../../src/engines/claude/pin.js";
 import { generateRunnerKey, saveRunnerKey } from "../../src/keys.js";
+import { setSetting } from "../../src/runnerSettings.js";
 import { runCli } from "../../src/cli.js";
 import { MACOS_PREVIEW_NOTICE, WSL1_CONVERT_NOTICE, WSL2_NOT_CLEARED_NOTICE } from "../../src/platformSupport.js";
 import { FULL_HELP, authText, helpWithout, makeFake, type Fake } from "../engines/claude/harness.js";
@@ -86,6 +87,55 @@ describe("a healthy machine", () => {
     expect(result.out).toContain("All checks passed.");
     // No model request: the three questions, and no run.
     expect(fake.calls()).toEqual(["--version ", "--help ", "auth status"]);
+  });
+});
+
+describe("the workspaces line (D#587 FU-318)", () => {
+  const RUN_OLD = "0f3c9a1e-5b7d-4c2a-9e18-6a4b2d7c1f01";
+  const plant = (days: number): void => {
+    const dir = path.join(root, ".cache", "fx-runner", "workspaces", RUN_OLD);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, "file.txt"), "x".repeat(4096));
+    const when = new Date(Date.now() - days * 86_400_000);
+    utimesSync(path.join(dir, "file.txt"), when, when);
+    utimesSync(dir, when, when);
+  };
+
+  it("reports the count, the bytes and the oldest age, as information while young and a warning when more than twice the retention", async () => {
+    register();
+    plant(3);
+    const roomy = { host: { workspaceFreeFraction: () => 0.5 } };
+    let result = await doctor(roomy);
+    expect(levelOf(result.out, "Workspaces")).toBe("INFO");
+    expect(result.out).toMatch(/Workspaces:\s+1 run workspace, [\d.]+ KB; oldest untouched 3 days; kept 7 days\n/);
+    plant(20);
+    result = await doctor(roomy);
+    expect(levelOf(result.out, "Workspaces")).toBe("WARN");
+    expect(result.out).toContain("oldest untouched 20 days");
+    expect(result.out).toContain("fx-runner prune");
+    expect(result.code).toBe(0);
+  });
+
+  it("shows the retention in force, not only the configured one: a day while the disk is under 10% free, and then a 3-day-old workspace is already a warning", async () => {
+    register();
+    plant(3);
+    const tight = await doctor({ host: { workspaceFreeFraction: () => 0.05 } });
+    expect(tight.out).toMatch(/Workspaces:\s+1 run workspace, [\d.]+ KB; oldest untouched 3 days; kept 7 days, but 1 day now: the disk is under 10% free/);
+    expect(levelOf(tight.out, "Workspaces")).toBe("WARN");
+    setSetting(stateDir, "workspace-retention-days", "2");
+    const configured = await doctor({ host: { workspaceFreeFraction: () => 0.5 } });
+    expect(configured.out).toMatch(/kept 2 days(;|\n)/);
+    expect(configured.out).not.toContain("now: the disk");
+    // Already at the pressure retention: nothing to add.
+    setSetting(stateDir, "workspace-retention-days", "1");
+    expect((await doctor({ host: { workspaceFreeFraction: () => 0.05 } })).out).toMatch(/kept 1 day(;|\n)/);
+    // The free space cannot be read: the configured retention stands.
+    expect((await doctor({ host: { workspaceFreeFraction: () => undefined } })).out).toMatch(/kept 1 day(;|\n)/);
+  });
+
+  it("prints nothing when there is no workspaces directory", async () => {
+    register();
+    expect((await doctor()).out).not.toContain("Workspaces:");
   });
 });
 
