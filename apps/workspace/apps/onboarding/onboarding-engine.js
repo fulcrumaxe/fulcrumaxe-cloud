@@ -136,7 +136,7 @@ export function machineContext(body, nowMs) {
   list.sort((a, b) => heard(b) - heard(a) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const r = list[0];
   if (!r) return {};
-  return { name: typeof r.name === "string" ? r.name.trim() : "", offline: r.state === "offline" || r.state === "not_responding", last_seen_min: Math.max(0, Math.floor((nowMs - heard(r)) / 60000)) };
+  return { name: typeof r.name === "string" && r.has_name !== false ? r.name.trim() : "", offline: r.state === "offline" || r.state === "not_responding", last_seen_min: Math.max(0, Math.floor((nowMs - heard(r)) / 60000)) };
 }
 
 /** The copy of the project step's machine list for a machine that cannot take another project, or "". */
