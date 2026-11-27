@@ -72,6 +72,8 @@ describe('engine_start_definer [pg]', () => {
       { proname: 'engine_operate_queue_enqueue', prosecdef: true, proconfig: pinned, app: true, ops: false, pub: false },
       { proname: 'engine_operate_queue_finish', prosecdef: true, proconfig: pinned, app: false, ops: true, pub: false },
       { proname: 'engine_start_covered', prosecdef: true, proconfig: pinned, app: false, ops: true, pub: false },
+      // 1113: the reader of the engine version a system start carries.
+      { proname: 'engine_start_version', prosecdef: true, proconfig: pinned, app: false, ops: true, pub: false },
       { proname: 'engine_system_start_issue', prosecdef: true, proconfig: pinned, app: false, ops: true, pub: false },
       { proname: 'engine_system_starts_due', prosecdef: true, proconfig: pinned, app: false, ops: true, pub: false },
       // 1109: the lister of the restart that follows a merged engine update.
@@ -191,7 +193,7 @@ describe('engine_start_definer [pg]', () => {
         'SELECT id, deleted_at, engine_quantity, platform_hold_at, partner_suspended_at, subscription_ended_at, past_due_since, stripe_subscription_status FROM accounts',
         'SELECT account_id, watch_enabled, operate_enabled, operate_epoch FROM engine_bridge_settings', 'SELECT account_id, repo_id FROM engine_bridge_repos',
         'SELECT account_id, repo_id, runner_id, placed_at FROM project_placements', 'SELECT id, account_id, revoked_at FROM runners', 'SELECT id, account_id, gh_repo_id, gh_owner, gh_name FROM repos',
-        'SELECT account_id, runner_id, name FROM runner_sandboxes', 'SELECT id, account_id, repo_id, runner_id, kind, state, issued_at FROM machine_jobs', 'SELECT id, account_id, repo_id, phase, start_pending FROM project_setups',
+        'SELECT account_id, runner_id, name FROM runner_sandboxes', 'SELECT id, account_id, repo_id, runner_id, kind, state, issued_at FROM machine_jobs', 'SELECT id, account_id, repo_id, phase, start_pending, engine_version, created_at FROM project_setups',
       ]) {
         expect(await code(c, sql), sql).toBe('ok');
       }
