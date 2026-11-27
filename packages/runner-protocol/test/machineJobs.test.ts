@@ -28,8 +28,9 @@ const ARGS: Record<string, unknown> = {
   project_remove: { delete_sandbox: true, removal_pr: false },
   twin_seed: { twin_id: ID, public: { owner: "acme", name: "widgets", gh_id: 78, default_branch: "main", head_sha: SHA }, private: { owner: "acme", name: "widgets-private", gh_id: 77 } },
   twin_publish: { twin_id: ID, public: { owner: "acme", name: "widgets", gh_id: 78, tip: SHA }, private: { owner: "acme", name: "widgets-private", gh_id: 77, base: SHA, head: "c".repeat(40) }, branch: `fx/publish-${"c".repeat(12)}`, private_set: { overlay_globs: ["docs/private/**"], install_paths: [".github/workflows/engine.yml"], blob_globs: ["assets/**"], identifier_rules_path: ".autonomous-team/ids.json", plan_data_rules_path: null } },
+  twin_sync: { twin_id: ID, public: { owner: "acme", name: "widgets", gh_id: 78, tip: SHA }, private: { owner: "acme", name: "widgets-private", gh_id: 77, base: "c".repeat(40) }, branch: `fx/twin-sync-${SHA.slice(0, 12)}`, paths: ["src/a.ts", "docs/readme.md"], private_set: { overlay_globs: ["docs/private/**"], install_paths: [".github/workflows/engine.yml"], blob_globs: ["assets/**"], identifier_rules_path: ".autonomous-team/ids.json", plan_data_rules_path: null } },
 };
-const jobOf = (kind: string, over: Record<string, unknown> = {}): Job => ({ ...base, ...(kind === "twin_seed" || kind === "twin_publish" ? { setup_id: ID } : {}), kind, args: ARGS[kind], ...over }) as Job;
+const jobOf = (kind: string, over: Record<string, unknown> = {}): Job => ({ ...base, ...(kind === "twin_seed" || kind === "twin_publish" || kind === "twin_sync" ? { setup_id: ID } : {}), kind, args: ARGS[kind], ...over }) as Job;
 const failsWith = (run: () => unknown, code: string): void => {
   try {
     run();
@@ -81,6 +82,25 @@ describe("machine job schema", () => {
     for (const bad of [{ tip: "abc" }, { tip: SHA.toUpperCase() }, { owner: "a/b" }, { token: "x" }]) expect(ok(jobOf("twin_publish", { args: { ...args, public: { ...args.public, ...bad } } })), JSON.stringify(bad)).toBe(false);
     for (const bad of [{ overlay_globs: Array.from({ length: 101 }, (_, n) => `a${n}`) }, { install_paths: Array.from({ length: 5001 }, (_, n) => `a${n}`) }, { blob_globs: [""] }, { identifier_rules_path: "" }, { extra: 1 }]) expect(ok(jobOf("twin_publish", { args: { ...args, private_set: { ...args.private_set, ...bad } } })), JSON.stringify(bad).slice(0, 40)).toBe(false);
     expect(ok(jobOf("twin_publish", { args: { ...args, token: "x" } }))).toBe(false);
+  });
+  it("holds a twin sync to its one home: the private twin through its setup, a branch named from the public tip, and 1 to 200 distinct plain paths", () => {
+    const args = ARGS["twin_sync"] as { public: Record<string, unknown>; private: Record<string, unknown>; paths: string[]; private_set: Record<string, unknown> };
+    expect(ok(jobOf("twin_sync"))).toBe(true);
+    expect(ok(jobOf("twin_sync", { repo_gh_id: 78 }))).toBe(false);
+    expect(ok(jobOf("twin_sync", { repo_gh_id: 99 }))).toBe(false);
+    expect(ok(jobOf("twin_sync", { args: { ...args, public: { ...args.public, gh_id: 77 } } }))).toBe(false);
+    expect(ok(jobOf("twin_sync", { setup_id: undefined }))).toBe(false);
+    expect(ok(jobOf("twin_sync", { requires_engine: "microvm" }))).toBe(false);
+    for (const branch of ["main", "fx/twin-sync-" + "d".repeat(12), "fx/twin-sync-" + SHA.slice(0, 11), "fx/publish-" + SHA.slice(0, 12), "../fx/twin-sync-" + SHA.slice(0, 12)]) expect(ok(jobOf("twin_sync", { args: { ...args, branch } })), branch).toBe(false);
+    // the paths: bounded, distinct, plain
+    const badPaths: unknown[][] = [[], Array.from({ length: 201 }, (_, n) => `a${n}`), ["a", "a"], ["/abs/x"], ["a//b"], ["a/./b"], ["a/../b"], [".git/config"], ["a/.GIT/x"], ["a\\b"], ["a\u0000b"], ["a\nb"], [""], ["x".repeat(1025)], [7]];
+    for (const paths of badPaths) expect(ok(jobOf("twin_sync", { args: { ...args, paths } })), JSON.stringify(paths).slice(0, 40)).toBe(false);
+    expect(ok(jobOf("twin_sync", { args: { ...args, paths: Array.from({ length: 200 }, (_, n) => `a${n}`) } }))).toBe(true);
+    for (const bad of [{ tip: "abc" }, { owner: "a/b" }, { token: "x" }]) expect(ok(jobOf("twin_sync", { args: { ...args, public: { ...args.public, ...bad } } })), JSON.stringify(bad)).toBe(false);
+    for (const bad of [{ base: "abc" }, { head: "c".repeat(40) }]) expect(ok(jobOf("twin_sync", { args: { ...args, private: { ...args.private, ...bad } } })), JSON.stringify(bad)).toBe(false);
+    expect(ok(jobOf("twin_sync", { args: { ...args, private_set: { ...args.private_set, extra: 1 } } }))).toBe(false);
+    expect(ok(jobOf("twin_sync", { args: { ...args, token: "x" } }))).toBe(false);
+    expect(SETUP_FAILURE_CODES).toEqual(expect.arrayContaining(["private_tip_moved", "sync_unsafe_path", "private_path_change", "public_tip_moved", "no_changes"]));
   });
   it("lists every refusal the push route can throw as a failure code a publish may report", () => {
     for (const code of PLANE_REFUSAL_CODES) expect(SETUP_FAILURE_CODES as readonly string[], code).toContain(code);
@@ -176,7 +196,7 @@ describe("what a runner is offered", () => {
     const six = [DEVICE_REGISTER_CAPABILITY, PROJECT_SETUP_CAPABILITY, SURVEY_CAPABILITY, ENGINE_SESSION_CAPABILITY, MACHINE_LOGIN_CAPABILITY, REPO_TOKEN_REFRESH_CAPABILITY];
     expect(six).toEqual(["device_register_v1", "project_setup_v1", "survey_v1", "engine_session_v1", "machine_login_v1", "repo_token_refresh_v1"]);
     for (const capability of six) expect(RUNNER_CAPABILITIES).toContain(capability);
-    expect(MACHINE_JOB_CAPABILITY).toEqual({ project_setup: "project_setup_v1", engine_update: "project_setup_v1", project_remove: "project_setup_v1", engine_session_start: "engine_session_v1", engine_session_stop: "engine_session_v1", engine_session_delete: "engine_session_v1", twin_seed: "twin_v1", twin_publish: "twin_v1" });
+    expect(MACHINE_JOB_CAPABILITY).toEqual({ project_setup: "project_setup_v1", engine_update: "project_setup_v1", project_remove: "project_setup_v1", engine_session_start: "engine_session_v1", engine_session_stop: "engine_session_v1", engine_session_delete: "engine_session_v1", twin_seed: "twin_v1", twin_publish: "twin_v1", twin_sync: "twin_v1" });
     expect(TASK_KIND_CAPABILITY).toEqual({ survey: "survey_v1" });
   });
   it("offers each kind of work to a runner with its capability and to no other", () => {

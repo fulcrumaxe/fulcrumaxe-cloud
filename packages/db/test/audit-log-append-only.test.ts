@@ -529,6 +529,8 @@ describe('audit_write / audit_write_system: append-only, unforgeable audit_log (
         '1109_engine_update_pr.sql',
         // 1110 (D#845 ON-27c2) restates 1108's machine_job_expire (which reads engine_updates) and reads 1097's repo_twins, so it goes with them.
         '1110_twin_publish.sql',
+        // 1111 (D#845 ON-27d2) restates 1110's machine_job_expire and reads 1097's repo_twins, so it goes with them.
+        '1111_twin_sync.sql',
       ];
       const AUDIT_WRITE_MIGRATIONS = allFiles.filter(
         (f) => BUILDS_ON_HELD_BACK.includes(f) || isAuditWriteMigration(readFileSync(path.join(DEFAULT_MIGRATIONS_DIR, f), 'utf8')),

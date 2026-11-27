@@ -26,6 +26,8 @@ const ARGS: Record<MachineJobKind, Record<string, unknown>> = {
   twin_seed: { twin_id: randomUUID(), public: { owner: "acme", name: "widgets", gh_id: 1, default_branch: "main", head_sha: SHA }, private: { owner: "acme", name: "widgets-private", gh_id: 2 } },
   // a publish is bound to the twin's own repository, its setup and its set: a test that issues one passes them through `args`
   twin_publish: { twin_id: randomUUID(), public: { owner: "acme", name: "widgets", gh_id: 1, tip: SHA }, private: { owner: "acme", name: "widgets-private", gh_id: 2, base: SHA, head: "c".repeat(40) }, branch: `fx/publish-${"c".repeat(12)}`, private_set: { overlay_globs: [], install_paths: [], blob_globs: [], identifier_rules_path: null, plan_data_rules_path: null } },
+  // a sync is bound to the twin's own repository, its setup and its set too
+  twin_sync: { twin_id: randomUUID(), public: { owner: "acme", name: "widgets", gh_id: 1, tip: SHA }, private: { owner: "acme", name: "widgets-private", gh_id: 2, base: SHA }, branch: `fx/twin-sync-${SHA.slice(0, 12)}`, paths: ["src/a.ts"], private_set: { overlay_globs: [], install_paths: [], blob_globs: [], identifier_rules_path: null, plan_data_rules_path: null } },
 };
 
 export interface IssueOptions {
