@@ -2,10 +2,27 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { SESSION_ID_PATTERN, type BrowserMethod } from "@fulcrumaxe/runner-protocol";
 import { roleToolsFor } from "../../job/roleTools.js";
+import { holdOnDisk } from "../../job/workspaceHolds.js";
+import { isPrunableName } from "../../job/workspacePrune.js";
 import { baseToolNames } from "./argv.js";
 import { jobDirFor } from "./engine.js";
 import { EngineRefusal } from "./refusal.js";
 import { readSessionIndex } from "./session.js";
+
+/**
+ * Runs the person's interactive session in `cwd` with the workspace held for as long as it lasts (D#587 FU-318). The runner's prune, in any runner process of
+ * this user, then leaves the directory alone however long the session sits unchanged; the hold ends with the session, or with this process if it dies.
+ * A workspace under another name is not one the prune removes, so it is not held. A hold that cannot be written refuses the takeover before the session starts.
+ */
+export async function runHeldTakeover<T>(cwd: string, pid: number, run: () => Promise<T>): Promise<T> {
+  const name = path.basename(cwd);
+  const release = isPrunableName(name) ? holdOnDisk(path.dirname(cwd), name, pid) : undefined;
+  try {
+    return await run();
+  } finally {
+    release?.();
+  }
+}
 
 /** The session a run was in, from the first stream line of its own transcript that names one. */
 export function sessionOfRun(logFile: string): string | undefined {

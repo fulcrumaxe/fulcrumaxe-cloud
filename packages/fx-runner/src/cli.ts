@@ -30,6 +30,7 @@ import { verifyBrowserServerCommand, type VerifyServerHost } from "./commands/ve
 import { verifyLoginCommand, type VerifyLoginHost } from "./commands/verifyLogin.js";
 import { takeoverPaneCommand, watchCommand } from "./commands/watchPane.js";
 import { purgeChildCommand } from "./commands/purgeChild.js";
+import { pruneCommand } from "./commands/prune.js";
 import { egressServeCommand, egressWaitCommand } from "./setup/egressServe.js";
 import { configCommand, updateCommand } from "./commands/update.js";
 import { engineHostCommand, type EngineHostRuntime } from "./commands/engineHost.js";
@@ -110,6 +111,7 @@ Commands:
                      List this machine's running jobs, or watch one read-only. --take-over stops the agent and hands the session to you.
   revoke [--reason <text>] [--local]
                      Revoke this runner and delete its key. --local only deletes the local files.
+  prune [--dry-run]  Remove the workspaces of finished runs that have not changed for 7 days (1 day when the disk is under 10% free; config set workspace-retention-days). The running runner does this hourly by itself. --dry-run lists and deletes nothing.
   doctor [--sandbox-only]
                      Check this machine: registration, cloud, the Claude CLI (version, flags, login) and shell variables. Makes no model request. --sandbox-only runs only the sandbox test.
   --version          Print the version.
@@ -130,7 +132,7 @@ Commands:
                      --check shows the current and the available version. --pin holds a version (installing it now, older ones included). --rollback returns to the kept previous version.
   config set auto-update on|off
                      Turn automatic updates, which happen between jobs only, on or off.
-  config set concurrency.total <1-8> | concurrency.heavy <1-4> | reserve-gb <1-256|auto> | cpu-reserve <0-256 cores|auto>
+  config set concurrency.total <1-8> | concurrency.heavy <1-4> | reserve-gb <1-256|auto> | cpu-reserve <0-256 cores|auto> | workspace-retention-days <1-365>
   config set budget.light.memory <1-8 GB> | budget.heavy.memory <2-32 GB> | budget.light.tasks | budget.heavy.tasks <64-65536>
   verify-login --base-url <address> | --forget
                      Sign in once as the TEST account for the deploy check's own browser: a window opens on the app, you sign in and press Enter. Only the app's own session is saved, at mode 0600
@@ -180,6 +182,7 @@ const COMMANDS: Readonly<Record<string, { flags: readonly string[]; switches: re
   // The engine session's supervisor, held in the session's unit on the standard tier (engineSession/standardTier.ts); not in --help.
   "__engine-supervise": { flags: [], switches: [], positionals: 0 },
   doctor: { flags: [], switches: ["sandbox-only"] },
+  prune: { flags: [], switches: ["dry-run"] },
   logs: { flags: [], switches: [], positionals: 1 },
   service: { flags: ["user"], switches: ["system"], positionals: 1 },
   update: { flags: ["pin"], switches: ["check", "unpin", "rollback"] },
@@ -307,6 +310,10 @@ export async function runCli(io: CliIo): Promise<number> {
     if (command === "doctor") {
       if (io.doctorHost === undefined) throw new CliError("doctor is only available from the fx-runner program");
       return await doctorCommand(ctx, io.doctorHost, { sandboxOnly: flags.has("sandbox-only") });
+    }
+    if (command === "prune") {
+      if (io.host === undefined) throw new CliError("prune is only available from the fx-runner program");
+      return await pruneCommand(ctx, flags, { home: io.home, platform: io.platform ?? "linux", xdgCacheHome: io.xdgCacheHome, kill: io.host.kill, pid: io.host.pid });
     }
     if (command === "assistant") return await assistantCommand(positionals, ctx);
     if (command === "engine-bridge") return await engineBridgeCommand(positionals, flags, ctx, { home: io.home, engineStateDirOverride: io.engineStateDirOverride, discovery: io.engineDiscovery });

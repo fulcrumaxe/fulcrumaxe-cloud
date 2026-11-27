@@ -16,6 +16,10 @@ import type { GitCapture } from "../../src/daemon/git.js";
 import { itNeedsHostSockets } from "../helpers/needsHostSockets.js";
 import { fakeSandboxHost } from "../helpers/fakeSandboxHost.js";
 import { takeoverCommand } from "../../src/engines/claude/takeover.js";
+import { EventEmitter } from "node:events";
+import { createClaudeKit } from "../../src/engines/claude/kit.js";
+import type { SpawnFn } from "../../src/engines/claude/capture.js";
+import { testLaunch } from "../helpers/launch.js";
 import { recordSession } from "../../src/engines/claude/session.js";
 import { ensurePrivateDir, markTakeoverReady, readEntries, socketPath, takeoverState, tmuxDir, writeEntry } from "../../src/watch/layout.js";
 
@@ -297,6 +301,26 @@ describe("the interactive resume of a taken-over run", () => {
     expect(argv).not.toContain("-p");
     expect(argv).not.toContain("--permission-prompts");
     expect(argv).not.toContain("--dangerously-skip-permissions");
+  });
+
+  it("the engine kit holds the workspace for the whole interactive session, so a prune of it never runs under the person's session (D#587 FU-318)", async () => {
+    const workspace = await jobFiles([JSON.stringify({ kind: "meta", line: "{}" }), init]);
+    const holdFile = path.join(path.dirname(workspace), ".holds", `${RUN_A}.4242424`);
+    const seen: { cwd?: string; held?: boolean } = {};
+    // Nothing real starts: the stand-in "claude" records what was true when it began and ends the session.
+    const spawnStub = ((_command: string, _args: readonly string[], options: { cwd: string }) => {
+      seen.cwd = options.cwd;
+      seen.held = existsSync(holdFile);
+      const child = new EventEmitter();
+      setImmediate(() => child.emit("close", 0));
+      return child;
+    }) as unknown as SpawnFn;
+    const kit = createClaudeKit(spawnStub, { launch: testLaunch() });
+    expect(existsSync(holdFile)).toBe(false);
+    const code = await kit.takeOver({ pid: 4_242_424, binaryPath: "/nonexistent/claude", credentials: { mode: "subscription" }, envOptions: {}, stateDir, runId: RUN_A, role: "executor" });
+    expect(code).toBe(0);
+    expect(seen).toEqual({ cwd: workspace, held: true });
+    expect(existsSync(holdFile)).toBe(false);
   });
 
   it("refuses a run with no session, no job files or no workspace left", async () => {

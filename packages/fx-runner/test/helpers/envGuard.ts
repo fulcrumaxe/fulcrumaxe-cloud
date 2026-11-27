@@ -189,6 +189,9 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/sandbox/toolchain.ts": ["fs", "path"], // the toolchain found at setup (D#6 R4d-3): stat, executable check and realpath of the tools; no process is started
 
   "src/job/plainSegment.ts": ["path"],
+  "src/job/workspaceHolds.ts": ["fs", "os", "path"], // D#587 FU-318: the hold files other runner processes read: a 0600 file made O_EXCL|O_NOFOLLOW, lstat of the directory and the owner check, readdir and unlink of dead holds
+  "src/commands/prune.ts": ["fs", "path"], // `fx-runner prune`: the state directory it takes the single-instance lock in
+  "src/job/workspacePrune.ts": ["crypto", "fs", "fs/promises", "os", "path"], // D#587 FU-318: the prune of finished runs' workspaces: lstat-only walks, no-follow removal (a link is unlinked, never entered), the owner check, statfs of the volume, and the 0600 list of held directories (random temp name, renamed whole)
   "src/job/spillFiles.ts": ["crypto", "fs", "os", "path"], // D#600 CX-4b: the no-follow writer of a run's spill files (lstat, O_EXCL|O_NOFOLLOW) and the owner check of its root
   // D#6 R6-2a, the update client. The fetcher is the only code that opens a connection for an update: https (the request, with each redirect hop checked by hand and no plain-http hop ever opened), stream (the response body handed to the TUF client), and http for the response's type only.
   "src/update/pinnedFetcher.ts": ["http", "https", "stream"],

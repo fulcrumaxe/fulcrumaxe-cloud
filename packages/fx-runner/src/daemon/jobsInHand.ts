@@ -9,15 +9,18 @@ export interface JobsInHand {
   any(): boolean;
 }
 
-export function createJobsInHand(): JobsInHand {
+/** `onChange` runs after every change of the count (the daemon keeps its on-disk "a job is in hand" hold in line with it). */
+export function createJobsInHand(onChange?: () => void): JobsInHand {
   let inHand = 0;
   return {
     async track(job) {
       inHand += 1;
+      onChange?.();
       try {
         return await job();
       } finally {
         inHand -= 1;
+        onChange?.();
       }
     },
     count: () => inHand,

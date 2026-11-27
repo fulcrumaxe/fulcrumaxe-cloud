@@ -29,6 +29,8 @@ export interface RunnerSettings {
   reserveGb?: number;
   /** CPU cores kept free for the person's own work (whole cores, 0 allowed); absent: 20% of the cores (the 0.8 load-per-core threshold). Set by `cpu-reserve`. */
   cpuReserve?: number;
+  /** FU-318: days a finished run's workspace is kept before the runner prunes it (1..365); absent: 7. Under 10% free disk the runner uses 1 day whatever this says. */
+  workspaceRetentionDays?: number;
   /** True only when the person set `budget.heavy.memory`; otherwise the heavy memory budget is derived from the measured footprints (jobLimits.budgetsOf) and `budget.heavy.memoryGb` is not used. */
   heavyMemorySet?: true;
   /** The hard limits one job of each class runs under (D#6 C43-5): memory in whole GB and the most processes and threads it may hold. */
@@ -129,7 +131,7 @@ export const ENGINE_START_DAY_KEY = "engine-host.start-day-at";
 const ENGINE_HOST_KEYS = [ENGINE_LOOP_MINUTES_KEY, ENGINE_START_DAY_KEY] as const;
 export const ENGINE_LOOP_MINUTES_RANGE: readonly [number, number] = [5, 60];
 const START_DAY_AT = /^([01]\d|2[0-3]):[0-5]\d$/;
-export const SETTING_KEYS: readonly string[] = ["concurrency.total", "concurrency.heavy", "reserve-gb", "cpu-reserve", ...BUDGET_KEYS, ...VERIFY_KEYS, ...ENGINE_HOST_KEYS, SANDBOX_ENGINE_KEY, ...MICROVM_KEYS];
+export const SETTING_KEYS: readonly string[] = ["concurrency.total", "concurrency.heavy", "reserve-gb", "cpu-reserve", "workspace-retention-days", ...BUDGET_KEYS, ...VERIFY_KEYS, ...ENGINE_HOST_KEYS, SANDBOX_ENGINE_KEY, ...MICROVM_KEYS];
 const isVmKey = (key: string): boolean => key === SANDBOX_ENGINE_KEY || (MICROVM_KEYS as readonly string[]).includes(key);
 
 const RANGES: Readonly<Record<string, readonly [number, number]>> = {
@@ -137,6 +139,7 @@ const RANGES: Readonly<Record<string, readonly [number, number]>> = {
   "concurrency.heavy": [1, MAX_HEAVY_CAPACITY],
   "reserve-gb": [1, 256],
   "cpu-reserve": [0, 256],
+  "workspace-retention-days": [1, 365],
   "budget.light.memory": BUDGET_MEMORY_GB.light,
   "budget.light.tasks": BUDGET_TASKS,
   "budget.heavy.memory": BUDGET_MEMORY_GB.heavy,
@@ -181,6 +184,8 @@ export function loadSettings(stateDir: string): RunnerSettings {
     if (reserve !== undefined) settings.reserveGb = reserve;
     const cores = whole(parsed["cpuReserve"], 0, 256);
     if (cores !== undefined) settings.cpuReserve = cores;
+    const retention = whole(parsed["workspaceRetentionDays"], 1, 365);
+    if (retention !== undefined) settings.workspaceRetentionDays = retention;
     const budget = parsed["budget"] as Record<string, Record<string, unknown> | undefined> | null | undefined;
     for (const cls of ["light", "heavy"] as const) {
       const saved = budget?.[cls];
@@ -349,6 +354,7 @@ export function setSetting(stateDir: string, key: string, text: string): string 
     settings.budget[target.cls][target.field] = number;
     if (key === "budget.heavy.memory") settings.heavyMemorySet = true;
   } else if (key === "cpu-reserve") settings.cpuReserve = number;
+  else if (key === "workspace-retention-days") settings.workspaceRetentionDays = number;
   else if (key === "concurrency.total") settings.ceilingTotal = number;
   else if (key === "concurrency.heavy") settings.ceilingHeavy = number;
   else settings.reserveGb = number;
@@ -395,6 +401,7 @@ export function unsetSetting(stateDir: string, key: string): string {
     settings.budget[target.cls][target.field] = DEFAULT_BUDGET[target.cls][target.field];
     if (key === "budget.heavy.memory") delete settings.heavyMemorySet;
   } else if (key === "cpu-reserve") delete settings.cpuReserve;
+  else if (key === "workspace-retention-days") delete settings.workspaceRetentionDays;
   else delete settings.reserveGb;
   writePrivateFile(stateDir, SETTINGS_FILE, serialize(settings));
   return `${key} is back to automatic; it applies from the next claim`;

@@ -58,6 +58,7 @@ import type { MemAvailableReader, MicrovmCaps, SandboxEngine, VmRequest } from "
 import { runVmJob, StepRefusal, type TokenSlot, type VmPort, type VmRegistry, type VmStep } from "../vm/jobLifecycle.js";
 import { closedWord, observedClient, type StepSink } from "./stepLog.js";
 import type { JobWatch, WatchedJob } from "./watch.js";
+import type { LiveWorkspaces } from "../job/workspacePrune.js";
 
 /** How many times `done` is sent when the cloud cannot reach GitHub or the call fails. */
 export const MAX_DONE_ATTEMPTS = 5;
@@ -192,6 +193,8 @@ export interface JobHandlerDeps {
    * ends `context_spill_unwritable` instead of starting with a marker that leads nowhere.
    */
   spillRoot?: string;
+  /** FU-318: the workspaces this runner holds right now; the prune never removes one. Absent: nothing is held (tests). */
+  liveWorkspaces?: Pick<LiveWorkspaces, "hold" | "release">;
   /** Replaceable so a test can count the calls. */
   runJobFn?: typeof runJob;
   /**
@@ -638,6 +641,15 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
         return true;
       }
     };
+    // FU-318: this run's own directory is held from here to its end, and a resumed one is held before anything reads it; a directory the prune is removing is never resumed.
+    const heldNames: string[] = [];
+    const holdName = (name: string): boolean => {
+      if (deps.liveWorkspaces === undefined) return true;
+      if (!deps.liveWorkspaces.hold(name)) return false;
+      heldNames.push(name);
+      return true;
+    };
+    holdName(job.run_id);
     try {
       const started: { base?: string; updatedTo?: string } = {};
       const promptNotes: string[] = [];
@@ -667,7 +679,10 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
           const grant: JobAllowanceGrant | undefined = job.sandbox_allowances === undefined ? undefined : { entries: job.sandbox_allowances.entries, commandTimeoutS: job.sandbox_allowances.command_timeout_s, storeKey: storeKeyOf(job.repo) };
           let planSession = deps.run.planSession;
           const wanted = job.continues === null ? undefined : deps.run.planSession(job.continues);
-          if (job.continues !== null && wanted?.kind === "resume" && !vmRun && deps.run.workspaces.owns(wanted.workspace)) {
+          if (job.continues !== null && wanted?.kind === "resume" && !vmRun && deps.run.workspaces.owns(wanted.workspace) && !holdName(wanted.workspace.split(/[\\/]/).pop() ?? "")) {
+            const fresh = { kind: "fresh", branch: job.continues.branch } as const;
+            planSession = () => fresh;
+          } else if (job.continues !== null && wanted?.kind === "resume" && !vmRun && deps.run.workspaces.owns(wanted.workspace)) {
             const resumed = await git.resume(job, claimed, wanted.workspace);
             if (resumed !== null) {
               started.base = resumed.base;
@@ -1070,6 +1085,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
       if (sent.status === "aborted") abandonSend = !(await reportShutdown(lease));
       return sent;
     } finally {
+      for (const name of heldNames) deps.liveWorkspaces?.release(name);
       ran.abort();
       observed.delete(claimed.runId);
       detach();

@@ -10,7 +10,7 @@ import { canaryArgvFingerprint, runInstructionCanary } from "./instructionCanary
 import { EngineRefusal } from "./refusal.js";
 import { type BinarySource, MIN_CLAUDE_VERSION, inspectBinary, resolveClaudePath, storedBinarySource, versionSupported } from "./pin.js";
 import { planSession, readSessionIndex, recordSession } from "./session.js";
-import { sessionOfRun, takeoverCommand } from "./takeover.js";
+import { runHeldTakeover, sessionOfRun, takeoverCommand } from "./takeover.js";
 
 /**
  * D#601 MEM-7 (CWE-367): the binary source of a job when the instruction-file check is on. Each job compares the build it is about to run with the
@@ -107,7 +107,7 @@ export function createClaudeKit(spawnFn: SpawnFn, options: { instructionCanary?:
     foreground: (command, args, env) => runForegroundLaunched(starter.spawn, launch, command, args, env),
     takeOver(input) {
       const { argv, cwd } = takeoverCommand(input);
-      return runForeground(starter.spawn, input.binaryPath, argv, cleanEnv(input.credentials, input.envOptions), cwd);
+      return runHeldTakeover(cwd, input.pid, () => runForeground(starter.spawn, input.binaryPath, argv, cleanEnv(input.credentials, input.envOptions), cwd));
     },
     captureWithStderr: async (command, args, env, timeoutMs) => {
       const out = await runCapture(starter.spawn, launch, command, args, env, timeoutMs, 4096, 4096);

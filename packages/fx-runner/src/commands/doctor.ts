@@ -34,6 +34,8 @@ import { vmInstallChecks, type VmInstallFacts } from "../vm/doctorChecks.js";
 import { VM_CHECKS, fixText, preflightChecks, probeNetwork, type NetworkPorts, type PreflightFacts } from "../daemon/preflight.js";
 import { updatesLine } from "./update.js";
 import { userUnitInstalled } from "./service.js";
+import { cacheRootsFor } from "../daemon/mirror.js";
+import { DEFAULT_RETENTION_DAYS, formatBytes, freeFractionOf, retentionFor, summariseWorkspaces } from "../job/workspacePrune.js";
 
 const OS_RELEASE = "/etc/os-release";
 const NIXOS_MARKER = "/etc/NIXOS";
@@ -53,6 +55,8 @@ export interface DoctorHost {
   /** The directory `doctor` was started in, where the CLI placeholders check also looks (D#6 RUNNER-CWD-1). */
   cwd?: string | undefined;
   xdgCacheHome?: string | undefined;
+  /** The free fraction of the disk the workspaces are on, for the retention in force; read from the disk when absent (a test seam). */
+  workspaceFreeFraction?: (() => number | undefined) | undefined;
   /** The user's login shell (an absolute path, from the SHELL variable): what the agent CLI starts its Bash tool through. Without it the job-shell check says it was not run. */
   shell?: string | undefined;
   /** The machine behind the sandbox probe: the process start and the file reads. */
@@ -435,6 +439,22 @@ export async function doctorCommand(ctx: CommandContext, host: DoctorHost, optio
   if (mode === "subscription") {
     if (host.shellVars.length === 0) line("PASS", "Shell variables", "no Anthropic key or token is set");
     for (const name of host.shellVars) line("WARN", "Shell variable", `${name} is set in this shell; it would outrank your Claude login. fx-runner removes it from jobs.`);
+  }
+  // FU-318: what finished runs leave on the disk, so a full disk has an explanation before it is a problem.
+  if (host.home !== undefined) {
+    const workspaceRoot = cacheRootsFor({ home: host.home, platform: host.platform, xdgCacheHome: host.xdgCacheHome }).workspaceRoot;
+    const summary = await summariseWorkspaces(workspaceRoot, ctx.now());
+    if (summary !== undefined) {
+      // The retention in force is the configured one, cut to a day while the disk is under 10% free (the prune's own rule), so a short retention is explained.
+      const configured = loadSettings(ctx.stateDir).workspaceRetentionDays ?? DEFAULT_RETENTION_DAYS;
+      const inForce = retentionFor(configured, host.workspaceFreeFraction === undefined ? freeFractionOf(workspaceRoot) : host.workspaceFreeFraction());
+      const oldest = summary.oldestIdleDays;
+      const days = (n: number): string => `${n} day${n === 1 ? "" : "s"}`;
+      const kept = `kept ${days(configured)}${inForce.pressure && inForce.days !== configured ? `, but ${days(inForce.days)} now: the disk is under 10% free` : ""}`;
+      const text = `${summary.directories} run workspace${summary.directories === 1 ? "" : "s"}, ${summary.partial ? "at least " : ""}${formatBytes(summary.bytes)}${oldest === undefined ? "" : `; oldest untouched ${days(oldest)}`}; ${kept}`;
+      if (oldest !== undefined && oldest > inForce.days * 2) line("WARN", "Workspaces", `${text}; the runner prunes while it runs, or run: fx-runner prune`);
+      else line("INFO", "Workspaces", text);
+    }
   }
   // Self-update (D#6 R6-2a, R6-2b): off, and said so, until the build carries a release root; then the pin, the switch and the last check.
   const updates = updatesLine(ctx.stateDir, host.update);
