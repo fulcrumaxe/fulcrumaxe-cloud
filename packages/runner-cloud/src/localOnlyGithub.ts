@@ -635,17 +635,18 @@ export interface InstallMergePin {
 }
 
 /** The rule a call breaks, or null when it is on the allowlist. `not_allowlisted` for anything the list does not hold; `accept` for a media type other than JSON. */
-export function localOnlyViolation(req: Pick<GithubRequest, "method" | "path" | "query" | "headers" | "body">, exclude: readonly string[] = [], options: { gate1Attest?: boolean; gate1Status?: boolean; engineRemove?: boolean; setupInstall?: boolean; setupFinish?: boolean; installMerge?: InstallMergePin } = {}): string | null {
+export function localOnlyViolation(req: Pick<GithubRequest, "method" | "path" | "query" | "headers" | "body">, exclude: readonly string[] = [], options: { gate1Attest?: boolean; gate1Status?: boolean; engineRemove?: boolean; setupInstall?: boolean; setupFinish?: boolean; markReadyOnly?: boolean; installMerge?: InstallMergePin } = {}): string | null {
   const pin = options.installMerge;
   const engineRemove = options.engineRemove === true;
   const gate1Attest = options.gate1Attest === true;
   const gate1Status = options.gate1Status === true;
   const setupInstall = options.setupInstall === true;
   const setupFinish = options.setupFinish === true;
+  const markReadyOnly = options.markReadyOnly === true;
   if (typeof req.method !== "string" || typeof req.path !== "string") return NOT_ALLOWLISTED;
   const where = canonical(foldContinuationBranchPath(req.path));
   if (where === null) return NOT_ALLOWLISTED;
-  const entry = LOCAL_ONLY_ALLOWLIST.find((e) => !exclude.includes(e.id) && (pin !== undefined ? e.id === "A10" : !(setupInstall && e.id === "A10")) && (engineRemove ? e.only === "engineRemove" || ENGINE_REMOVE_BASE_IDS.includes(e.id) : e.only !== "engineRemove" && (e.only === undefined || (e.only === "setupInstall" ? setupInstall : e.only === "setupFinish" ? setupFinish : gate1Attest || (gate1Status && e.alsoOn === "gate1Status")))) && e.method === req.method && e.paths.some((template) => templateMatches(template, where.segments)) && bodyFits(e, req.body, gate1Attest, engineRemove) && (pin === undefined || e.id !== "A10" || (where.segments[1] === pin.owner.toLowerCase() && where.segments[2] === pin.name.toLowerCase() && where.segments[4] === String(pin.number) && isPlainObject(req.body) && req.body.sha === pin.sha)));
+  const entry = LOCAL_ONLY_ALLOWLIST.find((e) => !exclude.includes(e.id) && (!markReadyOnly || (e.id === "A1" && documentBodyFits(req.body, GITHUB_GRAPHQL_DOCUMENTS, VARIABLES, "MarkReady"))) && (pin !== undefined ? e.id === "A10" : !(setupInstall && e.id === "A10")) && (engineRemove ? e.only === "engineRemove" || ENGINE_REMOVE_BASE_IDS.includes(e.id) : e.only !== "engineRemove" && (e.only === undefined || (e.only === "setupInstall" ? setupInstall : e.only === "setupFinish" ? setupFinish : gate1Attest || (gate1Status && e.alsoOn === "gate1Status")))) && e.method === req.method && e.paths.some((template) => templateMatches(template, where.segments)) && bodyFits(e, req.body, gate1Attest, engineRemove) && (pin === undefined || e.id !== "A10" || (where.segments[1] === pin.owner.toLowerCase() && where.segments[2] === pin.name.toLowerCase() && where.segments[4] === String(pin.number) && isPlainObject(req.body) && req.body.sha === pin.sha)));
   if (!entry) return NOT_ALLOWLISTED;
 
   const given = Object.entries(req.query ?? {});
@@ -682,9 +683,11 @@ export interface LocalOnlyGithub extends GithubClient {
  * Wraps `inner`: every call is checked first, and one the allowlist does not hold throws `LocalOnlyGithubError` without reaching `inner`.
  * `exclude` leaves entries out of the list for this client (by id): the client for a paired repository's code repository leaves out A10, so the
  * cloud cannot call merge on it at all and a runner or a person merges there. `gate1Attest` turns on the opt-in entries (A14 to A16, and A7's
- * `fx-gate1` shape) for this client only. `gate1Status` turns on A17 alone (a read), and nothing that writes.
+ * `fx-gate1` shape) for this client only. `markReadyOnly` (D#845 ON-24a, FU-322) narrows a client to A1 with the one `MarkReady` document, whatever else the other options would allow.
+ * The `setup_ready` client, which holds contents write, is built with it.
+ * `gate1Status` turns on A17 alone (a read), and nothing that writes.
  */
-export function localOnlyGithub(inner: GithubClient, options: { exclude?: readonly string[]; gate1Attest?: boolean; gate1Status?: boolean; engineRemove?: boolean; setupInstall?: boolean; setupFinish?: boolean; installMerge?: InstallMergePin } = {}): LocalOnlyGithub {
+export function localOnlyGithub(inner: GithubClient, options: { exclude?: readonly string[]; gate1Attest?: boolean; gate1Status?: boolean; engineRemove?: boolean; setupInstall?: boolean; setupFinish?: boolean; markReadyOnly?: boolean; installMerge?: InstallMergePin } = {}): LocalOnlyGithub {
   const installMerge = options.installMerge;
   if (installMerge !== undefined && !(ownerOrName(installMerge.owner) && ownerOrName(installMerge.name) && Number.isSafeInteger(installMerge.number) && installMerge.number >= 1 && SHA.test(installMerge.sha))) throw new TypeError("localOnlyGithub: installMerge needs a repository, a pull request number and a commit id");
   const exclude = options.exclude ?? [];
@@ -693,8 +696,9 @@ export function localOnlyGithub(inner: GithubClient, options: { exclude?: readon
   const engineRemove = options.engineRemove === true;
   const setupInstall = options.setupInstall === true;
   const setupFinish = options.setupFinish === true;
+  const markReadyOnly = options.markReadyOnly === true;
   const send = (req: GithubRequest): Promise<GithubResponse> => {
-    const rule = localOnlyViolation(req, exclude, { gate1Attest, gate1Status, engineRemove, setupInstall, setupFinish, ...(installMerge === undefined ? {} : { installMerge }) });
+    const rule = localOnlyViolation(req, exclude, { gate1Attest, gate1Status, engineRemove, setupInstall, setupFinish, markReadyOnly, ...(installMerge === undefined ? {} : { installMerge }) });
     if (rule !== null) return Promise.reject(new LocalOnlyGithubError(rule));
     const hasAccept = Object.keys(req.headers ?? {}).some((name) => name.toLowerCase() === "accept");
     return inner.request(hasAccept ? req : { ...req, headers: { ...req.headers, accept: JSON_ACCEPT } });

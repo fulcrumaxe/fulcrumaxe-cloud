@@ -351,7 +351,7 @@ describe("the install pull request step [pg]", () => {
       const r = await rig();
       const g = github();
       const first = await g.port.openDraft({ repo: REPO, branch: BRANCH, base: "main", text: installPullRequestText("1.2.3") });
-      await g.port.markReady({ repo: REPO, pullRequest: first });
+      await g.port.markReady({ repo: REPO, pullRequest: first, setup: true });
       expect(g.repo.pulls[0]!.draft).toBe(false);
       // a refusal of the mutation would fail the setup, so a success proves it was not asked
       g.fake.inject = { label: /^A1 MarkReady$/, reply: FORBIDDEN };

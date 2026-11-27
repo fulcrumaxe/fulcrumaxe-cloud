@@ -1,7 +1,7 @@
 import type { AppCredentialsSource } from "./appCredentials.js";
 import { ADD_DISCUSSION_COMMENT_DOCUMENT, type RetractionSurface } from "./retraction.js";
 import { GH_OWNER_LOGIN_RE, GH_REPO_NAME_RE } from "./eventMapper.js";
-import { getInstallationToken, PLANE_PARITY_PERMISSIONS, RECEIPT_BLOCK_PERMISSIONS, RETRACTION_PERMISSIONS, REVERT_PR_PERMISSIONS, SETUP_FINISH_PERMISSIONS, SETUP_LABELS_PERMISSIONS, type AccessTokenRequester, type InstallationTokenCache } from "./installationToken.js";
+import { getInstallationToken, PLANE_PARITY_PERMISSIONS, RECEIPT_BLOCK_PERMISSIONS, RETRACTION_PERMISSIONS, REVERT_PR_PERMISSIONS, SETUP_FINISH_PERMISSIONS, SETUP_LABELS_PERMISSIONS, SETUP_READY_PERMISSIONS, type AccessTokenRequester, type InstallationTokenCache } from "./installationToken.js";
 import { REVERT_PR_DOCUMENT, revertPrVariables } from "./revertPr.js";
 import { pinnedMergeGateBody, pinnedMergeQueueReadBody } from "./mergeGateGraphql.js";
 
@@ -62,7 +62,7 @@ import { pinnedMergeGateBody, pinnedMergeQueueReadBody } from "./mergeGateGraphq
  *     GitHub's own `message` cut short. It never hears a token, a header or a request body.
  */
 
-export type InstallationHttpKind = "read" | "merge_gate" | "runner_pr" | "repo_map" | "branch_delete" | "branch_sync" | "receipt_block" | "retraction" | "revert_pr" | "plane_parity" | "setup_labels" | "setup_finish";
+export type InstallationHttpKind = "read" | "merge_gate" | "runner_pr" | "repo_map" | "branch_delete" | "branch_sync" | "receipt_block" | "retraction" | "revert_pr" | "plane_parity" | "setup_labels" | "setup_finish" | "setup_ready";
 
 export interface InstallationHttpRequest {
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
@@ -263,6 +263,8 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
       // D#845 ON-8f2b: the `setup_labels` purpose, its fixed permission set and its revoke.
       // D#845 ON-13a4 (FU-261): the `setup_finish` purpose, its fixed permission set and its revoke: fresh for each client, never cached, revoked by `close()`.
       ...(kind === "setup_finish" ? { purpose: "setup_finish" as const, role: "setup_finish", scope: { repositories: [target.name] as [string], permissions: SETUP_FINISH_PERMISSIONS }, revoke: revokeInstallationToken } : {}),
+      // D#845 ON-24a (FU-322): the `setup_ready` purpose (contents and pull requests write, one repository): fresh for each client, never cached, revoked by `close()`.
+      ...(kind === "setup_ready" ? { purpose: "setup_ready" as const, role: "setup_ready", scope: { repositories: [target.name] as [string], permissions: SETUP_READY_PERMISSIONS }, revoke: revokeInstallationToken } : {}),
       ...(kind === "setup_labels" ? { purpose: "setup_labels" as const, role: "setup_labels", scope: { repositories: [target.name] as [string], permissions: SETUP_LABELS_PERMISSIONS }, revoke: revokeInstallationToken } : {}),
     });
     const prefix = `/repos/${target.owner}/${target.name}/`;
@@ -275,7 +277,7 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
 
     return {
       async close() {
-        if (kind === "branch_delete" || kind === "branch_sync" || kind === "retraction" || kind === "revert_pr" || kind === "plane_parity" || kind === "setup_labels" || kind === "setup_finish") await revokeInstallationToken(token);
+        if (kind === "branch_delete" || kind === "branch_sync" || kind === "retraction" || kind === "revert_pr" || kind === "plane_parity" || kind === "setup_labels" || kind === "setup_finish" || kind === "setup_ready") await revokeInstallationToken(token);
       },
       async request(raw) {
         // Snapshot every field of the request exactly once; from here on only the snapshot is used (checks, URL, body, log), so a caller's accessor
@@ -297,7 +299,7 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
         const queryText: Record<string, string> | undefined =
           rawQuery === undefined || rawQuery === null ? undefined : Object.fromEntries(Object.entries(rawQuery as Record<string, unknown>).map(([k, v]) => [k, String(v)]));
         const req = { method: method as typeof raw.method, path, query: queryText, body: snapBody };
-        const graphql = (kind === "runner_pr" || kind === "setup_finish" || kind === "retraction" || target.allowGraphql === true) && req.method === "POST" && req.path === GRAPHQL_PATH;
+        const graphql = (kind === "runner_pr" || kind === "setup_finish" || kind === "setup_ready" || kind === "retraction" || target.allowGraphql === true) && req.method === "POST" && req.path === GRAPHQL_PATH;
         // `revert_pr` may name `/graphql` too, but only the one exact mutation checked below.
         // D#694 B5a: the hosted `merge_gate` client may send `POST /graphql` only for one of seven pinned documents (mergeGateGraphql.ts); never a blanket flag.
         // D#694 B7-2: the hosted `read` client may send the one queue read (MERGE_QUEUE_READ_DOCUMENT) and no other document, with the same checks.
@@ -312,6 +314,8 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
         if (kind === "runner_pr" && !(graphql || runnerPrAllowed(req.method, req.path, prefix) || runnerPrCompareAllowed(req.method, req.path, req.query, req.body, prefix))) throw new InstallationHttpError("path_refused");
         // `setup_finish` holds issues and discussions write, so it gets an exact list too: `POST /graphql`, `GET` and `POST` of the repository's issues. Nothing else, PUT and PATCH included.
         if (kind === "setup_finish" && !(graphql || setupFinishAllowed(req.method, req.path, prefix))) throw new InstallationHttpError("path_refused");
+        // `setup_ready` holds contents:write, so it may send `POST /graphql` and nothing else (the one document is fixed by the fence in front of it: `localOnlyGithub` `markReadyOnly`). No REST call at all.
+        if (kind === "setup_ready" && !graphql) throw new InstallationHttpError("path_refused");
         // `setup_labels` holds issues:write, so it gets the narrowest list there is: create a label, with exactly the three fields of one label row.
         if (kind === "setup_labels") {
           const b = req.body;
@@ -403,7 +407,7 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
             headers: {
               accept: "application/vnd.github+json",
               authorization: `Bearer ${token}`,
-              ...(kind === "branch_delete" || kind === "receipt_block" || kind === "retraction" || kind === "revert_pr" || kind === "plane_parity" || kind === "setup_labels" || kind === "setup_finish" ? { "user-agent": "fulcrumaxe-cloud" } : {}),
+              ...(kind === "branch_delete" || kind === "receipt_block" || kind === "retraction" || kind === "revert_pr" || kind === "plane_parity" || kind === "setup_labels" || kind === "setup_finish" || kind === "setup_ready" ? { "user-agent": "fulcrumaxe-cloud" } : {}),
               "x-github-api-version": "2022-11-28",
               ...(sendBody !== undefined ? { "content-type": "application/json" } : {}),
             },
