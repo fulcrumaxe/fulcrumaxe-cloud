@@ -5,6 +5,7 @@ import { withTenant } from "@fx/db/src/withTenant.js";
 import { RunnerHttpError, pgCode, type RunnerCloudDeps, type SessionPrincipal } from "./http.js";
 import { requireMemberRole } from "./memberRole.js";
 import { RunPullRequestError, type RunPullRequestPort } from "./runPullRequest.js";
+import { guardTwinVisibility, twinVisibilityError } from "./twinVisibility.js";
 
 /**
  * D#845 ON-27b: the cloud's two halves of a private twin's seed (the runner's half is fx-runner's `twinSeed.ts`). The route, the card and the reconcile tick that call them come with ON-27d and ON-27e; until then nothing does,
@@ -67,6 +68,9 @@ export async function issueTwinSeed(deps: RunnerCloudDeps, principal: SessionPri
   if (facts.public.owner === null || facts.public.name === null || facts.private.owner === null || facts.private.name === null) throw refuse(409, "repo_unnamed", "a repository has no name on record");
   if (facts.setupId === null) throw refuse(409, "setup_not_found", "the private twin has no setup waiting");
   if (facts.runnerId === null) throw refuse(409, "setup_not_placed", "the private twin is not placed on a machine");
+  // FU-311: a private twin whose private repository is public is refused, and one whose visibility cannot be read is left alone.
+  const visible = await guardTwinVisibility(deps, principal, twinId);
+  if (visible !== "ok") throw twinVisibilityError(visible);
   let seen: { branch: string; tip: string | null };
   try {
     seen = await readTip(port, { id: facts.public.id, owner: facts.public.owner, name: facts.public.name });
@@ -108,10 +112,10 @@ export async function issueTwinSeed(deps: RunnerCloudDeps, principal: SessionPri
   return { job_id: jobId, attempt: row.o_attempt };
 }
 
-export type TwinSeedCheck = "ready" | "failed" | "not_ready" | "not_found" | "github_unavailable";
+export type TwinSeedCheck = "ready" | "failed" | "refused" | "not_ready" | "not_found" | "github_unavailable";
 
 /** `userId` is null for the tick's own session (no person); a person must be an owner or admin (the definer re-checks). */
-export async function checkTwinSeed(deps: Pick<RunnerCloudDeps, "appUserPool" | "pullRequests">, principal: { accountId: string; userId: string | null }, twinId: string): Promise<TwinSeedCheck> {
+export async function checkTwinSeed(deps: Pick<RunnerCloudDeps, "appUserPool" | "pullRequests" | "repoVisibility" | "repoVisibilityTimeoutMs">, principal: { accountId: string; userId: string | null }, twinId: string): Promise<TwinSeedCheck> {
   const port = deps.pullRequests ?? null;
   if (port === null) return "github_unavailable";
   const tenant = <T>(fn: (client: PoolClient) => Promise<T>) => (principal.userId === null ? withTenant(deps.appUserPool, principal.accountId, fn) : withTenant(deps.appUserPool, principal.accountId, principal.userId, fn));
@@ -127,6 +131,8 @@ export async function checkTwinSeed(deps: Pick<RunnerCloudDeps, "appUserPool" | 
   });
   if (target === null) return "not_ready";
   if (target.gh_owner === null || target.gh_name === null) return "not_ready";
+  const visible = await guardTwinVisibility(deps, principal, twinId);
+  if (visible !== "ok") return visible === "refused" ? "refused" : "github_unavailable";
   let tip: string | null;
   try {
     tip = (await readTip(port, { id: target.repo_id, owner: target.gh_owner, name: target.gh_name })).tip;

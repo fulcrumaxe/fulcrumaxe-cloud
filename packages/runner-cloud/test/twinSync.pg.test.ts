@@ -64,7 +64,7 @@ describe("twin sync [pg]", () => {
       },
     }) as unknown as SetupInstallPort;
   const depsFor = (over: Partial<RunnerCloudDeps> = {}): RunnerCloudDeps =>
-    h.deps({ setupPush: setupPort(), planePush: hosted(), pullRequests: github(TIPS), setupInstall: install(), engineCommandSigner: async () => ({ keyId: "k1", signMachineJob: (job: MachineJob) => signMachineJob(job, "k1", jobKeys.privateKey) }) as never, ...over });
+    h.deps({ repoVisibility: async () => "private", setupPush: setupPort(), planePush: hosted(), pullRequests: github(TIPS), setupInstall: install(), engineCommandSigner: async () => ({ keyId: "k1", signMachineJob: (job: MachineJob) => signMachineJob(job, "k1", jobKeys.privateKey) }) as never, ...over });
 
   interface Rig {
     who: SeedRefs;
@@ -773,6 +773,34 @@ describe("twin sync [pg]", () => {
       expect(await asRunner("SELECT twin_sync_head_record($1::uuid, $2::uuid, $3) AS ok", [a.setupId, jobId, PUSHED])).toEqual([{ ok: false }]);
       expect(await asRunner("SELECT o_result FROM twin_sync_progress_record($1::uuid, $2::uuid, 99, 'push', 'started', NULL, NULL)", [a.setupId, jobId])).toEqual([{ o_result: "not_found" }]);
       expect(await twinRow(a.twinId)).toMatchObject({ sync_head: PUSHED, verified: false });
+    });
+  });
+
+  /** FU-311 (migration 1116): what the visibility port answers for each repository of the rig; any repository not listed reads as unknown. */
+  const seeing = (r: Rig, priv: "private" | "public" | "unknown", pub: "private" | "public" | "unknown" = "public"): Partial<RunnerCloudDeps> => ({ repoVisibility: async (_accountId: string, repoId: string) => (repoId === r.privateId ? priv : repoId === r.publicId ? pub : "unknown") });
+  const noteOf = async (id: string) => (await h.admin.query<{ note: string | null }>("SELECT note FROM repo_twins WHERE id = $1", [id])).rows[0]!.note;
+
+  describe("the private repository must stay private (FU-311)", () => {
+    it("issues nothing for a twin whose private repository is public (refused twin_not_private, no job), nor when it cannot be read; a public side gone private is a note", async () => {
+      const r = await rig();
+      expect(await failureOf(() => issue(r, { deps: depsFor(seeing(r, "unknown")) }))).toEqual({ status: 409, code: "repo_visibility_unknown" });
+      expect(await twinRow(r.twinId)).toMatchObject({ state: "ready", failure_code: null });
+      expect(await failureOf(() => issue(r, { deps: depsFor(seeing(r, "public")) }))).toEqual({ status: 409, code: "twin_not_private" });
+      expect(await twinRow(r.twinId)).toMatchObject({ state: "refused", failure_code: "twin_not_private" });
+      expect(await jobRows(r.setupId)).toHaveLength(0);
+      const n = await rig();
+      expect(await issue(n, { deps: depsFor(seeing(n, "private", "private")) })).toMatchObject({ outcome: "issued" });
+      expect(await noteOf(n.twinId)).toBe("public_repo_private");
+    });
+
+    it("the check verifies nothing for a twin whose private repository is public: refused, and GitHub is not asked", async () => {
+      const r = await rig();
+      await finished(r);
+      const asked: unknown[] = [];
+      expect(await checkTwinSync(depsFor({ setupInstall: install({}, asked), ...seeing(r, "unknown") }), principal(r), r.twinId)).toBe("github_unavailable");
+      expect(await checkTwinSync(depsFor({ setupInstall: install({}, asked), ...seeing(r, "public") }), principal(r), r.twinId)).toBe("refused");
+      expect(asked).toEqual([]);
+      expect(await twinRow(r.twinId)).toMatchObject({ state: "refused", failure_code: "twin_not_private" });
     });
   });
 });

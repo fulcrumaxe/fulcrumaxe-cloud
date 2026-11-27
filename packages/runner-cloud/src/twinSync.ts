@@ -6,6 +6,7 @@ import { RunnerHttpError, pgCode, type RunnerCloudDeps } from "./http.js";
 import { requireMemberRole } from "./memberRole.js";
 import { LocalOnlyGithubError } from "./localOnlyGithub.js";
 import { RunPullRequestError, type RunPullRequestPort, type SetupInstallPort } from "./runPullRequest.js";
+import { guardTwinVisibility, twinVisibilityError } from "./twinVisibility.js";
 
 /**
  * D#845 ON-27d2: the cloud's halves of a private twin's sync, the public repository's changes coming into the twin (the runner's half is fx-runner's `twinSync.ts`). The sync pull request through the App, the merge handling, the
@@ -86,6 +87,8 @@ export async function issueTwinSync(deps: RunnerCloudDeps, principal: { accountI
   if (facts.runnerId === null) throw refuse(409, "setup_not_placed", "the private twin is not placed on a machine");
   const pub = { id: facts.public.id, owner: facts.public.owner, name: facts.public.name };
   const prv = { id: facts.private.id, owner: facts.private.owner, name: facts.private.name };
+  const visible = await guardTwinVisibility(deps, principal, id);
+  if (visible !== "ok") throw twinVisibilityError(visible);
   let base: string | null;
   let tip: string | null;
   let publicBranch: string;
@@ -144,12 +147,14 @@ export async function issueTwinSync(deps: RunnerCloudDeps, principal: { accountI
 export type TwinSyncCheck = "verified" | "refused" | "not_ready" | "not_found" | "github_unavailable";
 
 /** `userId` is null for the tick's own session (no person); a person must be an owner or admin (the definer re-checks). */
-export async function checkTwinSync(deps: Pick<RunnerCloudDeps, "appUserPool" | "setupInstall">, principal: { accountId: string; userId: string | null }, twinId: string): Promise<TwinSyncCheck> {
+export async function checkTwinSync(deps: Pick<RunnerCloudDeps, "appUserPool" | "setupInstall" | "repoVisibility" | "repoVisibilityTimeoutMs">, principal: { accountId: string; userId: string | null }, twinId: string): Promise<TwinSyncCheck> {
   const port = deps.setupInstall ?? null;
   const tenant = <T>(fn: (client: PoolClient) => Promise<T>) => (principal.userId === null ? withTenant(deps.appUserPool, principal.accountId, fn) : withTenant(deps.appUserPool, principal.accountId, principal.userId, fn));
   const id = twinId.toLowerCase();
   const target = await tenant(async (client) => (await client.query<{ o_repo_id: string; o_owner: string; o_name: string; o_branch: string; o_head: string; o_base: string }>("SELECT o_repo_id, o_owner, o_name, o_branch, o_head, o_base FROM twin_sync_to_verify($1::uuid)", [id])).rows[0] ?? null);
   if (target === null) return "not_ready";
+  const visible = await guardTwinVisibility(deps, principal, id);
+  if (visible !== "ok") return visible === "refused" ? "refused" : "github_unavailable";
   if (port === null) return "github_unavailable";
   const repo = { id: target.o_repo_id, owner: target.o_owner, name: target.o_name };
   let ok = false;
@@ -209,12 +214,14 @@ export type TwinSyncPrOpen = "recorded" | "refused" | "not_ready" | "not_found" 
  * Draft first, as the install's step is: the branch must still be at the verified head, the pull request's head must be it, and its changed files (every page) must all be paths the signed job named, before the label and the ready mark. A pull
  * request that fails any of these is closed and the twin refused (`head_unconfirmed`); a GitHub that cannot be asked leaves everything where it is, and the next pass reuses the open pull request.
  */
-export async function openTwinSyncPr(deps: Pick<RunnerCloudDeps, "appUserPool" | "setupInstall" | "planePush">, principal: { accountId: string; userId: string | null }, twinId: string): Promise<TwinSyncPrOpen> {
+export async function openTwinSyncPr(deps: Pick<RunnerCloudDeps, "appUserPool" | "setupInstall" | "planePush" | "repoVisibility" | "repoVisibilityTimeoutMs">, principal: { accountId: string; userId: string | null }, twinId: string): Promise<TwinSyncPrOpen> {
   const port = deps.setupInstall ?? null;
   const tenant = <T>(fn: (client: PoolClient) => Promise<T>) => (principal.userId === null ? withTenant(deps.appUserPool, principal.accountId, fn) : withTenant(deps.appUserPool, principal.accountId, principal.userId, fn));
   const id = twinId.toLowerCase();
   const t = await tenant(async (client) => (await client.query<{ o_repo_id: string; o_owner: string; o_name: string; o_branch: string; o_head: string; o_base: string; o_public_owner: string; o_public_name: string; o_tip: string; o_synced: string; o_paths: string[] }>("SELECT o_repo_id, o_owner, o_name, o_branch, o_head, o_base, o_public_owner, o_public_name, o_tip, o_synced, o_paths FROM twin_sync_pr_target($1::uuid)", [id])).rows[0] ?? null);
   if (t === null) return "not_ready";
+  const visible = await guardTwinVisibility(deps, principal, id);
+  if (visible !== "ok") return visible === "refused" ? "refused" : "github_unavailable";
   if (port === null) return "github_unavailable";
   const repo = { id: t.o_repo_id, owner: t.o_owner, name: t.o_name };
   const publicRepo = `${t.o_public_owner}/${t.o_public_name}`;

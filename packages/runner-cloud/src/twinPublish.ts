@@ -5,6 +5,7 @@ import { withTenant } from "@fx/db/src/withTenant.js";
 import { RunnerHttpError, pgCode, type RunnerCloudDeps, type PlanePushHostedPort } from "./http.js";
 import { requireMemberRole } from "./memberRole.js";
 import { RunPullRequestError, type RunPullRequestPort } from "./runPullRequest.js";
+import { guardTwinVisibility, twinVisibilityError } from "./twinVisibility.js";
 
 /**
  * D#845 ON-27c2: the cloud's halves of a private twin's publish (the runner's half is fx-runner's `twinPublish.ts`). The reconcile tick and the card that call them come with ON-27d and ON-27e; until then nothing does, and
@@ -88,6 +89,8 @@ export async function issueTwinPublish(deps: RunnerCloudDeps, principal: { accou
   if (facts.runnerId === null) throw refuse(409, "setup_not_placed", "the private twin is not placed on a machine");
   const pub = { id: facts.public.id, owner: facts.public.owner, name: facts.public.name };
   const prv = { id: facts.private.id, owner: facts.private.owner, name: facts.private.name };
+  const visible = await guardTwinVisibility(deps, principal, id);
+  if (visible !== "ok") throw twinVisibilityError(visible);
   let head: string | null;
   let tip: string | null;
   let publicBranch: string;
@@ -155,12 +158,14 @@ const unavailable = (error: unknown): boolean => {
 };
 
 /** `userId` is null for the tick's own session (no person); a person must be an owner or admin (the definer re-checks). */
-export async function checkTwinPublish(deps: Pick<RunnerCloudDeps, "appUserPool" | "planePush">, principal: { accountId: string; userId: string | null }, twinId: string): Promise<TwinPublishCheck> {
+export async function checkTwinPublish(deps: Pick<RunnerCloudDeps, "appUserPool" | "planePush" | "repoVisibility" | "repoVisibilityTimeoutMs">, principal: { accountId: string; userId: string | null }, twinId: string): Promise<TwinPublishCheck> {
   const port: PlanePushHostedPort | null = deps.planePush ?? null;
   const tenant = <T>(fn: (client: PoolClient) => Promise<T>) => (principal.userId === null ? withTenant(deps.appUserPool, principal.accountId, fn) : withTenant(deps.appUserPool, principal.accountId, principal.userId, fn));
   const id = twinId.toLowerCase();
   const target = await tenant(async (client) => (await client.query<{ o_owner: string; o_name: string; o_branch: string; o_head: string; o_tip: string }>("SELECT o_owner, o_name, o_branch, o_head, o_tip FROM twin_publish_to_verify($1::uuid)", [id])).rows[0] ?? null);
   if (target === null) return "not_ready";
+  const visible = await guardTwinVisibility(deps, principal, id);
+  if (visible !== "ok") return visible === "refused" ? "refused" : "github_unavailable";
   if (port === null || port.findOpenPullRequest === undefined) return "github_unavailable";
   const input = { accountId: principal.accountId, codeRepo: `${target.o_owner}/${target.o_name}`, branch: target.o_branch, headSha: target.o_head };
   let pr: { number: number } | null = null;

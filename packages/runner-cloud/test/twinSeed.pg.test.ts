@@ -41,7 +41,7 @@ describe("twin seed [pg]", () => {
       },
     }) as unknown as RunPullRequestPort;
   const depsFor = (over: Partial<RunnerCloudDeps> = {}): RunnerCloudDeps =>
-    h.deps({ setupPush: port(), pullRequests: github({ "acme/widgets": PUB_HEAD }), engineCommandSigner: async () => ({ keyId: "k1", signMachineJob: (job: MachineJob) => signMachineJob(job, "k1", jobKeys.privateKey) }) as never, ...over });
+    h.deps({ repoVisibility: async () => "private", setupPush: port(), pullRequests: github({ "acme/widgets": PUB_HEAD }), engineCommandSigner: async () => ({ keyId: "k1", signMachineJob: (job: MachineJob) => signMachineJob(job, "k1", jobKeys.privateKey) }) as never, ...over });
 
   interface Rig {
     who: SeedRefs;
@@ -540,6 +540,52 @@ describe("twin seed [pg]", () => {
       } finally {
         probe.release();
       }
+    });
+  });
+
+  /** FU-311 (migration 1116): what the visibility port answers for each repository of the rig; any repository not listed reads as unknown. */
+  const seeing = (r: Rig, priv: "private" | "public" | "unknown", pub: "private" | "public" | "unknown" = "public"): Partial<RunnerCloudDeps> => ({ repoVisibility: async (_accountId: string, repoId: string) => (repoId === r.privateId ? priv : repoId === r.publicId ? pub : "unknown") });
+  const noteOf = async (id: string) => (await h.admin.query<{ note: string | null }>("SELECT note FROM repo_twins WHERE id = $1", [id])).rows[0]!.note;
+
+  describe("the private repository must stay private (FU-311)", () => {
+    it("issues nothing for a twin whose private repository is public: the twin is refused twin_not_private, and no job is written", async () => {
+      const r = await rig();
+      expect(await failureOf(() => issue(r, { deps: depsFor(seeing(r, "public")) }))).toEqual({ status: 409, code: "twin_not_private" });
+      expect(await twinRow(r.twinId)).toMatchObject({ state: "refused", failure_code: "twin_not_private" });
+      expect(await jobRows(r.setupId)).toHaveLength(0);
+    });
+
+    it("fails closed on a visibility that cannot be read: nothing is issued and the twin is left as it was", async () => {
+      const r = await rig();
+      for (const priv of ["unknown", "throws"] as const) {
+        const deps = depsFor(priv === "throws" ? { repoVisibility: async () => { throw new Error("boom"); } } : seeing(r, "unknown"));
+        expect(await failureOf(() => issue(r, { deps })), priv).toEqual({ status: 409, code: "repo_visibility_unknown" });
+      }
+      expect(await twinRow(r.twinId)).toMatchObject({ state: "seeding", failure_code: null });
+      expect(await jobRows(r.setupId)).toHaveLength(0);
+    });
+
+    it("a public repository that turned private is a note, not a refusal: the copy is issued, and the note clears when it is public again", async () => {
+      const r = await rig();
+      expect((await issue(r, { deps: depsFor(seeing(r, "private", "private")) })).attempt).toBe(1);
+      expect(await noteOf(r.twinId)).toBe("public_repo_private");
+      expect(await twinRow(r.twinId)).toMatchObject({ state: "seeding", failure_code: null });
+      expect(await failureOf(() => issue(r, { deps: depsFor(seeing(r, "private", "public")) }))).toEqual({ status: 409, code: "seed_live" });
+      expect(await noteOf(r.twinId)).toBeNull();
+    });
+
+    it("the check finishes nothing for a twin whose private repository is public (refused, GitHub not asked), and waits when it cannot be read", async () => {
+      const r = await rig();
+      const jobId = await started(r);
+      await reportedToPush(r, jobId);
+      expect((await token(r, jobId)).status).toBe(200);
+      expect((await pushed(r, jobId)).status).toBe(200);
+      const asked: string[] = [];
+      const gh = github({ "acme/widgets-private": PUB_HEAD }, asked);
+      expect(await checkTwinSeed(depsFor({ pullRequests: gh, ...seeing(r, "unknown") }), principal(r), r.twinId)).toBe("github_unavailable");
+      expect(await checkTwinSeed(depsFor({ pullRequests: gh, ...seeing(r, "public") }), principal(r), r.twinId)).toBe("refused");
+      expect(asked).toEqual([]);
+      expect(await twinRow(r.twinId)).toMatchObject({ state: "refused", failure_code: "twin_not_private", published_private_sha: null, synced_public_sha: null });
     });
   });
 });
