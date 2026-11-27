@@ -2,6 +2,8 @@ import type { NextRequest, NextResponse } from "next/server";
 import { productionVercelEnvSource } from "../../../../lib/setupRequestEnvSource";
 import { getWorker } from "../../../../lib/worker";
 import { computeParityForJob } from "../../../../lib/planeParityCompute";
+import { computeTwinParityForJob } from "../../../../lib/twinParityCompute";
+import { twinSweepPorts } from "../../../../lib/twinSweepPorts";
 import { readRepoFileForImport } from "../../../../lib/github/planSource";
 import { liveInstallationTokens } from "@fx/github";
 import { setupRequestCheckHandler } from "./handler";
@@ -21,6 +23,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     getWorker,
     envSource: productionVercelEnvSource,
     planeParity: computeParityForJob,
+    twin: { compute: computeTwinParityForJob, ports: twinSweepPorts },
     repoFiles: { read: readRepoFileForImport, liveSecrets: () => liveInstallationTokens() },
     log: cronLog,
   });

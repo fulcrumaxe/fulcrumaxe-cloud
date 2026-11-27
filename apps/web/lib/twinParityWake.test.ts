@@ -47,7 +47,7 @@ describe("wakeTwinParity", () => {
     expect(lookup).toHaveLength(1);
     expect(lookup[0]!.params.slice(0, 3)).toEqual([ACCOUNT, REPO, "acme/widgets"]);
     expect(markDue).toHaveBeenCalledTimes(1);
-    expect(markDue).toHaveBeenCalledWith(expect.anything(), { accountId: ACCOUNT, twinIds: [TWIN] });
+    expect(markDue).toHaveBeenCalledWith(expect.anything(), { accountId: ACCOUNT, twinIds: [TWIN], repoId: REPO, fullName: "acme/widgets" });
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(woken()).toBe(true);
   });

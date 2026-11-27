@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { runGatedTick } from "@fx/core/src/pendingWork";
 import type { VercelEnvSource } from "@fx/core/src/setup-requests/checks";
 import type { ParityCompute } from "@fx/core/src/repos/planeParityChecks.js";
+import type { TwinParityCompute, TwinWorkPorts } from "@fx/core/src/repos/twinSweep.js";
 import type { RepoFileRead } from "@fx/core/src/memory/repoFileSweep.js";
 import type { LiveSecretsSource } from "@fx/core/src/memory/index.js";
 import type { SetupRequestCheckWorker } from "../../../../lib/worker";
@@ -30,6 +31,8 @@ export interface SetupRequestCheckHandlerDeps {
   envSource: VercelEnvSource;
   /** D#598 P1d-3: the plane parity check, run in the same sweep for the pairings whose time has come. Absent, no parity check runs. */
   planeParity?: ParityCompute;
+  /** D#845 ON-27d4b: the private twins' parity checks and work (seed check, publish, sync), run in the same sweep. Absent, none runs. */
+  twin?: { compute: TwinParityCompute; ports: TwinWorkPorts };
   /** D#601 MEM-5b: the repo instruction file import, run in the same sweep for the files whose time has come. Absent, none runs. */
   repoFiles?: { read: RepoFileRead; liveSecrets: LiveSecretsSource };
   log(line: string): void;
@@ -49,7 +52,7 @@ export async function setupRequestCheckHandler(req: NextRequest, deps: SetupRequ
         deps.log("setup request check: worker not configured");
         return { result: { configured: false }, workFound: false, nextDueAt: null };
       }
-      const { nextDueAt, ...counts } = await worker.sweepSetupRequestChecks({ envSource: deps.envSource, ...(deps.planeParity ? { planeParity: deps.planeParity } : {}), ...(deps.repoFiles ? { repoFiles: deps.repoFiles } : {}), ...(deps.planeParity || deps.repoFiles ? { deadlineAt } : {}) });
+      const { nextDueAt, ...counts } = await worker.sweepSetupRequestChecks({ envSource: deps.envSource, ...(deps.planeParity ? { planeParity: deps.planeParity } : {}), ...(deps.twin ? { twin: deps.twin } : {}), ...(deps.repoFiles ? { repoFiles: deps.repoFiles } : {}), ...(deps.planeParity || deps.twin || deps.repoFiles ? { deadlineAt } : {}) });
       return { result: { configured: true, ...counts }, workFound: counts.listed > 0, nextDueAt };
     },
     deps.log,
