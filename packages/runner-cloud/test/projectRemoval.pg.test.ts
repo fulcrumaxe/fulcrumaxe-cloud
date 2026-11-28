@@ -150,6 +150,25 @@ describe("removing a project [pg]", () => {
       expect(await audits(other)).toEqual([]);
     });
 
+    it("the identity reset's refusal (an account that went inactive after the role check) is 403 forbidden, not a 500, and the removal rolls back whole", async () => {
+      const r = await rig();
+      await h.admin.query("INSERT INTO repo_github_identity (account_id, repo_id, identity) VALUES ($1, $2, 'personal')", [r.who.accountId, r.who.repoId]);
+      // The account cannot be made inactive between the role check and the reset from a test, so the reset itself is made to answer what the definer answers for an inactive account: 42501.
+      await h.admin.query("CREATE FUNCTION public.fu330_refuse() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'inactive account' USING ERRCODE = 'insufficient_privilege'; END $$");
+      await h.admin.query("CREATE TRIGGER fu330_refuse BEFORE UPDATE ON repo_github_identity FOR EACH ROW EXECUTE FUNCTION public.fu330_refuse()");
+      try {
+        const before = await snapshot(r);
+        const res = await remove(r, undefined, { who: "admin" }).catch((e: Error) => ({ status: 500, body: e.message }));
+        expect(res.status, JSON.stringify(res.body)).toBe(403);
+        expect(res.body).toMatchObject({ error: { code: "forbidden" } });
+        expect(await snapshot(r)).toEqual(before);
+        expect((await h.admin.query<{ identity: string }>("SELECT identity FROM repo_github_identity WHERE repo_id = $1", [r.who.repoId])).rows[0]?.identity).toBe("personal");
+      } finally {
+        await h.admin.query("DROP TRIGGER fu330_refuse ON repo_github_identity");
+        await h.admin.query("DROP FUNCTION public.fu330_refuse()");
+      }
+    });
+
     it("a fault before commit leaves every row as it was", async () => {
       const r = await rig();
       const before = await snapshot(r);
