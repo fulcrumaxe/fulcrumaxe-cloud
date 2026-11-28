@@ -133,12 +133,15 @@ describe("states", () => {
   it("words capacity per class, and facts and the minter of a token-made runner", () => {
     expect(capacityText(readRunner(wire()))).toBe("Light 1 of 8 · Heavy 0 of 4");
     expect(capacityText(readRunner(wire({ capacity: null })))).toBe("Capacity unknown");
-    expect(factsText(readRunner(wire()))).toBe("macos · arm64 · os_sandbox");
+    expect(factsText(readRunner(wire()))).toBe("macos · arm64 · OS sandbox");
     // D#587 B-7c: the machine reads its platform and the words of that platform's support row, which the cloud sends; a WSL2 machine is never worded as Linux, and nothing is claimed when the cloud sends no row.
     const facts = (over) => factsText(readRunner(wire({ facts: { os: "linux", arch: "x64", engine: "os_sandbox", ...over } })));
-    expect(facts({ platform: "wsl2", support: "supported, OS sandbox only, NAT networking" })).toBe("wsl2 · x64 · os_sandbox · supported, OS sandbox only, NAT networking");
-    expect(facts({ platform: "linux", support: "supported" })).toBe("linux · x64 · os_sandbox · supported");
-    expect(facts({ platform: null, support: null })).toBe("linux · x64 · os_sandbox");
+    expect(facts({ platform: "wsl2", support: "supported, OS sandbox only, NAT networking" })).toBe("wsl2 · x64 · OS sandbox · supported, OS sandbox only, NAT networking");
+    expect(facts({ platform: "linux", support: "supported" })).toBe("linux · x64 · OS sandbox · supported");
+    expect(facts({ platform: null, support: null })).toBe("linux · x64 · OS sandbox")
+    expect(facts({ engine: "microvm" })).toBe("linux · x64 · microVM");
+    // FU-335: no raw engine code reaches the line, known or not.
+    for (const engine of ["os_sandbox", "microvm", "future_engine"]) expect(facts({ engine, support: null })).not.toMatch(/os_sandbox|microvm|future_engine/);;
     expect(facts({ platform: "wsl2" })).not.toMatch(/\bsupported\b/);
     expect(provText(readRunner(wire({ provisioning: { minted_by: { id: ME, name: "Ada Admin" }, first_ip: "203.0.113.9" } })))).toBe("Made from a token by Ada Admin · first seen at 203.0.113.9");
     expect(provText(readRunner(wire({ provisioning: { minted_by: { id: ME, name: "Ada Admin" }, first_ip: null } })))).toBe("Made from a token by Ada Admin");
