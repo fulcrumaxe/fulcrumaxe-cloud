@@ -18,6 +18,7 @@ export * from "./jobSignature.js";
 export * from "./httpSignature.js";
 export * from "./copy.js";
 export * from "./preflight.js";
+export * from "./platformSupport.js";
 export * from "./pairingDigest.js";
 export * from "./cliModels.js";
 export { isKnownStreamJsonType, isMalformedAssistant, normalizeMessage, resultUsageOf } from "./streamJson.js";

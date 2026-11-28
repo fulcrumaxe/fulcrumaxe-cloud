@@ -56,7 +56,7 @@ export function readRunner(r) {
     runs: (Array.isArray(r.current_runs) ? r.current_runs : []).filter((x) => x && typeof x.id === "string").map((x) => ({ id: x.id, label: text(x.label) || "A run" })),
     repos: (Array.isArray(r.repos) ? r.repos : []).map((x) => text(x && x.name)).filter(Boolean),
     labels: (Array.isArray(r.labels) ? r.labels : []).map(text).filter(Boolean),
-    facts: r.facts && typeof r.facts === "object" ? { os: text(r.facts.os), arch: text(r.facts.arch), engine: text(r.facts.engine), preflight: readPreflight(r.facts.preflight) } : null,
+    facts: r.facts && typeof r.facts === "object" ? { os: text(r.facts.os), arch: text(r.facts.arch), engine: text(r.facts.engine), platform: text(r.facts.platform), support: text(r.facts.support), preflight: readPreflight(r.facts.preflight) } : null,
     sandboxes: readSandboxes(r.sandboxes),
     paused: r.paused === true,
     draining: r.draining === true,
@@ -144,7 +144,7 @@ export const NO_PREFLIGHT = "Not reported yet";
 export const PREFLIGHT_OK = "All checks passed";
 /** The Machines row's preflight lines: the distinct fixed lines of the reported codes, or null while the machine has not said (the row then says NO_PREFLIGHT), or [] when every check passed. */
 export const preflightLines = (r) => (r.facts === null || r.facts.preflight === null ? null : [...new Set(r.facts.preflight.map((p) => p.fix))]);
-export const factsText = (r) => (r.facts === null ? "Not reported yet" : [r.facts.os, r.facts.arch, r.facts.engine].filter(Boolean).join(" · ") || "Not reported yet");
+export const factsText = (r) => (r.facts === null ? "Not reported yet" : [r.facts.platform || r.facts.os, r.facts.arch, r.facts.engine, r.facts.support].filter(Boolean).join(" · ") || "Not reported yet");
 export const provText = (r) => (r.prov === null ? "" : "Made from a token by " + r.prov.by + (r.prov.ip ? " · first seen at " + r.prov.ip : ""));
 
 /** Which controls a row shows, in order: [{ action, label }]. A removed runner has none (the register-again button is separate). */

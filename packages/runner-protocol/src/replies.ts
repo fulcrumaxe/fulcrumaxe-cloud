@@ -116,7 +116,9 @@ export const PREFLIGHT_CAPABILITY = "preflight" as const;
 export const HEARTBEAT_INVENTORY_CAPABILITY = "heartbeat_inventory" as const;
 /** D#845 ON-13c3: this cloud keeps the engine session lease (migration 1092) and sends `engine_lease`. Said only to a runner that declared `engine_lease_v1` at protocol 22 or later. */
 export const ENGINE_LEASE_CAPABILITY = "engine_lease" as const;
-export const HELLO_REPLY_CAPABILITIES = [WATCH_MODE_CAPABILITY, KVM_FACT_CAPABILITY, PREFLIGHT_CAPABILITY, HEARTBEAT_INVENTORY_CAPABILITY, ENGINE_LEASE_CAPABILITY] as const;
+/** D#587 B-7c: this cloud stores `facts.platform` (migration 1122). Said only to a runner that declared `platform_fact_v1`; the runner then sends `platform` on its later hellos. */
+export const PLATFORM_FACT_CAPABILITY = "platform_fact" as const;
+export const HELLO_REPLY_CAPABILITIES = [WATCH_MODE_CAPABILITY, KVM_FACT_CAPABILITY, PREFLIGHT_CAPABILITY, HEARTBEAT_INVENTORY_CAPABILITY, ENGINE_LEASE_CAPABILITY, PLATFORM_FACT_CAPABILITY] as const;
 
 /** 200 from hello: the protocol version this cloud speaks, the wake grant for a runner that asked for one, and the capabilities of this cloud. */
 export const HelloReply = z.object({ protocol_version: safeInt.min(1), wake, capabilities: z.array(z.enum(HELLO_REPLY_CAPABILITIES)).max(HELLO_REPLY_CAPABILITIES.length).refine((list) => new Set(list).size === list.length, { message: "a capability appears once" }).optional() }).strict();

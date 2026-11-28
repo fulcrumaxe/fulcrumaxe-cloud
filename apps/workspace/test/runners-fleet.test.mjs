@@ -134,6 +134,12 @@ describe("states", () => {
     expect(capacityText(readRunner(wire()))).toBe("Light 1 of 8 · Heavy 0 of 4");
     expect(capacityText(readRunner(wire({ capacity: null })))).toBe("Capacity unknown");
     expect(factsText(readRunner(wire()))).toBe("macos · arm64 · os_sandbox");
+    // D#587 B-7c: the machine reads its platform and the words of that platform's support row, which the cloud sends; a WSL2 machine is never worded as Linux, and nothing is claimed when the cloud sends no row.
+    const facts = (over) => factsText(readRunner(wire({ facts: { os: "linux", arch: "x64", engine: "os_sandbox", ...over } })));
+    expect(facts({ platform: "wsl2", support: "supported as a preview, not yet verified, OS sandbox only" })).toBe("wsl2 · x64 · os_sandbox · supported as a preview, not yet verified, OS sandbox only");
+    expect(facts({ platform: "linux", support: "supported" })).toBe("linux · x64 · os_sandbox · supported");
+    expect(facts({ platform: null, support: null })).toBe("linux · x64 · os_sandbox");
+    expect(facts({ platform: "wsl2" })).not.toMatch(/\bsupported\b/);
     expect(provText(readRunner(wire({ provisioning: { minted_by: { id: ME, name: "Ada Admin" }, first_ip: "203.0.113.9" } })))).toBe("Made from a token by Ada Admin · first seen at 203.0.113.9");
     expect(provText(readRunner(wire({ provisioning: { minted_by: { id: ME, name: "Ada Admin" }, first_ip: null } })))).toBe("Made from a token by Ada Admin");
   });

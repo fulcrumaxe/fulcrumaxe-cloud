@@ -1,6 +1,6 @@
 import type { PoolClient } from "pg";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { COPY, preflightView } from "@fulcrumaxe/runner-protocol";
+import { COPY, platformRow, preflightView, type PlatformId } from "@fulcrumaxe/runner-protocol";
 import type { RunnerCloudDeps, RunnerHttpResponse, SessionPrincipal } from "./http.js";
 import { readSandboxViews } from "./fleetSandboxes.js";
 import { readFleet, type ReportedFactsLoader } from "./readModel.js";
@@ -10,15 +10,28 @@ import { readFleet, type ReportedFactsLoader } from "./readModel.js";
  * `runner_facts` besides the hello route, and it lives here, apart from readModel.ts, because the request verifier's import graph reaches readModel.ts
  * and must never name the facts (D#605 FL-2 acceptance 4). Display only: nothing reads these values to decide anything.
  */
+/**
+ * D#587 B-7c: how a machine stands, in the words of the runner's own support table (`platformSupport.ts`): the row for what the runner reported (`platform`, else its `os`), so a WSL2 or macOS machine reads its row's label
+ * (a preview) and never Linux's "supported". The table's markdown (bold marks, the pointer to the README) is dropped. Null when there is no row: the screen then says nothing about support.
+ */
+export function supportText(platform: string | null, os: string): string | null {
+  try {
+    return platformRow((platform ?? os) as PlatformId).label.replaceAll("**", "").replace(" (see below)", "");
+  } catch {
+    // fx-swallow-ok: a value the table does not know has no row; nothing is claimed
+    return null;
+  }
+}
+
 export const readReportedFacts: ReportedFactsLoader = async (client: PoolClient, accountId: string) => {
   // D#845 ON-21b: the preflight codes sit on the runner's own row; both tables are named by the account, on top of row security. What is shown is only what the closed set names, each with its fixed line.
-  const { rows } = await client.query<{ runner_id: string; os: string; arch: string; sandbox_engine: string; preflight: string[] | null }>(
-    `SELECT f.runner_id, f.os, f.arch, f.sandbox_engine, r.preflight FROM runner_facts f
+  const { rows } = await client.query<{ runner_id: string; os: string; arch: string; sandbox_engine: string; platform: string | null; preflight: string[] | null }>(
+    `SELECT f.runner_id, f.os, f.arch, f.sandbox_engine, f.platform, r.preflight FROM runner_facts f
        LEFT JOIN runners r ON r.id = f.runner_id AND r.account_id = f.account_id
       WHERE f.account_id = $1`,
     [accountId],
   );
-  return new Map(rows.map((r) => [r.runner_id, { os: r.os, arch: r.arch, engine: r.sandbox_engine, preflight: r.preflight === null ? null : preflightView(r.preflight) }]));
+  return new Map(rows.map((r) => [r.runner_id, { os: r.os, arch: r.arch, engine: r.sandbox_engine, platform: r.platform, support: supportText(r.platform, r.os), preflight: r.preflight === null ? null : preflightView(r.preflight) }]));
 };
 
 /**

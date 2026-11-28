@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CURRENT_PROTOCOL_VERSION, HANDOFF_MIN_PROTOCOL_VERSION, HelloReply, KVM_FACT_CAPABILITY, MIN_SUPPORTED_PROTOCOL_VERSION, PREFLIGHT_CAPABILITY, WATCH_MODE_CAPABILITY } from "@fulcrumaxe/runner-protocol";
+import { CURRENT_PROTOCOL_VERSION, HANDOFF_MIN_PROTOCOL_VERSION, HelloReply, KVM_FACT_CAPABILITY, MIN_SUPPORTED_PROTOCOL_VERSION, PLATFORM_FACT_CAPABILITY, PREFLIGHT_CAPABILITY, WATCH_MODE_CAPABILITY } from "@fulcrumaxe/runner-protocol";
 import { HANDOFF_PROTOCOL_VERSION } from "../src/handoff.js";
 import { protocolVersionSupported } from "../src/hello.js";
 
@@ -36,6 +36,9 @@ describe("which protocol versions hello accepts", () => {
     expect(HelloReply.parse({ protocol_version: 24, capabilities: [WATCH_MODE_CAPABILITY, KVM_FACT_CAPABILITY] })).toEqual({ protocol_version: 24, capabilities: ["watch_mode", "kvm_fact"] });
     // D#845 ON-21b: `preflight` joins the closed set.
     expect(HelloReply.parse({ protocol_version: 24, capabilities: [WATCH_MODE_CAPABILITY, KVM_FACT_CAPABILITY, PREFLIGHT_CAPABILITY] })).toEqual({ protocol_version: 24, capabilities: ["watch_mode", "kvm_fact", "preflight"] });
+    // D#587 B-7c: `platform_fact` joins the closed set, after the older ones.
+    expect(HelloReply.parse({ protocol_version: 28, capabilities: [WATCH_MODE_CAPABILITY, KVM_FACT_CAPABILITY, PLATFORM_FACT_CAPABILITY] })).toEqual({ protocol_version: 28, capabilities: ["watch_mode", "kvm_fact", "platform_fact"] });
+    for (const bad of [["platform_fact", "platform_fact"], ["platform_fact_v1"]]) expect(() => HelloReply.parse({ protocol_version: 28, capabilities: bad }), JSON.stringify(bad)).toThrow();
     for (const bad of [["preflight", "preflight"], ["preflight_v1"], ["kvm_fact", "preflight", "other"], ["kvm_fact", "kvm_fact"], ["kvm_fact", "watch_mode", "kvm_fact"], ["kvm_fact_v1"], ["watch_mode", "kvm_fact", "other"]]) expect(() => HelloReply.parse({ protocol_version: 24, capabilities: bad }), JSON.stringify(bad)).toThrow();
   });
 

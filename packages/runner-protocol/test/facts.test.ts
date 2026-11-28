@@ -2,8 +2,8 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { CURRENT_PROTOCOL_VERSION, HelloMessage, RUNNER_MESSAGES, RUNNER_NAME_MAX, RegisterMessage, RunnerFacts, isValidRunnerName } from "../src/messages.js";
-import { HELLO_REPLY_CAPABILITIES, KVM_FACT_CAPABILITY, PREFLIGHT_CAPABILITY } from "../src/replies.js";
-import { KVM_FACT_HELLO_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, RUNNER_CAPABILITIES } from "../src/job.js";
+import { HELLO_REPLY_CAPABILITIES, KVM_FACT_CAPABILITY, PLATFORM_FACT_CAPABILITY, PREFLIGHT_CAPABILITY } from "../src/replies.js";
+import { KVM_FACT_HELLO_CAPABILITY, PLATFORM_FACT_HELLO_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, RUNNER_CAPABILITIES } from "../src/job.js";
 import { PREFLIGHT_CODES, PREFLIGHT_FIX, isPreflightCode, preflightView } from "../src/preflight.js";
 import { nonStrictObjects } from "./helpers/schemaWalk.js";
 
@@ -12,7 +12,12 @@ describe("the kvm_fact handshake names (D#845 ON-6c)", () => {
     expect(KVM_FACT_HELLO_CAPABILITY).toBe("kvm_fact_v1");
     expect(RUNNER_CAPABILITIES).toContain(KVM_FACT_HELLO_CAPABILITY);
     expect(KVM_FACT_CAPABILITY).toBe("kvm_fact");
-    expect([...HELLO_REPLY_CAPABILITIES]).toEqual(["watch_mode", "kvm_fact", "preflight", "heartbeat_inventory", "engine_lease"]);
+    expect([...HELLO_REPLY_CAPABILITIES]).toEqual(["watch_mode", "kvm_fact", "preflight", "heartbeat_inventory", "engine_lease", "platform_fact"]);
+  });
+  it("platform_fact_v1 is a hello capability and platform_fact is the reply's closed one (D#587 B-7c)", () => {
+    expect(PLATFORM_FACT_HELLO_CAPABILITY).toBe("platform_fact_v1");
+    expect(RUNNER_CAPABILITIES).toContain(PLATFORM_FACT_HELLO_CAPABILITY);
+    expect(PLATFORM_FACT_CAPABILITY).toBe("platform_fact");
   });
   it("preflight_v1 is a hello capability and preflight is the reply's closed one (D#845 ON-21b)", () => {
     expect(PREFLIGHT_HELLO_CAPABILITY).toBe("preflight_v1");
@@ -95,6 +100,12 @@ describe("facts (criterion 1)", () => {
     for (const kvm of ["", "yes", "Present", "unreadable", true, null, 1]) expect(hello({ ...good, kvm }), JSON.stringify(kvm)).toBe(false);
   });
 
+  it("platform (D#587 B-7c) is optional: a hello without it validates and reads as not said; linux, wsl2 and macos are accepted; anything else is refused", () => {
+    expect(HelloMessage.parse({ ...fixture("hello-legacy.json"), facts: good }).facts?.platform).toBeUndefined();
+    for (const platform of ["linux", "wsl2", "macos"]) expect(HelloMessage.parse({ ...fixture("hello-legacy.json"), facts: { ...good, platform } }).facts?.platform, platform).toBe(platform);
+    for (const platform of ["", "windows", "wsl1", "WSL2", "darwin", true, null, 1]) expect(hello({ ...good, platform }), JSON.stringify(platform)).toBe(false);
+  });
+
   it("refuses an unknown key, a missing key, and any value outside its enum or range", () => {
     expect(hello({ ...good, hostname: "box" })).toBe(false);
     for (const key of Object.keys(good)) expect(hello(Object.fromEntries(Object.entries(good).filter(([k]) => k !== key))), `missing ${key}`).toBe(false);
@@ -155,7 +166,7 @@ describe("the register name (criteria 2 and 3)", () => {
 
 describe("one protocol version", () => {
   it("is a single constant in the protocol package, which the cloud re-exports and the runner sends on hello", async () => {
-    expect(CURRENT_PROTOCOL_VERSION).toBe(27);
+    expect(CURRENT_PROTOCOL_VERSION).toBe(28);
     const { readFileSync: read } = await import("node:fs");
     const cloud = read(new URL("../../runner-cloud/src/http.ts", import.meta.url), "utf8");
     const runner = read(new URL("../../fx-runner/src/version.ts", import.meta.url), "utf8");

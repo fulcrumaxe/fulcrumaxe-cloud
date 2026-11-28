@@ -43,6 +43,15 @@ export function hostFactsOf(input: HostFactsInput): RunnerFacts | undefined {
   return { os: osName, arch, mem_gb_bucket: memBucketOf(input.totalMemBytes), cpus, sandbox_engine: input.engine ?? "os_sandbox", ...(input.kvm === "present" || input.kvm === "absent" ? { kvm: input.kvm } : {}) };
 }
 
+/**
+ * D#587 B-7c: the platform the runner tells apart beside `os`: `wsl2` is Linux whose kernel `detectPlatform` reads as WSL2 (`wsl2` is what `clearWsl` reported, from that same probe), so the cloud's runner screen can read the
+ * WSL2 row of `platformSupport.ts` instead of Linux's. Undefined for a machine the facts do not name. Sent only after a hello reply that listed `platform_fact`.
+ */
+export function platformFactOf(input: { platform: NodeJS.Platform; wsl2: boolean }): NonNullable<RunnerFacts["platform"]> | undefined {
+  if (input.platform === "darwin") return "macos";
+  return input.platform === "linux" ? (input.wsl2 ? "wsl2" : "linux") : undefined;
+}
+
 export const readHostFacts = (engine?: SandboxEngine, kvm?: HostFactsInput["kvm"]): RunnerFacts | undefined => hostFactsOf({ platform: os.platform(), arch: os.arch(), totalMemBytes: os.totalmem(), cpus: os.availableParallelism(), ...(engine === undefined ? {} : { engine }), ...(kvm === undefined ? {} : { kvm }) });
 
 /**
