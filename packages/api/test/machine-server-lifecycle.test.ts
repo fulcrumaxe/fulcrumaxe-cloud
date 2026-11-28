@@ -557,6 +557,24 @@ describe('machine servers: lifecycle, orphans and delete', () => {
       expect(await signedIn(b)).toBeNull();
     });
 
+    it('lists gh_login only while the linked runner\'s hello lists gh_login_v1: no runner, a runner without it and a removed runner read false', async () => {
+      const who = await owner();
+      const listed = async (id: string) => (await getServer(ctxOf(who), id))!.gh_login;
+      const runnerOf = (id: string) => `(SELECT runner_id FROM managed_servers WHERE id = '${id}')`;
+      const a = await create(who, 's3g');
+      expect(await listed(a)).toBe(false);
+      await admin.query(`UPDATE managed_servers SET status = 'registering' WHERE id = $1`, [a]);
+      await link(who, a, false);
+      expect(await listed(a)).toBe(false);
+      await admin.query(`SELECT set_config('app.x', '1', true)`);
+      await admin.query(`INSERT INTO runner_capabilities (account_id, runner_id, capabilities) SELECT account_id, runner_id, ARRAY['machine_login_v1'] FROM managed_servers WHERE id = $1 ON CONFLICT (runner_id) DO UPDATE SET capabilities = EXCLUDED.capabilities`, [a]);
+      expect(await listed(a)).toBe(false);
+      await admin.query(`UPDATE runner_capabilities SET capabilities = ARRAY['machine_login_v1', 'gh_login_v1'] WHERE runner_id = ${runnerOf(a)}`);
+      expect(await listed(a)).toBe(true);
+      await admin.query(`UPDATE runners SET revoked_at = now() WHERE id = ${runnerOf(a)}`);
+      expect(await listed(a)).toBe(false);
+    });
+
     it('stays booting while the create action runs, and fails the row when it errors', async () => {
       const who = await owner();
       const id = await create(who, 's4');

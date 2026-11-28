@@ -1703,6 +1703,7 @@ export interface Operations {
           ipv4_monthly_gross: string;
         }) | (null);
         claude_signed_in: boolean | null;
+        gh_login: boolean;
         created_at: string;
         runner_id: (string) | (null);
         status_at: string;
@@ -1746,6 +1747,7 @@ export interface Operations {
         ipv4_monthly_gross: string;
       }) | (null);
       claude_signed_in: boolean | null;
+      gh_login: boolean;
       created_at: string;
       runner_id: (string) | (null);
       status_at: string;
@@ -1837,6 +1839,7 @@ export interface Operations {
         ipv4_monthly_gross: string;
       }) | (null);
       claude_signed_in: boolean | null;
+      gh_login: boolean;
       created_at: string;
       runner_id: (string) | (null);
       status_at: string;

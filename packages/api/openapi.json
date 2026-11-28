@@ -14949,6 +14949,9 @@
                               "null"
                             ]
                           },
+                          "gh_login": {
+                            "type": "boolean"
+                          },
                           "created_at": {
                             "type": "string"
                           },
@@ -15009,6 +15012,7 @@
                           "failure_code",
                           "price",
                           "claude_signed_in",
+                          "gh_login",
                           "created_at",
                           "runner_id",
                           "status_at",
@@ -15242,6 +15246,9 @@
                         "null"
                       ]
                     },
+                    "gh_login": {
+                      "type": "boolean"
+                    },
                     "created_at": {
                       "type": "string"
                     },
@@ -15302,6 +15309,7 @@
                     "failure_code",
                     "price",
                     "claude_signed_in",
+                    "gh_login",
                     "created_at",
                     "runner_id",
                     "status_at",
@@ -15966,6 +15974,9 @@
                         "null"
                       ]
                     },
+                    "gh_login": {
+                      "type": "boolean"
+                    },
                     "created_at": {
                       "type": "string"
                     },
@@ -16026,6 +16037,7 @@
                     "failure_code",
                     "price",
                     "claude_signed_in",
+                    "gh_login",
                     "created_at",
                     "runner_id",
                     "status_at",

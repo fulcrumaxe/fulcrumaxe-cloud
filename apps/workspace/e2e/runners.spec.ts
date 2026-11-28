@@ -103,12 +103,13 @@ interface Hz {
   acts: Array<{ method: string; path: string; body: unknown }>;
   actRefusals: Answer[];
   login: Record<string, unknown>;
+  ghLogin: Record<string, unknown>;
 }
 const json = (route: Route, status: number, body: unknown) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 
 const hzDefaults = (): Hz => ({
   credential: fx("getHetznerCredential", "200-none.json"), credentialFail: 0, servers: (fx("listHetznerServers", "200-list.json").servers as unknown[]).slice(1), serversFail: false, catalogFail: false, quoteFail: false, quoteDelay: 0, createDelay: 0, listReads: 0, quotePatch: {},
-  connect: null, creates: [], removeFail: 0, connects: [], created: [], removes: 0, quotes: [], acts: [], actRefusals: [], login: {},
+  connect: null, creates: [], removeFail: 0, connects: [], created: [], removes: 0, quotes: [], acts: [], actRefusals: [], login: {}, ghLogin: {},
 });
 const refusal = (route: Route, status: number, code: string, retryAfter?: number, reason?: string) =>
   route.fulfill({ status, contentType: "application/json", headers: retryAfter ? { "Retry-After": String(retryAfter) } : {}, body: JSON.stringify({ error: { code, message: SERVER_TEXT, request_id: "r" }, ...(reason ? { reason } : {}) }) });
@@ -176,6 +177,15 @@ async function setup(page: Page, tweak: Omit<Partial<Mock>, "hz"> & { hz?: Parti
     // D#845 MC-10b2: the server actions, the Claude sign-in and move. Each is recorded; the next queued refusal answers it instead.
     const sa = p.match(/^\/api\/v1\/machine-servers\/([^/]+)(?:\/(reboot|keep|delete-orphan))?$/);
     const ra = p.match(/^\/api\/runners\/([^/]+)\/(claude-login|claude-login\/code|claude-logout)$/);
+    const gr = p.match(/^\/api\/runners\/([^/]+)\/(gh-login|gh-login\/cancel|gh-logout)$/);
+    if (gr && req.method() === "GET") return json(route, 200, hz.ghLogin[gr[1]!] ?? { request: null });
+    if (gr) {
+      hz.acts.push({ method: req.method(), path: p, body: undefined });
+      const no = hz.actRefusals.shift();
+      if (no) return refusal(route, no.status, no.code, no.retryAfter);
+      if (gr[2] === "gh-login") hz.ghLogin[gr[1]!] = { request: { request_id: "77777777-7777-4777-8777-777777777777", status: "pending", expires_at: "2099-01-01T00:00:00.000Z", device_url: null, user_code: null, failure_code: null } };
+      return json(route, 200, {});
+    }
     if (ra && req.method() === "GET") return json(route, 200, hz.login[ra[1]!] ?? { request: null });
     if ((sa && req.method() !== "GET") || ra || /^\/api\/runners\/repos\/[^/]+\/move$/.test(p)) {
       hz.acts.push({ method: req.method(), path: p + new URL(req.url()).search, body: req.postData() ? JSON.parse(req.postData()!) : undefined });
@@ -1596,6 +1606,42 @@ test.describe("D#845 MC-10b2: the Claude sign-in", () => {
     await refresh(page);
     await expect(t(page, "runners-signin")).toHaveCount(0);
     await expect(t(page, "runners-srv-signout")).toBeVisible();
+    await clean(page, errors);
+  });
+});
+
+const ghRequest = (status: string, over: Record<string, unknown> = {}) => ({ request: { request_id: "77777777-7777-4777-8777-777777777777", status, expires_at: farFuture, device_url: null, user_code: null, failure_code: null, ...over } });
+test.describe("D#845 ON-19c2: the GitHub sign-in on a server's card", () => {
+  test("is offered only when the server lists it, then walks pending, address and code with Copy and Cancel, done, a failure in plain words, and Sign out of GitHub", async ({ page }) => {
+    const { mock, errors } = await setup(page, { machines: [mach(RUN, "fx-s1"), mach(RUN2, "fx-s2")], hz: { credential: CONNECTED, servers: [sv(1, { runner_id: RUN, claude_signed_in: true, gh_login: true, last_seen_at: ago(0) }), sv(2, { runner_id: RUN2, claude_signed_in: true, gh_login: false, last_seen_at: ago(0) })] } });
+    await openServers(page);
+    await expect(t(page, "runners-gh")).toHaveCount(1); // the second server does not list it: no button, no sign-out
+    await expect(t(page, "runners-srv-gh-signout")).toHaveCount(1);
+    await press(t(page, "runners-gh-start"));
+    expect(mock.hz.acts.at(-1)).toEqual({ method: "POST", path: `/api/runners/${RUN}/gh-login`, body: undefined });
+    await expect(t(page, "runners-gh-status")).toHaveText("Starting the GitHub sign-in on fx-s1…");
+    mock.hz.ghLogin[RUN] = ghRequest("awaiting_code", { device_url: "https://github.com/login/device", user_code: "AB12-CD34" });
+    await refresh(page);
+    await page.waitForTimeout(3200); // the live request is read again
+    await expect(t(page, "runners-gh-open")).toHaveAttribute("href", "https://github.com/login/device");
+    await expect(t(page, "runners-gh-code")).toHaveText("AB12-CD34");
+    await expect(t(page, "runners-gh-copy")).toBeVisible();
+    await expect(t(page, "runners-gh-status")).toHaveText("Waiting for you to enter the code on GitHub…");
+    mock.hz.ghLogin[RUN] = ghRequest("failed", { failure_code: "cancelled" });
+    await press(t(page, "runners-gh-cancel"));
+    expect(mock.hz.acts.at(-1)).toEqual({ method: "POST", path: `/api/runners/${RUN}/gh-login/cancel`, body: undefined });
+    await expect(t(page, "runners-gh-words")).toHaveText("Sign-in cancelled.");
+    mock.hz.ghLogin[RUN] = ghRequest("failed", { failure_code: "already_signed_in" });
+    await refresh(page);
+    await press(t(page, "runners-gh-start"));
+    mock.hz.ghLogin[RUN] = ghRequest("failed", { failure_code: "already_signed_in" });
+    await page.waitForTimeout(100);
+    await refresh(page);
+    await expect(t(page, "runners-gh-words")).toHaveText("This machine is already signed in to GitHub. Sign out first, then try again.");
+    await press(t(page, "runners-srv-gh-signout"));
+    await expect(dlgOf(page).locator("h2")).toHaveText("Sign fx-s1 out of GitHub?");
+    await press(yes(page));
+    expect(mock.hz.acts.at(-1)).toEqual({ method: "POST", path: `/api/runners/${RUN}/gh-logout`, body: undefined });
     await clean(page, errors);
   });
 });

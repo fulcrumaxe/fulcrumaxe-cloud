@@ -999,7 +999,7 @@ export function readServerMore(s) {
   const t = (v) => (typeof v === "string" ? v : "");
   const known = Array.isArray(s.placed_projects);
   const placed = known ? s.placed_projects.filter((p) => p && typeof p.repo_id === "string" && UUID.test(p.repo_id)).map((p) => ({ id: p.repo_id, name: t(p.name).trim() || "Unnamed project" })) : [];
-  return { state: Object.hasOwn(SERVER_WORDS, s.status) ? s.status : "", runnerId: typeof s.runner_id === "string" && UUID.test(s.runner_id) ? s.runner_id : "", statusAt: t(s.status_at), lastSeen: t(s.last_seen_at), kept: s.kept === true, claudeIn: s.claude_signed_in === true ? "yes" : s.claude_signed_in === false ? "no" : "", placed, placedKnown: known, cost: costOf(s.price) };
+  return { state: Object.hasOwn(SERVER_WORDS, s.status) ? s.status : "", runnerId: typeof s.runner_id === "string" && UUID.test(s.runner_id) ? s.runner_id : "", statusAt: t(s.status_at), lastSeen: t(s.last_seen_at), kept: s.kept === true, ghLogin: s.gh_login === true, claudeIn: s.claude_signed_in === true ? "yes" : s.claude_signed_in === false ? "no" : "", placed, placedKnown: known, cost: costOf(s.price) };
 }
 const minutesSince = (iso, nowMs) => {
   const t = Date.parse(iso);
@@ -1153,6 +1153,91 @@ export function createSignIn({ call = api, signal, onChange = () => {}, every = 
     forget(id) { by.delete(id); since.delete(id); },
     async start(id) { if (await step(id, "login")) await load(id); },
     async sendCode(id, code) { if (await step(id, "login/code", { code })) await load(id); },
+    logout: (id) => step(id, "logout"),
+    stop() { if (timer !== null) clearTimer(timer); timer = null; },
+  };
+}
+
+// ── D#845 ON-19c2: the GitHub sign-in of a managed server. The address and the code are shown only in the two exact shapes the cloud accepts; every sentence is chosen here by closed code. ──────────
+/** The one address GitHub's device sign-in uses, and the shape of its code (a test pins both to the protocol's patterns). */
+export const GH_DEVICE_URL = /^https:\/\/github\.com\/login\/device$/;
+export const GH_USER_CODE = /^[A-Z0-9]{4}-[A-Z0-9]{4}$/;
+export const GH_LOGOUT_SENTENCE = "GitHub is signed out on this server when it next checks in. Work that needs GitHub waits until you sign in again.";
+const GH_LINK_LOST = "GitHub's sign-in link didn't come through. Start again.";
+const GH_UNFINISHED = "The GitHub sign-in didn't finish. Start again.";
+export const GH_FAILURE_WORDS = {
+  already_signed_in: "This machine is already signed in to GitHub. Sign out first, then try again.",
+  signout_failed: "Signing out of GitHub didn't work. Try again, or sign out in this machine's own terminal.",
+  start_failed: "GitHub sign-in couldn't start on this server. Try again.",
+  busy: "This server is already working on a sign-in. Try again in a minute.",
+  gh_missing: "GitHub's command line isn't installed on this server.",
+  unsupported_platform: "GitHub sign-in isn't available on this server.",
+  not_managed: "GitHub sign-in isn't available on this server.",
+  bad_link: GH_LINK_LOST, no_link: GH_LINK_LOST, link_refused: GH_LINK_LOST, link_unsent: GH_LINK_LOST, invalid_relay: GH_LINK_LOST,
+  login_failed: GH_UNFINISHED,
+  timeout: "That sign-in code expired. Start again.",
+  cancelled: "Sign-in cancelled.",
+};
+const GH_LIVE = ["pending", "awaiting_code"];
+const NO_GH = { status: "idle", url: "", code: "", words: "" };
+/** The newest GitHub sign-in request, as the panel shows it. A `done` is shown only when this page watched it; an outcome older than the server's state is history. */
+export function readGhLogin(b, statusAt, watched = false) {
+  const r = b && b.request;
+  if (!r || typeof r !== "object" || ![...GH_LIVE, "done", "failed", "expired"].includes(r.status)) return NO_GH;
+  if (r.status === "done" && !watched) return NO_GH;
+  if (!GH_LIVE.includes(r.status) && Date.parse(r.expires_at) <= Date.parse(statusAt)) return NO_GH;
+  const words = r.status === "expired" ? GH_FAILURE_WORDS.timeout : r.status === "failed" || r.failure_code === "invalid_relay" ? (Object.hasOwn(GH_FAILURE_WORDS, r.failure_code) ? GH_FAILURE_WORDS[r.failure_code] : GH_UNFINISHED) : "";
+  const shown = r.status === "awaiting_code" && GH_DEVICE_URL.test(r.device_url) && GH_USER_CODE.test(r.user_code);
+  return { status: r.status, url: shown ? r.device_url : "", code: shown ? r.user_code : "", words };
+}
+const ghUrl = (id, tail) => RUNNERS_URL + "/" + enc(id) + "/gh-" + tail;
+const ghSentence = (e) => (e && ["not_managed_server", "not_supported"].includes(e.code) ? GH_FAILURE_WORDS.unsupported_platform : actionSentence(e));
+/** The GitHub sign-in of each server by runner id: start, cancel, sign out, and a read that repeats every few seconds while a request is live. */
+export function createGhSignIn({ call = api, signal, onChange = () => {}, every = 3000, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
+  const by = new Map();
+  const since = new Map();
+  let timer = null;
+  const get = (id) => by.get(id) || { ...NO_GH, error: "", busy: false };
+  const put = (id, patch) => {
+    const was = get(id);
+    const next = { ...was, ...patch };
+    by.set(id, next);
+    if (Object.keys(next).some((k) => next[k] !== was[k])) onChange();
+  };
+  const arm = () => {
+    if (timer !== null || ![...by.values()].some((v) => GH_LIVE.includes(v.status))) return;
+    timer = setTimer(async () => {
+      timer = null;
+      for (const [id, v] of [...by]) if (GH_LIVE.includes(v.status)) await load(id);
+      arm();
+    }, every);
+  };
+  async function load(id, statusAt = since.get(id) || "") {
+    since.set(id, statusAt);
+    try {
+      const was = get(id).status;
+      put(id, { ...readGhLogin(await call("GET", ghUrl(id, "login"), undefined, signal), statusAt, GH_LIVE.includes(was) || was === "done"), error: "" });
+    } catch (e) {
+      if (!cancelled(e)) put(id, { error: ghSentence(e) });
+    }
+    arm();
+  }
+  async function step(id, tail) {
+    if (get(id).busy) return false;
+    put(id, { busy: true, error: "" });
+    try {
+      await call("POST", ghUrl(id, tail), undefined, signal);
+    } catch (e) {
+      put(id, { busy: false, ...(cancelled(e) ? {} : { error: ghSentence(e) }) });
+      return false;
+    }
+    put(id, { busy: false });
+    return true;
+  }
+  return {
+    get, load,
+    async start(id) { if (await step(id, "login")) await load(id); },
+    async cancel(id) { if (await step(id, "login/cancel")) await load(id); },
     logout: (id) => step(id, "logout"),
     stop() { if (timer !== null) clearTimer(timer); timer = null; },
   };
