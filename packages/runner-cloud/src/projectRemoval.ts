@@ -3,6 +3,7 @@ import { markRunnerWork } from "@fx/core/src/pendingWork.js";
 import { emitSetupChanged } from "@fx/core/src/onboarding/engineTrack.js";
 import { writeEngineAudit } from "@fx/db/src/engineAudit.js";
 import { lockEngineBridge } from "@fx/db/src/engineBridge.js";
+import { readRepoGithubIdentity, setRepoGithubIdentity } from "@fx/db/src/repoGithubIdentity.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { EngineRemovalError, buildEngineRemovalPr, type EngineRemovalCode } from "./engineRemovalPr.js";
 import { hadSession } from "./engineSession.js";
@@ -88,6 +89,11 @@ export async function removeProjectIn(client: PoolClient, a: Actor, repoId: stri
   if (setup) {
     await client.query("UPDATE project_setups SET phase = 'removed', updated_at = now() WHERE account_id = $1 AND id = $2", [a.accountId, setup.id]);
     await emitSetupChanged(client, { accountId: a.accountId, setupId: setup.id, repoId });
+  }
+  // Consent to act as the person on GitHub does not survive a removal: a repo added again starts on the app (migration 1121's definer; the caller is an owner or admin).
+  if ((await readRepoGithubIdentity(client, a.accountId, repoId)) === "personal") {
+    await setRepoGithubIdentity(client, repoId, "app");
+    await writeEngineAudit(client, "project.github_identity_changed", { repo_id: repoId, github_identity: "app" });
   }
   await client.query("SELECT audit_write('project.removed', $1::jsonb)", [
     JSON.stringify({ repo_id: repoId, runner_id: placed?.runner_id ?? null, delete_sandbox: o.deleteSandbox, removal_pr: o.removalPr, machine_parts: parts }),

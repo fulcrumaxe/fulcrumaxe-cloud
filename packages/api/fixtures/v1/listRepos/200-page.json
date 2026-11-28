@@ -7,7 +7,8 @@
       "install_state": "installed",
       "app_kind": "team",
       "full_name": "acme/widgets",
-      "removal": null
+      "removal": null,
+      "github_identity": "personal"
     },
     {
       "id": "44444444-4444-4444-8444-444444444444",
@@ -20,7 +21,8 @@
         "state": "waiting_machine",
         "machine_name": "Studio box",
         "failure_code": null
-      }
+      },
+      "github_identity": "app"
     }
   ],
   "next_cursor": null

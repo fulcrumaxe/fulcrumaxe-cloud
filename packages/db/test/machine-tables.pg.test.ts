@@ -420,7 +420,7 @@ describe('machine tables [pg]', () => {
     });
 
     it('still refuses an unknown action, a withdrawn one and NULL', async () => {
-      for (const action of ['server.bootstrap_issued', 'project.github_identity_changed', 'server.deleted ', null]) await expect(call(action)).rejects.toMatchObject({ code: PG_ERROR.INVALID_PARAMETER_VALUE });
+      for (const action of ['server.bootstrap_issued', 'project.github_identity_removed', 'server.deleted ', null]) await expect(call(action)).rejects.toMatchObject({ code: PG_ERROR.INVALID_PARAMETER_VALUE });
     });
   });
 

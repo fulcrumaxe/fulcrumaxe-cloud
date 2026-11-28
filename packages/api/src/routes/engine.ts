@@ -64,7 +64,7 @@ const nstr = z.string().nullable();
 const repoItem = z.object({
   repo_id: z.string(), full_name: z.string(), runner_id: nstr, runner_name: nstr, session_id: nstr, last_event_at: nstr, last_heard_at: nstr,
   liveness: z.enum(["live", "stale", "runner_removed", "never"]), watch_enabled: z.boolean(), operate_enabled: z.boolean(), halted: z.boolean(), halt_pending: z.boolean(),
-  halted_at: nstr, halted_by: z.object({ id: z.string(), display_name: z.string() }).nullable(), halt_epoch: z.number().int(),
+  halted_at: nstr, halted_by: z.object({ id: z.string(), display_name: z.string() }).nullable(), halt_epoch: z.number().int(), github_identity: z.enum(["app", "personal"]),
   stop_failed: z.object({ reason: z.enum(["person", "halt", "move", "remove", "operate_off", "plan"]).nullable(), code: nstr, at: z.string() }).nullable(),
   machine_name: nstr,
   setup: z.object({ status: z.enum(["none", "open", "done"]), phase: nstr, sub_step: nstr, state: z.enum(["started", "ok", "failed"]).nullable(), failure_code: nstr }),

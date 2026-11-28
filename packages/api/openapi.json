@@ -16943,6 +16943,13 @@
                                 "type": "null"
                               }
                             ]
+                          },
+                          "github_identity": {
+                            "type": "string",
+                            "enum": [
+                              "app",
+                              "personal"
+                            ]
                           }
                         },
                         "required": [
@@ -16952,7 +16959,8 @@
                           "install_state",
                           "app_kind",
                           "full_name",
-                          "removal"
+                          "removal",
+                          "github_identity"
                         ],
                         "additionalProperties": false
                       }
@@ -17153,6 +17161,13 @@
                           "type": "null"
                         }
                       ]
+                    },
+                    "github_identity": {
+                      "type": "string",
+                      "enum": [
+                        "app",
+                        "personal"
+                      ]
                     }
                   },
                   "required": [
@@ -17162,7 +17177,8 @@
                     "install_state",
                     "app_kind",
                     "full_name",
-                    "removal"
+                    "removal",
+                    "github_identity"
                   ],
                   "additionalProperties": false
                 }
@@ -54580,6 +54596,13 @@
                             "minimum": -9007199254740991,
                             "maximum": 9007199254740991
                           },
+                          "github_identity": {
+                            "type": "string",
+                            "enum": [
+                              "app",
+                              "personal"
+                            ]
+                          },
                           "stop_failed": {
                             "anyOf": [
                               {
@@ -54923,6 +54946,7 @@
                           "halted_at",
                           "halted_by",
                           "halt_epoch",
+                          "github_identity",
                           "stop_failed",
                           "machine_name",
                           "setup",
@@ -58681,6 +58705,290 @@
           },
           "429": {
             "description": "Error `rate_limited`. Carries an integer `Retry-After` in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/repos/{id}/github-identity": {
+      "get": {
+        "operationId": "getRepoGithubIdentity",
+        "summary": "A project's GitHub identity (`app` or `personal`) and the name of the machine that serves it",
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": [
+              "read"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A project's GitHub identity (`app` or `personal`) and the name of the machine that serves it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "github_identity": {
+                      "type": "string",
+                      "enum": [
+                        "app",
+                        "personal"
+                      ]
+                    },
+                    "machine": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "github_identity",
+                    "machine"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`. Carries an integer `Retry-After` in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "operationId": "setRepoGithubIdentity",
+        "summary": "Switch a project's GitHub identity (an owner or admin, on a session)",
+        "description": "`personal` is refused on a public repo with 409 `personal_identity_public_repo`, and with 409 `repo_visibility_unknown` when GitHub does not say. A real change writes `project.github_identity_changed`; a repeat writes nothing. Owner or admin, session only: no API token.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "github_identity": {
+                    "type": "string",
+                    "enum": [
+                      "app",
+                      "personal"
+                    ]
+                  }
+                },
+                "required": [
+                  "github_identity"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Switch a project's GitHub identity (an owner or admin, on a session)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "github_identity": {
+                      "type": "string",
+                      "enum": [
+                        "app",
+                        "personal"
+                      ]
+                    },
+                    "machine": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "github_identity",
+                    "machine"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The repo is public (`personal_identity_public_repo`), or GitHub did not say whether it is (`repo_visibility_unknown`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
             "content": {
               "application/json": {
                 "schema": {

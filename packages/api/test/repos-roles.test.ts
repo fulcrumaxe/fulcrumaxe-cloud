@@ -153,7 +153,7 @@ describe('D#31 API-8a: repos, settings and roles', () => {
     expect(body1.data.map((r) => r.id)).toEqual([c.repoId, b.repoId]);
     expect(body1.data[0]).toMatchObject({ install_state: 'not_installed', app_kind: null });
     expect(body1.data[1]).toMatchObject({ install_state: 'installed', app_kind: 'sitekit' });
-    expect(Object.keys(body1.data[0]!).sort()).toEqual(['app_kind', 'full_name', 'gh_repo_id', 'id', 'install_state', 'product', 'removal']);
+    expect(Object.keys(body1.data[0]!).sort()).toEqual(['app_kind', 'full_name', 'gh_repo_id', 'github_identity', 'id', 'install_state', 'product', 'removal']);
     // D#845 ON-16a1: no removal is waiting for a machine.
     expect(body1.data.map((r) => (r as unknown as { removal: unknown }).removal)).toEqual([null, null]);
     expect(body1.next_cursor).not.toBeNull();

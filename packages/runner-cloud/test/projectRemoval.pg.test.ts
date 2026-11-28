@@ -134,6 +134,22 @@ describe("removing a project [pg]", () => {
       expect(bridge).toEqual([{ kind: "repo_removed", repo_id: r.who.repoId }]);
     });
 
+    it("a removal puts a personal GitHub identity back to the app, with one audit row, so a repo added again starts on the app; an app repo gets no such row", async () => {
+      const r = await rig();
+      const other = await rig();
+      await h.admin.query("INSERT INTO repo_github_identity (account_id, repo_id, identity) VALUES ($1, $2, 'personal'), ($3, $4, 'app')", [r.who.accountId, r.who.repoId, other.who.accountId, other.who.repoId]);
+      const identity = async (x: Rig) => (await h.admin.query<{ identity: string }>("SELECT identity FROM repo_github_identity WHERE repo_id = $1", [x.who.repoId])).rows[0]?.identity;
+      const audits = async (x: Rig) => (await h.admin.query("SELECT payload FROM audit_log WHERE account_id = $1 AND action = 'project.github_identity_changed'", [x.who.accountId])).rows.map((a) => a.payload);
+      expect((await remove(r, undefined, { who: "admin" })).status).toBe(200);
+      expect(await identity(r)).toBe("app");
+      expect(await audits(r)).toEqual([{ repo_id: r.who.repoId, github_identity: "app" }]);
+      expect((await remove(r, undefined, { who: "admin" })).status).toBe(200);
+      expect(await audits(r)).toHaveLength(1);
+      expect((await remove(other, undefined, { who: "admin" })).status).toBe(200);
+      expect(await identity(other)).toBe("app");
+      expect(await audits(other)).toEqual([]);
+    });
+
     it("a fault before commit leaves every row as it was", async () => {
       const r = await rig();
       const before = await snapshot(r);

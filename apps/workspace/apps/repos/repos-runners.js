@@ -1556,3 +1556,91 @@ export function createTwinCard(env) {
     destroy() { ctl.destroy(); closeSheet(); el.replaceChildren(); },
   };
 }
+
+
+// ── D#845 ON-19a: the GitHub identity setting of a repo (`app` or `personal`). One separate section at the end of this file; it only stores the choice, the token never reaches the cloud. ──
+export const identityUrl = (repoId) => "/api/v1/repos/" + encodeURIComponent(repoId) + "/github-identity";
+export const IDENTITY_WORDS = Object.freeze({
+  acting: "Acting as you on GitHub (all your repos)", app: "Using the fulcrumaxe app on GitHub", open: "Act as me on GitHub…", back: "Switch back to the fulcrumaxe app",
+  title: "Act as you on GitHub?", tick: "I understand the engine can reach all my repos", confirm: "Act as me", yourMachine: "your machine",
+  adminOnly: "Only owners and admins can change this.", failed: "That change couldn't be saved. Try again.",
+  public: "A personal GitHub identity can't be used on a public repo.", unknown: "GitHub didn't say whether this repo is public or private. Try again in a minute.",
+});
+/** The fixed sentence, as parts so the machine and repo names can be drawn as text inside <bdi>: the parts joined are exactly the words the Spec fixes. */
+export const identityConfirmParts = (machine, repo) => ["The engine on ", machine, " will act as you on GitHub. It can reach every repo your GitHub account can reach, not just ", repo, ". Its pull requests and comments will come from you. You can switch back at any time."];
+const ID_SCOPE_LINES = { workflow: "This sign-in can change GitHub Actions workflows in every repo it reaches.", danger: "This sign-in can also delete repos or change org settings." };
+/** The warning lines for a closed list of GitHub scope names (the runner reports it; none until it does). A name that is not listed adds nothing. */
+export const identityScopeLines = (scopes) => [].concat(scopes.includes("workflow") ? [ID_SCOPE_LINES.workflow] : [], scopes.includes("delete_repo") || scopes.includes("admin:org") ? [ID_SCOPE_LINES.danger] : []);
+export const identitySentence = (e) => (e && e.status === 403 ? IDENTITY_WORDS.adminOnly : e && e.status === 409 && e.code === "personal_identity_public_repo" ? IDENTITY_WORDS.public : e && e.status === 409 && e.code === "repo_visibility_unknown" ? IDENTITY_WORDS.unknown : IDENTITY_WORDS.failed);
+const readIdentity = (b) => (b && (b.github_identity === "app" || b.github_identity === "personal") ? { identity: b.github_identity, machine: typeof b.machine === "string" && b.machine.trim() !== "" ? b.machine.trim() : null, scopes: Array.isArray(b.scopes) ? b.scopes.filter((s) => typeof s === "string") : [] } : null);
+
+/** One repo's identity: read it, PUT the other value, show what the server answered. No DOM. */
+export function createGithubIdentityController({ call = api, signal, repoId, onChange = () => {}, onSaved = () => {} } = {}) {
+  let st = { status: "loading", identity: "app", machine: null, scopes: [], phase: "idle", error: "" };
+  const set = (patch) => { st = { ...st, ...patch }; onChange(); };
+  async function load() {
+    try {
+      const v = readIdentity(await call("GET", identityUrl(repoId), undefined, signal));
+      set(v ? { status: "ready", ...v } : { status: "error" });
+    } catch (e) {
+      if (!cancelled(e)) set({ status: "error" });
+    }
+  }
+  async function change(identity) {
+    if (st.status !== "ready" || st.phase === "saving") return false;
+    set({ phase: "saving", error: "" });
+    try {
+      const v = readIdentity(await call("PUT", identityUrl(repoId), { github_identity: identity }, signal, { idempotencyKey: crypto.randomUUID() }));
+      if (!v) { set({ phase: "error", error: IDENTITY_WORDS.failed }); return false; }
+      set({ ...v, phase: "idle" });
+      onSaved(v.identity);
+      return true;
+    } catch (e) {
+      if (!cancelled(e)) set({ phase: "error", error: identitySentence(e) });
+      return false;
+    }
+  }
+  return { load, change, get state() { return st; } };
+}
+
+/** The view. The switch to `personal` opens a dialog with the fixed text, the scope lines and a box; its confirm button stays off until the box is ticked. Switching back sends at once. */
+export function createGithubIdentityControl({ call = api, signal, repoId, getRepoName = () => "", canChange = () => false, onSaved = () => {}, doc = document } = {}) {
+  const ctl = createGithubIdentityController({ call, signal, repoId, onChange: () => paint(), onSaved });
+  const line = h("p", { "data-testid": "repos-identity-line" });
+  const err = h("p", { class: "repos-error", role: "alert", "data-testid": "repos-identity-error" });
+  const btn = h("button", { type: "button", class: "repos-btn", "data-testid": "repos-identity-button", onClick: () => (ctl.state.identity === "personal" ? ctl.change("app") : openDialog()) });
+  const el = h("div", { class: "repos-toggle-group", "data-testid": "repos-identity" }, h("strong", null, "GitHub identity"), line, btn, err);
+  let dlg = null;
+  let dErr = null; // the refusal line inside the dialog: the modal makes everything outside it inert, so the outer line cannot be seen or announced while it is open
+  const shut = () => { if (dlg) { dlg.close(); dlg.remove(); dlg = null; dErr = null; } btn.focus(); };
+  function openDialog() {
+    if (dlg || ctl.state.status !== "ready") return;
+    const [a, m, b, r, c] = identityConfirmParts(ctl.state.machine || IDENTITY_WORDS.yourMachine, getRepoName());
+    const tick = h("input", { type: "checkbox", "data-testid": "repos-identity-tick", onChange: () => yes.setAttribute("aria-disabled", tick.checked ? "false" : "true") });
+    const yes = h("button", { type: "button", class: "repos-btn", "aria-disabled": "true", "data-testid": "repos-identity-confirm", onClick: async () => { if (tick.checked && (await ctl.change("personal"))) shut(); } }, IDENTITY_WORDS.confirm);
+    dlg = h("dialog", { class: "repos-dialog", "data-testid": "repos-identity-dialog", "aria-labelledby": "repos-identity-h", "aria-describedby": "repos-identity-d", onCancel: (e) => (e.preventDefault(), shut()) },
+      h("div", { class: "repos-dialog-body" }, h("h2", { class: "repos-subtitle", id: "repos-identity-h" }, IDENTITY_WORDS.title),
+        h("p", { id: "repos-identity-d", "data-testid": "repos-identity-text" }, a, h("bdi", null, m), b, h("bdi", null, r), c),
+        ...identityScopeLines(ctl.state.scopes).map((t) => h("p", { "data-testid": "repos-identity-scope" }, t)),
+        h("label", { class: "repos-toggle" }, tick, h("span", null, IDENTITY_WORDS.tick)),
+        (dErr = h("p", { class: "repos-error", role: "alert", tabindex: "-1", "data-testid": "repos-identity-dialog-error" })),
+        h("div", { class: "repos-actions" }, h("button", { type: "button", class: "repos-btn", "data-testid": "repos-identity-cancel", onClick: shut }, "Cancel"), yes)));
+    doc.body.appendChild(dlg);
+    dlg.showModal();
+    tick.focus();
+  }
+  function paint() {
+    const s = ctl.state;
+    el.hidden = s.status === "loading";
+    line.textContent = s.status !== "ready" ? "This setting isn't available right now." : s.identity === "personal" ? IDENTITY_WORDS.acting : IDENTITY_WORDS.app;
+    line.setAttribute("data-identity", s.identity);
+    btn.hidden = s.status !== "ready";
+    btn.textContent = s.identity === "personal" ? IDENTITY_WORDS.back : IDENTITY_WORDS.open;
+    btn.disabled = !canChange();
+    btn.setAttribute("aria-disabled", s.phase === "saving" ? "true" : "false");
+    err.textContent = dlg ? "" : s.error;
+    if (dErr && dErr.textContent !== s.error) { dErr.textContent = s.error; if (s.error) dErr.focus(); }
+  }
+  paint();
+  return { el, load: () => ctl.load(), repaint: paint, destroy: () => { if (dlg) { dlg.close(); dlg.remove(); dlg = null; } } };
+}

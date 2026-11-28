@@ -107,6 +107,8 @@ export const PLAN_STALE_S = 26 * 3600;
 export const LANE_PAGES = 5; // the merged count reads this many lane pages at most
 export const MERGED_WINDOW_MS = 30 * 24 * 3600 * 1000;
 
+/** D#845 ON-19a: the chip beside the liveness chip while a project acts as the person on GitHub (the Repos row says the same words). */
+export const IDENTITY_CHIP = "Acting as you on GitHub (all your repos)";
 export const WORDS = {
   title: "Team",
   loading: "Loading…",
@@ -274,7 +276,7 @@ export function readRepos(raw) {
     id: idKey(r.repo_id), name: r.full_name, runner: typeof r.runner_name === "string" ? r.runner_name : "", liveness: typeof r.liveness === "string" ? r.liveness : "never",
     lastHeard: typeof r.last_heard_at === "string" ? r.last_heard_at : "", operate: r.operate_enabled === true, halted: r.halted === true, haltPending: r.halt_pending === true,
     haltedAt: typeof r.halted_at === "string" ? r.halted_at : "", haltedBy: isObj(r.halted_by) && typeof r.halted_by.display_name === "string" && r.halted_by.display_name !== "" ? r.halted_by.display_name : "",
-    stopFailed: readStopFailed(r.stop_failed), engineUpdate: readEngineUpdate(r.engine_update), facts: readFacts(r),
+    identity: r.github_identity === "personal" ? "personal" : "app", stopFailed: readStopFailed(r.stop_failed), engineUpdate: readEngineUpdate(r.engine_update), facts: readFacts(r),
   }));
 }
 export function readSettings(raw) {
@@ -487,7 +489,7 @@ export function describe(st, nowMs) {
   return {
     kind: "ready", ...base, operate: describeOperate(shown, nowMs, repo, asOf, rows), halt: describeHalt(st, repo, nowMs), stopFail: describeStopFailed(st, repo), updateCard: describeEngineUpdate(st, repo), next: describeNext(st, repo, nowMs),
     repos: st.repos.map((r) => ({ id: r.id, name: r.name, selected: r.id === repo.id })),
-    chip: chipOf(repo), runner: repo.runner, banner: gapBanner(envs), notices: sourceNotices(envs, lanes),
+    chip: chipOf(repo), identityChip: repo.identity === "personal" ? IDENTITY_CHIP : "", runner: repo.runner, banner: gapBanner(envs), notices: sourceNotices(envs, lanes),
     watch: st.watchMod ? st.watchMod.watchView(st.watch, repo, nowMs) : null,
     agents: { ...head(agents), failed: !agents, rows, empty: WORDS.noAgents },
     lanes: { ...head(lanes), failed: !lanes, open: lane ? lane.open : [], merged: lane ? lane.merged : [], empty: WORDS.noLanes },

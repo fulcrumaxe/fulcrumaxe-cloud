@@ -165,6 +165,8 @@ export interface RepoRow {
   halted_by: { id: string; display_name: string } | null;
   /** +1 per halt, unchanged by a clear; 0 for a repo never halted. */
   halt_epoch: number;
+  /** The project's GitHub identity (migration 1121): `app` unless a person switched it to `personal`. */
+  github_identity: 'app' | 'personal';
   /** A stop that did not finish while the engine's sandbox is still up (ON-13c4a), derived from the repo's newest session job; null otherwise. Never stored. */
   stop_failed: StopFailed | null;
   /** The placed machine's name (or the newest session's runner when the repo is not placed), the setup, the session and the day's event quota (ON-14b). Derived on read, never stored. */
@@ -183,7 +185,7 @@ export async function readEngineRepos(client: PoolClient, accountId?: string): P
             COALESCE(NULLIF(ru.name, ''), NULLIF(ru.github_login, ''), $1) AS registrant, EXTRACT(EPOCH FROM (now() - a.heard_at))::float8 AS heard,
             (c.halted_at IS NOT NULL) AS halted, c.halted_at, COALESCE(c.halt_epoch, 0) AS halt_epoch, ap.applied_epoch,
             hm.user_id AS halted_by_id, COALESCE(NULLIF(hu.name, ''), NULLIF(hu.github_login, ''), $1) AS halted_by_name,
-            b.account_id, sj.job_kind, sj.job_state, sj.job_stop_reason, sj.job_failure_code, sj.job_at, ${SANDBOX_UP_SQL} AS sandbox_up
+            COALESCE(gi.identity, 'app') AS github_identity, b.account_id, sj.job_kind, sj.job_state, sj.job_stop_reason, sj.job_failure_code, sj.job_at, ${SANDBOX_UP_SQL} AS sandbox_up
        FROM engine_bridge_repos b
        JOIN repos r ON r.id = b.repo_id
        LEFT JOIN engine_bridge_settings st ON st.account_id = b.account_id
@@ -193,6 +195,7 @@ export async function readEngineRepos(client: PoolClient, accountId?: string): P
        LEFT JOIN runner_settings rs ON rs.runner_id = rn.id AND rs.account_id = rn.account_id
        LEFT JOIN users ru ON ru.id = rn.registered_by
        LEFT JOIN engine_repo_controls c ON c.account_id = b.account_id AND c.repo_id = b.repo_id
+       LEFT JOIN repo_github_identity gi ON gi.account_id = b.account_id AND gi.repo_id = b.repo_id
        -- Who halted it: only a person who is a member of this repo's own account (never a user of another account, whatever the column holds).
        LEFT JOIN account_members hm ON hm.account_id = b.account_id AND hm.user_id = c.halted_by AND c.halted_at IS NOT NULL
        LEFT JOIN users hu ON hu.id = hm.user_id
@@ -239,6 +242,7 @@ export async function readEngineRepos(client: PoolClient, accountId?: string): P
     halted_at: iso(r.halted_at),
     halted_by: r.halted_by_id === null || r.halted_by_id === undefined ? null : { id: r.halted_by_id, display_name: r.halted_by_name },
     halt_epoch: Number(r.halt_epoch),
+    github_identity: r.github_identity === 'personal' ? 'personal' : 'app',
     stop_failed: stopFailedOf(facts[i]!, planEnded),
     machine_name: sessionFacts[i]!.machine_name,
     setup: sessionFacts[i]!.setup,

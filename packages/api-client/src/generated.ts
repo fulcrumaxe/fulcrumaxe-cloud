@@ -1934,6 +1934,7 @@ export interface Operations {
           machine_name: string;
           failure_code: string | null;
         }) | (null);
+        github_identity: "app" | "personal";
       }>;
       next_cursor: string | null;
     };
@@ -1956,6 +1957,7 @@ export interface Operations {
         machine_name: string;
         failure_code: string | null;
       }) | (null);
+      github_identity: "app" | "personal";
     };
   };
   getRepoSettings: {
@@ -6134,6 +6136,7 @@ export interface Operations {
           display_name: string;
         }) | (null);
         halt_epoch: number;
+        github_identity: "app" | "personal";
         stop_failed: ({
           reason: ("person" | "halt" | "move" | "remove" | "operate_off" | "plan") | (null);
           code: string | null;
@@ -6656,6 +6659,30 @@ export interface Operations {
       }>;
       missing_events: number;
     } | unknown;
+  };
+  getRepoGithubIdentity: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      github_identity: "app" | "personal";
+      machine: string | null;
+    };
+  };
+  setRepoGithubIdentity: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: {
+      github_identity: "app" | "personal";
+    };
+    response: {
+      github_identity: "app" | "personal";
+      machine: string | null;
+    };
   };
 }
 
@@ -9520,6 +9547,28 @@ export const operations = {
     pathParams: ["id"],
     queryParams: [],
     hasBody: false,
+  },
+  getRepoGithubIdentity: {
+    method: "GET",
+    path: "/api/v1/repos/{id}/github-identity",
+    tokenAccess: true,
+    scope: "read",
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  setRepoGithubIdentity: {
+    method: "PUT",
+    path: "/api/v1/repos/{id}/github-identity",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: true,
   },
 } as const;
 
