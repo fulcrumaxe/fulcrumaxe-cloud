@@ -1586,11 +1586,12 @@ export function createGithubIdentityController({ call = api, signal, repoId, onC
       if (!cancelled(e)) set({ status: "error" });
     }
   }
+  // No Idempotency-Key: the route does not accept one (it answers 400 idempotency_not_supported), and setting a value is idempotent by nature.
   async function change(identity) {
     if (st.status !== "ready" || st.phase === "saving") return false;
     set({ phase: "saving", error: "" });
     try {
-      const v = readIdentity(await call("PUT", identityUrl(repoId), { github_identity: identity }, signal, { idempotencyKey: crypto.randomUUID() }));
+      const v = readIdentity(await call("PUT", identityUrl(repoId), { github_identity: identity }, signal));
       if (!v) { set({ phase: "error", error: IDENTITY_WORDS.failed }); return false; }
       set({ ...v, phase: "idle" });
       onSaved(v.identity);
