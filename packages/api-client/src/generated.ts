@@ -1935,6 +1935,14 @@ export interface Operations {
           failure_code: string | null;
         }) | (null);
         github_identity: "app" | "personal";
+        carry: ({
+          state: "waiting_machine" | "exporting" | "starting" | "failed";
+          failure_code: string | null;
+          from_name: string;
+          to_name: string;
+          parts_done: (number) | (null);
+          parts_total: (number) | (null);
+        }) | (null);
       }>;
       next_cursor: string | null;
     };
@@ -1958,6 +1966,14 @@ export interface Operations {
         failure_code: string | null;
       }) | (null);
       github_identity: "app" | "personal";
+      carry: ({
+        state: "waiting_machine" | "exporting" | "starting" | "failed";
+        failure_code: string | null;
+        from_name: string;
+        to_name: string;
+        parts_done: (number) | (null);
+        parts_total: (number) | (null);
+      }) | (null);
     };
   };
   getRepoSettings: {
@@ -6143,6 +6159,14 @@ export interface Operations {
           at: string;
         }) | (null);
         machine_name: string | null;
+        carry: ({
+          state: "waiting_machine" | "exporting" | "starting" | "failed";
+          failure_code: string | null;
+          from_name: string;
+          to_name: string;
+          parts_done: (number) | (null);
+          parts_total: (number) | (null);
+        }) | (null);
         setup: {
           status: "none" | "open" | "done";
           phase: string | null;

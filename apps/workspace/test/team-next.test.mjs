@@ -5,7 +5,7 @@
 // button makes and every refusal in fixed words, and a click on the real button (the page is driven on the built output in e2e/team.spec.ts).
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { REPOS_URL, SETTINGS_URL, chipOf, createTeam, createTeamApi, describe as describeState, readRepos } from "../apps/team/team-model.js";
-import { NEXT_WORDS, NO_OP, createOperate, describeNext, nextFailure, nextNodes, readFacts, untilWords } from "../apps/team/team-operate.js";
+import { NEXT_WORDS, NO_OP, createOperate, describeNext, nextFailure, nextNodes, readCarry, readFacts, untilWords } from "../apps/team/team-operate.js";
 import { REPO_A, RUNNER_A, RUNNER_B, makeFixtures } from "./fixtures/team/fixtures.mjs";
 
 const NOW = Date.parse("2026-11-16T15:00:00.000Z");
@@ -429,5 +429,109 @@ describe("nodes", () => {
     byId(nodes, "tm-move-cancel")[0].on.click();
     expect(mv.go).toHaveBeenCalledTimes(1);
     expect(mv.cancel).toHaveBeenCalledTimes(1);
+  });
+});
+
+// D#845 MC-9b2e: the carry of a project moved with its team memory: every state's sentence and buttons, who gets them, the exact request each makes, and every refusal in fixed words.
+describe("the carry card", () => {
+  const OLD = "Studio laptop", NEW = "Garage box";
+  const carry = (state, over = {}) => ({ state, failure_code: null, from_name: OLD, to_name: NEW, parts_done: null, parts_total: null, ...over });
+  const mine = (c, over = {}) => item({ session: session("stopped", { stopped_reason: "move" }), carry: c, ...over });
+  const KEEP = { id: "carry-abandon", label: "Start without the memory" }, AGAIN = { id: "carry-retry", label: "Try again" };
+  const rows = [
+    ["waiting for an offline old machine", carry("waiting_machine"), `Waiting for ${OLD} to hand over the team's memory. It's offline; the project starts on ${NEW} once ${OLD} is back.`, [KEEP]],
+    ["exporting, no part known yet", carry("exporting"), `Bringing the team's memory from ${OLD}.`, []],
+    ["exporting, the first of three", carry("exporting", { parts_done: 0, parts_total: 3 }), `Bringing the team's memory from ${OLD} (part 1 of 3).`, []],
+    ["exporting, the last of three", carry("exporting", { parts_done: 2, parts_total: 3 }), `Bringing the team's memory from ${OLD} (part 3 of 3).`, []],
+    ["too large", carry("failed", { failure_code: "too_large" }), "The team's memory is over 50 MB, so it can't be carried.", [KEEP]],
+    ["export failed", carry("failed", { failure_code: "export_failed" }), `The team's memory couldn't be brought from ${OLD}.`, [AGAIN, KEEP]],
+    ["import failed", carry("failed", { failure_code: "import_failed" }), `The team's memory couldn't be brought from ${OLD}.`, [AGAIN, KEEP]],
+    ["a code this build does not know", carry("failed", { failure_code: "link" }), `The team's memory couldn't be brought from ${OLD}.`, [AGAIN, KEEP]],
+    ["expired", carry("failed", { failure_code: "expired" }), `The team's memory expired before ${NEW} came online.`, [AGAIN, KEEP]],
+    ["the old machine was removed", carry("failed", { failure_code: "source_removed" }), `${OLD} was removed before it handed over the team's memory.`, [KEEP]],
+    ["the runner needs an update", carry("failed", { failure_code: "runner_update_needed" }), `Update fx-runner on ${OLD} to bring the memory along.`, [AGAIN, KEEP]],
+  ];
+  for (const [name, c, text, acts] of rows) {
+    it(`${name}: "${text}"`, async () => {
+      const nx = (await rig(mine(c))).t.view().next;
+      expect(nx.text).toBe(text);
+      expect(nx.acts).toEqual(acts);
+      expect(nx.action).toBeNull();
+      expect(nx.carryNote ? nx.carryNote.map((p) => (typeof p === "string" ? p : p.bdi)).join("") : "").toBe(acts.length ? `${OLD}'s copy of the project is deleted once ${NEW} is running.` : "");
+      const m = (await rig(mine(c), { canEdit: false })).t.view().next; // a member reads the sentence and is told who can act
+      expect(m.text).toBe(text);
+      expect(m.acts).toEqual([]);
+      expect(m.ask).toBe(acts.length ? NEXT_WORDS.ask.carry : ""); // only a state with a button tells a member who can act
+    });
+  }
+  it("a sealed carry draws the normal start progress, not a carry line; no carry draws none", async () => {
+    expect((await rig(item({ session: session("starting"), carry: carry("starting") }))).t.view().next.text).toBe("Starting the engine on Studio laptop…");
+    expect((await rig(item({ session: session("running"), carry: null }))).t.view().next).toBeNull();
+  });
+  it("a carry is read as the closed shape: an unknown state, a wrong type or a missing name is no carry or a fallback, never null on screen", () => {
+    expect(readCarry(null)).toBeNull();
+    expect(readCarry({ state: "later" })).toBeNull();
+    expect(readCarry(carry("failed", { failure_code: "Bad Code", from_name: " ", to_name: 4, parts_done: -1, parts_total: 1.5 })))
+      .toEqual({ state: "failed", code: "", from: "the old machine", to: "the new machine", done: null, of: null });
+  });
+  it("a carry with no session facts still draws its card", async () => {
+    const r = await rig(F.repo({ operate_enabled: true, carry: carry("waiting_machine") }));
+    delete r.table["GET " + REPOS_URL].items[0].session;
+    await r.t.load();
+    expect(r.t.view().next.text).toContain("to hand over the team's memory");
+  });
+  it("Try again and Start without the memory each send one empty POST, say what happened, and read the list again", async () => {
+    const URL = (k) => "/api/v1/engine/repos/" + REPO_A + "/carry/" + k;
+    const r = await rig(mine(carry("failed", { failure_code: "export_failed" })), { routes: { ["POST " + URL("retry")]: { carry: { id: "c1" } }, ["POST " + URL("abandon")]: { job_id: "j1" } } });
+    expect(await r.t.operate.retryCarry()).toBe(true);
+    expect(r.t.view().next.note).toBe("Trying again. The team's memory is being brought from the old machine.");
+    expect(await r.t.operate.abandonCarry()).toBe(true);
+    expect(r.t.view().next.note).toBe("Starting the engine on the new machine without the team's memory.");
+    expect(posts(r)).toEqual([["POST", URL("retry"), {}], ["POST", URL("abandon"), {}]]);
+    expect(r.log.filter(([m, p]) => m === "GET" && p === REPOS_URL)).toHaveLength(2);
+    const member = await rig(mine(carry("failed", { failure_code: "export_failed" })), { canEdit: false });
+    expect(await member.t.operate.retryCarry()).toBe(false);
+    expect(posts(member)).toEqual([]);
+  });
+  it("every refusal is in fixed words, by status and closed code, never the server's text", async () => {
+    const say = (status, code, reason) => nextFailure(Object.assign(e(status, code), { reason }));
+    expect(say(409, "carry_pending")).toBe("The team's memory is still being moved. Wait for it, or start without it.");
+    expect(say(409, "no_carry")).toBe("That was already settled. Reload the page.");
+    expect(say(409, "carry_not_failed")).toBe("The team's memory is still on its way.");
+    expect(say(409, "nothing_to_retry")).toBe("The old machine can't hand the memory over again. Start without it.");
+    expect(say(409, "state_carry_unavailable", "runner_update_needed")).toBe("Update fx-runner on both machines to bring the team's memory along.");
+    expect(say(409, "state_carry_unavailable", "machine_kek_unset")).toBe("The team's memory can't be carried right now. Start without it, or try again later.");
+    expect(say(409, "state_carry_unavailable", "something_new")).toBe("That didn't go through. Try again.");
+    expect(say(403, "forbidden")).toBe("Only an owner or admin can do that.");
+    const r = await rig(mine(carry("failed", { failure_code: "export_failed" })), { routes: { ["POST /api/v1/engine/repos/" + REPO_A + "/carry/retry"]: Object.assign(e(409, "state_carry_unavailable"), { reason: "runner_update_needed" }) } });
+    expect(await r.t.operate.retryCarry()).toBe(false);
+    expect(r.t.view().next.note).toBe("Update fx-runner on both machines to bring the team's memory along.");
+  });
+  describe("nodes", () => {
+    beforeEach(() => {
+      vi.stubGlobal("Node", FakeNode);
+      vi.stubGlobal("document", { createElement: (t) => new FakeEl(t), createTextNode: (text) => ({ text }) });
+    });
+    afterEach(() => vi.unstubAllGlobals());
+    it("each button calls go with its id, a busy one keeps its place in the Tab order and ignores a click, and the machine names stay text", async () => {
+      const r = await rig(mine(carry("failed", { failure_code: "export_failed", from_name: "<b>x</b>" })));
+      const go = vi.fn();
+      const nodes = nextNodes(r.t.view().next, go, {});
+      expect(byId(nodes, "tm-next-text")[0].textContent).toBe("The team's memory couldn't be brought from <b>x</b>.");
+      expect(findAll(byId(nodes, "tm-next-text")[0], (x) => x.tag === "b")).toHaveLength(0);
+      expect(byId(nodes, "tm-carry-note")[0].textContent).toBe("<b>x</b>'s copy of the project is deleted once Garage box is running.");
+      byId(nodes, "tm-next-carry-retry")[0].on.click();
+      byId(nodes, "tm-next-carry-abandon")[0].on.click();
+      expect(go.mock.calls).toEqual([["carry-retry"], ["carry-abandon"]]);
+      const busy = nextNodes({ ...r.t.view().next, busy: true }, go, {});
+      const stuck = byId(busy, "tm-next-carry-retry")[0];
+      expect(stuck.getAttribute("aria-disabled")).toBe("true");
+      expect(stuck.attrs.disabled).toBeUndefined();
+      stuck.on.click();
+      expect(go).toHaveBeenCalledTimes(2);
+      const waiting = nextNodes((await rig(mine(carry("exporting")))).t.view().next, go, {});
+      expect(byId(waiting, "tm-next-carry-abandon")).toHaveLength(0);
+      expect(byId(waiting, "tm-carry-note")).toHaveLength(0);
+    });
   });
 });

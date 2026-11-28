@@ -1043,11 +1043,20 @@ const ACTION_BY_CODE = {
   machine_not_eligible: "That machine can't take this project right now",
   machine_single_project: "That machine uses Standard isolation and already hosts a project",
   placement_busy: "Another change to that machine is in progress. Try again in a moment",
+  carry_pending: "The team's memory is still on its way from the last move. Wait for it, or choose Start without the memory on the Team page",
+};
+/** D#845 MC-9b2e: why a move with the team's memory was refused (the closed `reason` beside a 409 `state_carry_unavailable`). Nothing was moved; unticking the box moves the project without it. */
+export const CARRY_REFUSALS = {
+  runner_update_needed: "Update fx-runner on both machines to bring the team's memory along, or untick the box to move without it",
+  machine_kek_unset: "The team's memory can't be carried right now. Untick the box to move without it, or try again later",
+  no_session: "This project hasn't run on its machine yet, so there's no team memory to bring. Untick the box to move it",
+  source_removed: "The old machine was removed, so it can't hand over the team's memory. Untick the box to move without it",
 };
 /** The sentence for a refused server action, sign-in step or move: by closed code, then by status, never the server's words. */
 export function actionSentence(e) {
   const status = statusOf(e);
   if (status === 429) return SLOW_DOWN + " " + retryWords(waitSeconds(e));
+  if (e && e.code === "state_carry_unavailable" && Object.hasOwn(CARRY_REFUSALS, e.reason)) return CARRY_REFUSALS[e.reason];
   if (e && Object.hasOwn(ACTION_BY_CODE, e.code)) return ACTION_BY_CODE[e.code];
   return status === 403 ? ONLY_ADMINS_ACT : status === 404 ? "That isn't on your account any more. Refresh the list" : e && typeof e.code === "string" && e.code.startsWith("hetzner_") ? HETZNER_DOWN : "That didn't work. Try again.";
 }
@@ -1063,10 +1072,10 @@ export async function serverAct(kind, id, { call = api, signal, removeProjects =
     return cancelled(e) ? "" : actionSentence(e);
   }
 }
-/** Moves a project to another machine. Resolves to "" when done, else the sentence. (No state is carried along: that is a later row.) */
-export async function moveProject(repoId, toRunnerId, { call = api, signal } = {}) {
+/** Moves a project to another machine; `carry` also brings the team's memory along (the start then waits for it). Resolves to "" when done, else the sentence. */
+export async function moveProject(repoId, toRunnerId, { call = api, signal, carry = false } = {}) {
   try {
-    await call("POST", RUNNERS_URL + "/repos/" + enc(repoId) + "/move", { to_runner_id: toRunnerId }, signal);
+    await call("POST", RUNNERS_URL + "/repos/" + enc(repoId) + "/move", carry ? { to_runner_id: toRunnerId, carry_state: true } : { to_runner_id: toRunnerId }, signal);
     return "";
   } catch (e) {
     return cancelled(e) ? "" : actionSentence(e);

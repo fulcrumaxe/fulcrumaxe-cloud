@@ -15,7 +15,7 @@
 import { api, isRateLimited, retryWords, waitSeconds } from "../_lib/api.js";
 import { usd as dollars } from "../_lib/dom.js";
 import { readFleet } from "../runners/runners-fleet.js";
-import { NO_OP, agentWords, createOperate, describeEngineUpdate, describeHalt, describeNext, describeOperate, describeStopFailed, isAgentId, readEngineUpdate, readFacts, readStopFailed, sessionChip, stopOf } from "./team-operate.js";
+import { NO_OP, agentWords, createOperate, describeEngineUpdate, describeHalt, describeNext, describeOperate, describeStopFailed, isAgentId, readCarry, readEngineUpdate, readFacts, readStopFailed, sessionChip, stopOf } from "./team-operate.js";
 
 // The Team app's one door to the cloud, below: every URL and every request the app makes, written against the engine routes' documented shapes (the per-repo list envelope, the
 // settings read, the settings write, the command channel and the decision dials). The model and the page never build a path of their own. It lives in this file so the app stays
@@ -40,6 +40,7 @@ export const haltUrl = (repoId) => REPOS_URL + "/" + enc(repoId) + "/halt";
 export const retryStopUrl = (repoId) => REPOS_URL + "/" + enc(repoId) + "/retry-stop";
 export const updateUrl = (repoId) => REPOS_URL + "/" + enc(repoId) + "/update";
 export const startUrl = (repoId) => REPOS_URL + "/" + enc(repoId) + "/start";
+export const carryUrl = (repoId, kind) => REPOS_URL + "/" + enc(repoId) + "/carry/" + kind;
 export const moveUrl = (repoId) => RUNNERS_URL + "/repos/" + enc(repoId) + "/move";
 export const CHECKOUT_URL = "/api/v1/billing/checkout-session";
 export const clearHaltUrl = (repoId) => haltUrl(repoId) + "/clear";
@@ -68,6 +69,8 @@ export function createTeamApi(call = api) {
     retryStop: (repoId, signal) => call("POST", retryStopUrl(repoId), undefined, signal),
     startUpdate: (repoId, signal) => call("POST", updateUrl(repoId), undefined, signal),
     startEngine: (repoId, signal) => call("POST", startUrl(repoId), undefined, signal),
+    retryCarry: (repoId, signal) => call("POST", carryUrl(repoId, "retry"), {}, signal),
+    abandonCarry: (repoId, signal) => call("POST", carryUrl(repoId, "abandon"), {}, signal),
     moveProject: (repoId, toRunnerId, signal) => call("POST", moveUrl(repoId), { to_runner_id: toRunnerId }, signal),
     checkout: (signal) => call("POST", CHECKOUT_URL, { plan: "engine", quantity: 1, success_path: "/", cancel_path: "/" }, signal),
     halt: (repoId, signal) => call("POST", haltUrl(repoId), {}, signal),
@@ -276,7 +279,7 @@ export function readRepos(raw) {
     id: idKey(r.repo_id), name: r.full_name, runner: typeof r.runner_name === "string" ? r.runner_name : "", liveness: typeof r.liveness === "string" ? r.liveness : "never",
     lastHeard: typeof r.last_heard_at === "string" ? r.last_heard_at : "", operate: r.operate_enabled === true, halted: r.halted === true, haltPending: r.halt_pending === true,
     haltedAt: typeof r.halted_at === "string" ? r.halted_at : "", haltedBy: isObj(r.halted_by) && typeof r.halted_by.display_name === "string" && r.halted_by.display_name !== "" ? r.halted_by.display_name : "",
-    identity: r.github_identity === "personal" ? "personal" : "app", stopFailed: readStopFailed(r.stop_failed), engineUpdate: readEngineUpdate(r.engine_update), facts: readFacts(r),
+    identity: r.github_identity === "personal" ? "personal" : "app", stopFailed: readStopFailed(r.stop_failed), engineUpdate: readEngineUpdate(r.engine_update), facts: readFacts(r), carry: readCarry(r.carry),
   }));
 }
 export function readSettings(raw) {

@@ -418,6 +418,8 @@ function mountApp(contentEl) {
     if (id === "start") ops.startEngine();
     else if (id === "operate") ops.turnOnOperate();
     else if (id === "renew") ops.renew();
+    else if (id === "carry-retry") ops.retryCarry();
+    else if (id === "carry-abandon") ops.abandonCarry();
     else if (id === "move") { want = "next-move-pick"; ops.askMove(); }
     else if (id === "machines") openApp("runners");
     else openApp("onboarding", id === "setup" ? { step: "project", repo_id: team.state.selectedId } : undefined);

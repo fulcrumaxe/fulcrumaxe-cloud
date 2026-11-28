@@ -135,11 +135,26 @@ describe("the server actions", () => {
     expect(await serverAct("delete", ID, { call: recorder(fail(409, "projects_placed")).call })).toContain("Projects are placed on this server");
     expect(await serverAct("reboot", ID, { call: recorder(Object.assign(new Error("x"), { name: "AbortError" })).call })).toBe("");
   });
-  it("moves a project with exactly { to_runner_id }, and offers only an online machine that has room", async () => {
+  it("moves a project with exactly { to_runner_id }, and with { carry_state: true } when the memory comes along", async () => {
     const r = recorder({});
     expect(await moveProject(REPO, RUNNER, { call: r.call })).toBe("");
     expect(r.calls).toEqual([["POST", "/api/runners/repos/" + REPO + "/move", { to_runner_id: RUNNER }]]);
     expect(await moveProject(REPO, RUNNER, { call: recorder(fail(409, "machine_single_project")).call })).toBe("That machine uses Standard isolation and already hosts a project");
+    const t = recorder({});
+    expect(await moveProject(REPO, RUNNER, { call: t.call, carry: true })).toBe("");
+    expect(t.calls).toEqual([["POST", "/api/runners/repos/" + REPO + "/move", { to_runner_id: RUNNER, carry_state: true }]]);
+  });
+  it("words every refusal of a move that brings the team's memory, by closed reason, and never the server's text", async () => {
+    const refused = (reason) => actionSentence(fail(409, "state_carry_unavailable", { reason }));
+    expect(refused("runner_update_needed")).toBe("Update fx-runner on both machines to bring the team's memory along, or untick the box to move without it");
+    expect(refused("machine_kek_unset")).toBe("The team's memory can't be carried right now. Untick the box to move without it, or try again later");
+    expect(refused("no_session")).toBe("This project hasn't run on its machine yet, so there's no team memory to bring. Untick the box to move it");
+    expect(refused("source_removed")).toBe("The old machine was removed, so it can't hand over the team's memory. Untick the box to move without it");
+    expect(refused("a_reason_this_build_lacks")).toBe("That didn't work. Try again.");
+    expect(actionSentence(fail(409, "carry_pending"))).toBe("The team's memory is still on its way from the last move. Wait for it, or choose Start without the memory on the Team page");
+    expect(await moveProject(REPO, RUNNER, { call: recorder(fail(409, "state_carry_unavailable", { reason: "no_session" })).call, carry: true })).toBe(refused("no_session"));
+  });
+  it("offers only an online machine that has room", () => {
     const m = (id, live, tier, running) => ({ id, name: id, live, tier, running });
     expect(moveTargets([m("a", true, "microvm", "p"), m("b", false, "microvm", null), m("c", true, "standard", "p"), m("d", true, "standard", null), m("self", true, "microvm", null)], "self").map((x) => x.id)).toEqual(["a", "d"]);
   });
