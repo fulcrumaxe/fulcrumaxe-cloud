@@ -1,5 +1,5 @@
 // D#845 ON-19a: the Repos app's GitHub identity setting, state by state. The controller has no DOM (a fake call() stands in for the server, strict about the contract:
-// one PUT with exactly { github_identity }, one Idempotency-Key); the view and its confirm dialog are built by the shared h() against a small stand-in for the DOM calls.
+// one PUT with exactly { github_identity } and no Idempotency-Key, which the route refuses); the view and its confirm dialog are built by the shared h() against a small stand-in for the DOM calls.
 // The Team chip says the same words as the Repos row; one test pins both strings. The vitest environment is node.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -14,7 +14,6 @@ import {
 import { IDENTITY_CHIP } from "../apps/team/team-model.js";
 
 const REPO = "99999999-9999-4999-8999-999999999999";
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ACTING = "Acting as you on GitHub (all your repos)";
 const refusal = (status, code) => Object.assign(new Error("server text that must never be shown"), { status, code });
 const settle = () => new Promise((r) => setTimeout(r, 0));
@@ -26,7 +25,7 @@ function fakeServer({ identity = "app", machine = "Studio laptop", writeError = 
     log.push([method, path, body]);
     expect(path).toBe(identityUrl(REPO));
     if (method === "PUT") {
-      expect(opts && UUID.test(opts.idempotencyKey)).toBe(true);
+      expect(opts).toBeUndefined();
       expect(body).toEqual({ github_identity: expect.stringMatching(/^(app|personal)$/) });
       if (writeError) throw writeError;
       current = body.github_identity;
