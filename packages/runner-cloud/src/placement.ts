@@ -1,5 +1,5 @@
 import type { PoolClient } from "pg";
-import { HOST_LOAD_MIN_INTERVAL_SECONDS } from "@fulcrumaxe/runner-protocol";
+import { HOST_LOAD_MIN_INTERVAL_SECONDS, STATE_CARRY_MAX_BYTES } from "@fulcrumaxe/runner-protocol";
 import { RUNNER_ONLINE_SECONDS, runnerLiveSql } from "@fx/runner";
 import { assertMayAddReposToRunner, PlanHolderOnlyError } from "@fx/db/src/runnerPlanLoosen.js";
 import { RunnerHttpError, pgCode } from "./http.js";
@@ -23,7 +23,8 @@ export const PLACEMENT_MIN_DISK_FREE_MB = 10240;
 /** The most a carried state directory may weigh. The carry itself is not built yet, so a request for it is refused (see `moveProject`). */
 /** A host-load reading older than this many report intervals is as good as none. */
 export const LOAD_STALE_AFTER_INTERVALS = 3;
-export const STATE_CARRY_MAX_BYTES = 50 * 1024 * 1024;
+/** The size lives with the carry's protocol (D#845 MC-9b2); this name stays for the callers that read it here. */
+export { STATE_CARRY_MAX_BYTES };
 
 /** Why a machine cannot take a project, in the order they are checked. `has_project` first, because the screen names the project that holds it. */
 export type IneligibleReason = "has_project" | "server_deleting" | "not_live" | "paused" | "draining" | "claude_not_ready" | "load_unknown" | "low_memory" | "low_disk";

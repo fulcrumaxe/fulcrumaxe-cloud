@@ -74,7 +74,7 @@ export const jobCarriesPinnedCommit = (role: string): boolean => PINNED_COMMIT_J
  * role out for a runner that did not advertise the capability on its latest hello. A role not named here needs none.
  * D#6 RUNNER-WAKE R3a: `wake_v1` gates no role. It tells the cloud the runner can read a `wake` grant on its hello and claim replies (wake.ts).
  */
-export const RUNNER_CAPABILITIES = ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", BROWSER_CHROME_CAPABILITY, DEPLOY_ORDER_CAPABILITY, BROWSER_PLAYWRIGHT_CAPABILITY, "overlap_facts_v1", "engine_bridge_v1", "sandbox_commands_v1", "device_register_v1", "project_setup_v1", "survey_v1", "engine_session_v1", "machine_login_v1", "repo_token_refresh_v1", "watch_mode_v1", "kvm_fact_v1", "preflight_v1", "heartbeat_inventory_v1", "engine_lease_v1", "survey_public_v1", "twin_v1", "platform_fact_v1"] as const;
+export const RUNNER_CAPABILITIES = ["proposal_verifier", "wake_v1", "plane_merge_v1", "memory_limit_v1", "plane_merge_queue_v1", "discovery_analyst", "conflict_facts_v1", "ordered_facts_v1", "tip_publish_v1", "mem_proposal_v1", BROWSER_CHROME_CAPABILITY, DEPLOY_ORDER_CAPABILITY, BROWSER_PLAYWRIGHT_CAPABILITY, "overlap_facts_v1", "engine_bridge_v1", "sandbox_commands_v1", "device_register_v1", "project_setup_v1", "survey_v1", "engine_session_v1", "machine_login_v1", "repo_token_refresh_v1", "watch_mode_v1", "kvm_fact_v1", "preflight_v1", "heartbeat_inventory_v1", "engine_lease_v1", "survey_public_v1", "twin_v1", "platform_fact_v1", "engine_carry_v1"] as const;
 /** D#587 B-7b: a runner that lists it can receive signed sandbox commands on its claim reply and ack them on its next claim (sandboxCommands.ts). It gates no role and needs protocol 21. */
 export const SANDBOX_COMMAND_CAPABILITY = "sandbox_commands_v1" as const;
 /**
@@ -99,6 +99,11 @@ export const SURVEY_PUBLIC_CAPABILITY = "survey_public_v1" as const;
  * protocol 22. A build lists it (last) only because its run command registers a handler for each of the three twin jobs (ON-27d4c).
  */
 export const TWIN_CAPABILITY = "twin_v1" as const;
+/**
+ * D#845 MC-9b2: a runner that lists `engine_carry_v1` accepts the optional `carry` on a signed `engine_session_stop` (export the state directory) and `engine_session_start` (import it). It gates no job kind: the cloud
+ * sends the key only to a runner whose latest hello lists this, because a runner without it refuses a job with an unknown key. A build lists it (last) only when it has both handlers.
+ */
+export const ENGINE_CARRY_CAPABILITY = "engine_carry_v1" as const;
 export const publicRepoAllowed = (role: string, taskKind: string): boolean => role === SURVEY_ROLE && taskKind === "survey";
 export const ENGINE_SESSION_CAPABILITY = "engine_session_v1" as const;
 export const MACHINE_LOGIN_CAPABILITY = "machine_login_v1" as const;

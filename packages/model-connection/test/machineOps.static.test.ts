@@ -43,6 +43,11 @@ describe('machine_ops is the only code path that touches the machine key and the
     expect(filesMatching(/\b(?:auth_url_ct|code_ct)\b/)).toEqual(['packages/runner-cloud/src/machineLogin.ts']);
   });
 
+  it('D#845 MC-9b2: the state-carry sealer is built in the runner routes alone, and the state chunks reach the database through their definers in the one runner-cloud file', () => {
+    expect(filesMatching(/createStateCarrySealer\(/)).toEqual([MACHINE_OPS, 'apps/web/lib/runnerRoutes.ts'].sort());
+    expect(filesMatching(/state_carry_chunk_put|state_carry_chunk_take/)).toEqual(['packages/runner-cloud/src/stateCarry.ts']);
+  });
+
   it('the guard can fail: the scan finds the three words in machineOps.ts, so an empty result is not a broken scan', () => {
     const text = readFileSync(path.join(ROOT, MACHINE_OPS), 'utf8');
     for (const word of ['FX_MACHINE_KEK_V1', 'machine_credential_use', 'server.unsealed']) expect(text).toContain(word);

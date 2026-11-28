@@ -1,7 +1,7 @@
 import type { Pool } from "pg";
 import { CURRENT_PROTOCOL_VERSION, MAX_CREATED_SKEW_SECONDS, MIN_SUPPORTED_PROTOCOL_VERSION, type ClaimCapacity, type ContextLedgerBody, type DoneCheck, type Job, type LocalOnlyEvent, type PlaneMergeOrderedConfig, type PlaneMergeOrderedFact, type SignedJob, type StopReason, type SurveyFailureReason } from "@fulcrumaxe/runner-protocol";
 import { reportError } from "@fx/telemetry";
-import type { MachineLoginSealer } from "@fx/model-connection";
+import type { MachineLoginSealer, StateCarrySealer } from "@fx/model-connection";
 import type { CloudClose, ScopeRefusal } from "@fx/core/src/work-items/scopeRefusal.js";
 import type { EngineUsagePort } from "./ingestEngineEvents.js";
 import type { EngineCommandSigner } from "./engineCommands.js";
@@ -24,6 +24,8 @@ export interface RunnerHttpResponse {
   status: number;
   body: unknown;
   headers?: Record<string, string>;
+  /** D#845 MC-9b2: set instead of a JSON `body` by the one route that answers raw bytes (a state chunk): the route sends them as `application/octet-stream`. */
+  binary?: Uint8Array;
 }
 
 /** A refusal with a fixed status and code. Messages are fixed text, never an argument value or a database message. */
@@ -61,6 +63,8 @@ export async function toResponse(run: () => Promise<RunnerHttpResponse>): Promis
 
 /** Any request body over this gets 413 before its signature is looked at (criterion 9). */
 export const MAX_BODY_BYTES = 256 * 1024;
+/** D#845 MC-9b2: the one route allowed a larger body, the state-carry chunk: one 4 MiB chunk of raw bytes and nothing more. */
+export const CARRY_CHUNK_BODY_BYTES = 4 * 1024 * 1024;
 /** A runner key older than this must be re-registered (criterion 6). */
 export const MAX_KEY_AGE_DAYS = 90;
 /**
@@ -90,6 +94,8 @@ export interface RunnerCloudDeps {
    * with a key error: the sign-in routes answer 503 `not_configured` and nothing is stored or opened.
    */
   machineLoginSealer?: MachineLoginSealer | null;
+  /** D#845 MC-9b2: seals and opens the state-carry chunks under the machine key. Absent, or answering with a key error: the chunk routes answer 503 and nothing is stored or opened. */
+  stateCarrySealer?: StateCarrySealer | null;
   /** The configured public origin (FX_APP_ORIGIN). The only source of the URL a signature is checked against. */
   origin: string | undefined;
   /** EB-8a: the signer for engine bridge commands (the job-signing key, held by the worker). Absent, or answering null, the pull route is 503 `not_configured` and delivers nothing. */

@@ -68,8 +68,8 @@ export function signedUrl(origin: string | undefined, path: string): string {
 
 type KeyResolver = (keyid: string) => Ed25519Jwk | undefined | Promise<Ed25519Jwk | undefined>;
 
-async function checkSignature(deps: Pick<RunnerCloudDeps, "origin" | "now">, path: string, req: RunnerHttpRequest, resolveKey: KeyResolver): Promise<VerifiedSignature> {
-  if (req.body.byteLength > MAX_BODY_BYTES) throw new RunnerHttpError(413, "body_too_large", "the request body is too large");
+async function checkSignature(deps: Pick<RunnerCloudDeps, "origin" | "now">, path: string, req: RunnerHttpRequest, resolveKey: KeyResolver, maxBodyBytes: number = MAX_BODY_BYTES): Promise<VerifiedSignature> {
+  if (req.body.byteLength > maxBodyBytes) throw new RunnerHttpError(413, "body_too_large", "the request body is too large");
   const url = signedUrl(deps.origin, path);
   try {
     return await verifySignature({ method: req.method, url, headers: req.headers, body: req.body }, resolveKey, deps.now?.());
@@ -84,7 +84,7 @@ export async function verifyRunnerRequest(
   deps: RunnerCloudDeps,
   path: string,
   req: RunnerHttpRequest,
-  options: { replay: "once" | "none" },
+  options: { replay: "once" | "none"; /** A route that takes a larger body than every other (the state-carry chunk) says so here; the cap is still checked before any signature work. */ maxBodyBytes?: number },
 ): Promise<VerifiedRunner> {
   const seen: { row?: RunnerRow } = {};
   const signature = await checkSignature(deps, path, req, async (keyid) => {
@@ -95,7 +95,7 @@ export async function verifyRunnerRequest(
     if (!found || !isUsableEd25519Key(found.public_key_jwk.x)) return undefined;
     seen.row = found;
     return found.public_key_jwk;
-  });
+  }, options.maxBodyBytes);
   const row = seen.row;
   if (!row) throw UNAUTHORIZED();
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { HelloMessage, KVM_FACT_HELLO_CAPABILITY, PLATFORM_FACT_HELLO_CAPABILITY, TWIN_CAPABILITY, type HelloMessage as Hello } from "@fulcrumaxe/runner-protocol";
+import { ENGINE_CARRY_CAPABILITY, HelloMessage, KVM_FACT_HELLO_CAPABILITY, PLATFORM_FACT_HELLO_CAPABILITY, TWIN_CAPABILITY, type HelloMessage as Hello } from "@fulcrumaxe/runner-protocol";
 import { createRunnerClient } from "../../src/daemon/client.js";
 import { generateRunnerKey } from "../../src/keys.js";
 import { RUNNER_BUILD_CAPABILITIES, RUNNER_PROTOCOL_VERSION, RUNNER_VERSION } from "../../src/version.js";
@@ -40,6 +40,14 @@ describe("hello: platform_fact_v1 is dropped first", () => {
     expect(sent[0]!.capabilities.indexOf(PLATFORM_FACT_HELLO_CAPABILITY)).toBeGreaterThanOrEqual(0);
     expect(sent[1]!.capabilities).toEqual(others);
     expect(sent[1]!.capabilities).toContain(TWIN_CAPABILITY);
+  });
+
+  it("sits ahead of engine_carry_v1 on the ladder: a cloud that refuses only platform_fact_v1 drops it alone and engine_carry_v1 stays (Ruling 128.1)", async () => {
+    const { client, sent } = cloud(true, false);
+    const answer = await client.hello({ ...base, capabilities: [ENGINE_CARRY_CAPABILITY, PLATFORM_FACT_HELLO_CAPABILITY] });
+    expect((answer as { dropped?: string[] }).dropped?.[0]).toBe(PLATFORM_FACT_HELLO_CAPABILITY);
+    expect((answer as { dropped?: string[] }).dropped).toHaveLength(1);
+    expect(sent[1]!.capabilities.indexOf(ENGINE_CARRY_CAPABILITY)).toBe(0);
   });
 
   it("the retry carries no facts.platform either (a cloud rolled back after it listed platform_fact), and the other facts stay", async () => {

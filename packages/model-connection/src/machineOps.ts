@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { withTenant } from '@fx/db/src/withTenant.js';
 import { getMemberRole, requireOwnerOrAdmin } from '@fx/core/src/tenancy/authorize.js';
-import { open, seal } from './crypto.js';
+import { open, openBytes, seal } from './crypto.js';
 import { parseKek32 } from './kekFormat.js';
 import type { KekSource } from './kek.js';
 import { buildAad, type Principal } from './types.js';
@@ -112,6 +112,47 @@ export function createMachineLoginSealer(kek: KekSource = machineKekSource()): M
         return open({ kek: key, aad: loginAad(ids, purpose) }, { nonce: body.subarray(0, NONCE_BYTES), wrappedDek: body.subarray(NONCE_BYTES, NONCE_BYTES + WRAPPED_DEK_BYTES), ciphertext: body.subarray(NONCE_BYTES + WRAPPED_DEK_BYTES) });
       } catch {
         // fx-swallow-ok: a blob that does not open (tampered, moved to another request, runner, purpose or account, wrong key) fails closed; the cipher error names key material, so only a fixed code is kept
+        throw new MachineOpsError('unseal_failed');
+      }
+    },
+  };
+}
+
+/**
+ * D#845 MC-9b2: one chunk of the engine's state tar, sealed under the machine KEK with the AAD `account:carry:index`, so a chunk copied to another account, carry or place fails to open. The parts are the columns the
+ * carry table keeps (the KEK version that wrapped the key, the nonce, the wrapped key, the ciphertext). The chunk is bytes, never logged, audited or put in an error: failures are fixed codes of {@link MachineOpsError}.
+ */
+export interface StateCarryChunkIds {
+  accountId: string;
+  carryId: string;
+  index: number;
+}
+export interface SealedStateChunk {
+  kekVersion: number;
+  nonce: Buffer;
+  wrappedDek: Buffer;
+  ciphertext: Buffer;
+}
+export interface StateCarrySealer {
+  seal(ids: StateCarryChunkIds, plaintext: Uint8Array): SealedStateChunk;
+  open(ids: StateCarryChunkIds, sealed: SealedStateChunk): Buffer;
+}
+const carryAad = (ids: StateCarryChunkIds): Buffer => Buffer.from(`${ids.accountId.toLowerCase()}:${ids.carryId.toLowerCase()}:${ids.index}`, 'utf8');
+
+export function createStateCarrySealer(kek: KekSource = machineKekSource()): StateCarrySealer {
+  return {
+    seal(ids, plaintext) {
+      const kekVersion = kek.currentVersion();
+      const sealed = seal({ kek: keyOrThrow(kek, kekVersion), aad: carryAad(ids) }, plaintext);
+      return { kekVersion, ...sealed };
+    },
+    open(ids, sealed) {
+      if (!Number.isInteger(sealed.kekVersion) || sealed.kekVersion < 1) throw new MachineOpsError('unseal_failed');
+      const key = keyOrThrow(kek, sealed.kekVersion);
+      try {
+        return openBytes({ kek: key, aad: carryAad(ids) }, sealed);
+      } catch {
+        // fx-swallow-ok: a chunk that does not open (tampered, moved to another account, carry or place, wrong key) fails closed; the cipher error names key material, so only a fixed code is kept
         throw new MachineOpsError('unseal_failed');
       }
     },

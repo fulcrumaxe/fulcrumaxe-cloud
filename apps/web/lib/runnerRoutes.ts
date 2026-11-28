@@ -3,7 +3,7 @@ import type { Pool } from "pg";
 import { NextResponse } from "next/server";
 import { MAX_BODY_BYTES, RunnerHttpError, errorResponse, readDeviceCodeKey, readDeviceGlobalLimit, readWakeKey, toResponse } from "@fx/runner-cloud";
 import type { FailRunnerLeases, PlaneMergePort, PlaneMergeStorePort, PlanePushHostedPort, RunnerCloudDeps, RunnerLeaseOps, RunnerHttpRequest, RunnerHttpResponse, SessionPrincipal, SetupInstallPort } from "@fx/runner-cloud";
-import { createMachineLoginSealer } from "@fx/model-connection";
+import { createMachineLoginSealer, createStateCarrySealer } from "@fx/model-connection";
 import { PgRateLimitStore, type RateLimitStore } from "@fx/api/src/ratelimit/store.js";
 import { bucketKeyForAnonIp, clientIpFromRequest } from "@fx/api/src/ratelimit/limits.js";
 import { defaultAuthDeps } from "../app/api/auth/_lib/deps";
@@ -126,6 +126,7 @@ function planePushIdentity(): { name: string; email: string } | null {
 
 /** D#845 MC-8a: the machine key reader for the Claude sign-in link. Built once; the key is read on each use, so an unset key is a 503 on the sign-in routes and nothing more. */
 let machineLoginSealer: ReturnType<typeof createMachineLoginSealer> | undefined;
+let stateCarrySealer: ReturnType<typeof createStateCarrySealer> | undefined;
 
 /** D#845 ON-10b2: the worker's survey start and deadline look, resolved per call (null, and so a 503 `not_configured`, while no worker is configured). */
 const surveyRuns: NonNullable<RunnerCloudDeps["surveyRuns"]> = async () => {
@@ -166,6 +167,7 @@ export function runnerDeps(): RunnerCloudDeps {
     deviceFlowGlobalPerHour: () => readDeviceGlobalLimit(process.env),
     engineCommandSigner: async () => (await getWorker())?.engineCommandSigner ?? null,
     machineLoginSealer: (machineLoginSealer ??= createMachineLoginSealer()),
+    stateCarrySealer: (stateCarrySealer ??= createStateCarrySealer()),
     surveyRuns,
     surveyDeadline,
   };
@@ -196,6 +198,7 @@ export async function readCappedBody(req: Request, max: number): Promise<Uint8Ar
 }
 
 function send(res: RunnerHttpResponse): NextResponse {
+  if (res.binary !== undefined) return new NextResponse(Buffer.from(res.binary), { status: res.status, headers: { "cache-control": "no-store", "content-type": "application/octet-stream", ...res.headers } });
   return NextResponse.json(res.body, { status: res.status, headers: { "cache-control": "no-store", ...res.headers } });
 }
 
@@ -228,12 +231,14 @@ export async function handleRunnerRequest(
   run: (deps: RunnerCloudDeps, request: RunnerHttpRequest) => Promise<RunnerHttpResponse>,
   deps: () => RunnerCloudDeps = runnerDeps,
   guard?: RequestGuard,
+  /** D#845 MC-9b2: the state-carry chunk route alone passes a larger cap (4 MiB); every other runner route keeps 256 KiB. */
+  maxBodyBytes: number = MAX_BODY_BYTES,
 ): Promise<NextResponse> {
   return send(
     await toResponse(async () => {
       const refused = await guard?.(req);
       if (refused) return refused;
-      const body = await readCappedBody(req, MAX_BODY_BYTES);
+      const body = await readCappedBody(req, maxBodyBytes);
       if (!body) throw new RunnerHttpError(413, "body_too_large", "the request body is too large");
       return run(deps(), { method: req.method, headers: Object.fromEntries(req.headers), body, clientIp: clientIpFromRequest(req) });
     }),
