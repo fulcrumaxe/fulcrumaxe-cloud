@@ -1,6 +1,6 @@
 import { generateKeyPairSync } from "node:crypto";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { InstallationTokenCache, InstallationTokenError, SETUP_LABELS_PERMISSIONS, getInstallationToken, type AccessTokenRequester } from "../src/installationToken.js";
+import { InstallationTokenCache, InstallationTokenError, SETUP_LABELS_PERMISSIONS, assertIssueReadToken, getInstallationToken, type AccessTokenRequester } from "../src/installationToken.js";
 import { createInstallationHttp } from "../src/installationHttp.js";
 import { strictGithubFetch } from "./helpers/strictGithub.js";
 
@@ -282,6 +282,19 @@ describe("issue_read installation kind and token purpose (D#845 ON-27f, FU-324)"
     const http = await t.open("issue_read", TARGET);
     await expect(http.request({ method, path, ...(query === undefined ? {} : { query }), ...(body === undefined ? {} : { body }) })).rejects.toThrow(/path_refused|method_refused/);
     expect(labelCalls(t)).toEqual([]);
+  });
+
+  it.each(["POST", "PATCH", "DELETE"] as const)("the one-issue route refuses %s (nothing sent)", async (method) => {
+    const t = setup({ answer: () => readAnswer });
+    const http = await t.open("issue_read", TARGET);
+    await expect(http.request({ method, path: `${ISSUES}/7` })).rejects.toThrow(/path_refused|method_refused/);
+    expect(labelCalls(t)).toEqual([]);
+  });
+
+  it("assertIssueReadToken refuses a token answer holding issues write, and accepts exactly issues read and metadata read of the one repository", () => {
+    expect(() => assertIssueReadToken({ permissions: { metadata: "read", issues: "write" }, repositories: ["widgets"] }, "widgets")).toThrow("token_scope_mismatch");
+    expect(() => assertIssueReadToken({ permissions: { issues: "write" }, repositories: ["widgets"] }, "widgets")).toThrow("token_scope_mismatch");
+    expect(() => assertIssueReadToken({ permissions: { metadata: "read", issues: "read" }, repositories: ["widgets"] }, "widgets")).not.toThrow();
   });
 
   it("a mint whose answer holds a write, an extra permission, no issues read, or another repository is refused and revoked", async () => {
