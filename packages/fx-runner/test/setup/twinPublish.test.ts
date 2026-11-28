@@ -401,6 +401,8 @@ describe("what the build advertises", () => {
   it("twin_v1 is the last capability a runner build lists (D#845 ON-27d4c), and run.ts registers all three twin handlers", () => {
     // D#845 ON-19c: `gh_login_v1` is newer and goes after it; the order is checked by index, never from the end.
     expect((RUNNER_BUILD_CAPABILITIES as string[]).indexOf("twin_v1")).toBe((RUNNER_BUILD_CAPABILITIES as string[]).indexOf("gh_login_v1") - 1);
+    // D#845 ON-13b2 (Ruling 128.2): `engine_session_v1` is newer still and is listed last, after `gh_login_v1`.
+    expect((RUNNER_BUILD_CAPABILITIES as string[]).indexOf("engine_session_v1")).toBe((RUNNER_BUILD_CAPABILITIES as string[]).indexOf("gh_login_v1") + 1);
   });
 });
 

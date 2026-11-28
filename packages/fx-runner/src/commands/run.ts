@@ -76,7 +76,7 @@ import { computeConflictAttestation } from "../daemon/conflictAttest.js";
 import { createPlaneBaseLedger, createPlanePushHook, type PlaneBaseLedger } from "../daemon/planePush.js";
 import { createPlanePushGithub } from "../daemon/planePushGithub.js";
 import { createPlaneMergeHandler } from "../daemon/planeMerge.js";
-import { CONFLICT_FACTS_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, ENGINE_LEASE_HELLO_CAPABILITY, HEARTBEAT_INVENTORY_HELLO_CAPABILITY, GH_LOGIN_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, PLATFORM_FACT_HELLO_CAPABILITY, MACHINE_LOGIN_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, MEMORY_LIMIT_CAPABILITY, ORDERED_FACTS_CAPABILITY, OVERLAP_FACTS_CAPABILITY, PROJECT_SETUP_CAPABILITY, SANDBOX_COMMAND_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, type LimitedBy, type PreflightCode } from "@fulcrumaxe/runner-protocol";
+import { CONFLICT_FACTS_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, ENGINE_LEASE_HELLO_CAPABILITY, ENGINE_SESSION_CAPABILITY, HEARTBEAT_INVENTORY_HELLO_CAPABILITY, GH_LOGIN_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, PLATFORM_FACT_HELLO_CAPABILITY, MACHINE_LOGIN_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, MEMORY_LIMIT_CAPABILITY, ORDERED_FACTS_CAPABILITY, OVERLAP_FACTS_CAPABILITY, PROJECT_SETUP_CAPABILITY, SANDBOX_COMMAND_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, type LimitedBy, type PreflightCode } from "@fulcrumaxe/runner-protocol";
 import { createGitTransport, createPublicHeadsReader } from "@fulcrumaxe/runner-protocol/planePush";
 import { createNixShell, findNix, findTool, identityVia } from "../daemon/nixShell.js";
 import { createDepsInstaller } from "../daemon/depsInstall.js";
@@ -799,7 +799,9 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       // `kvm_fact_v1` is declared only by a runner that has a KVM reading to send (a plain present or absent), so a runner without one says what it always said.
       // D#845 ON-8f2c: `project_setup_v1` is advertised only when the setup and update handlers exist further down (a microVM guest, or the host guest on the standard tier); they are built from the same two parts, which are known by now.
       const setupJobsPossible = vmDeps !== undefined || (host.engine.installCapture !== undefined && host.selfCommand !== undefined);
-      const capabilityList = async () => [...RUNNER_BUILD_CAPABILITIES.filter((c) => ((c !== MACHINE_LOGIN_CAPABILITY && c !== GH_LOGIN_CAPABILITY) || host.managedServer?.() === true) && (c !== PROJECT_SETUP_CAPABILITY || setupJobsPossible)), SANDBOX_COMMAND_CAPABILITY, ...(factsWithKvm?.kvm === undefined ? [] : [KVM_FACT_HELLO_CAPABILITY]), ...(platformFact === undefined ? [] : [PLATFORM_FACT_HELLO_CAPABILITY]), ...(preflightReporter === undefined ? [] : [PREFLIGHT_HELLO_CAPABILITY]), ...(inventoryReporter === undefined ? [] : [HEARTBEAT_INVENTORY_HELLO_CAPABILITY]), ...(engineLeaseArmed ? [ENGINE_LEASE_HELLO_CAPABILITY] : []), ...(await verifyLocal.capabilities())];
+      // D#845 ON-13b2: `engine_session_v1` is listed only by a host that has what a session needs: the live microVM stack (its channel dial, its credential source and its snapshot deps, without which no session VM can be persistent) and a user id. The same condition builds `microvmSessions` below, so the first hello already says it.
+      const engineSessionArmed = vm !== undefined && vmDeps !== undefined && host.uid !== undefined && host.microvm?.deps?.snapshots !== undefined;
+      const capabilityList = async () => [...RUNNER_BUILD_CAPABILITIES.filter((c) => ((c !== MACHINE_LOGIN_CAPABILITY && c !== GH_LOGIN_CAPABILITY) || host.managedServer?.() === true) && (c !== PROJECT_SETUP_CAPABILITY || setupJobsPossible) && (c !== ENGINE_SESSION_CAPABILITY || engineSessionArmed)), SANDBOX_COMMAND_CAPABILITY, ...(factsWithKvm?.kvm === undefined ? [] : [KVM_FACT_HELLO_CAPABILITY]), ...(platformFact === undefined ? [] : [PLATFORM_FACT_HELLO_CAPABILITY]), ...(preflightReporter === undefined ? [] : [PREFLIGHT_HELLO_CAPABILITY]), ...(inventoryReporter === undefined ? [] : [HEARTBEAT_INVENTORY_HELLO_CAPABILITY]), ...(engineLeaseArmed ? [ENGINE_LEASE_HELLO_CAPABILITY] : []), ...(await verifyLocal.capabilities())];
       const helloBody = async (facts: typeof factsPlain) => ({ protocol_version: RUNNER_PROTOCOL_VERSION, binary_version: RUNNER_VERSION, model_auth_present: await modelAuth(), isolation: "host_sandbox" as const, ...(facts === undefined ? {} : { facts }), capabilities: await capabilityList() });
       const firstHello = await helloMessage();
       let advertised = JSON.stringify(firstHello.capabilities);
@@ -881,6 +883,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
               repoOf: createRepoLookup({ git: setupParts.git, mirrorDir: (id: number) => mirrors.dir({ id: String(id), owner: "-", name: "-" }) }),
               mark: createOperateMark({ stateDir, uid: host.uid, log: (event) => ctx.out(`fx-runner: ${event.event}`) }),
               runnerId: registration.runner_id,
+              cloudOrigin: registration.cloud_origin,
             };
       const microvmSessions =
         vm === undefined || vmDeps === undefined || sessionCommon === undefined
@@ -888,6 +891,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
           : createEngineSessionHandlers({
               vm: vmDeps,
               port: (options) => vm.vmPort(options),
+              readToken: vm.readToken, // the runner's own credential path (`credentials set-vm-token`), a fresh buffer per call
+              stopped: (r) => ctx.out(`fx-runner: engine session stopped (${r.method}, ${r.survivors} survivors, synced ${r.paused.synced})`),
               state: async (name) => (await vm.port.sandboxState?.({ runId: "", sandboxName: name, sessionId: "" })) ?? "unknown",
               ...sessionCommon,
             });
@@ -897,7 +902,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
           ? undefined
           : (() => {
               const parts = createStandardSessionParts({ guest: { ...guestDeps, jobsRoot: path.join(path.dirname(mirrorsRoot), "engine-sessions", "roots"), cacheDir: path.dirname(mirrorsRoot), scope: { tools: scopes.tools, runtimeDir: scopes.runtimeDir, budget: budgets().heavy } }, xdgRuntimeDir: host.xdgRuntimeDir, capture: host.engine.capture, supervise: host.engineSupervise === true ? { claudePath: binaryPath } : undefined });
-              return createEngineSessionHandlers({ vm: parts.vm, port: () => parts.port, state: parts.state, wipeToken: parts.wipeToken, minGuestMb: 1, get paths() { return parts.paths(); }, ...sessionCommon });
+              return createEngineSessionHandlers({ vm: parts.vm, port: () => parts.port, state: parts.state, wipeToken: parts.wipeToken, tier: "unit", minGuestMb: 1, get paths() { return parts.paths(); }, ...sessionCommon });
             })();
       const sessionHandlers = sessionHandlersFor({ microvm: microvmSessions, standard: standardSessions }, () => effectiveEngine(engine, loadSettings(stateDir).sandboxEngine));
       // D#845 ON-13c3: the same stop path a signed stop job takes, for the guard's own stop of a session whose lease ran out.

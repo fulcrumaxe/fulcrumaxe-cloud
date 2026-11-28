@@ -17,13 +17,17 @@ function cloud(unknown: string[]) {
   }) as unknown as typeof fetch;
   return { client: createRunnerClient({ origin: "https://cloud.example.test", key: generateRunnerKey(), now: () => new Date(), fetchFn }), sent };
 }
-const caps = [...RUNNER_BUILD_CAPABILITIES, ENGINE_CARRY_CAPABILITY];
+// the build behind `engine_session_v1` (D#845 ON-13b2, Ruling 128.2: it is listed last and dropped second, pinned in engineSessionHello.test.ts)
+const BUILD = RUNNER_BUILD_CAPABILITIES.filter((c) => c !== "engine_session_v1");
+const caps = [...BUILD, ENGINE_CARRY_CAPABILITY];
 
 describe("engine_carry_v1 on the hello", () => {
-  it("is newer than twin_v1 and older than gh_login_v1, which is the protocol's newest; a hello that lists it is a valid one", () => {
+  it("is newer than twin_v1 and older than gh_login_v1 and engine_session_v1, which is the protocol's newest; a hello that lists it is a valid one", () => {
     expect(RUNNER_CAPABILITIES.indexOf(ENGINE_CARRY_CAPABILITY)).toBeGreaterThan(RUNNER_CAPABILITIES.indexOf(TWIN_CAPABILITY));
     expect(RUNNER_CAPABILITIES.indexOf(GH_LOGIN_CAPABILITY)).toBe(RUNNER_CAPABILITIES.indexOf(ENGINE_CARRY_CAPABILITY) + 1);
-    expect(RUNNER_CAPABILITIES.indexOf(GH_LOGIN_CAPABILITY)).toBe(RUNNER_CAPABILITIES.length - 1);
+    // D#845 ON-13b2 (Ruling 128.2): `engine_session_v1` is newer than all of them and is the protocol's last name; checked by index.
+    expect(RUNNER_CAPABILITIES.indexOf("engine_session_v1")).toBe(RUNNER_CAPABILITIES.indexOf(GH_LOGIN_CAPABILITY) + 1);
+    expect(RUNNER_CAPABILITIES.indexOf("engine_session_v1")).toBe(RUNNER_CAPABILITIES.length - 1);
     expect(HelloMessage.safeParse({ ...base, capabilities: caps }).success).toBe(true);
   });
 
@@ -31,7 +35,7 @@ describe("engine_carry_v1 on the hello", () => {
     const { client, sent } = cloud([ENGINE_CARRY_CAPABILITY]);
     expect(await client.hello({ ...base, capabilities: caps })).toEqual({ kind: "ok", dropped: [ENGINE_CARRY_CAPABILITY] });
     expect(sent).toHaveLength(2);
-    expect(sent[1]).toEqual([...RUNNER_BUILD_CAPABILITIES]);
+    expect(sent[1]).toEqual([...BUILD]);
     expect(sent[1]).toContain(TWIN_CAPABILITY);
   });
 

@@ -283,7 +283,7 @@ describe("1-hello. the machine's facts are sent once on start (D#605 FL-2)", () 
   // D#483 S5-j2f: a hello the cloud keeps refusing with a 4xx goes out as the whole ladder of dropped capabilities each time (one POST per droppable capability, plus the last one that has nothing left to drop); said on every pass that is a flood.
   it("a hello that keeps being refused with a 4xx is said again less and less often, not on every pass", async () => {
     // Every capability but the base role (`proposal_verifier`, which the ladder never drops) is droppable, so the count follows the list and a new capability does not break this test.
-    const droppable = RUNNER_BUILD_CAPABILITIES.filter((c) => c !== "proposal_verifier").length;
+    const droppable = RUNNER_BUILD_CAPABILITIES.filter((c) => c !== "proposal_verifier" && c !== "engine_session_v1").length; // engine_session_v1 is listed only by a host with the microVM session stack, which this one is not
     // sandbox_commands_v1 (D#587 B-7b) and platform_fact_v1 (D#587 B-7c) are advertised beside the build list and are droppable too.
     const perAttempt = droppable + 3;
     expect(droppable).toBeGreaterThan(0);
@@ -1976,6 +1976,36 @@ describe("D#587 B-5b-3a: the microVM engine in the composed daemon", () => {
     await polls(() => (claimBodies().at(-1)?.["sandboxes"] as unknown[] | undefined)?.length === 0);
     expect(fake.spawnCount()).toBe(0);
     expect((await stop(run)).code).toBe(0);
+  }, 60_000);
+
+  it("D#845 ON-13b2: a runner with the live microVM stack says engine_session_v1 on its FIRST hello, last of its build list; an os_sandbox runner, with or without the stack, never does", async () => {
+    enableMicrovm("microvm");
+    // the rig's daemon deps carry snapshot deps (a limit and a state directory), as a runner with its limits set has; `withoutSnapshots` is one whose limits or state directory were refused
+    const withoutSnapshots = (): LiveMicrovmParts => {
+      const parts = wiredParts();
+      const deps = { ...parts.deps } as Record<string, unknown>;
+      delete deps["snapshots"];
+      return { ...parts, deps: deps as unknown as LiveMicrovmParts["deps"] };
+    };
+    const run = start({ host: { vmFacts: async () => goodFacts, microvm: wiredParts(), uid: process.getuid?.() } });
+    await until(() => claims() >= 1);
+    expect(sentHello().capabilities).toContain("engine_session_v1");
+    expect(sentHello().capabilities?.filter((c) => RUNNER_BUILD_CAPABILITIES.includes(c as never)).at(-1)).toBe("engine_session_v1");
+    expect((await stop(run)).code).toBe(0);
+    // a microvm runner with no snapshot deps (no limits set, or the state directory refused) could not keep a session's disk, so it never lists the capability
+    cloud.seen.length = 0;
+    const unsnapshotted = start({ host: { vmFacts: async () => goodFacts, microvm: withoutSnapshots(), uid: process.getuid?.() } });
+    await until(() => claims() >= 1);
+    expect(sentHello().capabilities).not.toContain("engine_session_v1");
+    expect((await stop(unsnapshotted)).code).toBe(0);
+    for (const host of [{}, { vmFacts: async () => goodFacts, microvm: wiredParts(), uid: process.getuid?.() }]) {
+      enableMicrovm("os_sandbox");
+      cloud.seen.length = 0;
+      const plain = start({ host });
+      await until(() => claims() >= 1);
+      expect(sentHello().capabilities).not.toContain("engine_session_v1");
+      expect((await stop(plain)).code).toBe(0);
+    }
   }, 60_000);
 
   it("an os_sandbox runner with a complete live stack still reports os_sandbox and sends no sandboxes block: its claim is the one it always sent", async () => {

@@ -4,7 +4,7 @@ import { createMicrovmVmPort, VmPortRefused, type MicrovmVmPortParts } from "../
 
 const SENTINEL = "/home/sentinel-user/secret-repo";
 
-function rig(over: { state?: string; guestFails?: boolean; createFails?: boolean; teardown?: boolean; persistent?: boolean; wake?: "ok" | "gone" } = {}) {
+function rig(over: { state?: string; guestFails?: boolean; createFails?: boolean; teardown?: boolean; persistent?: boolean; wake?: "ok" | "gone"; timedOut?: boolean; noPredicate?: boolean } = {}) {
   const log: string[] = [];
   const parts: MicrovmVmPortParts = {
     sandbox: {
@@ -37,7 +37,11 @@ function rig(over: { state?: string; guestFails?: boolean; createFails?: boolean
             },
           }),
     },
-    daemon: { teardown: async (id) => (log.push(`teardown ${id}`), over.teardown !== false), get: async (id) => (log.push(`get ${id}`), {} as never) },
+    daemon: {
+      teardown: async (id) => (log.push(`teardown ${id}`), over.teardown !== false),
+      get: async (id) => (log.push(`get ${id}`), {} as never),
+      ...(over.noPredicate === true ? {} : { hasTimedOutWrite: (id: string) => (log.push(`timedOut ${id}`), over.timedOut === true) }),
+    },
     bindings: { bind: (name, _sandbox, timeoutMs) => (log.push(`bind ${name} timeout=${String(timeoutMs)}`), {} as never), unbind: (name) => void log.push(`unbind ${name}`) },
     policy: { release: async (id) => void log.push(`release ${id}`) },
     idOf: (name) => `id-${name}`,
@@ -63,6 +67,14 @@ describe("the production VmPort", () => {
     await r.port.destroy("rc-1");
     await r.port.delete("rn-1");
     expect(r.log.filter((l) => l.startsWith("bind") || l.startsWith("unbind"))).toEqual(["bind rn-1 timeout=123000", "bind rc-1 timeout=123000", "unbind rn-1", "unbind rc-1", "unbind rn-1"]);
+  });
+
+  it("writeTimedOut is the daemon's answer by the daemon's id, true and false alike, and false when the daemon cannot say", () => {
+    const yes = rig({ timedOut: true });
+    expect(yes.port.writeTimedOut?.("rn-1")).toBe(true);
+    expect(yes.log).toEqual(["timedOut id-rn-1"]);
+    expect(rig({ timedOut: false }).port.writeTimedOut?.("rn-1")).toBe(false);
+    expect(rig({ noPredicate: true }).port.writeTimedOut?.("rn-1")).toBe(false);
   });
 
   it("only the agent's VM is ever persistent: the check VM never keeps a snapshot", async () => {

@@ -68,8 +68,16 @@ function readLine(socket: Duplex, timeoutMs: number): Promise<string> {
   });
 }
 
-export function createHelperClient(connect: () => Promise<Duplex>, timeoutMs = 30_000): Helper {
-  async function call(frame: Record<string, string | number>): Promise<Record<string, unknown>> {
+/**
+ * How long a `snapshot` request may wait for its reply. It is its own bound because the helper writes the whole guest's RAM before it answers: on the
+ * installed disk (11-27, real VM) that took 10 s and 18.6 s for a small guest and 39.3 s and 41.5 s for the engine session's guest, past the 30 s that
+ * every other verb gets. A client that gave up at 30 s made the daemon destroy the VM in the middle of the write. Five minutes is about seven times the
+ * slowest measured write and still ends: a helper that never answers is not waited on for ever.
+ */
+export const HELPER_SNAPSHOT_TIMEOUT_MS = 300_000;
+
+export function createHelperClient(connect: () => Promise<Duplex>, timeoutMs = 30_000, snapshotTimeoutMs = HELPER_SNAPSHOT_TIMEOUT_MS): Helper {
+  async function call(frame: Record<string, string | number>, waitMs = timeoutMs): Promise<Record<string, unknown>> {
     let socket: Duplex;
     try {
       socket = await connect();
@@ -78,7 +86,7 @@ export function createHelperClient(connect: () => Promise<Duplex>, timeoutMs = 3
       throw new HelperError("unreachable");
     }
     try {
-      const reply = readLine(socket, timeoutMs);
+      const reply = readLine(socket, waitMs);
       socket.write(`${JSON.stringify(frame)}\n`);
       let parsed: unknown;
       try {
@@ -104,7 +112,7 @@ export function createHelperClient(connect: () => Promise<Duplex>, timeoutMs = 3
     start: async (id) => located(await call({ verb: "start", sandbox_id: id })),
     destroy: async (id) => void (await call({ verb: "destroy", sandbox_id: id })),
     snapshot: async (id, snap) => {
-      const bytes = (await call({ verb: "snapshot", sandbox_id: id, snapshot_id: snap }))["snapshot_bytes"];
+      const bytes = (await call({ verb: "snapshot", sandbox_id: id, snapshot_id: snap }, snapshotTimeoutMs))["snapshot_bytes"];
       if (!isPositiveInt(bytes)) throw new HelperError("bad_reply");
       return { snapshotBytes: bytes };
     },

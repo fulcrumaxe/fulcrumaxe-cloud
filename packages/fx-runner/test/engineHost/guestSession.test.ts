@@ -1,9 +1,13 @@
+import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { guestRuntime, runEngineSupervise } from "../../scripts/engine-supervise-host.mjs";
 import { CHANNEL_OPS, CHANNEL_SOCKET, SESSION_READY_LINE, createGuestSession, EVENTS_READ_MAX, FRAME_MAX, SESSION_CONFIG_FILE, TOKEN_MAX, type ChannelReply, type GuestRuntime, type GuestSession } from "../../src/engineHost/guestSession.js";
+import { EngineCommand, signEngineCommand } from "@fulcrumaxe/runner-protocol";
+import { originHash, type PinnedKeyrings } from "../../src/keyring.js";
+import { renderPrompt } from "../../src/engineHost/prompts.js";
 import { HOST_LOG_FILE, HOST_LOG_MAX_BYTES } from "../../src/engineHost/hostFiles.js";
 import { SPOOL_FILE } from "../../src/engineHost/hostFeeds.js";
 import { BACKOFF_MS, CRASH_LIMIT, FILE_BEAT_MS, HOST_ARGS } from "../../src/engineHost/supervisor.js";
@@ -50,6 +54,7 @@ process.stdin.on("data", (d) => {
     buf = buf.slice(i + 1);
     log({ event: "user", role: m.message.role, content: m.message.content });
     if (mode === "flood") { const line = JSON.stringify({ type: "assistant", pad: "x".repeat(1000) }) + "\\n"; for (let n = 0; n < 21 * 1024; n++) process.stdout.write(line); }
+    if (mode === "hold") continue; // a turn that never ends (single flight)
     if (mode === "nousage") out({ type: "result", subtype: "error_max_turns", is_error: true });
     else if (mode === "echo") setTimeout(result, 400); // after the split write has completed its line
     else result();
@@ -87,7 +92,7 @@ interface Rig {
 
 const rigs: Rig[] = [];
 /** A session over a fresh state directory, a checkout, the stand-in CLI and a PRIVATE PATH. `tune` may replace the clock and the timers. */
-function rig(mode: string, tune: (rt: GuestRuntime) => GuestRuntime = (rt) => rt, config = true, model?: string): Rig {
+function rig(mode: string, tune: (rt: GuestRuntime) => GuestRuntime = (rt) => rt, config = true, model?: string, extra: { keyrings?: PinnedKeyrings; session?: Record<string, unknown> } = {}): Rig {
   const scratch = tempDir("fx-gs-");
   const bin = path.join(scratch, "bin");
   mkdirSync(bin);
@@ -102,9 +107,9 @@ function rig(mode: string, tune: (rt: GuestRuntime) => GuestRuntime = (rt) => rt
   mkdirSync(priv);
   // the child's whole PATH is this empty directory: the real claude, gh and a credential helper are unreachable (asserted in the first test)
   const runtime = tune(guestRuntime({ claudePath: claude, env: { PATH: priv, HOME: scratch, FAKE_MODE: mode, FAKE_RECORD: record, ...(model === undefined ? {} : { FAKE_MODEL: model }) } }));
-  const session = createGuestSession({ dir, runtime });
+  const session = createGuestSession({ dir, runtime, ...(extra.keyrings === undefined ? {} : { keyrings: extra.keyrings }) });
   if (config) {
-    writeFileSync(path.join(dir, SESSION_CONFIG_FILE), JSON.stringify({ repo_gh_id: "424242", repo_checkout: checkout }), { mode: 0o600 });
+    writeFileSync(path.join(dir, SESSION_CONFIG_FILE), JSON.stringify({ repo_gh_id: "424242", repo_checkout: checkout, ...extra.session }), { mode: 0o600 });
   }
   const read = (file: string): string => (existsSync(file) ? readFileSync(file, "utf8") : "");
   const r: Rig = {
@@ -143,7 +148,7 @@ describe("the channel's closed messages", () => {
 
   it("refuses anything that is not one of them, or carries a key outside its shape", async () => {
     const r = rig("ok");
-    for (const bad of [null, [], "tick", 7, {}, { op: "exec", text: "x" }, { op: "tick" }, { op: "tick", text: "" }, { op: "tick", text: "x", extra: 1 }, { op: "tick", text: 5 }, { op: "stop", reason: "halted" }, { op: "events_read", after: -1 }, { op: "events_read", after: 1.5 }, { op: "events_read" }, { op: "command", command: {}, x: 1 }]) {
+    for (const bad of [null, [], "tick", 7, {}, { op: "exec", text: "x" }, { op: "tick" }, { op: "tick", text: "free text" }, { op: "tick", kind: "nap" }, { op: "tick", kind: "loop", name: "x" }, { op: "tick", kind: "checkin" }, { op: "tick", kind: "checkin", name: "Bad Name" }, { op: "tick", kind: "loop", extra: 1 }, { op: "stop", reason: "weekend" }, { op: "events_read", after: -1 }, { op: "events_read", after: 1.5 }, { op: "events_read" }, { op: "events_read", after: 0, stream: "x" }, { op: "command", command: {}, x: 1 }]) {
       expect(await r.ask(bad), JSON.stringify(bad)).toEqual({ ok: false, code: "bad_request" });
     }
     expect(r.starts()).toEqual([]);
@@ -151,16 +156,16 @@ describe("the channel's closed messages", () => {
 
   it("tick answers no_session_config before the config exists, and starts nothing", async () => {
     const r = rig("ok", (rt) => rt, false);
-    expect(await r.ask({ op: "tick", text: "hello" })).toEqual({ ok: false, code: "no_session_config" });
+    expect(await r.ask({ op: "tick", kind: "loop" })).toEqual({ ok: false, code: "no_session_config" });
     expect(r.starts()).toEqual([]);
   });
 
   it("tick starts the host on the first message and sends each tick as one stream-json user message with the fixed argument vector", async () => {
     const r = rig("ok");
-    expect(await r.ask({ op: "tick", text: "first tick" })).toEqual({ ok: true, started: true });
-    expect(await r.ask({ op: "tick", text: "second tick" })).toEqual({ ok: true, started: false });
+    expect(await r.ask({ op: "tick", kind: "loop" })).toEqual({ ok: true, started: true });
+    expect(await r.ask({ op: "tick", kind: "loop" })).toEqual({ ok: true, started: false });
     await until(() => r.users().length === 2, "both messages");
-    expect(r.users()).toEqual(["first tick", "second tick"]);
+    expect(r.users()).toEqual([renderPrompt("loop"), renderPrompt("loop")]);
     const [start, ...more] = r.starts();
     expect(more).toEqual([]);
     expect(start?.argv).toEqual([...HOST_ARGS]);
@@ -169,30 +174,12 @@ describe("the channel's closed messages", () => {
     expect(start?.tokenEnvSet).toBe(false);
   });
 
-  it("command is refused command_unverified until a verifier is given, and is never sent", async () => {
-    const r = rig("ok");
-    expect(await r.ask({ op: "command", command: { kind: "answer_ask" } })).toEqual({ ok: false, code: "command_unverified" });
-    expect(r.starts()).toEqual([]);
-    const scratch = tempDir("fx-gs-v-");
-    const checkout = path.join(scratch, "co");
-    mkdirSync(checkout);
-    const claude = path.join(scratch, "host-standin");
-    writeFileSync(claude, FAKE);
-    chmodSync(claude, 0o755);
-    const record = path.join(scratch, "rec.jsonl");
-    const verified = createGuestSession({ dir: path.join(scratch, "st"), runtime: guestRuntime({ claudePath: claude, env: { PATH: scratch, FAKE_MODE: "ok", FAKE_RECORD: record } }), verifyCommand: (c) => ((c as { ok?: boolean }).ok === true ? "the verified text" : undefined) });
-    writeFileSync(path.join(scratch, "st", SESSION_CONFIG_FILE), JSON.stringify({ repo_gh_id: "424242", repo_checkout: checkout }), { mode: 0o600 });
-    expect(await verified.request({ op: "command", command: { ok: false } })).toEqual({ ok: false, code: "command_unverified" });
-    expect(await verified.request({ op: "command", command: { ok: true } })).toEqual({ ok: true, started: true });
-    await until(() => existsSync(record) && readFileSync(record, "utf8").includes("the verified text"), "the verified command");
-    await verified.request({ op: "stop" });
-  });
 });
 
 describe("usage_tick", () => {
   it("each result with all four totals is one usage_tick event of raw counts, with the model and a window", async () => {
     const r = rig("ok");
-    await r.ask({ op: "tick", text: "go" });
+    await r.ask({ op: "tick", kind: "loop" });
     await until(() => r.events().some((e) => e["kind"] === "usage_tick"), "a usage_tick");
     const tick = r.events().find((e) => e["kind"] === "usage_tick");
     expect(tick).toMatchObject({ v: 1, kind: "usage_tick", model_tier: "claude-haiku-4-5", input_tokens: 11, output_tokens: 22, cache_read_tokens: 33, cache_write_tokens: 44 });
@@ -202,11 +189,11 @@ describe("usage_tick", () => {
 
   it("a model the tier pattern does not accept is 'unknown', and a result with no usage is not a tick at all", async () => {
     const odd = rig("ok", (rt) => rt, true, "Not A Model");
-    await odd.ask({ op: "tick", text: "go" });
+    await odd.ask({ op: "tick", kind: "loop" });
     await until(() => odd.events().some((e) => e["kind"] === "usage_tick"), "a usage_tick");
     expect(odd.events().find((e) => e["kind"] === "usage_tick")?.["model_tier"]).toBe("unknown");
     const none = rig("nousage");
-    await none.ask({ op: "tick", text: "go" });
+    await none.ask({ op: "tick", kind: "loop" });
     await until(() => none.users().length === 1, "the message");
     await new Promise((resolve) => setTimeout(resolve, 200));
     expect(none.events().filter((e) => e["kind"] === "usage_tick")).toEqual([]);
@@ -217,7 +204,7 @@ describe("events_read", () => {
   it("returns whole lines from a byte offset, continues from `next`, and answers reset when the file is shorter than the offset", async () => {
     const r = rig("ok");
     expect(await r.ask({ op: "events_read", after: 0 })).toEqual({ ok: true, lines: [], next: 0, reset: false });
-    await r.ask({ op: "tick", text: "go" });
+    await r.ask({ op: "tick", kind: "loop" });
     await until(() => r.events().some((e) => e["kind"] === "usage_tick"), "a usage_tick");
     const first = (await r.ask({ op: "events_read", after: 0 })) as unknown as { lines: string[]; next: number; reset: boolean };
     expect(first.reset).toBe(false);
@@ -232,7 +219,7 @@ describe("events_read", () => {
 
   it("never returns more than EVENTS_READ_MAX bytes at a time and never a partial line", async () => {
     const r = rig("ok");
-    await r.ask({ op: "tick", text: "go" });
+    await r.ask({ op: "tick", kind: "loop" });
     await until(() => r.events().length >= 2, "events");
     writeFileSync(path.join(r.dir, SPOOL_FILE), `${"a".repeat(1000)}\n`.repeat(200) + "partial", { mode: 0o600 });
     const got = (await r.ask({ op: "events_read", after: 0 })) as unknown as { lines: string[]; next: number };
@@ -263,7 +250,7 @@ describe("token_put and the wipe", () => {
   it("a token reaches the host's environment at launch only, and is in no reply, log, spool or event", async () => {
     const r = rig("ok");
     const replies: ChannelReply[] = [await r.ask({ op: "token_put", name: "claude", size: TOKEN.length }, tokenBody())];
-    replies.push(await r.ask({ op: "tick", text: "go" }));
+    replies.push(await r.ask({ op: "tick", kind: "loop" }));
     await until(() => r.events().some((e) => e["kind"] === "usage_tick"), "a usage_tick");
     replies.push(await r.ask({ op: "events_read", after: 0 }));
     expect(r.starts()[0]?.tokenSeen).toBe(true);
@@ -276,13 +263,13 @@ describe("token_put and the wipe", () => {
   it("stop wipes first: the reply says so, the host process is gone, and nothing more is accepted or started", async () => {
     const r = rig("ok");
     await r.ask({ op: "token_put", name: "claude", size: TOKEN.length }, tokenBody());
-    await r.ask({ op: "tick", text: "go" });
+    await r.ask({ op: "tick", kind: "loop" });
     await until(() => r.users().length === 1, "the message");
     const pid = r.starts()[0]?.pid ?? -1;
     expect(alive(pid)).toBe(true);
-    expect(await r.ask({ op: "stop", reason: "machine_shutdown" })).toEqual({ ok: true, survivors: 0, token_wiped: true });
+    expect(await r.ask({ op: "stop", reason: "machine_shutdown" })).toEqual({ ok: true, survivors: 0, token_wiped: true, pid: process.pid });
     await until(() => !alive(pid), "the host to be gone");
-    expect(await r.ask({ op: "tick", text: "again" })).toEqual({ ok: false, code: "stopped" });
+    expect(await r.ask({ op: "tick", kind: "loop" })).toEqual({ ok: false, code: "stopped" });
     expect(await r.ask({ op: "token_put", name: "claude", size: 3 }, tokenBody("abc"))).toEqual({ ok: false, code: "stopped" });
     expect(r.events().map((e) => e["kind"])).toContain("host_stopped");
     expect(r.events().find((e) => e["kind"] === "host_stopped")?.["reason"]).toBe("machine_shutdown");
@@ -292,7 +279,7 @@ describe("token_put and the wipe", () => {
     const r = rig("ok");
     await r.ask({ op: "token_put", name: "claude", size: 3 }, tokenBody("one"));
     await r.ask({ op: "token_put", name: "claude", size: TOKEN.length }, tokenBody());
-    await r.ask({ op: "tick", text: "go" });
+    await r.ask({ op: "tick", kind: "loop" });
     await until(() => r.starts().length === 1, "the start");
     expect(r.starts()[0]?.tokenSeen).toBe(true);
   });
@@ -300,7 +287,7 @@ describe("token_put and the wipe", () => {
   it("stop without a start still wipes and answers", async () => {
     const r = rig("ok");
     await r.ask({ op: "token_put", name: "claude", size: 3 }, tokenBody("abc"));
-    expect(await r.ask({ op: "stop" })).toEqual({ ok: true, survivors: 0, token_wiped: true });
+    expect(await r.ask({ op: "stop" })).toEqual({ ok: true, survivors: 0, token_wiped: true, pid: process.pid });
     expect(r.starts()).toEqual([]);
   });
 });
@@ -318,7 +305,7 @@ describe("restarts and crash_loop", () => {
         return () => void (t.cancelled = true);
       },
     }));
-    expect(await r.ask({ op: "tick", text: "go" })).toMatchObject({ ok: true, started: true });
+    expect(await r.ask({ op: "tick", kind: "loop" })).toMatchObject({ ok: true, started: true });
     const waits: number[] = [];
     for (let crash = 1; crash < CRASH_LIMIT; crash++) {
       // the dead host's own 15 s file beat is cancelled when its exit is seen: only then is the one live timer the back-off
@@ -335,7 +322,7 @@ describe("restarts and crash_loop", () => {
     expect(r.starts().length).toBe(CRASH_LIMIT);
     expect(r.starts()[0]?.argv).toEqual([...HOST_ARGS]);
     expect(r.starts()[1]?.argv).toEqual([...HOST_ARGS, "--resume", SID]);
-    expect(await r.ask({ op: "tick", text: "more" })).toEqual({ ok: false, code: "host_ended", reason: "crash_loop" });
+    expect(await r.ask({ op: "tick", kind: "loop" })).toEqual({ ok: false, code: "host_ended", reason: "crash_loop" });
     const stopped = r.events().filter((e) => e["kind"] === "host_stopped");
     expect(stopped).toHaveLength(1);
     expect(stopped[0]?.["reason"]).toBe("crash_loop");
@@ -346,7 +333,7 @@ describe("the 20 MB rotating guest log", () => {
   it("is the host log's own default size and rotates to .1 when the host's stream passes it, never growing past it", async () => {
     expect(HOST_LOG_MAX_BYTES).toBe(20 * 1024 * 1024);
     const r = rig("flood");
-    await r.ask({ op: "tick", text: "go" });
+    await r.ask({ op: "tick", kind: "loop" });
     await until(() => existsSync(path.join(r.dir, `${HOST_LOG_FILE}.1`)), "the log to rotate", 800);
     await until(() => r.events().some((e) => e["kind"] === "usage_tick"), "the turn to end", 800);
     expect(statSync(path.join(r.dir, HOST_LOG_FILE)).size).toBeLessThanOrEqual(HOST_LOG_MAX_BYTES);
@@ -393,7 +380,7 @@ describe.skipIf(sockets)("the socket", () => {
       head.writeUInt32BE(FRAME_MAX + 1, 0);
       expect(await ask(file, [head])).toEqual({ ok: false, code: "bad_request" });
       expect(await ask(file, [Buffer.from([0, 0, 0, 3]), Buffer.from("{x}")])).toEqual({ ok: false, code: "bad_request" });
-      expect(await ask(file, [frame({ op: "tick", text: "go" })])).toEqual({ ok: true, started: true });
+      expect(await ask(file, [frame({ op: "tick", kind: "loop" })])).toEqual({ ok: true, started: true });
       await until(() => r.users().length === 1, "the message");
     } finally {
       await listening.close();
@@ -507,7 +494,7 @@ describe("crash_loop wipes the credential and ends the program", () => {
       held.some((b) => !zeroed(b)),
       "control: the copy holds the token before the loop ends",
     ).toBe(true);
-    expect(await r.ask({ op: "tick", text: "go" })).toMatchObject({ ok: true, started: true });
+    expect(await r.ask({ op: "tick", kind: "loop" })).toMatchObject({ ok: true, started: true });
     let settled = false;
     void r.session.finished().then(() => void (settled = true));
     await crash.drive(() => r.starts().length);
@@ -534,7 +521,7 @@ describe("the host log never keeps the credential", () => {
   it("redacts every exact copy of the token an echoing host writes, on stdout, stderr and split across two chunks, and keeps the rest of the text", async () => {
     const r = rig("echo");
     await r.ask({ op: "token_put", name: "claude", size: TOKEN.length }, tokenBody());
-    await r.ask({ op: "tick", text: "go" });
+    await r.ask({ op: "tick", kind: "loop" });
     await until(() => r.events().some((e) => e["kind"] === "usage_tick"), "the turn to end");
     await new Promise((resolve) => setTimeout(resolve, 400)); // the split write arrives
     await r.ask({ op: "stop" });
@@ -553,7 +540,7 @@ describe("output that arrives after the host has exited", () => {
   it("is still redacted and written to the host log (the held-back tail is flushed when the streams close, not when the process exits)", async () => {
     const r = rig("late");
     await r.ask({ op: "token_put", name: "claude", size: TOKEN.length }, tokenBody());
-    await r.ask({ op: "tick", text: "go" });
+    await r.ask({ op: "tick", kind: "loop" });
     await until(() => readFileSync(path.join(r.dir, HOST_LOG_FILE), "latin1").includes("late [redacted] end"), "the late output in the host log");
     const log = readFileSync(path.join(r.dir, HOST_LOG_FILE), "latin1");
     expect(log).not.toContain(TOKEN);
@@ -612,10 +599,133 @@ describe.skipIf(sockets)("the program exits", () => {
     const p = program("crash", crash.tune);
     await until(() => p.lines.includes(SESSION_READY_LINE), "the ready line");
     writeFileSync(path.join(p.dir, SESSION_CONFIG_FILE), JSON.stringify({ repo_gh_id: "424242", repo_checkout: p.checkout }), { mode: 0o600 });
-    expect(await ask(p.socket, { op: "tick", text: "go" })).toMatchObject({ ok: true, started: true });
+    expect(await ask(p.socket, { op: "tick", kind: "loop" })).toMatchObject({ ok: true, started: true });
     const record = path.join(p.scratch, "rec.jsonl");
     const starts = (): number => (existsSync(record) ? readFileSync(record, "utf8").split("\n").filter((l) => l.includes('"start"')).length : 0);
     await crash.drive(starts);
     expect(await settled(p.done)).toBe(0);
   }, 60_000);
+});
+
+/** ON-13b2: ticks and signed commands, with the stand-in host. Commands are signed with a key made here, pinned under a fictional cloud address through the session's `keyrings`. */
+const ORIGIN = "https://cloud.fictional.invalid";
+const RUNNER = randomUUID();
+const REPO = 424242;
+const keys = generateKeyPairSync("ed25519");
+const stranger = generateKeyPairSync("ed25519");
+const pinned: PinnedKeyrings = { [originHash(ORIGIN) as string]: { "job-key-1": keys.publicKey } };
+const sessionExtra = { keyrings: pinned, session: { runner_id: RUNNER, cloud_origin: ORIGIN } };
+const signedCommand = (over: Record<string, unknown> = {}, key = keys.privateKey): unknown =>
+  signEngineCommand(
+    EngineCommand.parse({ v: 1, purpose: "engine_command_v1", command_id: randomUUID(), command_seq: 1, runner_id: RUNNER, repo_gh_id: REPO, kind: "start_day", args: {}, issued_by: randomUUID(), issued_at: new Date().toISOString(), expires_at: new Date(Date.now() + 60_000).toISOString(), halt_epoch: 0, ...over }),
+    "job-key-1",
+    key,
+  );
+const outcomes = async (r: Rig): Promise<Array<{ name: string; ack: { outcome: string; refusal?: string } }>> => {
+  const reply = (await r.ask({ op: "events_read", after: 0, stream: "outcomes" })) as unknown as { lines: string[] };
+  return reply.lines.map((l) => JSON.parse(l) as { name: string; ack: { outcome: string } });
+};
+
+describe("ticks (EB-12b's rules over the channel)", () => {
+  it("each kind is its fixed template, and no text of the peer's is ever sent", async () => {
+    const r = rig("ok");
+    await r.ask({ op: "tick", kind: "loop" });
+    await until(() => r.users().length === 1, "the loop tick");
+    await r.ask({ op: "tick", kind: "checkin", name: "pm-sweep" });
+    await r.ask({ op: "tick", kind: "start_day" });
+    await until(() => r.users().length === 3, "all three ticks");
+    expect(r.users()).toEqual([renderPrompt("loop"), renderPrompt("checkin", { name: "pm-sweep" }), renderPrompt("start_day_scheduled")]);
+    await until(() => r.events().filter((e) => e["kind"] === "tick_ended").length === 3, "three tick_ended events");
+    expect(r.events().filter((e) => e["kind"] === "tick_started").map((e) => e["tick_kind"])).toEqual(["loop", "checkin", "start_day"]);
+  });
+
+  it("single flight: while a turn has not ended the next tick waits, and a second of a kind that is already queued is dropped", async () => {
+    const r = rig("hold");
+    await r.ask({ op: "tick", kind: "loop" });
+    await until(() => r.users().length === 1, "the first message");
+    for (const kind of ["loop", "loop", "loop"]) await r.ask({ op: "tick", kind });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(r.users()).toEqual([renderPrompt("loop")]); // nothing else went out, and the three requests were one queued tick
+    expect(r.events().filter((e) => e["kind"] === "tick_started")).toHaveLength(1);
+  });
+
+  it("a verified pause_loop stops loop ticks and resume_loop lets them go on", async () => {
+    const r = rig("ok", (rt) => rt, true, undefined, sessionExtra);
+    await r.ask({ op: "tick", kind: "loop" });
+    await until(() => r.users().length === 1, "the first tick");
+    expect(await r.ask({ op: "command", command: signedCommand({ kind: "pause_loop", command_seq: 1 }) })).toMatchObject({ ok: true });
+    await until(async () => (await outcomes(r)).some((o) => o.ack.outcome === "applied"), "pause_loop applied");
+    await r.ask({ op: "tick", kind: "loop" });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(r.users()).toHaveLength(1);
+    expect(await r.ask({ op: "command", command: signedCommand({ kind: "resume_loop", command_seq: 2 }) })).toMatchObject({ ok: true });
+    await r.ask({ op: "tick", kind: "loop" });
+    await until(() => r.users().length === 2, "the loop tick after resume");
+  });
+});
+
+describe("signed commands, checked again in the guest", () => {
+  it("a command the pinned key signed is applied by the ticker, answered once, and its outcome is read back", async () => {
+    const r = rig("ok", (rt) => rt, true, undefined, sessionExtra);
+    expect(await r.ask({ op: "command", command: signedCommand({ command_seq: 7 }) })).toEqual({ ok: false, code: "host_not_running" }); // verified, but no host yet: nothing is applied
+    await r.ask({ op: "tick", kind: "loop" });
+    await until(() => r.users().length === 1, "the first tick");
+    const reply = await r.ask({ op: "command", command: signedCommand({ kind: "start_day", command_seq: 8 }) });
+    expect(reply).toMatchObject({ ok: true, name: expect.stringMatching(/^8-[0-9a-f-]{36}$/) as unknown });
+    await until(async () => (await outcomes(r)).length === 1, "the outcome");
+    expect(await outcomes(r)).toEqual([{ name: (reply as unknown as { name: string }).name, ack: { outcome: "applied" } }]);
+    expect(r.users()).toHaveLength(2);
+  });
+
+  it("a forged signature, a tampered body, a stranger's key, an unsigned or expired command, another runner's or repository's, and a bridge kind are all command_unverified and reach nothing", async () => {
+    const r = rig("ok", (rt) => rt, true, undefined, sessionExtra);
+    await r.ask({ op: "tick", kind: "loop" });
+    await until(() => r.users().length === 1, "the first tick");
+    const good = signedCommand({ kind: "start_day" }) as { command: Record<string, unknown>; key_id: string; signature: string };
+    const forged = { ...good, signature: Buffer.alloc(64, 1).toString("base64url") };
+    const tampered = { ...good, command: { ...good.command, kind: "request_spawn", args: { role: "executor", discussion: 1 } } };
+    const unsigned = { command: good.command, key_id: good.key_id };
+    const cases: Array<[string, unknown]> = [
+      ["forged signature", forged],
+      ["tampered body", tampered],
+      ["another key", signedCommand({}, stranger.privateKey)],
+      ["unsigned", unsigned],
+      ["unknown key id", { ...good, key_id: "job-key-9" }],
+      ["expired", signedCommand({ issued_at: new Date(Date.now() - 120_000).toISOString(), expires_at: new Date(Date.now() - 60_000).toISOString() })],
+      ["another runner", signedCommand({ runner_id: randomUUID() })],
+      ["another repository", signedCommand({ repo_gh_id: REPO + 1 })],
+      ["a bridge kind", signedCommand({ kind: "bridge_enable", args: {} })],
+      ["not an object", "start_day"],
+    ];
+    for (const [what, command] of cases) expect(await r.ask({ op: "command", command }), what).toEqual({ ok: false, code: "command_unverified" });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(r.users()).toHaveLength(1);
+    expect(await outcomes(r)).toEqual([]);
+  });
+
+  it("a session whose config names no pinned cloud (or no runner) verifies nothing, whatever is signed", async () => {
+    const none = rig("ok", (rt) => rt, true, undefined, { keyrings: pinned, session: { runner_id: RUNNER, cloud_origin: "https://other.fictional.invalid" } });
+    await none.ask({ op: "tick", kind: "loop" });
+    expect(await none.ask({ op: "command", command: signedCommand() })).toEqual({ ok: false, code: "command_unverified" });
+    const noRunner = rig("ok", (rt) => rt, true, undefined, { keyrings: pinned, session: { cloud_origin: ORIGIN } });
+    await noRunner.ask({ op: "tick", kind: "loop" });
+    expect(await noRunner.ask({ op: "command", command: signedCommand() })).toEqual({ ok: false, code: "command_unverified" });
+    const plain = rig("ok");
+    expect(await plain.ask({ op: "command", command: signedCommand() })).toEqual({ ok: false, code: "command_unverified" });
+  });
+});
+
+describe("halt", () => {
+  it("a channel stop with reason halted wipes the credential, ends the host with no survivor and says halted in the host's own event", async () => {
+    const r = rig("ok");
+    await r.ask({ op: "token_put", name: "claude", size: TOKEN.length }, tokenBody());
+    await r.ask({ op: "tick", kind: "loop" });
+    await until(() => r.starts().length === 1, "the host");
+    const pid = r.starts()[0]?.pid as number;
+    expect(await r.ask({ op: "stop", reason: "halted" })).toEqual({ ok: true, survivors: 0, token_wiped: true, pid: process.pid });
+    await until(() => !alive(pid), "the host to be gone");
+    await until(() => r.events().some((e) => e["kind"] === "host_stopped"), "host_stopped");
+    expect(r.events().find((e) => e["kind"] === "host_stopped")).toMatchObject({ reason: "halted" });
+    expect(await r.ask({ op: "tick", kind: "loop" })).toEqual({ ok: false, code: "stopped" });
+  });
 });

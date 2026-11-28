@@ -80,6 +80,39 @@ describe("the SdkSandbox slice on the daemon", () => {
     expect((await sdk.get({ name: NAME, resume: false, ...creds })).name).toBe(NAME);
   });
 
+  it("a persistent sandbox is made persistent in the daemon: its stop keeps a snapshot and a wake restores it, and a non-persistent one keeps none (B-3)", async () => {
+    const { sdk, rig } = setup();
+    const sandbox = await sdk.create(params(NAME, { persistent: true, keepLastSnapshots: { count: 2 } }));
+    await sandbox.stop();
+    expect(rig.helper.frames.map((f) => f["verb"])).toContain("snapshot");
+    expect(rig.helper.snapshots.size).toBe(1);
+    await sdk.get({ name: NAME, resume: true, ...creds });
+    expect(rig.helper.frames.map((f) => f["verb"])).toContain("resume");
+    const plain = setup();
+    const other = await plain.sdk.create(params(NAME));
+    await other.stop();
+    expect(plain.rig.helper.frames.map((f) => f["verb"])).not.toContain("snapshot");
+    expect(plain.rig.helper.snapshots.size).toBe(0);
+  });
+
+  it("keepLastSnapshots from the create call reaches the daemon: three stops keep two snapshots, where the default would keep one", async () => {
+    const { sdk, rig } = setup();
+    const first = await sdk.create(params(NAME, { persistent: true, keepLastSnapshots: { count: 2 } }));
+    await first.stop();
+    for (let i = 0; i < 2; i++) {
+      const woken = await sdk.get({ name: NAME, resume: true, ...creds });
+      await woken.stop();
+    }
+    expect(rig.helper.snapshots.size).toBe(2);
+  });
+
+  it("a persistent sandbox on a daemon that has nowhere to keep a snapshot is refused, never made non-persistent without a word", async () => {
+    const rig = makeRig({ extra: { snapshots: undefined } });
+    const sdk: VercelSandboxSdk = createDaemonSdk({ daemon: rig.daemon, policy: policyPort({ applied: [], released: [] }), template: "fx-agent", memMb: 512 });
+    await expect(sdk.create(params(NAME, { persistent: true }))).rejects.toMatchObject({ response: { status: 400 } });
+    expect(rig.helper.frames).toEqual([]);
+  });
+
   it("a taken name answers 400 bad_request, the shape the port reads as a conflict", async () => {
     const { sdk } = setup();
     await sdk.create(params());

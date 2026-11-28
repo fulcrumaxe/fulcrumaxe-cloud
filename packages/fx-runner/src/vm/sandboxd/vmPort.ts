@@ -11,7 +11,9 @@
  * Nothing here starts a process or reads `process.*`.
  */
 import type { SandboxHandle } from "../../sandbox/port.js";
+import { CHANNEL_PORT } from "../../engineHost/guestSession.js";
 import type { VmKind, VmPort } from "../jobLifecycle.js";
+import type { Connect } from "./guestAgent.js";
 import type { MicrovmSandbox } from "./microvmSandbox.js";
 import type { GuestBindings, RunEventHooks } from "./guestBindings.js";
 import type { Sandboxd } from "./sandboxd.js";
@@ -19,7 +21,7 @@ import type { Sandboxd } from "./sandboxd.js";
 export interface MicrovmVmPortParts {
   sandbox: Pick<MicrovmSandbox, "createSandbox" | "stop" | "deleteSandbox" | "guestOf" | "sandboxState"> & Partial<Pick<MicrovmSandbox, "wake">>;
   /** The daemon's no-snapshot teardown (`Sandboxd.teardown`), by daemon id. */
-  daemon: Pick<Sandboxd, "teardown" | "get">;
+  daemon: Pick<Sandboxd, "teardown" | "get"> & Partial<Pick<Sandboxd, "hasTimedOutWrite">>;
   /** The per-sandbox bindings the guest runtime and the token step read (`GuestBindings`): bound when a VM is created, unbound when it is ended. */
   bindings: Pick<GuestBindings, "bind" | "unbind">;
   /** The egress policy port's `release`, by daemon id. */
@@ -42,8 +44,17 @@ export class VmPortRefused extends Error {
   }
 }
 
+/** A connection to a guest vsock port, as `viaFirecrackerVsock` hands it out. */
+type Duplex = Awaited<ReturnType<Connect>>;
+
 /** The VM factory of a persistent sandbox that can also be woken from its kept disk (D#845 ON-13a1). */
-export type ResumableVmPort = VmPort & { resume(id: string): Promise<void> };
+export type ResumableVmPort = VmPort & {
+  resume(id: string): Promise<void>;
+  /** D#845 ON-13b2: a connection to the engine session's channel of a running VM (vsock port 5255). The microVM tier has it; the standard tier's port does not. The caller closes it. */
+  channel?(id: string): Promise<Duplex>;
+  /** True when the daemon's last snapshot write of this VM timed out and no destroy has returned since: the helper stops the VM by itself, so a channel to it is not to be expected. */
+  writeTimedOut?(id: string): boolean;
+};
 
 export function createMicrovmVmPort(parts: MicrovmVmPortParts): ResumableVmPort {
   const handles = new Map<string, SandboxHandle>();
@@ -96,6 +107,8 @@ export function createMicrovmVmPort(parts: MicrovmVmPortParts): ResumableVmPort 
       signal.throwIfAborted();
     },
     releaseEgress: (id) => parts.policy.release(parts.idOf(id)),
+    channel: async (id) => (await parts.daemon.get(parts.idOf(id))).connect(CHANNEL_PORT),
+    writeTimedOut: (id) => parts.daemon.hasTimedOutWrite?.(parts.idOf(id)) === true,
     stop: (id) => parts.sandbox.stop(handleOf(id)),
     async destroy(id) {
       if (!persistentIds.has(id)) {

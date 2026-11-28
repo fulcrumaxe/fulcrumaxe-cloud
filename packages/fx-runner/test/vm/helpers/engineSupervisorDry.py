@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """ON-13b1 DRY run, inside the guest: the image's own fx-engine-supervisor bundle (node) with a stand-in for the model CLI. No model, no sign-in, no network.
 
-usage: engineSupervisorDry.py <work dir> <file holding the token canary>
+usage: engineSupervisorDry.py <work dir>
 
-The canary is read from a file (and the file removed) so that it is never an argument of the guest agent's command record.
+The canary is made HERE, from the guest's own randomness, and is never sent to the guest by the host: anything the host writes into the guest through the agent's generic file path stays in that
+long-lived root process's heap (only its token path is zeroed), and so would reach every RAM snapshot. The stand-in compares a sha256 of what it was given with the one this program writes to
+`canary.sha256`, so no file holds the canary either. The prefix is built from two pieces, so that no file of this tree holds the first 16 bytes the RAM search looks for.
 
 It starts the bundle the way engine-bridge.py does (the unprivileged user's own process, FX_ENGINE_DIR and FX_ENGINE_SOCK set, FX_ENGINE_CLAUDE naming the stand-in),
 then drives the channel over its unix socket: token_put, tick, events_read, stop. The stand-in prints an `init` line, answers each user line with a `result`, and after
@@ -11,12 +13,10 @@ the FIRST result starts a background process in its own process group that write
 and what it started live on after a turn ends (the supervisor keeps stdin open and does not kill the group), with no second command from a model. It prints one line,
 `DRY_REPORT <json>`, of closed fields (booleans, counts and seconds): never a byte of the token or of anything the stand-in said.
 """
-import calendar, json, os, socket, struct, subprocess, sys, time
+import calendar, hashlib, json, os, socket, struct, subprocess, sys, time
 
-work, canary_file = sys.argv[1], sys.argv[2]
-with open(canary_file) as f:
-    canary = f.read().strip()
-os.unlink(canary_file)
+work = sys.argv[1]
+canary = "fake-synthetic-" + "dry-" + os.urandom(12).hex()
 state, sock_path, record, marker = work + "/state", work + "/channel.sock", work + "/record.jsonl", work + "/marker"
 checkout = work + "/checkout"
 os.makedirs(checkout, exist_ok=True)
@@ -56,14 +56,16 @@ sup = subprocess.Popen(["/opt/fx/bin/node", "/usr/lib/fx/fx-engine-supervisor.mj
 try:
     report["ready"] = until(lambda: os.path.exists(sock_path), 20)
     report["mode_0600"] = report["ready"] and (os.stat(sock_path).st_mode & 0o777) == 0o600
-    report["no_config"] = ask({"op": "tick", "text": "x"}) == {"ok": False, "code": "no_session_config"}
+    report["no_config"] = ask({"op": "tick", "kind": "loop"}) == {"ok": False, "code": "no_session_config"}
     report["unverified"] = ask({"op": "command", "command": {}}) == {"ok": False, "code": "command_unverified"}
     report["bad_request"] = ask({"op": "exec"}) == {"ok": False, "code": "bad_request"}
+    with open(work + "/canary.sha256", "w") as f:
+        f.write(hashlib.sha256(canary.encode()).hexdigest())
     with open(state + "/session.json", "w") as f:
         json.dump({"repo_gh_id": "424242", "repo_checkout": checkout}, f)
     os.chmod(state + "/session.json", 0o600)
     report["token_put"] = ask({"op": "token_put", "name": "claude", "size": len(canary)}, canary.encode()) == {"ok": True}
-    report["tick"] = ask({"op": "tick", "text": "dry run"}) == {"ok": True, "started": True}
+    report["tick"] = ask({"op": "tick", "kind": "loop"}) == {"ok": True, "started": True}
     report["usage_tick"] = until(lambda: any(e.get("kind") == "usage_tick" for e in lines()), 30)
     ticks = [e for e in lines() if e.get("kind") == "usage_tick"]
     report["usage_exact"] = bool(ticks) and [ticks[0].get(k) for k in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "model_tier")] == [11, 22, 33, 44, "claude-haiku-4-5"]
@@ -89,7 +91,7 @@ try:
     # the program ENDS after a channel stop (no copy of the token may outlive it): the socket goes away, so a tick after the stop either gets `stopped` or finds no listener
     report["supervisor_exited"] = until(lambda: sup.poll() is not None, 15)
     try:
-        report["tick_after_stop"] = ask({"op": "tick", "text": "again"}) == {"ok": False, "code": "stopped"}
+        report["tick_after_stop"] = ask({"op": "tick", "kind": "loop"}) == {"ok": False, "code": "stopped"}
     except OSError:
         report["tick_after_stop"] = True
     leaked = False

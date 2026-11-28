@@ -60,6 +60,11 @@ export function tickSettingsFor(runnerStateDir: string, checkout: string, uid: n
   return { loopMin: host?.loopMin, startDayAt: host?.startDayAt, get checkins() { return readCheckins(checkout, uid); } };
 }
 
+/** ON-13b2: the in-guest ticker's settings. A session has no runner settings file, so the loop runs at its default; the check-ins are the engine config's, read when the ticker starts. */
+export function tickSettingsOf(checkout: string, uid: number): TickSettings {
+  return { get checkins() { return readCheckins(checkout, uid); } };
+}
+
 /**
  * How the host is paid for, from where its own `init` line says it found its credential (`apiKeySource`), the way `engines/claude/credentialCheck.ts` reads it:
  * `none` is a login (subscription); any other source is a key. A line that has not come yet, or has no such field, is never reported as a subscription.

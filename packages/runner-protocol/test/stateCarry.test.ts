@@ -28,7 +28,9 @@ const carry = { id: CARRY, bytes: STATE_CARRY_CHUNK_BYTES + 5, chunks: 2, sha256
 describe("engine_carry_v1 (D#845 MC-9b2)", () => {
   it("is after twin_v1 and platform_fact_v1, directly before gh_login_v1 (D#845 ON-19c, the newest), and on the hello's closed list", () => {
     expect(RUNNER_CAPABILITIES.indexOf("gh_login_v1")).toBe(RUNNER_CAPABILITIES.indexOf(ENGINE_CARRY_CAPABILITY) + 1);
-    expect(RUNNER_CAPABILITIES.indexOf("gh_login_v1")).toBe(RUNNER_CAPABILITIES.length - 1);
+    // D#845 ON-13b2 (Ruling 128.2): `engine_session_v1` is newer than all of them and is the last name; checked by index.
+    expect(RUNNER_CAPABILITIES.indexOf("engine_session_v1")).toBe(RUNNER_CAPABILITIES.indexOf("gh_login_v1") + 1);
+    expect(RUNNER_CAPABILITIES.indexOf("engine_session_v1")).toBe(RUNNER_CAPABILITIES.length - 1);
     expect(RUNNER_CAPABILITIES.indexOf(ENGINE_CARRY_CAPABILITY)).toBeGreaterThan(RUNNER_CAPABILITIES.indexOf(TWIN_CAPABILITY));
     expect(RUNNER_CAPABILITIES.indexOf(ENGINE_CARRY_CAPABILITY)).toBeGreaterThan(RUNNER_CAPABILITIES.indexOf(PLATFORM_FACT_HELLO_CAPABILITY));
   });

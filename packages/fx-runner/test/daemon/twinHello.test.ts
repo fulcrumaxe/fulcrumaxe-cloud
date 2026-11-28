@@ -19,11 +19,16 @@ function cloud(unknown: string[]) {
   return { client: createRunnerClient({ origin: "https://cloud.example.test", key: generateRunnerKey(), now: () => new Date(), fetchFn }), sent };
 }
 
+/** The build behind `engine_session_v1` (D#845 ON-13b2, Ruling 128.2), which is listed last of all and dropped second (right after `platform_fact_v1`, which these tests do not send): the ladders below start behind it. */
+const BUILD = RUNNER_BUILD_CAPABILITIES.filter((c) => c !== "engine_session_v1");
+
 describe("twin_v1 on the build and on the hello", () => {
   it("is last on the build and the hello it makes is a valid one", () => {
     // D#845 ON-19c: `gh_login_v1` is newer and goes after it; the order is checked by index, never from the end.
     expect(RUNNER_BUILD_CAPABILITIES.indexOf(TWIN_CAPABILITY)).toBe(RUNNER_BUILD_CAPABILITIES.indexOf(GH_LOGIN_CAPABILITY) - 1);
-    expect(RUNNER_BUILD_CAPABILITIES.indexOf(GH_LOGIN_CAPABILITY)).toBe(RUNNER_BUILD_CAPABILITIES.length - 1);
+    // D#845 ON-13b2 (Ruling 128.2): `engine_session_v1` is the newest of all and is listed last, after `gh_login_v1`.
+    expect(RUNNER_BUILD_CAPABILITIES.indexOf("engine_session_v1")).toBe(RUNNER_BUILD_CAPABILITIES.indexOf(GH_LOGIN_CAPABILITY) + 1);
+    expect(RUNNER_BUILD_CAPABILITIES.indexOf("engine_session_v1")).toBe(RUNNER_BUILD_CAPABILITIES.length - 1);
     expect(HelloMessage.safeParse({ ...base, capabilities: [...RUNNER_BUILD_CAPABILITIES] }).success).toBe(true);
   });
 
@@ -38,16 +43,16 @@ describe("twin_v1 on the build and on the hello", () => {
   it("a cloud that does not know it costs one retry that drops it alone and keeps project_setup_v1 and every other capability", async () => {
     // a cloud that lacks twin_v1 lacks the newer gh_login_v1 too, which goes first
     const { client, sent } = cloud([TWIN_CAPABILITY, GH_LOGIN_CAPABILITY]);
-    const answer = await client.hello({ ...base, capabilities: [...RUNNER_BUILD_CAPABILITIES] });
+    const answer = await client.hello({ ...base, capabilities: [...BUILD] });
     expect(answer).toEqual({ kind: "ok", dropped: [GH_LOGIN_CAPABILITY, TWIN_CAPABILITY] });
     expect(sent).toHaveLength(3);
-    expect(sent[2]).toEqual(RUNNER_BUILD_CAPABILITIES.filter((c) => c !== TWIN_CAPABILITY && c !== GH_LOGIN_CAPABILITY));
+    expect(sent[2]).toEqual(BUILD.filter((c) => c !== TWIN_CAPABILITY && c !== GH_LOGIN_CAPABILITY));
     expect(sent[2]).toContain(PROJECT_SETUP_CAPABILITY);
   });
 
   it("a cloud that knows it keeps it: one hello, nothing dropped", async () => {
     const { client, sent } = cloud([]);
-    expect(await client.hello({ ...base, capabilities: [...RUNNER_BUILD_CAPABILITIES] })).toEqual({ kind: "ok" });
+    expect(await client.hello({ ...base, capabilities: [...BUILD] })).toEqual({ kind: "ok" });
     expect(sent).toHaveLength(1);
     expect(sent[0]).toContain(TWIN_CAPABILITY);
   });
