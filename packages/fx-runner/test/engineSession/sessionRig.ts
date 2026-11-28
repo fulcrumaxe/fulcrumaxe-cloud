@@ -1,7 +1,9 @@
 import { SandboxInventory, type MachineJob, type SandboxInventoryRow } from "@fulcrumaxe/runner-protocol";
 import type { MachineJobClaimResult, MachineJobProgressResult } from "../../src/daemon/client.js";
 import { createMachineJobDispatcher, type MachineJobEvent } from "../../src/daemon/machineJobs.js";
-import { createEngineSessionHandlers, sessionNameOf, type EngineSessionDeps } from "../../src/engineSession/lifecycle.js";
+import path from "node:path";
+import { createEngineSessionHandlers, sessionNameOf, type EngineSessionDeps, type SessionStopReport } from "../../src/engineSession/lifecycle.js";
+import type { FakeChannel } from "../helpers/fakeChannel.js";
 import { createOperateMark, type OperateMarkEvent } from "../../src/engineSession/operateMark.js";
 import { SandboxNotFoundError, type SandboxComputeState } from "../../src/sandbox/port.js";
 import { buildWorkspaceArchive } from "../../src/daemon/vmArchive.js";
@@ -43,6 +45,15 @@ export interface Rig {
   /** Runs the jobs in order through the real dispatcher, one claim each; answers what the handler's reports left. */
   run(...jobs: MachineJob[]): Promise<void>;
   makeDeps(): EngineSessionDeps;
+  /** ON-13b2: set one and every VM the factory makes has a channel to it, and the deps carry the runner's credential source (`token`) and a stop report sink. */
+  channel: FakeChannel | undefined;
+  token: string | undefined;
+  /** Every buffer the credential source handed out, to see each one zeroed. */
+  issued: Buffer[];
+  tier: "vm_stop" | "unit" | undefined;
+  /** Names whose port says the daemon's snapshot write timed out (the helper has stopped the VM on its own). */
+  writeTimedOut: Set<string>;
+  stopReports: SessionStopReport[];
 }
 
 export function sessionRig(): Rig {
@@ -93,6 +104,8 @@ export function sessionRig(): Rig {
         m.state = "running";
         held.add(id);
       },
+      ...(rig.channel === undefined ? {} : { channel: () => (rig.channel as FakeChannel).connect() }),
+      writeTimedOut: (id) => rig.writeTimedOut.has(id),
       async startEgress(id) {
         log.push(`startEgress ${id}`);
         if (machines.get(id)?.state !== "running") throw new Error("egress_down");
@@ -147,6 +160,22 @@ export function sessionRig(): Rig {
     repoOf: async () => (fail.repoOf === true ? undefined : { owner: "acme", name: "widgets" }),
     mark: createOperateMark({ stateDir: markDir, uid: process.getuid!(), log: (e) => markEvents.push(e) }),
     runnerId: RUNNER_ID,
+    supervisorExit: { totalMs: 300, pollMs: 10 }, // short: a test that never sees the program go waits this long
+    cloudOrigin: "https://cloud.fictional.invalid",
+    ...(rig.token === undefined
+      ? {}
+      : {
+          readToken: () => {
+            const fresh = Buffer.from(rig.token as string, "latin1");
+            rig.issued.push(fresh);
+            return fresh;
+          },
+        }),
+    ...(rig.tier === undefined ? {} : { tier: rig.tier }),
+    stopped: (report) => void rig.stopReports.push(report),
+    get engineDir() {
+      return path.join((newest.current as Machine).root, "sandbox", ".fx-engine");
+    },
     // the guest's paths are directories of the test's own (the real unpack runs there); a machine's are its own root's, so every machine is given its guest's
     get paths() {
       return (newest.current as Machine).guest.paths;
@@ -180,6 +209,12 @@ export function sessionRig(): Rig {
       for (let i = 0; i < jobs.length; i++) expect_handled(await dispatcher.run());
     },
     makeDeps,
+    channel: undefined,
+    writeTimedOut: new Set<string>(),
+    token: undefined,
+    issued: [],
+    tier: undefined,
+    stopReports: [],
   };
   return rig;
 }

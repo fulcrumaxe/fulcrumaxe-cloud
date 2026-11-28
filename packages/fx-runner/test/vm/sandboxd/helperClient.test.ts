@@ -1,7 +1,7 @@
 import net from "node:net";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { HELPER_CODES, HelperError, createHelperClient } from "../../../src/vm/sandboxd/helperClient.js";
+import { HELPER_CODES, HELPER_SNAPSHOT_TIMEOUT_MS, HelperError, createHelperClient } from "../../../src/vm/sandboxd/helperClient.js";
 import { connectUnix, runCleanups, scratch, startFakeHelper } from "./helpers.js";
 
 afterEach(runCleanups);
@@ -102,3 +102,27 @@ describe("the helper client speaks the helper's frames", () => {
     }
   });
 });
+
+describe("a snapshot is waited for longer than the other verbs", () => {
+  it("a snapshot that takes longer than the ordinary request timeout still answers", async () => {
+    const h = startFakeHelper(scratch());
+    await createHelperClient(connectUnix(h.sock), 3000).prepare({ sandboxId: "slow", template: "fx-agent", vcpus: 1, memMb: 256 });
+    let release!: () => void;
+    h.holdSnapshot = new Promise<void>((r) => (release = r));
+    setTimeout(() => release(), 500); // the write takes 500 ms; an ordinary verb would give up at 150 ms
+    const client = createHelperClient(connectUnix(h.sock), 150);
+    await expect(client.snapshot("slow", "snslow")).resolves.toEqual({ snapshotBytes: 4096 });
+  });
+
+  it("the bound is documented as well above the longest measured write (41.5 s), and a silent helper still times out at it", async () => {
+    expect(HELPER_SNAPSHOT_TIMEOUT_MS).toBeGreaterThanOrEqual(4 * 41_500);
+    const dir = scratch();
+    const mute = net.createServer(() => undefined).listen(path.join(dir, "mute.sock"));
+    try {
+      await expect(createHelperClient(connectUnix(path.join(dir, "mute.sock")), 3000, 150).snapshot("x", "snx")).rejects.toMatchObject({ code: "timeout" });
+    } finally {
+      mute.close();
+    }
+  });
+});
+

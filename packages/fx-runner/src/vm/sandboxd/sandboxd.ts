@@ -14,10 +14,13 @@ import { assertBootable, type BootDigests, type TargetListing } from "../bootGat
 import type { Arch } from "../lock.js";
 import { SandboxdCommand, type CommandSpec } from "./command.js";
 import { HelperError, SANDBOX_ID, type Helper, type PreparedReply } from "./helperClient.js";
-import type { GuestAgent } from "./guestAgent.js";
+import type { Connect, GuestAgent } from "./guestAgent.js";
 import { STREAM_ID, type GuestStream } from "./streamCommand.js";
 import { FileError, MAX_FILE_BYTES, checkGuestPath, guestFileMode, type FileContent } from "./files.js";
 import { DEFAULT_KEEP_LAST, DEFAULT_SNAPSHOT_TTL_SECONDS, MAX_KEEP_LAST, MIB, admitSnapshot, loadStore, newSnapshotId, saveStore, snapshotNeedBytes, type SnapshotDeps, type SnapshotMeta } from "./snapshots.js";
+
+/** A connection to a guest vsock port, as `viaFirecrackerVsock` hands it out. */
+type Duplex = Awaited<ReturnType<Connect>>;
 
 /** What a stop needs of a running command, whichever way it runs (a one-shot exec, or a stream). */
 interface TrackedCommand { kill(signal: "SIGKILL"): Promise<void>; wait(): Promise<unknown>; abort?(): void }
@@ -55,6 +58,8 @@ export interface SandboxdDeps {
   /** True when the directory holds a `v.sock_<port>` entry the runner does not own (or one that cannot be examined): the sandbox is then not started. */
   hasForeignListener(vsockDir: string): boolean;
   agentFor(vsockDir: string): GuestAgent;
+  /** D#845 ON-13b2: connects to a guest vsock port (the engine session's channel) through the directory's checked descriptors; the handshake is done and nothing past it is read. Absent: no channel. */
+  dial?(vsockDir: string, port: number): Promise<Duplex>;
   /** Removes the runner's own `v.sock` left in a stopped sandbox's vsock directory (see `removeOwnVsockSocket`); throws when it is not the runner's. */
   removeVsockSocket(vsockDir: string): void;
   /** Absent: no sandbox may be persistent. */
@@ -88,6 +93,8 @@ interface Record_ {
   /** Oldest first. Only a persistent sandbox has any. */
   snapshots: SnapshotMeta[];
   agent?: GuestAgent;
+  /** The checked vsock directory of the running VM (set with `agent`). */
+  vsockDir?: string;
   commands: Set<TrackedCommand>;
   /** Every stream id given to this VM's agent (the agent keeps an id for its whole run, so one is never reused); cleared when the VM is destroyed. */
   streamIds?: Set<string>;
@@ -103,6 +110,8 @@ interface Record_ {
   delivering?: Set<Promise<void>>;
   /** A stop has begun: no new delivery is taken. */
   stopRequested?: boolean;
+  /** Snapshot ids whose write the helper had not answered when the client gave up. They stay in `writing` until a destroy of this VM returns (the helper holds the sandbox for the whole write, so the write is then over); a destroy releases them, and the sweep and `delete` then remove the files. */
+  timedOut?: Set<string>;
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -127,6 +136,8 @@ export class Sandbox {
   /** Removes the token and kills every holder; resolves only when the guest confirms none is left (`token_wipe_failed` otherwise). */
   wipeToken(): Promise<void> { return this.daemon.wipeToken(this.name); }
   readFile(path: string, sink: (chunk: Buffer) => void | Promise<void>): Promise<number> { return this.daemon.readFile(this.name, path, sink); }
+  /** D#845 ON-13b2: a connection to a guest vsock port, through the checked vsock directory. */
+  connect(port: number): Promise<Duplex> { return this.daemon.connect(this.name, port); }
   stop(): Promise<void> { return this.daemon.stop(this.name); }
   delete(): Promise<void> { return this.daemon.delete(this.name); }
   /** A command on the guest's streaming exec: output as it arrives, a `kill` by id, the exit status once every frame is read. The sandbox's stop ends it. */
@@ -249,6 +260,7 @@ export class Sandboxd {
       const dir = checkVsockDir(started.vsockDir, name, started.sandboxGid, this.deps.euid as number, this.deps.inspectDir(started.vsockDir));
       if (this.deps.hasForeignListener(dir)) throw new SandboxdError(502, "vsock_dir_refused");
       rec.agent = this.deps.agentFor(dir);
+      rec.vsockDir = dir;
       await this.waitForAgent(rec.agent);
       rec.state = "running";
     } catch (err) {
@@ -300,10 +312,25 @@ export class Sandboxd {
     try {
       await this.deps.helper.destroy(name);
       this.registered.delete(name);
+      this.releaseTimedOut(this.records.get(name)); // the destroy returned: no write of this sandbox is still going on
     } catch (err) {
       // fx-swallow-ok: any other refusal leaves the id registered, so the daemon-wide teardown tries again; the caller already has its own error
-      if (err instanceof HelperError && err.code === "unknown_sandbox") this.registered.delete(name);
+      if (err instanceof HelperError && err.code === "unknown_sandbox") {
+        this.registered.delete(name);
+        this.releaseTimedOut(this.records.get(name)); // the helper does not know it: nothing is writing for it
+      }
     }
+  }
+
+  /** True while a snapshot write of this sandbox timed out and no destroy of it has returned since: the helper has stopped (or is about to stop) its VM on its own. */
+  hasTimedOutWrite(name: string): boolean {
+    return (this.records.get(name)?.timedOut?.size ?? 0) > 0;
+  }
+
+  /** Lets the sweep and `delete` remove the snapshots whose write once timed out; they stay on `orphans` until the helper confirms their deletion. */
+  private releaseTimedOut(rec: Record_ | undefined): void {
+    for (const id of rec?.timedOut ?? []) this.writing.delete(id);
+    rec?.timedOut?.clear();
   }
 
   async get(name: string, opts: { resume?: boolean } = {}): Promise<Sandbox> {
@@ -442,6 +469,14 @@ export class Sandboxd {
     }
   }
 
+  /** A connection to `port` of the running guest (the engine session's channel is 5255); the caller owns and closes it. */
+  async connect(name: string, port: number): Promise<Duplex> {
+    this.runningAgent(name);
+    const dir = this.get_(name).vsockDir;
+    if (dir === undefined || this.deps.dial === undefined) throw new SandboxdError(409, "not_running");
+    return this.deps.dial(dir, port);
+  }
+
   /** An explicit wipe: a delivery in flight lands (or is given up on, bounded) first, then the guest must confirm that no file and no holder is left. */
   async wipeToken(name: string): Promise<void> {
     const rec = this.get_(name);
@@ -488,7 +523,7 @@ export class Sandboxd {
     const rec = this.get_(name);
     if (rec.state === "stopped") return Promise.resolve();
     if (rec.state === "creating") return Promise.reject(new SandboxdError(409, "conflict"));
-    rec.stopping ??= this.beginStop(rec, this.persistent(rec));
+    rec.stopping ??= this.beginStop(rec, this.persistent(rec) && (rec.timedOut?.size ?? 0) === 0);
     return rec.stopping;
   }
 
@@ -590,7 +625,16 @@ export class Sandboxd {
     let bytes: number;
     try {
       bytes = (await this.deps.helper.snapshot(name, id)).snapshotBytes;
-    } catch {
+    } catch (err) {
+      if (err instanceof HelperError && err.code === "timeout") {
+        // The helper may still be writing: destroying the VM now would cut the write short. Nothing is destroyed. The helper kills the VM itself when
+        // it is done, the id stays in `writing` (so no sweep deletes a file that is being written) and on `orphans` (so the next daemon start does),
+        // and the sandbox is reported as still held. The id is noted on the record: the next destroy of this VM releases it, so that the sweep and a
+        // delete remove the file. The next stop of the record is a destroy with no snapshot (the helper ends the VM itself, so a second snapshot of it would fail).
+        (rec.timedOut ??= new Set()).add(id);
+        rec.state = "running";
+        throw new SandboxdError(502, "helper_failed");
+      }
       // fx-swallow-ok: replaced by the fixed error below, once the VM is made sure to be gone; the orphan stays so the snapshot is deleted if it exists
       this.writing.delete(id);
       await this.destroyQuietly(name);

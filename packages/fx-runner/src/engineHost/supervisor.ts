@@ -151,7 +151,7 @@ export interface Supervisor {
   /** Sends one user message to the host's stdin. False when no host is running. The text is never logged. */
   send(text: string): boolean;
   /** Ends the host cleanly: close stdin, then the kill path after the grace. Idempotent. */
-  stop(reason: "stopped_by_person" | "machine_shutdown" | "log_failed"): Promise<void>;
+  stop(reason: "stopped_by_person" | "machine_shutdown" | "log_failed" | "halted" | "operate_off"): Promise<void>;
   /** Resolves with the reason once `host_stopped` was emitted. */
   stopped: Promise<StopReason>;
   /** The session id read from the host's last `init` line, once there is one. */

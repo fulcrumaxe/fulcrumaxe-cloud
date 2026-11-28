@@ -64,6 +64,125 @@ describe("stop writes a snapshot and resume restores it", () => {
   });
 });
 
+describe("a snapshot that takes longer than the helper's ordinary timeout", () => {
+  it("a stop waits for it: the VM is not destroyed in the middle of the write, and the snapshot is kept", async () => {
+    // the ordinary request timeout is 150 ms here (30 s in production); the write takes 600 ms (39 to 41 s on the real VM)
+    const rig2 = makeRig({ helperMs: { request: 150 } });
+    const sb = await rig2.daemon.create(persistent("alpha"));
+    let release!: () => void;
+    rig2.helper.holdSnapshot = new Promise<void>((r) => (release = r));
+    setTimeout(() => release(), 600);
+    await sb.stop();
+    expect(sb.status).toBe("stopped");
+    expect(verbs(rig2)).toEqual(["prepare", "start", "snapshot"]); // never a destroy
+    await rig2.daemon.get("alpha", { resume: true });
+    expect(sb.status).toBe("running");
+  });
+
+  it("a write that outlasts even the snapshot bound is reported with the closed code, and the VM is left to the helper: no destroy, no resume", async () => {
+    const rig2 = makeRig({ helperMs: { request: 5000, snapshot: 150 } });
+    const sb = await rig2.daemon.create(persistent("alpha"));
+    let release!: () => void;
+    rig2.helper.holdSnapshot = new Promise<void>((r) => (release = r));
+    await expect(sb.stop()).rejects.toMatchObject({ status: 502, code: "helper_failed" });
+    expect(verbs(rig2)).toEqual(["prepare", "start", "snapshot"]); // the destroy would have cut the write short
+    expect(sb.status).toBe("running");
+    release();
+  });
+
+  /** A stop whose snapshot reply timed out while the helper went on writing; resolves once the helper holds the file. */
+  async function timedOut(): Promise<ReturnType<typeof makeRig>> {
+    const rig2 = makeRig({ helperMs: { request: 5000, snapshot: 150 } });
+    const sb = await rig2.daemon.create(persistent("alpha"));
+    let release!: () => void;
+    rig2.helper.holdSnapshot = new Promise<void>((r) => (release = r));
+    await expect(sb.stop()).rejects.toMatchObject({ code: "helper_failed" });
+    release();
+    for (let i = 0; i < 100 && rig2.helper.snapshots.size === 0; i++) await new Promise((r) => setTimeout(r, 20));
+    expect(rig2.helper.snapshots.size).toBe(1); // the write finished behind the daemon's back
+    return rig2;
+  }
+
+  it("while the helper may still be writing, a sweep does not delete the snapshot: the file would be pulled from under the write", async () => {
+    const rig2 = makeRig({ helperMs: { request: 5000, snapshot: 150 } });
+    const sb = await rig2.daemon.create(persistent("alpha"));
+    let release!: () => void;
+    rig2.helper.holdSnapshot = new Promise<void>((r) => (release = r));
+    await expect(sb.stop()).rejects.toMatchObject({ code: "helper_failed" });
+    await rig2.daemon.sweep();
+    expect(verbs(rig2)).not.toContain("snapshot_delete");
+    release();
+  });
+
+  it("hasTimedOutWrite is false on a fresh running record, true after a snapshot timeout, and false again once a destroy has returned", async () => {
+    const rig2 = makeRig({ helperMs: { request: 5000, snapshot: 150 } });
+    const sb = await rig2.daemon.create(persistent("alpha"));
+    expect(rig2.daemon.hasTimedOutWrite("alpha")).toBe(false);
+    expect(rig2.daemon.hasTimedOutWrite("nobody")).toBe(false);
+    let release!: () => void;
+    rig2.helper.holdSnapshot = new Promise<void>((r) => (release = r));
+    await expect(sb.stop()).rejects.toMatchObject({ code: "helper_failed" });
+    expect(rig2.daemon.hasTimedOutWrite("alpha")).toBe(true);
+    release();
+    for (let i = 0; i < 100 && rig2.helper.snapshots.size === 0; i++) await new Promise((r) => setTimeout(r, 20));
+    await sb.stop();
+    expect(rig2.daemon.hasTimedOutWrite("alpha")).toBe(false);
+  });
+
+  it("a destroy that times out while the write is still held releases nothing: no sweep deletes the file, the id stays on the orphan list, and a later stop does", async () => {
+    const rig2 = makeRig({ helperMs: { request: 150, snapshot: 150 } });
+    const sb = await rig2.daemon.create(persistent("alpha"));
+    let release!: () => void;
+    rig2.helper.holdSnapshot = new Promise<void>((r) => (release = r));
+    await expect(sb.stop()).rejects.toMatchObject({ code: "helper_failed" }); // the snapshot reply timed out
+    await expect(sb.stop()).rejects.toMatchObject({ code: "helper_failed" }); // the destroy waits for the write (as the real helper's does) and times out too
+    await rig2.daemon.sweep();
+    expect(verbs(rig2)).not.toContain("snapshot_delete");
+    expect(JSON.parse(readFileSync(stateFile(rig2), "utf8")).orphans).toHaveLength(1);
+    release();
+    for (let i = 0; i < 100 && rig2.helper.snapshots.size === 0; i++) await new Promise((r) => setTimeout(r, 20));
+    expect(rig2.helper.snapshots.size).toBe(1);
+    await sb.stop(); // the write is over: the destroy answers, the id is released
+    await rig2.daemon.sweep();
+    expect(rig2.helper.snapshots.size).toBe(0);
+    expect(JSON.parse(readFileSync(stateFile(rig2), "utf8")).orphans).toEqual([]);
+  });
+
+  it("a destroy the helper answers with unknown_sandbox releases the id too: nothing is writing for a sandbox it does not hold", async () => {
+    const rig2 = await timedOut();
+    rig2.helper.entries.delete("alpha"); // a helper restart lost its registry; the snapshot file stays
+    await rig2.daemon.stop("alpha");
+    await rig2.daemon.sweep();
+    expect(rig2.helper.snapshots.size).toBe(0);
+  });
+
+  it("a delete after the timeout removes the written snapshot: a snapshot_delete is sent and the helper's store and the state file end empty", async () => {
+    const rig2 = await timedOut();
+    const id = String(rig2.helper.frames.find((f) => f["verb"] === "snapshot")!["snapshot_id"]);
+    await rig2.daemon.delete("alpha");
+    expect(rig2.helper.frames).toContainEqual({ verb: "snapshot_delete", snapshot_id: id });
+    expect(rig2.helper.snapshots.size).toBe(0);
+    expect(JSON.parse(readFileSync(stateFile(rig2), "utf8"))).toEqual({ version: 1, sandboxes: [], orphans: [] });
+  });
+
+  it("after the timeout and a daemon restart, the sweep deletes the snapshot: its id stayed on the orphan list", async () => {
+    const rig2 = await timedOut();
+    expect(JSON.parse(readFileSync(stateFile(rig2), "utf8")).orphans).toHaveLength(1);
+    await rig2.restart().sweep();
+    expect(rig2.helper.snapshots.size).toBe(0);
+  });
+
+  it("the next stop of that sandbox is a destroy with no second snapshot, so a person's Stop ends it and the snapshot is released for the sweep", async () => {
+    const rig2 = await timedOut();
+    const sb = await rig2.daemon.get("alpha");
+    await sb.stop();
+    expect(sb.status).toBe("stopped");
+    expect(verbs(rig2)).toEqual(["prepare", "start", "snapshot", "destroy"]);
+    await rig2.daemon.sweep();
+    expect(rig2.helper.snapshots.size).toBe(0);
+  });
+});
+
 describe("admission", () => {
   it("refuses when the free bytes are below the guest's RAM, names both numbers, and leaves the sandbox running", async () => {
     const rig = makeRig();

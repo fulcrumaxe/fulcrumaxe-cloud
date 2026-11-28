@@ -10,6 +10,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"fx-vmhelper/internal/protocol"
 )
@@ -24,6 +25,8 @@ type snapLauncher struct {
 	saw        map[string][]byte      // the snapshot files in the jail root when a resume launched
 	sawMode    map[string]os.FileMode // and their modes
 	onLaunch   func(s Spec) error     // an error to answer a launch with, after the files were seen
+	entered    chan struct{}          // set with gate: closed when a Snapshot has started writing
+	gate       chan struct{}          // set with entered: a Snapshot waits here until it is closed
 }
 
 type snapInst struct {
@@ -35,6 +38,10 @@ func (i snapInst) Stop() error { return fakeInst{&i.l.fakeLauncher}.Stop() }
 
 func (i snapInst) Snapshot() error {
 	root := jailRootOf(i.s)
+	if i.l.gate != nil {
+		close(i.l.entered)
+		<-i.l.gate
+	}
 	if i.l.snapErr != nil {
 		return i.l.snapErr
 	}
@@ -225,6 +232,39 @@ func TestSnapshotRefusals(t *testing.T) {
 	}
 	if _, c := m.Snapshot("box-a", "../x"); c != protocol.BadID {
 		t.Errorf("bad id: %s", c)
+	}
+}
+
+// The runner's daemon relies on this: a destroy that answers OK means no snapshot of that sandbox is still being written, and one that
+// is slower than the daemon's request bound does not tell it the write is over.
+func TestDestroyWaitsForAnInFlightSnapshot(t *testing.T) {
+	m, l, _, _ := newSnapMgr(t)
+	started(t, m, "box-a")
+	l.entered, l.gate = make(chan struct{}), make(chan struct{})
+	snapDone := make(chan protocol.Code, 1)
+	go func() {
+		_, c := m.Snapshot("box-a", "snap-1")
+		snapDone <- c
+	}()
+	<-l.entered // the write is under way and holds the sandbox
+	destroyDone := make(chan protocol.Code, 1)
+	go func() { destroyDone <- m.Destroy("box-a") }()
+	select {
+	case c := <-destroyDone:
+		t.Fatalf("Destroy answered %v while the snapshot was still being written", c)
+	case <-time.After(300 * time.Millisecond):
+	}
+	close(l.gate)
+	if c := <-snapDone; c != protocol.OK {
+		t.Fatalf("the snapshot answered %v", c)
+	}
+	select {
+	case c := <-destroyDone:
+		if c != protocol.OK {
+			t.Errorf("Destroy answered %v after the write", c)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Destroy never answered after the snapshot returned")
 	}
 }
 

@@ -20,7 +20,7 @@ beforeEach(async () => {
 afterEach(() => cloud.close());
 
 // D#845 ON-10c: these tests pin the ladder of the capabilities before `survey_v1`; its own step (right after `watch_mode_v1`) is pinned in surveyHello.test.ts.
-const hello: HelloMessageType = { protocol_version: CURRENT_PROTOCOL_VERSION, binary_version: "1.0.0", model_auth_present: false, isolation: "host_sandbox", capabilities: RUNNER_BUILD_CAPABILITIES.filter((c) => c !== "survey_v1" && c !== "survey_public_v1" && c !== "project_setup_v1" && c !== "twin_v1" && c !== "gh_login_v1") };
+const hello: HelloMessageType = { protocol_version: CURRENT_PROTOCOL_VERSION, binary_version: "1.0.0", model_auth_present: false, isolation: "host_sandbox", capabilities: RUNNER_BUILD_CAPABILITIES.filter((c) => c !== "survey_v1" && c !== "survey_public_v1" && c !== "project_setup_v1" && c !== "twin_v1" && c !== "gh_login_v1" && c !== "engine_session_v1") };
 const hellos = () => cloud.seen.filter((s) => s.path === "/api/runner/hello").map((s) => HelloMessage.parse(s.body));
 
 describe("hello", () => {

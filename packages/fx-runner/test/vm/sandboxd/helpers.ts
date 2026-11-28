@@ -204,10 +204,12 @@ export interface FakeHelper {
   dropReply: Set<string>;
   /** Holds a `snapshot` until this resolves, before anything is stored. */
   holdSnapshot?: Promise<void>;
+  /** The snapshot of a sandbox that is being written: the helper's per-sandbox reservation. A `destroy` or a second `snapshot` of the same id waits for it, as the real helper's does. */
+  inflight: Map<string, Promise<unknown>>;
 }
 
 export function startFakeHelper(root: string, gid = process.getgid?.() ?? 1000): FakeHelper {
-  const h: FakeHelper = { sock: path.join(root, "helper.sock"), frames: [], refuse: new Map(), raw: new Map(), onStart: () => undefined, mangle: (_id, dir) => dir, entries: new Map(), snapshots: new Map(), snapshotBytes: 4096, onSnapshot: () => undefined, onResume: () => undefined, dropReply: new Set() };
+  const h: FakeHelper = { sock: path.join(root, "helper.sock"), frames: [], refuse: new Map(), raw: new Map(), onStart: () => undefined, mangle: (_id, dir) => dir, entries: new Map(), snapshots: new Map(), snapshotBytes: 4096, onSnapshot: () => undefined, onResume: () => undefined, dropReply: new Set(), inflight: new Map() };
   const dirOf = (id: string): string => path.join(root, "vsock", id);
   const server = net.createServer((sock) => {
     sock.on("error", () => undefined);
@@ -223,6 +225,20 @@ export function startFakeHelper(root: string, gid = process.getgid?.() ?? 1000):
     });
   });
   async function answer(f: Record<string, unknown>): Promise<string> {
+    const id = String(f["sandbox_id"]);
+    if (String(f["verb"]) === "snapshot") {
+      const before = h.inflight.get(id);
+      const mine = (async (): Promise<string> => {
+        await before; // a second snapshot of the same sandbox waits for the first
+        return answerNow(f);
+      })();
+      h.inflight.set(id, mine.catch(() => undefined));
+      return mine;
+    }
+    if (String(f["verb"]) === "destroy") await h.inflight.get(id); // the real helper's destroy takes the same per-sandbox reservation as a snapshot
+    return answerNow(f);
+  }
+  async function answerNow(f: Record<string, unknown>): Promise<string> {
     const verb = String(f["verb"]);
     if (verb === "prepare") await h.holdPrepare;
     const raw = h.raw.get(verb);
@@ -305,7 +321,7 @@ export interface Rig {
   restart(): Sandboxd;
 }
 
-export function makeRig(over: { readOnlyRoot?: boolean; listing?: TargetListing; euid?: number; agentFor?: (dir: string) => GuestAgent; gid?: number; extra?: Partial<SandboxdDeps> } = {}): Rig {
+export function makeRig(over: { readOnlyRoot?: boolean; listing?: TargetListing; euid?: number; agentFor?: (dir: string) => GuestAgent; gid?: number; helperMs?: { request: number; snapshot?: number }; extra?: Partial<SandboxdDeps> } = {}): Rig {
   const free = { bytes: 1024 ** 4 };
   const clock = { t: 1_700_000_000 };
   const root = scratch();
@@ -319,7 +335,7 @@ export function makeRig(over: { readOnlyRoot?: boolean; listing?: TargetListing;
   };
   const deps: SandboxdDeps = {
     euid: over.euid ?? process.geteuid?.(),
-    helper: createHelperClient(connectUnix(helper.sock), 5000),
+    helper: createHelperClient(connectUnix(helper.sock), over.helperMs?.request ?? 5000, over.helperMs?.snapshot),
     boot: { listTargets: async () => over.listing ?? listing(), facts: () => ({ arch: "amd64", digests: DIGESTS }) },
     inspectDir: (dir) => fdInspectDir(dir, realOps()),
     hasForeignListener: (dir) => hasForeignListener(dir, realOps()),

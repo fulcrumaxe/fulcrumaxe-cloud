@@ -6,7 +6,7 @@ import { generateRunnerKey } from "../../src/keys.js";
 import { RUNNER_BUILD_CAPABILITIES, RUNNER_PROTOCOL_VERSION, RUNNER_VERSION } from "../../src/version.js";
 // D#845 ON-10e1: `survey_public_v1` is the newest capability of all and is dropped before everything on the ladder (pinned in surveyPublic.test.ts); these tests pin the ladder behind it.
 // D#845 ON-8f2c: `project_setup_v1` is newer still and is dropped first of all (pinned in daemon/projectSetupHello.test.ts), so the ladders below start behind both.
-const BUILD_BEHIND_PUBLIC = RUNNER_BUILD_CAPABILITIES.filter((c) => c !== "survey_public_v1" && c !== "project_setup_v1" && c !== "twin_v1" && c !== "gh_login_v1");
+const BUILD_BEHIND_PUBLIC = RUNNER_BUILD_CAPABILITIES.filter((c) => c !== "survey_public_v1" && c !== "project_setup_v1" && c !== "twin_v1" && c !== "gh_login_v1" && c !== "engine_session_v1");
 
 const RUN = "11111111-1111-4111-8111-111111111111";
 const vm = (name: string): SandboxInventoryRow => ({ name, state: "running", created_at: "2026-11-21T10:00:00Z", last_used_at: null, disk_bytes: 1, snapshot_count: 0, snapshot_age_s: null });
