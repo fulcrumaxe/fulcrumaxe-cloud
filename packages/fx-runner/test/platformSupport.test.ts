@@ -32,8 +32,8 @@ describe("the macOS preview label lives in one place", () => {
 
 describe("the Windows notice lives in one place", () => {
   it("is spelled once in src, in platformSupport.ts", () => {
-    spelledOnce("does not support Windows yet");
-    expect(WINDOWS_UNSUPPORTED_NOTICE).toBe("fx-runner does not support Windows yet, including WSL2. Linux and macOS are supported.");
+    spelledOnce("does not support native Windows");
+    expect(WINDOWS_UNSUPPORTED_NOTICE).toBe("fx-runner does not support native Windows. Install it inside WSL2, or on Linux or macOS.");
   });
 });
 
@@ -42,9 +42,10 @@ describe("the README's support matrix", () => {
     expect(matrix).toEqual(PLATFORM_SUPPORT.map((row): [string, string] => [row.name, row.label]));
   });
 
-  it("states macOS and WSL2 as previews, Linux as supported, and native Windows and WSL1 as not supported", () => {
-    expect(PLATFORM_SUPPORT.map((row) => [row.id, row.status])).toEqual([["macos", "preview"], ["linux", "supported"], ["windows", "not_supported"], ["wsl2", "preview"], ["wsl1", "not_supported"]]);
-    expect(matrix.find(([platform]) => platform === "WSL2")?.[1]).toContain(`**${MACOS_PREVIEW_LABEL}**`);
+  it("states macOS as a preview, Linux and WSL2 as supported, and native Windows and WSL1 as not supported", () => {
+    expect(PLATFORM_SUPPORT.map((row) => [row.id, row.status])).toEqual([["macos", "preview"], ["linux", "supported"], ["windows", "not_supported"], ["wsl2", "supported"], ["wsl1", "not_supported"]]);
+    expect(matrix.find(([platform]) => platform === "WSL2")?.[1]).toBe("supported, OS sandbox only, NAT networking (see below)");
+    expect(matrix.find(([platform]) => platform === "WSL2")?.[1]).not.toContain(MACOS_PREVIEW_LABEL);
   });
 
   it("WSL2 says VM mode is not offered, once, in the row; doctor and the README read it", () => {
@@ -52,8 +53,8 @@ describe("the README's support matrix", () => {
     expect(PLATFORM_SUPPORT.filter((row) => row.vmNotice !== undefined).map((row) => row.id)).toEqual(["wsl2"]);
   });
 
-  it("never shows a platform as supported before it is: only Linux says plain 'supported'", () => {
-    expect(PLATFORM_SUPPORT.filter((row) => row.status === "supported").map((row) => row.id)).toEqual(["linux"]);
+  it("never shows a platform as supported before it is: only Linux and WSL2 (NAT, proven) are supported", () => {
+    expect(PLATFORM_SUPPORT.filter((row) => row.status === "supported").map((row) => row.id)).toEqual(["linux", "wsl2"]);
   });
 
   it("the runner refuses with the notice the row holds, for every row that refuses", () => {

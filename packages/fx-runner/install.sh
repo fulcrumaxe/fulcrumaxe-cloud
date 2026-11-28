@@ -5,7 +5,7 @@
 #   sh install.sh --uninstall                     remove bin/fx-runner and versions/; the registration and keys stay
 #
 # What it does, in order:
-#   1. refuses native Windows and WSL, notes the macOS preview, and picks the artifact for this machine;
+#   1. refuses native Windows and WSL1, installs on WSL2 when systemd is PID 1, notes the macOS preview, and picks the artifact for this machine;
 #   2. downloads that artifact over HTTPS and checks its length and SHA-256 against the values baked into THIS copy of the
 #      script (the renderer writes them in; an unrendered copy refuses to install). The copy served by the cloud has them
 #      from release metadata the cloud verified through TUF; the release-page copy has them from the release manifest. In
@@ -38,8 +38,8 @@
 #   - the download is capped at the baked size (curl --max-filesize) and must be exactly that long before its SHA-256 is looked at.
 #
 # Test seams (all harmless in real use): FX_INSTALL_BASE_URL replaces the release download base (it must still be https, and
-# the baked length and checksum still have to match), FX_INSTALL_OS_RELEASE_FILE, FX_INSTALL_PROC_VERSION_FILE and
-# FX_INSTALL_NIXOS_MARKER replace the os-release file, /proc/version and the NixOS marker file.
+# the baked length and checksum still have to match), FX_INSTALL_OS_RELEASE_FILE, FX_INSTALL_PROC_VERSION_FILE,
+# FX_INSTALL_PID1_COMM_FILE and FX_INSTALL_NIXOS_MARKER replace the os-release file, /proc/version, PID 1's comm file and the NixOS marker file.
 
 set -eu
 
@@ -65,7 +65,9 @@ linux-arm64 fx-runner-linux-arm64"
 # src/engines/claude/pin.ts: MIN_CLAUDE_VERSION
 MIN_CLAUDE_VERSION="2.1.295"
 # src/platformSupport.ts
-WINDOWS_UNSUPPORTED_NOTICE="fx-runner does not support Windows yet, including WSL2. Linux and macOS are supported."
+WINDOWS_UNSUPPORTED_NOTICE="fx-runner does not support native Windows. Install it inside WSL2, or on Linux or macOS."
+WSL1_CONVERT_NOTICE="fx-runner does not support WSL1. Convert the distribution with: wsl --set-version <distro> 2 (WSL2 is supported and runs only when its safety checks pass). Linux and macOS are supported."
+WSL2_SYSTEMD_NOTICE="Turn on systemd for this WSL distribution: add [boot] systemd=true to /etc/wsl.conf, run wsl --shutdown in Windows, then run this installer again."
 MACOS_PREVIEW_NOTICE="macOS support is a preview, not yet verified: jobs run in Claude Code's own sandbox, which has not been proven on macOS yet."
 # src/sandbox/sandboxFix.ts: INSTALL_COMMAND (each is printed with "sudo " in front) and NIXOS_CONFIG_LINE
 PKG_APT="apt-get install -y bubblewrap socat"
@@ -320,11 +322,21 @@ main() {
   case $OS_NAME in
     Linux)
       OS=linux
-      if [ -n "${WSL_DISTRO_NAME:-}" ] || [ -n "${WSL_INTEROP:-}" ]; then
-        die 2 "$WINDOWS_UNSUPPORTED_NOTICE"
-      fi
+      # WSL1's kernel string says "Microsoft" without "-standard"; WSL2's says "microsoft-standard" (or "WSL2"). A custom
+      # WSL2 kernel is still told by the WSL variables.
+      IS_WSL=
+      if [ -n "${WSL_DISTRO_NAME:-}" ] || [ -n "${WSL_INTEROP:-}" ]; then IS_WSL=2; fi
       if [ -r "$PROC_VERSION_FILE" ] && grep -qi 'microsoft' "$PROC_VERSION_FILE" 2>/dev/null; then
-        die 2 "$WINDOWS_UNSUPPORTED_NOTICE"
+        if grep -qiE 'microsoft-standard|wsl2' "$PROC_VERSION_FILE" 2>/dev/null; then IS_WSL=2; else IS_WSL=1; fi
+      fi
+      if [ "$IS_WSL" = 1 ]; then die 2 "$WSL1_CONVERT_NOTICE"; fi
+      if [ "$IS_WSL" = 2 ]; then
+        # systemd must be PID 1: its name is in the first process's comm file.
+        PID1_COMM_FILE=${FX_INSTALL_PID1_COMM_FILE:-/proc/1/comm}
+        if [ ! -r "$PID1_COMM_FILE" ] || [ "$(cat "$PID1_COMM_FILE" 2>/dev/null || true)" != systemd ]; then die 2 "$WSL2_SYSTEMD_NOTICE"; fi
+        if command -v wslinfo >/dev/null 2>&1 && [ "$(wslinfo --networking-mode 2>/dev/null || true)" = mirrored ]; then
+          note "This machine uses WSL mirrored networking. Jobs in the OS sandbox are refused until you switch WSL to NAT networking (the default)."
+        fi
       fi
       ;;
     Darwin) OS=darwin ;;
