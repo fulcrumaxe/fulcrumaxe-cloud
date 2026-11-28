@@ -15,7 +15,7 @@ Sources:
 
 - [README](../README.md) — the pipeline from proposal to browser check in one page, repo layout, getting set up, commands, the database migration scheme, and CI.
 - [Architecture](architecture.md) — the two repository planes, workspace project dependency graph, how a request moves from browser to Postgres, the pipeline (merge gate, merge queue, post-merge verify, the cloud's own `fx-gate1`, where an agent runs, the engine bridge, verdict envelopes) and the assistant.
-- [Status](status.md) — what the pipeline does today (including the post-merge browser check, the Engine plan and the live view of an engine), what is built but off until configured, which parts of the machine and microVM work are built but off until configured (such as private twins), and every workspace project with its test evidence.
+- [Status](status.md) — what the pipeline does today (including the post-merge browser check, the Engine plan and the live view of an engine), what is built but off until configured, which parts of the machine and microVM work are built but off until configured, and every workspace project with its test evidence.
 - [Testing](testing.md) — what `scripts/check.sh` runs, how CI scopes a pull request (including the test edges and repository-wide scans that select extra packages), the repository-wide guard tests, e2e projects, and how test fakes stay as strict as the real services.
 - [Decisions](decisions.md) — a log of specific technical decisions, why they were made, and where they still hold at HEAD.
 - [Builder guide](agents/builder-guide.md) — the working checklist for anyone, human or agent, changing this repo: the check, the guard tests, migrations, database tests, fakes, UI work and the pull request. The root `AGENTS.md` points to it.
@@ -45,8 +45,8 @@ Sources:
 
 ## Apps
 
-- [`apps/web`](apps/web.md) — the Next.js App Router console, including the `/link` page where a person approves a machine, the Machines routes, the install pull request, plan draft, survey, engine update and engine stop retry routes and the `/install.sh` route for the runner.
-- [`apps/workspace`](apps/workspace.md) — the imported fulcrumaxe workspace UI, filtered to a cloud build profile; its first-party apps (onboarding, with its engine track and the retry of a failed install, pipeline, needs-you, team, with its failed-stop row and engine update card, runs and others) are under `apps/workspace/apps/`.
+- [`apps/web`](apps/web.md) — the Next.js App Router console, including the `/link` page where a person approves a machine, the Machines routes, the install pull request, plan draft, survey, engine update, engine stop retry and private twin routes and the `/install.sh` route for the runner.
+- [`apps/workspace`](apps/workspace.md) — the imported fulcrumaxe workspace UI, filtered to a cloud build profile; its first-party apps (onboarding, with its engine track and the retry of a failed install, pipeline, needs-you, team, with its failed-stop row, engine update card and next-step card, runs and others) are under `apps/workspace/apps/`.
 - [`apps/live-e2e`](apps/live-e2e.md) — live end-to-end packs: manifest, selection, targets and the `plan` command.
 
 ## Cross-cutting
