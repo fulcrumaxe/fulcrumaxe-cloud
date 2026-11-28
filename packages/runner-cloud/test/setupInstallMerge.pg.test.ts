@@ -297,7 +297,10 @@ describe("the install summary and merge [pg]", () => {
       await definer(r);
       const claim = await claimSetupFinish(h.opsPool, r.setupId);
       if (claim === null || claim === "malformed") throw new Error("no claim");
+      // a pass that could not reach GitHub has counted retries; a release must leave that count alone (a zero would pin nothing)
+      await h.admin.query("UPDATE project_setups SET finish_retries = 7 WHERE id = $1", [r.setupId]);
       const before = await row(r.setupId);
+      expect(before.finish_retries).toBe(7);
       await h.opsPool.query("SELECT setup_finish_release($1::uuid, $2::int, $3::text)", [r.setupId, claim.attempt, claim.claimAt]);
       const after = await row(r.setupId);
       const { finish_claim_at: was, ...restBefore } = before;
