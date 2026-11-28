@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { SetupFinishPort, SetupInstallPort } from "@fx/runner-cloud";
+import { RunPullRequestError, type SetupFinishPort, type SetupInstallPort } from "@fx/runner-cloud";
 import { setupFinishStep, setupInstallStep, type ReconcileHandlerDeps } from "../app/api/cron/reconcile/handler";
 import { drainInstallPr, drainSetupFinish, finishNow, installPrNow, HANDOFF_MAX_SETUPS, type HandoffDeps } from "../lib/onboardingHandoff";
 
@@ -9,18 +9,21 @@ import { drainInstallPr, drainSetupFinish, finishNow, installPrNow, HANDOFF_MAX_
  */
 const SHA = "c".repeat(40);
 const INSTALL_ROW = { o_account: "a1", o_setup: "s1", o_repo: "r1", o_user: "u1", o_attempt: 1, o_mode: "pr", o_base: "a".repeat(40), o_branch: "fx/engine-install-1.2.3", o_head: SHA, o_version: "1.2.3", o_owner: "acme", o_name: "widgets" };
-const FINISH_ROW = { o_account: "a1", o_setup: "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e", o_repo: "r1", o_attempt: 1, o_owner: "acme", o_name: "widgets", o_roadmap: [], o_seeded: [] };
+const FINISH_ROW = { o_account: "a1", o_setup: "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e", o_repo: "r1", o_attempt: 1, o_owner: "acme", o_name: "widgets", o_roadmap: [], o_seeded: [], o_claim_at: "2026-11-27 21:15:42.123456+00" };
 
 /** A fake of the platform_ops pool: each claim function answers its queue of rows (one per call), the recording definers answer ok. */
 function fakePool(queues: { install?: unknown[]; finish?: unknown[] }) {
   const install = [...(queues.install ?? [])];
   const finish = [...(queues.finish ?? [])];
   const sql: string[] = [];
+  const args: Array<{ text: string; args: unknown[] | undefined }> = [];
   return {
     sql,
+    args,
     pool: {
-      query: vi.fn(async (text: string) => {
+      query: vi.fn(async (text: string, a?: unknown[]) => {
         sql.push(text);
+        args.push({ text, args: a });
         if (text.includes("setup_install_pr_claim")) return { rows: install.length > 0 ? [install.shift()] : [] };
         if (text.includes("setup_finish_claim")) return { rows: finish.length > 0 ? [finish.shift()] : [] };
         if (text.includes("engine_update_pr_claim")) return { rows: [] };
@@ -161,5 +164,90 @@ describe("the finish, right after the install pull request merged", () => {
     const { deps, errors } = rig(pool, { setupFinishPort: finishPort, engineSystemStarts: async () => { throw boom; } });
     await expect(drainSetupFinish(deps)).resolves.toBeUndefined();
     expect(errors).toEqual([{ err: boom, stage: "onboarding.handoff_finish" }]);
+  });
+
+  it("the webhook's pass and the merge route's pass together finish a setup once: the second finds the claim taken", async () => {
+    const { pool } = fakePool({ finish: [FINISH_ROW] });
+    const starts = vi.fn(async (_scope: { msLeft: () => number }) => ({ not_configured: false, issued: 1, results: [] }));
+    const { deps, kept } = rig(pool, { setupFinishPort: finishPort, engineSystemStarts: starts });
+    finishNow(deps); // the merge route's hand-off
+    finishNow(deps); // the webhook's hand-off
+    await Promise.all(kept);
+    expect(kept).toHaveLength(2);
+    expect(starts).toHaveBeenCalledOnce();
+  });
+
+  it("a pass whose GitHub call fails releases its claim so the next pass retries at once: it is reported, never thrown, and starts nothing", async () => {
+    const { pool, sql } = fakePool({ finish: [FINISH_ROW] });
+    const boom = new Error("github down");
+    const starts = vi.fn();
+    const port = () => ({ findTeamLog: async () => { throw boom; }, installPullRequest: async () => null, discussionTarget: async () => null }) as unknown as SetupFinishPort;
+    const { deps, errors } = rig(pool, { setupFinishPort: port, engineSystemStarts: starts as never });
+    await expect(drainSetupFinish(deps)).resolves.toBeUndefined();
+    expect(errors).toEqual([{ err: boom, stage: "onboarding.handoff_finish" }]);
+    expect(starts).not.toHaveBeenCalled();
+    expect(sql.some((q) => q.includes("setup_finish_complete"))).toBe(false);
+    expect(sql.filter((q) => q.includes("setup_finish_release"))).toHaveLength(1);
+  });
+
+  it("a pass that could not reach GitHub (a retry) also releases its claim, and stops without finishing", async () => {
+    const { pool: base, sql, args } = fakePool({ finish: [FINISH_ROW] });
+    // the definer counts the failed pass and answers `retry` (the first of 24)
+    const pool = { query: vi.fn(async (text: string, args?: unknown[]) => (text.includes("setup_finish_retry") ? (sql.push(text), { rows: [{ r: "retry" }] }) : (base.query as (t: string, a?: unknown[]) => Promise<unknown>)(text, args))) };
+    const port = () => ({ findTeamLog: async () => { throw new RunPullRequestError("unavailable", 502); }, createTeamLog: async () => 1, installPullRequest: async () => null, discussionTarget: async () => null }) as unknown as SetupFinishPort;
+    const starts = vi.fn();
+    const { deps, errors } = rig(pool, { setupFinishPort: port, engineSystemStarts: starts as never });
+    await drainSetupFinish(deps);
+    expect(errors).toEqual([]);
+    expect(sql.filter((q) => q.includes("setup_finish_retry"))).toHaveLength(1);
+    expect(sql.filter((q) => q.includes("setup_finish_release"))).toHaveLength(1);
+    expect(args.find((c) => c.text.includes("setup_finish_release"))?.args).toEqual([FINISH_ROW.o_setup, 1, FINISH_ROW.o_claim_at]);
+    expect(starts).not.toHaveBeenCalled();
+  });
+
+  it("an immediate pass for one setup claims that setup alone; the tick's step and the webhook's pass name none", async () => {
+    const setup = FINISH_ROW.o_setup;
+    const named = fakePool({ finish: [FINISH_ROW] });
+    await drainSetupFinish(rig(named.pool, { setupFinishPort: finishPort }).deps, setup);
+    expect(named.args.filter((c) => c.text.includes("setup_finish_claim")).every((c) => c.args?.[0] === setup)).toBe(true);
+    const open = fakePool({ finish: [FINISH_ROW] });
+    await drainSetupFinish(rig(open.pool, { setupFinishPort: finishPort }).deps);
+    expect(open.args.find((c) => c.text.includes("setup_finish_claim"))?.args).toEqual([null]);
+    const kept: Array<Promise<unknown>> = [];
+    const viaNow = fakePool({ finish: [FINISH_ROW] });
+    const r = rig(viaNow.pool, { setupFinishPort: finishPort });
+    finishNow({ ...r.deps, keepAlive: (w) => void kept.push(w) }, setup);
+    await Promise.all(kept);
+    expect(viaNow.args.find((c) => c.text.includes("setup_finish_claim"))?.args).toEqual([setup]);
+  });
+
+  it("the tick's own step keeps the lease when it fails: it releases nothing", async () => {
+    const { pool, sql } = fakePool({ finish: [FINISH_ROW] });
+    const port = () => ({ findTeamLog: async () => { throw new Error("github down"); }, installPullRequest: async () => null, discussionTarget: async () => null }) as unknown as SetupFinishPort;
+    const { reconcile } = rig(pool, { setupFinishPort: port });
+    await expect(setupFinishStep(reconcile)(pool as never)).rejects.toThrow("github down");
+    expect(sql.some((q) => q.includes("setup_finish_release"))).toBe(false);
+  });
+
+  it("the tick's own step finishes a merged setup with no webhook and no merge-route hand-off", async () => {
+    const { pool, sql } = fakePool({ finish: [FINISH_ROW] });
+    const { reconcile } = rig(pool, { setupFinishPort: finishPort });
+    expect(await setupFinishStep(reconcile)(pool as never)).toBe("done");
+    expect(sql.some((q) => q.includes("setup_finish_complete"))).toBe(true);
+  });
+
+  it("logs one coded line per pass, telling a pass that found nothing from one that finished a setup", async () => {
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((l: unknown) => void lines.push(String(l)));
+    try {
+      await drainSetupFinish(rig(fakePool({ finish: [FINISH_ROW] }).pool, { setupFinishPort: finishPort }).deps);
+      await drainSetupFinish(rig(fakePool({}).pool, { setupFinishPort: finishPort }).deps);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(lines.map((l) => JSON.parse(l))).toEqual([
+      { event: "onboarding.finish_pass", finished: 1, stopped: "none" },
+      { event: "onboarding.finish_pass", finished: 0, stopped: "none" },
+    ]);
   });
 });

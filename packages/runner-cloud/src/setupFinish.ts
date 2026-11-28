@@ -42,6 +42,8 @@ export interface SetupFinishClaim {
   installHeadSha: string | null;
   /** The live twin whose private repo this is, or null. Only the database says so. */
   twinId: string | null;
+  /** The claim's own timestamp (database text, microseconds kept): a release names it, so it can only give back this claim and never a later one. */
+  claimAt: string;
 }
 
 export type SetupFinishOutcome = "done" | "failed" | "retry" | "skipped";
@@ -83,9 +85,10 @@ function parseRoadmap(raw: unknown): SetupFinishRow[] | null {
 }
 
 /** Takes the oldest due setup, or null when none is due. A row of a shape a setup cannot have is left to its lease (`malformed`), never acted on. */
-export async function claimSetupFinish(pool: Pick<Pool, "query">): Promise<SetupFinishClaim | null | "malformed"> {
-  const { rows } = await pool.query<{ o_account: string; o_setup: string; o_repo: string; o_attempt: number; o_owner: string | null; o_name: string | null; o_roadmap: unknown; o_seeded: unknown; o_install_pr: number | null; o_install_head_sha: string | null; o_twin: string | null }>(
-    "SELECT o_account, o_setup, o_repo, o_attempt, o_owner, o_name, o_roadmap, o_seeded, o_install_pr, o_install_head_sha, o_twin FROM setup_finish_claim()",
+export async function claimSetupFinish(pool: Pick<Pool, "query">, setupId: string | null = null): Promise<SetupFinishClaim | null | "malformed"> {
+  const { rows } = await pool.query<{ o_account: string; o_setup: string; o_repo: string; o_attempt: number; o_owner: string | null; o_name: string | null; o_roadmap: unknown; o_seeded: unknown; o_install_pr: number | null; o_install_head_sha: string | null; o_twin: string | null; o_claim_at: string }>(
+    "SELECT o_account, o_setup, o_repo, o_attempt, o_owner, o_name, o_roadmap, o_seeded, o_install_pr, o_install_head_sha, o_twin, o_claim_at FROM setup_finish_claim($1::uuid)",
+    [setupId],
   );
   const r = rows[0];
   if (r === undefined) return null;
@@ -102,7 +105,7 @@ export async function claimSetupFinish(pool: Pick<Pool, "query">): Promise<Setup
   const installHeadSha = r.o_install_head_sha ?? null;
   const twinId = r.o_twin ?? null;
   if ((installPr !== null && (!Number.isSafeInteger(installPr) || installPr < 1)) || (installHeadSha !== null && !SHA.test(installHeadSha)) || (twinId !== null && !UUID.test(twinId))) return "malformed";
-  return { accountId: r.o_account, setupId: r.o_setup, repoId: r.o_repo, attempt: r.o_attempt, owner: r.o_owner, name: r.o_name, roadmap, seeded, installPr, installHeadSha, twinId };
+  return { accountId: r.o_account, setupId: r.o_setup, repoId: r.o_repo, attempt: r.o_attempt, owner: r.o_owner, name: r.o_name, roadmap, seeded, installPr, installHeadSha, twinId, claimAt: String(r.o_claim_at) };
 }
 
 /** A person wrote the plan's words, so they are cleaned before they reach GitHub: no control character, and no HTML comment (the one comment a body holds is our marker). */

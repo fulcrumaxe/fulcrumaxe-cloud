@@ -348,10 +348,15 @@ export function setupInstallStep(deps: Pick<ReconcileHandlerDeps, "reportError" 
 }
 
 /** D#845 ON-13a4 (Ruling 93): one pass of the finish phase for the reconcile job: claims the oldest due setup (platform_ops, under its lease) and does it. The port is built the first time a setup is due. */
-export function setupFinishStep(deps: Pick<ReconcileHandlerDeps, "reportError" | "setupFinishPort">): SetupFinishStep {
+/**
+ * `setupId` limits a pass to that one setup (the immediate hand-off of a person's merge works on its own setup and never drains the oldest due ones across accounts; the tick leaves it unset).
+ * `releaseOnFailure` is the immediate hand-off's (D#845 Ruling 122.1): a pass that could not finish the setup it claimed (GitHub unreachable, or a throw) gives the claim back, so the next pass, the webhook's, the merge route's or
+ * the tick's, retries at once. The tick keeps today's ten minute lease: it runs every fifteen minutes anyway, and a lease there is what stops two overlapping ticks from both acting.
+ */
+export function setupFinishStep(deps: Pick<ReconcileHandlerDeps, "reportError" | "setupFinishPort">, opts: { releaseOnFailure?: boolean; setupId?: string } = {}): SetupFinishStep {
   let port: SetupFinishPort | undefined;
   return async (pool) => {
-    const claim = await claimSetupFinish(pool);
+    const claim = await claimSetupFinish(pool, opts.setupId ?? null);
     if (claim === null) return "none";
     if (claim === "malformed") {
       deps.reportError(new Error("setup finish claim malformed"), { stage: "reconcile.setup_finish", route: RECONCILE_ROUTE, code: "internal_error" });
@@ -359,7 +364,23 @@ export function setupFinishStep(deps: Pick<ReconcileHandlerDeps, "reportError" |
     }
     port ??= (deps.setupFinishPort ?? createAppRunPullRequestPort)();
     const report = (reason: string): void => deps.reportError(new Error(reason), { stage: "reconcile.setup_finish_twin", route: RECONCILE_ROUTE, code: "internal_error" });
-    const outcome = await completeSetupFinish({ pool, port, report }, claim);
+    const release = async (): Promise<void> => {
+      if (opts.releaseOnFailure !== true) return;
+      try {
+        await pool.query("SELECT setup_finish_release($1::uuid, $2::int, $3::text) AS r", [claim.setupId, claim.attempt, claim.claimAt]);
+      } catch (err) {
+        // the lease lapses by itself; the tick is the backstop
+        deps.reportError(err, { stage: "reconcile.setup_finish_release", route: RECONCILE_ROUTE, code: "internal_error" });
+      }
+    };
+    let outcome: Awaited<ReturnType<typeof completeSetupFinish>>;
+    try {
+      outcome = await completeSetupFinish({ pool, port, report }, claim);
+    } catch (err) {
+      await release();
+      throw err;
+    }
+    if (outcome === "retry") await release();
     return outcome === "retry" ? "retry" : "done";
   };
 }

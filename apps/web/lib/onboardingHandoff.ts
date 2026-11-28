@@ -9,7 +9,7 @@ import type { ReconcileHandlerDeps } from "../app/api/cron/reconcile/handler";
  *   install PR merged -> the finish phase (Discussions, team-log issue, the twin's files), then the first engine session start (the GitHub webhook calls `finishNow` after it has answered)
  *
  * Both run the very steps the tick runs (`setupInstallStep`, `setupFinishStep`, and the same first-start pass), over the same claims: each claim is taken under a database lease, so an immediate pass and a tick that race
- * never both act, and a pass that fails (GitHub down, the database) leaves its claim for the lease to lapse and the tick to redo. Nothing here throws into the request; a failure is reported by code on stdout/error events.
+ * never both act, and a finish pass that fails gives its claim back so the next pass retries at once (the install pass leaves its claim for the lease to lapse and the tick to redo). Nothing here throws into the request; a failure is reported by code on stdout/error events.
  */
 
 /** Setups one immediate pass takes before it stops: a handful can be due together, and the tick finishes whatever is left. */
@@ -57,15 +57,19 @@ export async function drainInstallPr(deps: HandoffDeps = defaultHandoffDeps): Pr
 }
 
 /** One immediate pass of the finish step, then the first-start pass for the sessions it made due. A failure leaves the claim to the tick. */
-export async function drainSetupFinish(deps: HandoffDeps = defaultHandoffDeps): Promise<void> {
+export async function drainSetupFinish(deps: HandoffDeps = defaultHandoffDeps, setupId?: string): Promise<void> {
   try {
     const reconcile = await deps.reconcile();
-    const step = (await deps.steps()).setupFinishStep(reconcile);
+    const step = (await deps.steps()).setupFinishStep(reconcile, { releaseOnFailure: true, ...(setupId === undefined ? {} : { setupId }) });
     let finished = 0;
+    let last = "none";
     for (let i = 0; i < HANDOFF_MAX_SETUPS; i += 1) {
-      if ((await step(reconcile.platformOpsPool)) !== "done") break;
+      last = String(await step(reconcile.platformOpsPool));
+      if (last !== "done") break;
       finished += 1;
     }
+    // a fixed event name: a pass that found nothing (`none`) or left its claim to the lease (`retry`) is told apart from one that finished a setup
+    console.log(JSON.stringify({ event: "onboarding.finish_pass", finished, stopped: last }));
     if (finished === 0 || !reconcile.engineSystemStarts) return;
     const deadline = Date.now() + HANDOFF_START_BUDGET_MS;
     await reconcile.engineSystemStarts({ msLeft: () => Math.max(0, deadline - Date.now()) });
@@ -79,7 +83,7 @@ export function installPrNow(deps: HandoffDeps = defaultHandoffDeps): void {
   deps.keepAlive(drainInstallPr(deps));
 }
 
-/** Starts the finish pass and keeps it alive past the response. Never throws, never waits. */
-export function finishNow(deps: HandoffDeps = defaultHandoffDeps): void {
-  deps.keepAlive(drainSetupFinish(deps));
+/** Starts the finish pass and keeps it alive past the response. Never throws, never waits. With a setup id the pass works on that setup alone (a person's merge); without one it takes the due setups, a handful at most (the webhook's delivery, which names none). */
+export function finishNow(deps: HandoffDeps = defaultHandoffDeps, setupId?: string): void {
+  deps.keepAlive(drainSetupFinish(deps, setupId));
 }

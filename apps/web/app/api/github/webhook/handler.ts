@@ -151,6 +151,24 @@ export function defaultGithubWebhookDeps(): GithubWebhookHandlerDeps {
   };
 }
 
+/** One coded line for every pull request delivery from an engine install branch, so a dropped or unmatched merge is visible (the head ref is ours to name; nothing else from the payload is written). */
+function logInstallPullRequestDelivery(eventName: string, payload: unknown, result: HandleWebhookResult): void {
+  if (eventName !== "pull_request") return;
+  const p = payload as { action?: unknown; pull_request?: { head?: { ref?: unknown }; merged?: unknown } } | null;
+  const ref = p?.pull_request?.head?.ref;
+  if (typeof ref !== "string" || !/^fx\/engine-install-[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}$/.test(ref)) return;
+  console.log(
+    JSON.stringify({
+      event: "onboarding.install_pr_webhook",
+      action: typeof p?.action === "string" ? p.action.slice(0, 32) : null,
+      merged: p?.pull_request?.merged === true,
+      handled: result.handled,
+      applied: result.handled ? result.result.applied : result.reason.slice(0, 64),
+      outcome: result.handled && "outcome" in result.result ? String(result.result.outcome) : null,
+    }),
+  );
+}
+
 export async function githubWebhookHandler(
   req: NextRequest,
   deps: GithubWebhookHandlerDeps = defaultGithubWebhookDeps(),
@@ -235,6 +253,7 @@ export async function githubWebhookHandler(
   // D#845 ON-13a4: a merged install pull request moves its setup to the finish phase; wake the reconciler so the Discussions and the team-log issue are made on the next tick.
   // D#845 ON-15c: a merged engine update is waiting for its restart: the same wake.
   if (result.handled && (result.result.applied === "setup_install_pr_closed" || result.result.applied === "engine_update_pr_closed") && result.result.outcome === "finished") void markWorkPending("reconcile");
+  logInstallPullRequestDelivery(eventName, payload, result);
   // D#845 Ruling 122: a person is waiting on the finish of a merged install, so it runs now; a failure here is the tick's to redo (the claim lease lapses).
   if (result.handled && result.result.applied === "setup_install_pr_closed" && result.result.outcome === "finished") {
     try {
