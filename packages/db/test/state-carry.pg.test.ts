@@ -38,6 +38,13 @@ describe('state carry (1123) [pg]', () => {
       await c.query(`SELECT set_config('app.runner_id', $1, true)`, [runnerId]);
       return fn(c);
     });
+  /**
+   * The issue time of a cleanup job signed straight after the rig. The definer refuses an issue time
+   * before the cleanup's request time, and a JS Date is truncated to the millisecond while the request
+   * time keeps microseconds, so `new Date()` can land a fraction of a millisecond early on a fast run.
+   * Two seconds ahead stays inside the minute the definer allows.
+   */
+  const issueTime = (): Date => new Date(Date.now() + 2000);
   const code = async (p: Promise<unknown>): Promise<string> => p.then(() => 'ok', (e: { code: string; message: string }) => `${e.code}`);
 
   /** An account whose repo moved from `from` to `to`, with the move's cleanup and an open carry. */
@@ -446,7 +453,7 @@ describe('state carry (1123) [pg]', () => {
     const issue = (r: Rig, kind: string, args: Record<string, unknown>) =>
       runner(r, r.from, async (c) => {
         const id = randomUUID();
-        const issued = new Date();
+        const issued = issueTime();
         const expires = new Date(issued.getTime() + 600_000);
         const gh = (await c.query('SELECT gh_repo_id FROM repos WHERE id = $1', [r.a.repoId])).rows[0].gh_repo_id;
         const j = { job: { job_id: id, kind, runner_id: r.from, repo_gh_id: Number(gh), requires_engine: 'any', issued_at: issued.toISOString(), expires_at: expires.toISOString(), args } };
@@ -466,7 +473,7 @@ describe('state carry (1123) [pg]', () => {
       const issueFor = (who: string, cleanup: string, ghRepoId: number, carry: string) =>
         runner(r, who, async (c) => {
           const id = randomUUID();
-          const issued = new Date();
+          const issued = issueTime();
           const expires = new Date(issued.getTime() + 600_000);
           const j = { job: { job_id: id, kind: 'engine_session_stop', runner_id: who, repo_gh_id: ghRepoId, requires_engine: 'any', issued_at: issued.toISOString(), expires_at: expires.toISOString(), args: { reason: 'move', operate_epoch: 0, carry: { id: carry } } } };
           await c.query('SELECT machine_cleanup_issue($1, $2, $3, $4::jsonb, $5, $6)', [cleanup, id, 'engine_session_stop', JSON.stringify(j), issued, expires]);
