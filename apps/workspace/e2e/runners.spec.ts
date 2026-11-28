@@ -307,7 +307,7 @@ test.describe("D#605 FL-9: the fleet page", () => {
     await expect(rows.nth(0)).toContainText("acme/web, acme/api");
     await expect(rows.nth(0)).toContainText("API key");
     await expect(rows.nth(0)).toContainText("gpu");
-    await expect(rows.nth(0)).toContainText("macos · arm64 · os_sandbox");
+    await expect(rows.nth(0)).toContainText("macos · arm64 · OS sandbox");
     await expect(rows.nth(0).locator('[data-testid="runners-run"]')).toHaveText("fulcrumaxe executor · acme/web");
     await expect(rows.nth(1).locator('[data-testid="runners-name"]')).toHaveText("Unnamed runner (Bo Builder)");
     await expect(rows.nth(1)).toContainText("Not reported yet");

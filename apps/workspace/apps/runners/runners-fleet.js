@@ -144,7 +144,9 @@ export const NO_PREFLIGHT = "Not reported yet";
 export const PREFLIGHT_OK = "All checks passed";
 /** The Machines row's preflight lines: the distinct fixed lines of the reported codes, or null while the machine has not said (the row then says NO_PREFLIGHT), or [] when every check passed. */
 export const preflightLines = (r) => (r.facts === null || r.facts.preflight === null ? null : [...new Set(r.facts.preflight.map((p) => p.fix))]);
-export const factsText = (r) => (r.facts === null ? "Not reported yet" : [r.facts.platform || r.facts.os, r.facts.arch, r.facts.engine, r.facts.support].filter(Boolean).join(" · ") || "Not reported yet");
+/** The words for the sandbox engine a machine reports (never the raw code). An engine this build does not know shows no word rather than its code. */
+export const ENGINE_WORDS = { os_sandbox: "OS sandbox", microvm: "microVM" };
+export const factsText = (r) => (r.facts === null ? "Not reported yet" : [r.facts.platform || r.facts.os, r.facts.arch, ENGINE_WORDS[r.facts.engine], r.facts.support].filter(Boolean).join(" · ") || "Not reported yet");
 export const provText = (r) => (r.prov === null ? "" : "Made from a token by " + r.prov.by + (r.prov.ip ? " · first seen at " + r.prov.ip : ""));
 
 /** Which controls a row shows, in order: [{ action, label }]. A removed runner has none (the register-again button is separate). */
