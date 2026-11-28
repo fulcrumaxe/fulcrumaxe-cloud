@@ -429,7 +429,12 @@ describe("machine login: start, link, code, report, sign out [pg]", () => {
     await expect(insert(f.o1, null, r2.id, "claude_login_code", id)).rejects.toMatchObject({ code: "42501" });
     await expect(insert(f.o1, null, r.id, "claude_logout", id)).rejects.toMatchObject({ code: "23514" });
     await expect(insert(f.o1, null, r.id, "claude_login_code", null)).rejects.toMatchObject({ code: "23514" });
-    await expect(insert(f.o1, null, r.id, "gh_login_start", id)).rejects.toMatchObject({ code: "23514" });
+    // D#845 ON-19c (1125): the two GitHub kinds are in the closed list, with the same request rule (a start names one, a logout names none).
+    await expect(insert(f.o1, null, r.id, "gh_login_start", null)).rejects.toMatchObject({ code: "23514" });
+    await expect(insert(f.o1, null, r.id, "gh_logout", id)).rejects.toMatchObject({ code: "23514" });
+    await expect(insert(f.o1, null, r.id, "gh_something", null)).rejects.toMatchObject({ code: "23514" });
+    expect((await insert(f.o1, null, r.id, "gh_login_start", id)).rowCount).toBe(1);
+    expect((await insert(f.o1, null, r.id, "gh_logout", null)).rowCount).toBe(1);
     expect((await insert(f.o1, null, r.id, "claude_login_code", id)).rowCount).toBe(1);
   });
 });

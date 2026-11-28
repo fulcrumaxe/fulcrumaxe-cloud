@@ -12,7 +12,7 @@ export const MACHINE_COMMAND_PURPOSE = "machine_command_v1" as const;
 /** The same bounds as the engine commands' (engineCommands.ts, which cannot be imported here: it imports messages.ts, which needs this file; a test holds the two together). */
 export const MACHINE_COMMAND_MAX_LIFE_S = 600;
 export const MACHINE_COMMAND_MAX_CLOCK_SKEW_S = 60;
-export const MACHINE_COMMAND_KINDS = ["claude_login_start", "claude_login_code", "claude_logout"] as const;
+export const MACHINE_COMMAND_KINDS = ["claude_login_start", "claude_login_code", "claude_logout", "gh_login_start", "gh_logout"] as const;
 export type MachineCommandKind = (typeof MACHINE_COMMAND_KINDS)[number];
 
 /**
@@ -37,9 +37,9 @@ const BASE = {
 const command = <K extends MachineCommandKind>(kind: K) => strict({ ...BASE, kind: z.literal(kind), args: strict({ request_id: z.string().uuid() }) });
 
 /** `claude_logout` names no request: it signs the machine out of Claude, whatever request signed it in. */
-const logout = strict({ ...BASE, kind: z.literal("claude_logout"), args: strict({}) });
+const logout = (kind: "claude_logout" | "gh_logout") => strict({ ...BASE, kind: z.literal(kind), args: strict({}) });
 
-export const MachineCommand = z.discriminatedUnion("kind", [command("claude_login_start"), command("claude_login_code"), logout]).superRefine((cmd, ctx) => {
+export const MachineCommand = z.discriminatedUnion("kind", [command("claude_login_start"), command("claude_login_code"), logout("claude_logout"), command("gh_login_start"), logout("gh_logout")]).superRefine((cmd, ctx) => {
   const life = Date.parse(cmd.expires_at) - Date.parse(cmd.issued_at);
   if (!(life > 0 && life <= MACHINE_COMMAND_MAX_LIFE_S * 1000)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a command lives 1 ms to 600 s", path: ["expires_at"] });
 });
@@ -76,6 +76,24 @@ export const MachineLoginReport = strict({ state: z.enum(["awaiting_code", "done
 export type MachineLoginReport = z.infer<typeof MachineLoginReport>;
 /** What the person types: the one-time code the sign-in page shows. Letters, digits and a few separators, no space or control character. */
 export const MachineLoginCode = z.string().regex(/^[A-Za-z0-9._~+/=#-]{1,512}$/);
+
+/**
+ * D#845 ON-19c: the GitHub sign-in relay. `gh auth login --web` prints a one-time code and the one device address; the runner relays exactly those two values and nothing else the CLI prints. The code is two groups of four
+ * letters or digits (the 8 characters, as the real CLI printed `XXXX-XXXX` in the spike) and the address is the one URL, so a report that carries anything else is refused here, before it is stored.
+ */
+export const GH_DEVICE_URL = "https://github.com/login/device" as const;
+export const GH_DEVICE_URL_PATTERN = /^https:\/\/github\.com\/login\/device$/;
+export const GH_USER_CODE_PATTERN = /^[A-Z0-9]{4}-[A-Z0-9]{4}$/;
+export const ghLoginReportPath = (requestId: string): string => `/api/runner/machine-login/${requestId}/gh-report`;
+/** The closed words a GitHub sign-in may fail with. `already_signed_in`: github.com already has an account on the machine (one account per machine keeps every sign-out unambiguous), so no second sign-in is started. `signout_failed`: the sign-out that undoes a sign-in the cloud no longer wants did not succeed. */
+export const GH_LOGIN_FAILURE_CODES = ["unsupported_platform", "not_managed", "busy", "gh_missing", "start_failed", "already_signed_in", "bad_link", "no_link", "link_refused", "link_unsent", "login_failed", "timeout", "cancelled", "signout_failed"] as const;
+export const GhLoginReport = strict({ state: z.enum(["awaiting_code", "done", "failed"]), device_url: z.string().regex(GH_DEVICE_URL_PATTERN).optional(), user_code: z.string().regex(GH_USER_CODE_PATTERN).optional(), failure_code: z.enum(GH_LOGIN_FAILURE_CODES).optional() }).superRefine((r, ctx) => {
+  const both = r.device_url !== undefined && r.user_code !== undefined;
+  const none = r.device_url === undefined && r.user_code === undefined;
+  if (r.state === "awaiting_code" ? !both : !none) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "the address and the code go together, with awaiting_code only", path: ["device_url"] });
+  if (r.failure_code !== undefined && r.state !== "failed") ctx.addIssue({ code: z.ZodIssueCode.custom, message: "failure_code goes with failed only", path: ["failure_code"] });
+});
+export type GhLoginReport = z.infer<typeof GhLoginReport>;
 
 /** Verifies a signed machine command for the runner `runnerId` and returns it. Throws `JobSignatureError` and nothing else (`bad_signature` for a changed byte or another runner, `expired` past `expires_at` or when `issued_at` is more than `MAX_CLOCK_SKEW_S` ahead). */
 export function verifyMachineCommand(signed: unknown, keyring: JobKeyring, runnerId: string, now: Date = new Date()): MachineCommand {

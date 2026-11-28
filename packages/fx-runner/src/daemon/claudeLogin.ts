@@ -137,6 +137,8 @@ export interface LoginSpawnSpec {
   args: string[];
   cwd: string;
   env: Record<string, string>;
+  /** D#845 ON-19c: start the process with no pipe at all (standard input, output and error all ignored), for a command whose answer is its exit status and whose output must never reach the runner (it may be a token). */
+  ignoreStdio?: boolean;
 }
 export interface LoginChild {
   write(text: string): void;
@@ -150,6 +152,8 @@ export interface ClaudeLoginHost {
   launch(spec: LoginSpawnSpec): LoginChild;
   /** The absolute path of the installed CLI, or undefined when there is none. */
   locateClaude(): string | undefined;
+  /** D#845 ON-19c: the absolute path of the installed `gh`, or undefined when there is none. Absent: no GitHub sign-in can start. */
+  locateGh?(): string | undefined;
   /** The name the sign-in command runs the CLI by (looked up on the child's search path). Absent in production, where it is the CLI's own name; a test names a stand-in. */
   cliName?: string;
   /** The fixed-allowlist environment (no credential, no `BROWSER`, no `DISPLAY`); `PATH` is extended here with the CLI's own directory. */
@@ -226,7 +230,7 @@ function openLog(dir: string, requestId: string, uid: number | undefined): numbe
 }
 
 /** The fixed directory the CLI starts in: made 0700 when it is missing, checked (a directory, ours, 0700) and emptied; anything in it is removed without following a link. */
-function prepareWorkDir(dir: string, uid: number | undefined): string {
+export function prepareWorkDir(dir: string, uid: number | undefined): string {
   try {
     mkdirSync(dir, { mode: 0o700 });
   } catch (error) {

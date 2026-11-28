@@ -2,7 +2,7 @@ import { generateKeyPairSync, sign } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { JobSignatureError, canonicalJson } from "../src/jobSignature.js";
 import { ENGINE_COMMAND_MAX_LIFE_S, MAX_CLOCK_SKEW_S } from "../src/engineCommands.js";
-import { CLAUDE_AUTH_ORIGIN, CLAUDE_AUTH_URL_PATTERN, MACHINE_COMMAND_MAX_CLOCK_SKEW_S, MACHINE_COMMAND_MAX_LIFE_S, MACHINE_COMMAND_REFUSALS, MachineCommandAck, MachineLoginCode, MachineLoginReport, ClaudeAuthUrl, MACHINE_COMMAND_KINDS, MACHINE_COMMAND_PURPOSE, MachineCommand, signMachineCommand, verifyMachineCommand, type MachineCommand as Command } from "../src/machineCommands.js";
+import { CLAUDE_AUTH_ORIGIN, CLAUDE_AUTH_URL_PATTERN, MACHINE_COMMAND_MAX_CLOCK_SKEW_S, MACHINE_COMMAND_MAX_LIFE_S, MACHINE_COMMAND_REFUSALS, MachineCommandAck, MachineLoginCode, MachineLoginReport, ClaudeAuthUrl, MACHINE_COMMAND_KINDS, MACHINE_COMMAND_PURPOSE, GH_DEVICE_URL, GH_LOGIN_FAILURE_CODES, GhLoginReport, ghLoginReportPath, MachineCommand, signMachineCommand, verifyMachineCommand, type MachineCommand as Command } from "../src/machineCommands.js";
 import { SANDBOX_COMMAND_PURPOSE, signSandboxCommand } from "../src/sandboxCommands.js";
 
 const { publicKey, privateKey } = generateKeyPairSync("ed25519");
@@ -14,7 +14,7 @@ const ID = "5d0c6f0e-2a54-4f3b-8d1e-7a9c2b3d4e5f";
 const at = (s: number): string => new Date(NOW.getTime() + s * 1000).toISOString();
 const cmd = (over: Record<string, unknown> = {}): Command => ({ v: 1, purpose: MACHINE_COMMAND_PURPOSE, command_id: ID, runner_id: RUNNER, issued_by: ID, issued_at: at(0), expires_at: at(300), kind: "claude_login_start", args: { request_id: ID }, ...over }) as Command;
 /** The logout command names no request; the two sign-in commands name exactly one. */
-const ofKind = (kind: (typeof MACHINE_COMMAND_KINDS)[number]): Command => cmd({ kind, args: kind === "claude_logout" ? {} : { request_id: ID } });
+const ofKind = (kind: (typeof MACHINE_COMMAND_KINDS)[number]): Command => cmd({ kind, args: kind === "claude_logout" || kind === "gh_logout" ? {} : { request_id: ID } });
 const failsWith = (run: () => unknown, code: string): void => {
   try {
     run();
@@ -28,7 +28,7 @@ const failsWith = (run: () => unknown, code: string): void => {
 
 describe("machine command schema", () => {
   it("has the two sign-in commands, each with a request id and nothing else, the logout with none, and no repo", () => {
-    expect([...MACHINE_COMMAND_KINDS]).toEqual(["claude_login_start", "claude_login_code", "claude_logout"]);
+    expect([...MACHINE_COMMAND_KINDS]).toEqual(["claude_login_start", "claude_login_code", "claude_logout", "gh_login_start", "gh_logout"]);
     for (const kind of MACHINE_COMMAND_KINDS) expect(MachineCommand.safeParse(ofKind(kind)).success, kind).toBe(true);
     expect(MachineCommand.safeParse(cmd({ kind: "claude_logout" })).success).toBe(false);
     expect(MachineCommand.safeParse(cmd({ kind: "claude_logout", args: { request_id: ID } })).success).toBe(false);
@@ -121,4 +121,35 @@ describe("the bounds, the ack, the report and the code", () => {
     for (const ok of ["abc123", "Ab-9_x.y~z+/=#"]) expect(MachineLoginCode.safeParse(ok).success, ok).toBe(true);
     for (const bad of ["", " ", "a b", "a\nb", "a\u0000b", "x".repeat(513), 5, null]) expect(MachineLoginCode.safeParse(bad).success, String(bad)).toBe(false);
   });
+});
+
+/** D#845 ON-19c: the GitHub sign-in relay's two commands and its report, which holds the relayed values to their exact shapes. */
+describe("the GitHub sign-in relay", () => {
+  const ok = { state: "awaiting_code", device_url: GH_DEVICE_URL, user_code: "AB12-CD34" };
+  it("names no request on gh_logout and exactly one on gh_login_start, and a stray argument is refused", () => {
+    expect(MachineCommand.safeParse(cmd({ kind: "gh_logout", args: { request_id: ID } })).success).toBe(false);
+    expect(MachineCommand.safeParse(cmd({ kind: "gh_login_start", args: {} })).success).toBe(false);
+    expect(MachineCommand.safeParse(cmd({ kind: "gh_login_start", args: { request_id: ID, code: "AB12-CD34" } })).success).toBe(false);
+  });
+  it("takes the address and the code together with awaiting_code, and nothing else with it", () => {
+    expect(GhLoginReport.safeParse(ok).success).toBe(true);
+    expect(GhLoginReport.safeParse({ state: "done" }).success).toBe(true);
+    expect(GhLoginReport.safeParse({ state: "failed", failure_code: "login_failed" }).success).toBe(true);
+    for (const bad of [
+      { state: "awaiting_code" }, { state: "awaiting_code", device_url: GH_DEVICE_URL }, { state: "awaiting_code", user_code: "AB12-CD34" },
+      { state: "done", state2: 1 }, { ...ok, state: "done" }, { ...ok, state: "failed" }, { state: "done", failure_code: "x" },
+      { ...ok, extra: ["gho", "16C7e42F292c6912E7710c838347Ae178B4a"].join("_") }, { ...ok, token: "x" },
+    ]) expect(GhLoginReport.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
+  });
+  it.each(["http://github.com/login/device", "https://github.com/login/device/", "https://github.com/login/device?x=1", "https://github.com.evil.test/login/device", "https://evil.test/login/device", "https://user@github.com/login/device", "https://github.com/login/device\n", " https://github.com/login/device", "javascript:alert(1)", "https://github.com/login/oauth/authorize"])(
+    "refuses the address %j",
+    (device_url) => expect(GhLoginReport.safeParse({ ...ok, device_url }).success).toBe(false),
+  );
+  it.each(["ab12-cd34", "AB12CD34", "AB12-CD345", "AB1-CD34", "AB12-CD3 ", "AB12-CD3!", "AB12_CD34", "AB12-CD34\n", ["gho", "16C7e42F292c6912E7710c838347Ae178B4a"].join("_"), "", "A".repeat(500)])("refuses the code %j", (user_code) => expect(GhLoginReport.safeParse({ ...ok, user_code }).success).toBe(false));
+  it("fails only with a word from the closed list, already_signed_in and signout_failed among them", () => {
+    for (const failure_code of GH_LOGIN_FAILURE_CODES) expect(GhLoginReport.safeParse({ state: "failed", failure_code }).success, failure_code).toBe(true);
+    expect(GH_LOGIN_FAILURE_CODES).toEqual(expect.arrayContaining(["already_signed_in", "signout_failed"]));
+    for (const bad of ["", "x", "Already_Signed_In", "already signed in", "login_failed ", "gho_x", "unable_to_determine_which_account_to_log_out_of_xxxxxxxx"]) expect(GhLoginReport.safeParse({ state: "failed", failure_code: bad }).success, bad).toBe(false);
+  });
+  it("has its own report path, under the request", () => expect(ghLoginReportPath(ID)).toBe(`/api/runner/machine-login/${ID}/gh-report`));
 });

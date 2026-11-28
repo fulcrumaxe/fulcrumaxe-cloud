@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { ENGINE_CARRY_CAPABILITY, HelloMessage, PLATFORM_FACT_HELLO_CAPABILITY, RUNNER_CAPABILITIES, TWIN_CAPABILITY, type HelloMessage as Hello } from "@fulcrumaxe/runner-protocol";
+import { ENGINE_CARRY_CAPABILITY, GH_LOGIN_CAPABILITY, HelloMessage, PLATFORM_FACT_HELLO_CAPABILITY, RUNNER_CAPABILITIES, TWIN_CAPABILITY, type HelloMessage as Hello } from "@fulcrumaxe/runner-protocol";
 import { createRunnerClient } from "../../src/daemon/client.js";
 import { generateRunnerKey } from "../../src/keys.js";
 import { RUNNER_BUILD_CAPABILITIES, RUNNER_PROTOCOL_VERSION, RUNNER_VERSION } from "../../src/version.js";
 
-// D#845 MC-9b2 (Ruling 128.1): `engine_carry_v1` is the second rung of the drop ladder: `platform_fact_v1` first, then this, then `twin_v1`. The build lists it only when it has both handlers (the runner change), so these hellos add it by hand.
+// D#845 MC-9b2 (Ruling 128.1): `engine_carry_v1` is the second rung of the drop ladder: `platform_fact_v1` first, then this, then `gh_login_v1` (D#845 ON-19c), then `twin_v1`. The build lists it only when it has both handlers (the runner change), so these hellos add it by hand.
 const base: Hello = { protocol_version: RUNNER_PROTOCOL_VERSION, binary_version: RUNNER_VERSION, model_auth_present: false, isolation: "host_sandbox" };
 
 function cloud(unknown: string[]) {
@@ -20,9 +20,10 @@ function cloud(unknown: string[]) {
 const caps = [...RUNNER_BUILD_CAPABILITIES, ENGINE_CARRY_CAPABILITY];
 
 describe("engine_carry_v1 on the hello", () => {
-  it("is the protocol's newest capability, and a hello that lists it is a valid one", () => {
-    expect(RUNNER_CAPABILITIES.indexOf(ENGINE_CARRY_CAPABILITY)).toBe(RUNNER_CAPABILITIES.length - 1);
+  it("is newer than twin_v1 and older than gh_login_v1, which is the protocol's newest; a hello that lists it is a valid one", () => {
     expect(RUNNER_CAPABILITIES.indexOf(ENGINE_CARRY_CAPABILITY)).toBeGreaterThan(RUNNER_CAPABILITIES.indexOf(TWIN_CAPABILITY));
+    expect(RUNNER_CAPABILITIES.indexOf(GH_LOGIN_CAPABILITY)).toBe(RUNNER_CAPABILITIES.indexOf(ENGINE_CARRY_CAPABILITY) + 1);
+    expect(RUNNER_CAPABILITIES.indexOf(GH_LOGIN_CAPABILITY)).toBe(RUNNER_CAPABILITIES.length - 1);
     expect(HelloMessage.safeParse({ ...base, capabilities: caps }).success).toBe(true);
   });
 
@@ -34,14 +35,15 @@ describe("engine_carry_v1 on the hello", () => {
     expect(sent[1]).toContain(TWIN_CAPABILITY);
   });
 
-  it("a cloud that knows none of the three drops platform_fact_v1 first, engine_carry_v1 second and twin_v1 third (Ruling 128.1)", async () => {
-    const { client } = cloud([PLATFORM_FACT_HELLO_CAPABILITY, ENGINE_CARRY_CAPABILITY, TWIN_CAPABILITY]);
+  it("a cloud that knows none of them drops platform_fact_v1 first, engine_carry_v1 second, gh_login_v1 third and twin_v1 fourth (Ruling 128.1)", async () => {
+    const { client } = cloud([PLATFORM_FACT_HELLO_CAPABILITY, ENGINE_CARRY_CAPABILITY, GH_LOGIN_CAPABILITY, TWIN_CAPABILITY]);
     const answer = await client.hello({ ...base, capabilities: [...caps, PLATFORM_FACT_HELLO_CAPABILITY] });
     expect(answer.kind).toBe("ok");
     const dropped = (answer as { dropped?: string[] }).dropped ?? [];
     expect(dropped[0]).toBe(PLATFORM_FACT_HELLO_CAPABILITY);
     expect(dropped[1]).toBe(ENGINE_CARRY_CAPABILITY);
-    expect(dropped[2]).toBe(TWIN_CAPABILITY);
+    expect(dropped[2]).toBe(GH_LOGIN_CAPABILITY);
+    expect(dropped[3]).toBe(TWIN_CAPABILITY);
   });
 
   it("a cloud that knows it keeps it: one hello, nothing dropped", async () => {

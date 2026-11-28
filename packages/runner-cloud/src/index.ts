@@ -245,6 +245,7 @@ export {
   type IssuedSessionJob,
   type PersonStopReason,
 } from "./engineSession.js";
+export { cancelGhLogin, ghLoginReportRun, readGhLogin, signOutOfGh, startGhLogin } from "./ghLogin.js";
 export {
   cancelClaudeLogin,
   exchangeMachineCommands,

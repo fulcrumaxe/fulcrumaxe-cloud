@@ -5,6 +5,7 @@ import { generateKeyPairSync } from "node:crypto";
 import { MACHINE_COMMAND_PURPOSE, MACHINE_COMMANDS_PER_CLAIM, signMachineCommand, type MachineCommand } from "@fulcrumaxe/runner-protocol";
 import { describe, expect, it } from "vitest";
 import { createClaudeLoginRunner, type ClaudeLoginRunner, type Outcome } from "../../src/daemon/claudeLogin.js";
+import type { GhLoginRunner } from "../../src/daemon/ghLogin.js";
 import { createMachineCommandReceiver, MACHINE_COMMAND_SEEN_CAPACITY } from "../../src/daemon/machineCommands.js";
 
 const { publicKey, privateKey } = generateKeyPairSync("ed25519");
@@ -287,5 +288,29 @@ describe("a runner that is not a cloud-managed server", () => {
     expect(r.pendingAcks()).toEqual([1, 2, 3].map((n) => ({ command_id: id(n), outcome: "refused", refusal: "unsupported" })));
     expect(launched).toBe(0);
     expect(reported).toEqual([{ state: "failed", failure_code: "not_managed" }]);
+  });
+});
+
+describe("the GitHub sign-in's two commands", () => {
+  const ghStart = (n: number) => ({ ...base(n), kind: "gh_login_start", args: { request_id: REQ } }) as MachineCommand;
+  const ghOut = (n: number) => ({ ...base(n), kind: "gh_logout", args: {} }) as MachineCommand;
+  it("go to the GitHub runner, never to the Claude one, and are acked by its answer", async () => {
+    const { login, calls } = fake();
+    const seen: string[] = [];
+    const gh: GhLoginRunner = { start: async (r) => (seen.push(`start ${r}`), { ok: true }), logout: async () => (seen.push("logout"), { ok: false, refusal: "busy" }), idle: async () => undefined };
+    const r = createMachineCommandReceiver({ keyring, runnerId: RUNNER, now: () => clock, login, gh });
+    r.receive([signed(ghStart(1)), signed(ghOut(2))]);
+    await r.idle();
+    expect(seen).toEqual([`start ${REQ}`, "logout"]);
+    expect(calls).toEqual([]);
+    expect(r.pendingAcks()).toEqual([{ command_id: id(1), outcome: "applied" }, { command_id: id(2), outcome: "refused", refusal: "busy" }]);
+  });
+  it("are refused as unsupported by a build with no GitHub runner, and still never reach the Claude one", async () => {
+    const { login, calls } = fake();
+    const r = receiver(login);
+    r.receive([signed(ghStart(1)), signed(ghOut(2))]);
+    await r.idle();
+    expect(calls).toEqual([]);
+    expect(r.pendingAcks()).toEqual([1, 2].map((n) => ({ command_id: id(n), outcome: "refused", refusal: "unsupported" })));
   });
 });

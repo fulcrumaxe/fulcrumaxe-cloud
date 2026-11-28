@@ -26,8 +26,9 @@ const ok = (value: unknown): boolean => MachineJob.safeParse(value).success;
 const carry = { id: CARRY, bytes: STATE_CARRY_CHUNK_BYTES + 5, chunks: 2, sha256: HEX };
 
 describe("engine_carry_v1 (D#845 MC-9b2)", () => {
-  it("is the newest capability, after twin_v1, and on the hello's closed list", () => {
-    expect(RUNNER_CAPABILITIES.indexOf(ENGINE_CARRY_CAPABILITY)).toBe(RUNNER_CAPABILITIES.length - 1);
+  it("is after twin_v1 and platform_fact_v1, directly before gh_login_v1 (D#845 ON-19c, the newest), and on the hello's closed list", () => {
+    expect(RUNNER_CAPABILITIES.indexOf("gh_login_v1")).toBe(RUNNER_CAPABILITIES.indexOf(ENGINE_CARRY_CAPABILITY) + 1);
+    expect(RUNNER_CAPABILITIES.indexOf("gh_login_v1")).toBe(RUNNER_CAPABILITIES.length - 1);
     expect(RUNNER_CAPABILITIES.indexOf(ENGINE_CARRY_CAPABILITY)).toBeGreaterThan(RUNNER_CAPABILITIES.indexOf(TWIN_CAPABILITY));
     expect(RUNNER_CAPABILITIES.indexOf(ENGINE_CARRY_CAPABILITY)).toBeGreaterThan(RUNNER_CAPABILITIES.indexOf(PLATFORM_FACT_HELLO_CAPABILITY));
   });

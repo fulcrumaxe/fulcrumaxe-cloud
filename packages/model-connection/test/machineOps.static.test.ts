@@ -38,9 +38,11 @@ describe('machine_ops is the only code path that touches the machine key and the
   });
 
   it('D#845 MC-8a: the sealed sign-in columns are read through their two definers in the one runner-cloud file, and the sealer is built in the runner routes alone', () => {
-    expect(filesMatching(/machine_login_code_take|machine_login_auth_url/)).toEqual(['packages/runner-cloud/src/machineLogin.ts']);
+    // D#845 ON-19c: the GitHub relay (ghLogin.ts) rides the same rows and the same definer for the person's read; it unseals nothing itself and writes the sealed columns NULL only (cancel and expiry).
+    const LOGIN_FILES = ['packages/runner-cloud/src/ghLogin.ts', 'packages/runner-cloud/src/machineLogin.ts'];
+    expect(filesMatching(/machine_login_code_take|machine_login_auth_url/)).toEqual(LOGIN_FILES);
     expect(filesMatching(/createMachineLoginSealer\(/)).toEqual([MACHINE_OPS, 'apps/web/lib/runnerRoutes.ts'].sort());
-    expect(filesMatching(/\b(?:auth_url_ct|code_ct)\b/)).toEqual(['packages/runner-cloud/src/machineLogin.ts']);
+    expect(filesMatching(/\b(?:auth_url_ct|code_ct)\b/)).toEqual(LOGIN_FILES);
   });
 
   it('D#845 MC-9b2: the state-carry sealer is built in the runner routes alone, and the state chunks reach the database through their definers in the one runner-cloud file', () => {

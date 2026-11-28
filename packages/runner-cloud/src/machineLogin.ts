@@ -1,5 +1,6 @@
 import {
   CLAUDE_AUTH_ORIGIN,
+  GH_LOGIN_CAPABILITY,
   MACHINE_COMMAND_PURPOSE,
   MACHINE_LOGIN_CAPABILITY,
   MACHINE_ONBOARDING_MIN_PROTOCOL,
@@ -28,12 +29,12 @@ import { verifyRunnerRequest, withRunnerSession, type VerifiedRunner } from "./v
  * Person routes (session; owner or admin, the database decides): start, read, code, cancel and sign out. Runner routes (signed): report and code. Delivery rides on the claim reply like sandbox commands.
  */
 /** A path id in its one canonical form (lower case), taken once where it enters: the advisory-lock key and the seal's AAD are strings, so `ABC...` and `abc...` must not be two keys. */
-const canonicalId = (id: string): string => id.toLowerCase();
-const NO_STORE = { "cache-control": "no-store" } as const;
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const LIVE = "('pending', 'awaiting_code', 'code_ready')";
+export const canonicalId = (id: string): string => id.toLowerCase();
+export const NO_STORE = { "cache-control": "no-store" } as const;
+export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export const LIVE = "('pending', 'awaiting_code', 'code_ready')";
 /** A request and its commands live ten minutes at most (the table's CHECK and the command life are the same bound). */
-const LOGIN_LIFE_SECONDS = 600;
+export const LOGIN_LIFE_SECONDS = 600;
 const LOGOUT_COMMAND_LIFE_SECONDS = 300;
 
 /** The claim's half: acks the runner carried are stored, then waiting commands are signed and marked delivered in the one transaction (nothing is delivered when a signature cannot be made). */
@@ -51,10 +52,10 @@ export async function exchangeMachineCommands(client: PoolClient, runner: Verifi
     `SELECT c.id, c.kind, c.request_id, c.nonce, c.issued_by, c.issued_at, c.expires_at
        FROM machine_commands c
        JOIN runners rn ON rn.account_id = c.account_id AND rn.id = c.runner_id AND rn.revoked_at IS NULL AND rn.protocol_version >= $3
-       JOIN runner_capabilities cap ON cap.account_id = rn.account_id AND cap.runner_id = rn.id AND $4::text = ANY (cap.capabilities)
+       JOIN runner_capabilities cap ON cap.account_id = rn.account_id AND cap.runner_id = rn.id AND (CASE WHEN c.kind LIKE 'gh\_%' THEN $6::text ELSE $4::text END) = ANY (cap.capabilities)
       WHERE c.runner_id = $1 AND c.account_id = $2 AND c.state = 'pending' AND c.expires_at > now()
       ORDER BY c.issued_at, c.id LIMIT $5 FOR UPDATE OF c`,
-    [runner.runnerId, runner.accountId, MACHINE_ONBOARDING_MIN_PROTOCOL, MACHINE_LOGIN_CAPABILITY, MACHINE_COMMANDS_PER_CLAIM],
+    [runner.runnerId, runner.accountId, MACHINE_ONBOARDING_MIN_PROTOCOL, MACHINE_LOGIN_CAPABILITY, MACHINE_COMMANDS_PER_CLAIM, GH_LOGIN_CAPABILITY],
   );
   if (due.rows.length === 0) return [];
   const keyHolder = await signer();
@@ -78,7 +79,7 @@ export async function exchangeMachineCommands(client: PoolClient, runner: Verifi
 // ---- the person's routes ------------------------------------------------------------------------------------------------------------------------
 
 /** Runs `fn` in the person's tenant session after the owner-or-admin check and the runner checks: a live runner of the account, linked to a managed server, that lists `machine_login_v1`. */
-async function asOwnerOnManagedRunner<T>(deps: RunnerCloudDeps, principal: SessionPrincipal, runnerId: string, fn: (client: PoolClient) => Promise<T>): Promise<T> {
+export async function asOwnerOnManagedRunner<T>(deps: RunnerCloudDeps, principal: SessionPrincipal, runnerId: string, fn: (client: PoolClient) => Promise<T>, capability: string = MACHINE_LOGIN_CAPABILITY): Promise<T> {
   if (!UUID.test(runnerId)) throw new RunnerHttpError(404, "not_found", "no such runner");
   try {
     return await withTenant(deps.appUserPool, principal.accountId, principal.userId, async (client) => {
@@ -90,7 +91,7 @@ async function asOwnerOnManagedRunner<T>(deps: RunnerCloudDeps, principal: Sessi
                   EXISTS (SELECT 1 FROM managed_servers s WHERE s.account_id = rn.account_id AND s.runner_id = rn.id AND s.deleted_at IS NULL AND s.status NOT IN ('deleting', 'deleted', 'failed', 'orphaned')) AS managed
              FROM runners rn LEFT JOIN runner_capabilities cap ON cap.account_id = rn.account_id AND cap.runner_id = rn.id
             WHERE rn.id = $1 AND rn.account_id = $2`,
-          [runnerId, principal.accountId, MACHINE_ONBOARDING_MIN_PROTOCOL, MACHINE_LOGIN_CAPABILITY],
+          [runnerId, principal.accountId, MACHINE_ONBOARDING_MIN_PROTOCOL, capability],
         )
       ).rows[0];
       if (found === undefined) throw new RunnerHttpError(404, "not_found", "no such runner");
@@ -106,11 +107,11 @@ async function asOwnerOnManagedRunner<T>(deps: RunnerCloudDeps, principal: Sessi
     throw error;
   }
 }
-const sealerOf = (deps: RunnerCloudDeps): MachineLoginSealer => {
+export const sealerOf = (deps: RunnerCloudDeps): MachineLoginSealer => {
   if (!deps.machineLoginSealer) throw new RunnerHttpError(503, "not_configured", "signing in to Claude from here is not available right now");
   return deps.machineLoginSealer;
 };
-const sealed = <T>(run: () => T): T => {
+export const sealed = <T>(run: () => T): T => {
   try {
     return run();
   } catch {
@@ -118,16 +119,16 @@ const sealed = <T>(run: () => T): T => {
     throw new RunnerHttpError(503, "not_configured", "signing in to Claude from here is not available right now");
   }
 };
-const insertCommand = (client: PoolClient, principal: SessionPrincipal, runnerId: string, kind: MachineCommand["kind"], requestId: string | null, lifeSeconds: number) =>
+export const insertCommand = (client: PoolClient, principal: SessionPrincipal, runnerId: string, kind: MachineCommand["kind"], requestId: string | null, lifeSeconds: number) =>
   client.query<{ id: string; expires_at: Date }>(
     `INSERT INTO machine_commands (account_id, runner_id, kind, request_id, issued_by, issued_at, expires_at) VALUES ($1, $2, $3, $4, $5, now(), now() + make_interval(secs => $6))
      ON CONFLICT (runner_id, kind, COALESCE(request_id, '00000000-0000-0000-0000-000000000000'::uuid)) WHERE state = 'pending' DO NOTHING RETURNING id, expires_at`,
     [principal.accountId, runnerId, kind, requestId, principal.userId, lifeSeconds],
   );
-const liveRequest = async (client: PoolClient, principal: SessionPrincipal, runnerId: string, status?: string) =>
+export const liveRequest = async (client: PoolClient, principal: SessionPrincipal, runnerId: string, status?: string, kind: "claude" | "github" = "claude") =>
   (
     await client.query<{ id: string; status: string; expires_at: Date }>(
-      `SELECT id, status, expires_at FROM machine_login_requests WHERE account_id = $1 AND runner_id = $2 AND status ${status === undefined ? `IN ${LIVE}` : "= $3"} AND expires_at > now() ORDER BY created_at DESC LIMIT 1 FOR UPDATE`,
+      `SELECT id, status, expires_at FROM machine_login_requests WHERE account_id = $1 AND runner_id = $2 AND kind = '${kind}' AND status ${status === undefined ? `IN ${LIVE}` : "= $3"} AND expires_at > now() ORDER BY created_at DESC LIMIT 1 FOR UPDATE`,
       status === undefined ? [principal.accountId, runnerId] : [principal.accountId, runnerId, status],
     )
   ).rows[0];
@@ -139,7 +140,7 @@ export async function startClaudeLogin(deps: RunnerCloudDeps, principal: Session
   const row = await asOwnerOnManagedRunner(deps, principal, runnerId, async (client) => {
     await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`machine-login:${runnerId}`]);
     // A request whose life is over still holds a live status until the prune: retire it here, so asking again starts a fresh one.
-    await client.query(`UPDATE machine_login_requests SET status = 'expired', auth_url_ct = NULL, code_ct = NULL WHERE account_id = $1 AND runner_id = $2 AND status IN ${LIVE} AND expires_at <= now()`, [principal.accountId, runnerId]);
+    await client.query(`UPDATE machine_login_requests SET status = 'expired', auth_url_ct = NULL, code_ct = NULL WHERE account_id = $1 AND runner_id = $2 AND kind = 'claude' AND status IN ${LIVE} AND expires_at <= now()`, [principal.accountId, runnerId]);
     const live = await liveRequest(client, principal, runnerId);
     if (live) return live;
     const made = await client.query<{ id: string; status: string; expires_at: Date }>(
@@ -162,7 +163,7 @@ export async function readClaudeLogin(deps: RunnerCloudDeps, principal: SessionP
   const body = await asOwnerOnManagedRunner(deps, principal, runnerId, async (client) => {
     const r = (
       await client.query<{ id: string; status: string; expires_at: Date; failure_code: string | null; lapsed: boolean }>(
-        `SELECT id, status, expires_at, failure_code, (status IN ${LIVE} AND expires_at <= now()) AS lapsed FROM machine_login_requests WHERE account_id = $1 AND runner_id = $2 ORDER BY created_at DESC LIMIT 1`,
+        `SELECT id, status, expires_at, failure_code, (status IN ${LIVE} AND expires_at <= now()) AS lapsed FROM machine_login_requests WHERE account_id = $1 AND runner_id = $2 AND kind = 'claude' ORDER BY created_at DESC LIMIT 1`,
         [principal.accountId, runnerId],
       )
     ).rows[0];
@@ -225,7 +226,7 @@ export async function signOutOfClaude(deps: RunnerCloudDeps, principal: SessionP
 // ---- the runner's routes ------------------------------------------------------------------------------------------------------------------------
 
 /** The Postgres answers of the definers, as the statuses a runner understands: 55000 the request is not in a state that takes this (409), no_data_found there is none for this runner (404). */
-const asLoginError = (error: unknown): unknown => {
+export const asLoginError = (error: unknown): unknown => {
   const code = pgCode(error);
   if (code === "55000") return new RunnerHttpError(409, "not_in_state", "the sign-in request is not in a state that takes this");
   if (code === "P0002") return new RunnerHttpError(404, "not_found", "no such sign-in request");
