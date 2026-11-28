@@ -5,6 +5,8 @@ import { descriptionHash } from "@fx/core/src/github/createRepoState.js";
 import { validateNewRepo } from "@fx/core/src/github/repoName.js";
 import { assertRepoIdShape } from "@fx/core/src/repos/read.js";
 import { changeRepoTwin, checkRepoTwinAgain, getRepoTwin, getTwinCreateFacts, TWIN_ENABLED, TwinStateError, type RepoTwin, type TwinAction } from "@fx/core/src/repos/twins.js";
+import { adoptTwinPlanWhenReady } from "@fx/core/src/repos/twinAdopt.js";
+import { getTwinPaths, setTwinPaths, TwinPathsConflictError, TwinRemovedError, TWIN_FIXED_PRIVATE, type TwinPaths } from "@fx/core/src/repos/twinPaths.js";
 import type { RouteEntry } from "../registry.js";
 import { ApiError } from "../errors.js";
 import { SESSION_LIMITS } from "../ratelimit/session.js";
@@ -68,15 +70,36 @@ const twinSchema = z.object({
   merged_count: z.number().int().nullable(),
   /** Changes on the public repo that the last parity check found waiting to come in; null before any check has run. */
   new_changes_count: z.number().int().nullable(),
+  /** `public_repo_private`: the public repo has turned private and the twin keeps working; null otherwise. */
+  note: z.enum(["public_repo_private"]).nullable(),
   created_at: z.string(),
   updated_at: z.string(),
 });
 
 const toItem = (t: RepoTwin): z.infer<typeof twinSchema> => ({
   id: t.id, public_repo_id: t.publicRepoId, private_repo_id: t.privateRepoId, private_name: t.privateName, state: t.state, overlay_globs: t.overlayGlobs,
-  published_private_sha: t.publishedPrivateSha, synced_public_sha: t.syncedPublicSha, publish_pr: t.publishPr, sync_pr: t.syncPr, failure_code: t.failureCode, merged_count: t.mergedCount, new_changes_count: t.newChangesCount,
+  published_private_sha: t.publishedPrivateSha, synced_public_sha: t.syncedPublicSha, publish_pr: t.publishPr, sync_pr: t.syncPr, failure_code: t.failureCode, merged_count: t.mergedCount, new_changes_count: t.newChangesCount, note: t.note,
   created_at: t.createdAt, updated_at: t.updatedAt,
 });
+
+const pathsSchema = z.object({
+  overlay_globs: z.array(z.string()),
+  binary_globs: z.array(z.string()),
+  /** Exact paths the install added; read-only. */
+  install_paths: z.array(z.string()),
+  /** The fixed roots and secret defaults that are always private; read-only. */
+  fixed_roots: z.array(z.string()),
+  identifier_rules_path: z.string().nullable(),
+  plan_data_rules_path: z.string().nullable(),
+  /** Send this back with a change; a change against any other value is `twin_paths_changed`. */
+  revision: z.string(),
+});
+const toPaths = (p: TwinPaths): z.infer<typeof pathsSchema> => ({
+  overlay_globs: p.overlayGlobs, binary_globs: p.binaryGlobs, install_paths: p.installPaths, fixed_roots: [...TWIN_FIXED_PRIVATE],
+  identifier_rules_path: p.identifierRulesPath, plan_data_rules_path: p.planDataRulesPath, revision: p.revision,
+});
+const pathsBody = z.object({ revision: z.string().min(1), overlay_globs: z.array(z.string()).optional(), binary_globs: z.array(z.string()).optional() }).strict();
+const adoptBody = z.object({ setup_id: z.string().uuid() }).strict();
 
 async function change(ctx: { pool: Pool; principal: { accountId: string; userId: string } }, id: string, action: TwinAction): Promise<z.infer<typeof twinSchema>> {
   enabled();
@@ -163,7 +186,7 @@ export const repoTwinRoutes: RouteEntry[] = [
     method: "GET",
     path: "/api/v1/repos/{id}/twin",
     operationId: "getRepoTwin",
-    summary: "A public repo's live private twin, or null",
+    summary: "The live private twin that has this repo as either half (the public repo or the private twin), or null",
     minRole: "member",
     idempotency: "never",
     rateClass: "read",
@@ -174,6 +197,59 @@ export const repoTwinRoutes: RouteEntry[] = [
       enabled();
       const twin = await getRepoTwin({ pool: ctx.pool, principal: ctx.principal }, input.params.id!);
       return { twin: twin ? toItem(twin) : null };
+    },
+  },
+  {
+    method: "GET",
+    path: "/api/v1/twins/{id}/paths",
+    operationId: "getRepoTwinPaths",
+    summary: "A twin's private paths and the revision to change them against (owner or admin)",
+    extraResponses: { "503": "`not_configured`: private twins are not on yet." },
+    ...common,
+    responseSchema: pathsSchema,
+    async handler(ctx, input) {
+      enabled();
+      return toPaths(await getTwinPaths({ pool: ctx.pool, principal: ctx.principal }, input.params.id!));
+    },
+  },
+  {
+    method: "PUT",
+    path: "/api/v1/twins/{id}/paths",
+    operationId: "setRepoTwinPaths",
+    summary: "Change the person's private paths and binary globs (owner or admin); one audit row",
+    extraResponses: { ...stateExtra, "409": "`twin_paths_changed` (read the paths again) or `twin_state` (the twin was removed).", "422": "`invalid_role_settings_input`: a path is not allowed, or a rule file would no longer be private." },
+    ...common,
+    bodySchema: pathsBody,
+    responseSchema: pathsSchema,
+    async handler(ctx, input) {
+      enabled();
+      const body = input.body as z.infer<typeof pathsBody>;
+      try {
+        const patch = { ...(body.overlay_globs ? { overlayGlobs: body.overlay_globs } : {}), ...(body.binary_globs ? { binaryGlobs: body.binary_globs } : {}) };
+        return toPaths(await setTwinPaths({ pool: ctx.pool, principal: ctx.principal }, input.params.id!, body.revision, patch));
+      } catch (err) {
+        if (err instanceof TwinPathsConflictError) throw new ApiError(409, "twin_paths_changed", "the private paths changed; read them again");
+        if (err instanceof TwinRemovedError) throw new ApiError(409, "twin_state", "a twin that is removed cannot change its paths", undefined, { state: "removed" });
+        throw err;
+      }
+    },
+  },
+  {
+    method: "POST",
+    path: "/api/v1/twins/{id}/adopt-plan",
+    operationId: "adoptRepoTwinPlan",
+    summary: "Use the public repo's approved plan as the twin setup's plan, with no survey (owner or admin; the twin must be ready or paused)",
+    description: "`{id}` is the twin and `setup_id` the setup of its private repo. A plan that cannot be carried is `adopted: false` with the reason (`no_draft`: the public repo has none; `bad_state`: the setup has a survey or is past it).",
+    extraResponses: { ...stateExtra, "409": "`twin_not_ready`: the twin is not ready or paused. Nothing changed." },
+    ...common,
+    bodySchema: adoptBody,
+    responseSchema: z.object({ adopted: z.boolean(), draft_id: z.string().nullable(), reason: z.enum(["no_draft", "bad_state"]).nullable() }),
+    async handler(ctx, input) {
+      enabled();
+      const r = await adoptTwinPlanWhenReady({ pool: ctx.pool, principal: ctx.principal }, input.params.id!, (input.body as z.infer<typeof adoptBody>).setup_id);
+      if (r.ok) return { adopted: true, draft_id: r.draftId, reason: null };
+      if (r.reason === "twin_not_ready") throw new ApiError(409, "twin_not_ready", "the private twin is not ready or paused");
+      return { adopted: false, draft_id: null, reason: r.reason };
     },
   },
   {

@@ -172,6 +172,21 @@ describe('repo twins API', () => {
     expect(paused.merged_count).toBe(3);
   });
 
+  it('the twin item carries the note the cloud keeps beside the state (the public repo turned private), null otherwise, and never another twin\'s', async () => {
+    const owner = await account();
+    const quiet = await readyTwin(owner);
+    const noted = await readyTwin(owner, undefined, ['gizmos', 'gizmos-private']);
+    await admin.query("UPDATE repo_twins SET note = 'public_repo_private' WHERE id = $1", [noted.id]);
+    const noteOf = async (who: Identity, repo: string) => ((await (await call(who, 'GET', `/repos/${repo}/twin`)).json()) as { twin: { note: string | null } }).twin.note;
+    expect(await noteOf(owner, quiet.pub)).toBeNull();
+    expect(await noteOf(owner, noted.pub)).toBe('public_repo_private');
+    expect(await noteOf(owner, noted.priv)).toBe('public_repo_private');
+    const stopped = (await (await call(owner, 'POST', `/twins/${noted.id}/pause`)).json()) as { note: string | null };
+    expect(stopped.note).toBe('public_repo_private');
+    const other = await account();
+    expect(await noteOf(other, (await readyTwin(other)).pub)).toBeNull();
+  });
+
   it('Check again marks the twin due now for the sweep (owner or admin only), and only a ready or conflicting twin has anything to check', async () => {
     const owner = await account();
     const t = await readyTwin(owner, { result: 'publish_pending', publish: 1 });
