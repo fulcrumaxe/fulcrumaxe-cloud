@@ -7,7 +7,7 @@
 //
 // Commands are fixed templates filled with the page's own origin. A Copy button copies exactly the text drawn beside it.
 // onboarding-app.js loads this file with import() when the engine track is on screen, so it is not a boot request (the boot budget is full).
-import { h, timeNode, usd, confirmAction } from "../_lib/dom.js";
+import { h, timeNode, usd, confirmAction, ADOPT_COPY, TWIN_COST, TWIN_RETURN, adoptWords, readTwin, twinCanAdopt, twinChoice, twinDetail, twinRefusal } from "../_lib/dom.js";
 import { api } from "../_lib/api.js";
 import { MAX_MARKDOWN_BYTES, renderMarkdown } from "../_lib/markdown.js";
 
@@ -225,37 +225,8 @@ export function surveyDetail(row) {
 }
 /** D#845 ON-11a1: the plan step's stage from the engine track's `setup` ({ id, phase, state }): a survey that is running, or a plan waiting for review. Anything else is empty. */
 const stageOf = (setup) => (setup && setup.phase === "survey" && setup.state === "started" ? { stage: "surveying" } : setup && setup.phase === "plan" ? { stage: "draft" } : {});
-/** D#845 ON-27a: what each state of a private twin says, in plain words (no state name, no internal label). */
-const TWIN_WORDS = {
-  creating: "Creating the private repo…",
-  not_connected: "The private repo exists. Add it to the GitHub app so we can copy your code into it.",
-  seeding: "Copying your code into the private repo…",
-  ready: "Your work happens in the private repo. Merged work comes back as a pull request you merge.",
-  paused: "Paused. Nothing is published or synced, and the engine keeps working in the private repo.",
-  conflict: "Your public repo and the private repo changed in the same place. The sync pull request needs a hand.",
-  refused: "A change was held back because it looked like it contained something private.",
-  failed: "The twin stopped.",
-  removed: "Stopped. The private repo is still on GitHub.",
-};
-const TWIN_NAME_RE = /^[A-Za-z0-9._-]{1,100}$/;
-const TWIN_OWNER_RE = /^[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
-/**
- * D#845 ON-27a: the private twin's card from a twin row (the item of GET /api/v1/repos/:id/twin) and the public repo's owner login. A missing row, or a state this does not know, is empty.
- * Returns { twin: { state, lines, actions: [{ id, label }], private_url } }. The actions are the undo routes: Pause or Resume, Stop publishing, and Cancel before the seed (which leaves the empty private repo on GitHub and says so).
- */
-export function twinDetail(row, owner) {
-  if (!row || typeof row.state !== "string" || !Object.hasOwn(TWIN_WORDS, row.state) || typeof row.private_name !== "string" || !TWIN_NAME_RE.test(row.private_name)) return {};
-  const url = typeof owner === "string" && TWIN_OWNER_RE.test(owner) ? "https://github.com/" + owner + "/" + row.private_name : "";
-  const lines = [TWIN_WORDS[row.state]];
-  const actions = [];
-  const seeded = typeof row.published_private_sha === "string" && row.published_private_sha !== "";
-  if (row.state === "not_connected") actions.push({ id: "add_to_app", label: "Add " + row.private_name + " to the GitHub app" });
-  if (row.state === "paused") actions.push({ id: "resume", label: "Resume" });
-  else if (row.state !== "removed") actions.push({ id: "pause", label: "Pause" });
-  if (row.state !== "removed") actions.push(seeded ? { id: "stop", label: "Stop publishing" } : { id: "cancel", label: "Cancel" });
-  if (row.state === "removed" || (!seeded && row.state !== "ready")) lines.push("Delete " + row.private_name + " on GitHub if you don't want it. We never delete a repo.");
-  return { twin: { state: row.state, lines, actions, private_url: url } };
-}
+// D#845 ON-27a/ON-27e: the twin's words and view-model are shared with the Repos app, so they live in ../_lib/dom.js.
+export { twinDetail };
 /**
  * One engine step's copy. `steps` is the engine track, `i` the step, `ctx` the view-model (every field optional):
  *   name, origin, isAdmin, offline, last_seen_min, price (the Engine plan's monthly price), planNote (a refused purchase's sentence, or the "Engine added" notice), planBusy
@@ -405,7 +376,9 @@ export function engineSection(steps, env) {
       // D#845 ON-11b: the plan review lives in a host the app keeps across redraws, while the setup waits at the plan.
       s.step === "plan" && (s.state === "active" || s.state === "done") && env.ctx.setup && env.ctx.setup.phase === "plan" ? env.planHost || null : null,
       // D#845 ON-10e2b: the survey's start card, while the setup waits at the survey with no run (the app mounts it; a public repo's consent is asked there).
-      s.step === "plan" && s.state !== "done" && env.ctx.setup && env.ctx.setup.phase === "survey" && env.ctx.setup.state === "started" && env.ctx.setup.survey_run_id === null ? env.surveyHost || null : null);
+      s.step === "plan" && s.state !== "done" && env.ctx.setup && env.ctx.setup.phase === "survey" && env.ctx.setup.state === "started" && env.ctx.setup.survey_run_id === null ? env.surveyHost || null : null,
+      // D#845 ON-27e (FU-297): the twin's plan choice, in a host the app keeps across redraws, while the setup still waits at the survey with no run.
+      s.step === "plan" && s.state !== "done" && env.ctx.setup && env.ctx.setup.phase === "survey" && env.ctx.setup.state === "started" && env.ctx.setup.survey_run_id === null && env.ctx.setup.repo_id ? env.twinHost || null : null);
   });
   return h("section", { class: "ob-track", "data-testid": "ob-track-engine", "aria-label": "Engine setup" },
     first === 0 ? h("div", { class: "ob-prereq", "data-testid": "ob-prereq" }, h("h3", { class: "ob-sub" }, "Before you start"),
@@ -527,8 +500,9 @@ const CREATE_OUTCOMES = {
 export function parseReturn(search) {
   const p = new URLSearchParams(typeof search === "string" ? search : "");
   const outcome = p.get("create");
-  if (outcome === "ok") return { outcome, repo: UUID_RE.test(p.get("repo") || "") ? p.get("repo").toLowerCase() : "" };
-  return Object.hasOwn(CREATE_OUTCOMES, outcome || "") ? { outcome, repo: "" } : null;
+  const twin = Object.hasOwn(TWIN_RETURN, p.get("twin") || "") ? { twin: p.get("twin") } : {}; // D#845 ON-27e: the word a twin's create adds
+  if (outcome === "ok") return { outcome, repo: UUID_RE.test(p.get("repo") || "") ? p.get("repo").toLowerCase() : "", ...twin };
+  return Object.hasOwn(CREATE_OUTCOMES, outcome || "") ? { outcome, repo: "", ...twin } : null;
 }
 
 /**
@@ -537,7 +511,8 @@ export function parseReturn(search) {
  */
 export function mountProjectPicker(host, env) {
   const S = { stage: "loading", err: null, note: "", data: null, machines: [], settings: null, repo: null, isNew: false, runner: "", operate: false, owner: 0, name: "", vis: "private", busy: false, checking: false, loadFailed: false };
-  let dead = false;
+  let dead = false, offer = null;
+  const twinHost = h("div", { class: "ob-twin-host", "data-testid": "ob-twin-host" }); // D#845 ON-27e: the private twin's card; it keeps its own state across the picker's redraws
   const bdi = (t) => h("bdi", null, t);
   const p = (t, id) => h("p", { class: "ob-muted", "data-testid": id }, t);
   const btn = (id, label, fn, o = {}) => h("button", { type: "button", class: "ob-btn" + (o.primary ? " ob-btn-primary" : ""), "data-testid": "ob-pick-" + id, "data-focus": id, disabled: o.disabled || S.busy, onClick: fn }, label);
@@ -573,6 +548,7 @@ export function mountProjectPicker(host, env) {
       if (hit) { choose(hit, true); return; }
       S.note = back.outcome === "ok" ? "The new repo isn't in your list yet. Reload the list to see it." : CREATE_OUTCOMES[back.outcome];
     }
+    if (back && back.twin && back.twin !== "ok") S.note = (S.note ? S.note + " " : "") + TWIN_RETURN[back.twin];
     if (preselect()) return;
     S.stage = S.loadFailed ? "failed" : "pick";
     draw();
@@ -589,6 +565,8 @@ export function mountProjectPicker(host, env) {
     S.repo = repo; S.isNew = isNew; S.operate = false; S.err = null; S.note = "";
     const first = S.machines.find((m) => m.ok);
     S.runner = first ? first.id : "";
+    if (offer) offer.destroy();
+    offer = mountTwinOffer(twinHost, { repo, signal: env.signal, announce: say, redraw: () => draw(), pick: (id) => { const r = S.data.repos.find((x) => x.id === id); if (r) choose(r, false); }, install });
     S.stage = "confirm"; draw();
     say("Confirm " + repo.name);
     refreshMachines().then((fresh) => {
@@ -639,8 +617,9 @@ export function mountProjectPicker(host, env) {
     const box = operateBox(S.settings, S.repo.id, S.repo.visibility);
     const ticked = !!box && !box.on && !box.blocked && S.operate;
     S.busy = true; S.err = null; draw();
+    let res;
     try {
-      await api("POST", "/api/runners/repos/" + S.repo.id + "/place", { kind: S.isNew ? "new" : "existing", ...(S.runner ? { runner_id: S.runner } : {}), ...(ticked ? { turn_on_operate: true, operate_others: box.others.map((o) => o.id) } : {}) }, env.signal);
+      res = await api("POST", "/api/runners/repos/" + S.repo.id + "/place", { kind: S.isNew ? "new" : "existing", ...(S.runner ? { runner_id: S.runner } : {}), ...(ticked ? { turn_on_operate: true, operate_others: box.others.map((o) => o.id) } : {}) }, env.signal);
     } catch (e) {
       if (e && e.name === "AbortError") return;
       if (isLoadPending(e) && attempt < CHECK_TRIES) {
@@ -662,6 +641,7 @@ export function mountProjectPicker(host, env) {
       return;
     }
     S.busy = false; S.note = ""; S.stage = "placed"; draw();
+    if (offer) offer.placed(res && res.setup_id);
     say("Placed " + S.repo.name);
     env.onPlaced();
   }
@@ -691,6 +671,7 @@ export function mountProjectPicker(host, env) {
       h("h3", { class: "ob-sub" }, ["Set up ", bdi(r.name)]),
       p(pickVisibility(r.visibility) + (S.isNew ? " · new repo" : ""), "ob-pick-vis-line"),
       r.visibility === "public" ? p(PUBLIC_COPY, "ob-pick-public") : "",
+      twinHost, // dom-insert-ok: an element built above with h(); the offer fills it
       p(dialsLine(r, S.isNew), "ob-pick-dials"),
       h("fieldset", { class: "ob-fieldset" }, h("legend", null, "Machine"),
         choices.length ? choices.map((m) => h("label", { class: "ob-preset", "data-testid": "ob-pick-machine" },
@@ -701,7 +682,7 @@ export function mountProjectPicker(host, env) {
       box ? h("div", { class: "ob-operate", "data-testid": "ob-pick-operate" },
         box.on ? p(box.text, "ob-pick-operate-on")
           : h("label", { class: "ob-preset" }, h("input", { type: "checkbox", checked: S.operate && !box.blocked, disabled: !!box.blocked || S.busy, "data-focus": "operate", onChange: (ev) => { S.operate = ev.target.checked; draw("operate"); } }), h("span", { class: "ob-preset-text" }, box.text, box.blocked ? h("span", { class: "ob-preset-role" }, box.blocked) : ""))) : "",
-      btn("confirm", S.checking ? CHECKING_MACHINE : S.busy ? "Placing…" : "Confirm", () => place(), { primary: true, disabled: !S.runner || !choices.some((m) => m.id === S.runner && m.ok) }),
+      btn("confirm", S.checking ? CHECKING_MACHINE : S.busy ? "Placing…" : "Confirm", () => place(), { primary: true, disabled: !S.runner || !choices.some((m) => m.id === S.runner && m.ok) || !!(offer && offer.holdsPlace()) }),
       btn("change", "Change repo", () => go("pick")),
     ];
   }
@@ -710,7 +691,7 @@ export function mountProjectPicker(host, env) {
     if (S.stage === "failed") return [p("Your repos couldn't be loaded.", "ob-pick-load-failed"), btn("retry", "Try again", reload, { primary: true })];
     if (S.stage === "create") return createView();
     if (S.stage === "confirm") return confirmView();
-    if (S.stage === "placed") return [p(["Placed ", bdi(S.repo.name), "."], "ob-pick-placed")];
+    if (S.stage === "placed") return [p(["Placed ", bdi(S.repo.name), "."], "ob-pick-placed"), twinHost]; // dom-insert-ok: an element built above with h()
     return [
       S.data.repos.length ? h("ul", { class: "ob-issues", "aria-label": "Your repos" }, S.data.repos.map((r) => h("li", null, h("button", { type: "button", class: "ob-btn ob-repo", "data-testid": "ob-pick-repo", "data-repo": r.id, onClick: () => choose(r, false) }, bdi(r.name), " · ", pickVisibility(r.visibility)))))
         : p("You have no repos yet. Create a new project.", "ob-pick-empty"),
@@ -718,7 +699,105 @@ export function mountProjectPicker(host, env) {
     ];
   }
   start();
-  return { preselect() { if (!S.busy && (S.stage === "pick" || S.stage === "failed")) preselect(); }, destroy() { dead = true; host.replaceChildren(); } };
+  return { preselect() { if (!S.busy && (S.stage === "pick" || S.stage === "failed")) preselect(); }, destroy() { dead = true; if (offer) offer.destroy(); host.replaceChildren(); } };
+}
+
+/**
+ * D#845 ON-27e: the private twin's part of the picker, drawn into `host` for one chosen repo. A public repo with no twin gets the choice card (4.1); a repo that is one half of a live twin gets
+ * the twin's rows and lines; once a twin's repo is placed and the twin is ready (or paused), "Use my approved plan" or "Survey again". Any answer but a read of the twin (the kill switch's 503
+ * included) draws nothing: with twins off there is no card. `env`: { repo, signal, announce, redraw(), pick(repoId), install(), call? }. Nothing is sent until a button is pressed.
+ */
+export function mountTwinOffer(host, env) {
+  const call = env.call || api;
+  const T = { stage: "loading", row: null, name: "", busy: false, err: "", setup: "", done: "" };
+  let dead = false;
+  const parts = env.repo.name.includes("/") ? env.repo.name.split("/") : null;
+  const btn = (id, label, fn, o = {}) => h("button", { type: "button", class: "ob-btn" + (o.primary ? " ob-btn-primary" : ""), "data-testid": "ob-twin-" + id, disabled: T.busy, onClick: () => fn() }, label);
+  const line = (t, id, cls) => h("p", { class: cls || "ob-muted", "data-testid": "ob-twin-" + id }, t);
+  const mine = () => !!T.row && T.row.private_repo_id === env.repo.id;
+  function view() {
+    const err = T.err ? h("p", { class: "ob-error", role: "alert", "data-testid": "ob-twin-error" }, T.err) : "";
+    if (T.stage === "none" && parts) {
+      const c = twinChoice(parts[0], parts[1]);
+      return [h("h3", { class: "ob-sub" }, "Run the engine on a private twin"), line(c.makeText, "make-text"), line(TWIN_COST, "cost"), btn("make", c.make, () => { T.stage = "name"; T.name = parts[1] + "-private"; T.err = ""; draw(); }, { primary: true }), line(c.stayText, "stay-text"), btn("stay", c.stay, () => { T.stage = "stay"; draw(); }), err];
+    }
+    if (T.stage === "name") {
+      const input = h("input", { class: "ob-input", type: "text", value: T.name, maxLength: 100, autocomplete: "off", "data-testid": "ob-twin-name", onInput: (ev) => { T.name = ev.target.value.trim(); } });
+      return [h("label", { class: "ob-label" }, "Name of the private repo", input), line("GitHub asks you to approve this. The private repo is created under your own GitHub authority and stays on GitHub if you stop here.", "authorize-note"), btn("continue", "Continue to GitHub", create, { primary: true }), btn("back", "Back", () => { T.stage = "none"; T.err = ""; draw(); }), err];
+    }
+    if (T.stage === "row" && T.row) {
+      const v = twinDetail(T.row, parts ? parts[0] : "", env.repo.name).twin;
+      if (!v) return [];
+      const own = mine();
+      return [
+        h("h3", { class: "ob-sub" }, own ? "Your private twin" : ["This repo has a private twin: ", h("bdi", null, T.row.private_name)]),
+        own && v.rows.length ? h("ol", { class: "ob-steps", "aria-label": "Private twin steps" }, v.rows.map((r) => h("li", { class: "ob-step" + (r.state === "done" ? " ob-done" : ""), "data-testid": "ob-twin-row", "data-state": r.state }, h("strong", null, r.label), h("span", { class: "ob-state" }, STATE_WORDS[r.state])))) : "",
+        v.lines.map((t) => line(t, "line")),
+        env.install && v.actions.some((a) => a.id === "add_to_app") ? btn("add-to-app", v.actions.find((a) => a.id === "add_to_app").label, env.install) : "",
+        !own && T.row.private_repo_id && env.pick ? btn("setup", "Set up the private twin", () => env.pick(T.row.private_repo_id), { primary: true }) : "",
+        T.setup && own && twinCanAdopt(T.row) && !T.done ? [line("Your public repo may have a plan you already approved.", "adopt-note"), btn("adopt", ADOPT_COPY.use, adopt, { primary: true }), btn("again", ADOPT_COPY.again, () => { T.done = "again"; draw(); })] : "",
+        T.done && T.done !== "again" ? line(T.done, "adopted") : "", err,
+      ];
+    }
+    return err ? [err] : [];
+  }
+  function draw() { if (dead) return; host.replaceChildren(...view().flat(2).filter(Boolean)); env.redraw(); } // dom-insert-ok: view() builds every entry with h(), and the empty ones are dropped
+  async function read() {
+    try {
+      const body = await call("GET", "/api/v1/repos/" + env.repo.id + "/twin", undefined, env.signal);
+      if (!body || typeof body !== "object" || !("twin" in body)) throw new Error("shape");
+      T.row = readTwin(body);
+      T.stage = T.row ? "row" : env.repo.visibility === "public" ? "none" : "off";
+    } catch (e) {
+      if (e && e.name === "AbortError") return;
+      T.stage = "off"; // twins are off (503), or the read failed: no card
+    }
+    draw();
+  }
+  async function create() {
+    if (!/^[A-Za-z0-9._-]{1,100}$/.test(T.name)) { T.err = twinRefusal({ code: "validation_failed" }); draw(); return; }
+    T.busy = true; T.err = ""; draw();
+    try {
+      const res = await call("POST", "/api/v1/repos/" + env.repo.id + "/twin", { name: T.name }, env.signal);
+      if (res && typeof res.authorize_url === "string" && res.authorize_url.startsWith("https://github.com/")) { window.location.assign(res.authorize_url); return; } // GitHub's own page; it returns here with ?create=ok&twin=ok
+      throw new Error("link");
+    } catch (e) {
+      if (e && e.name === "AbortError") return;
+      T.err = twinRefusal(e);
+      if (e && (e.code === "twin_exists" || e.code === "pairing_exists")) { T.busy = false; env.announce(T.err); await read(); return; }
+    }
+    T.busy = false; draw(); env.announce(T.err);
+  }
+  async function adopt() {
+    T.busy = true; T.err = ""; draw();
+    try {
+      T.done = adoptWords(await call("POST", "/api/v1/twins/" + T.row.id + "/adopt-plan", { setup_id: T.setup }, env.signal));
+    } catch (e) {
+      if (e && e.name === "AbortError") return;
+      T.err = twinRefusal(e);
+      if (e && e.code === "twin_not_ready") { T.busy = false; await read(); }
+    }
+    T.busy = false; draw(); env.announce(T.done || T.err);
+  }
+  read();
+  return {
+    destroy() { dead = true; host.replaceChildren(); },
+    /** A live twin on this very repo: the twin is where the project is placed, not this repo. */
+    holdsPlace: () => T.stage === "row" && !!T.row && !mine() && T.row.state !== "removed",
+    /** The repo was placed and its setup is `setupId`: read the twin again, then offer the plan if it is ready. */
+    placed(setupId) { T.setup = typeof setupId === "string" && UUID_RE.test(setupId) ? setupId : ""; T.done = ""; read(); },
+  };
+}
+
+/**
+ * D#845 ON-27e (FU-297): the twin's plan choice for the setup the engine track names (`setup`: { id, repo_id }), so a reload does not lose it. The setup's repository is the one the picker placed;
+ * if it is one half of a live twin, the twin's lines are drawn and, once it is ready or paused, "Use my approved plan" or "Survey again". Any repo without a twin draws nothing.
+ * `env`: { setup, signal, announce, call? }.
+ */
+export function mountTwinPlanChoice(host, env) {
+  const offer = mountTwinOffer(host, { repo: { id: env.setup.repo_id, name: "", visibility: "private" }, signal: env.signal, announce: env.announce, redraw() {}, call: env.call });
+  offer.placed(env.setup.id);
+  return { destroy: offer.destroy };
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------

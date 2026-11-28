@@ -115,6 +115,7 @@
 .ob-repo { display: block; width: 100%; text-align: left; margin: 0; overflow-wrap: anywhere; }
 .ob-operate { margin: 8px 0; }
 .ob-picker .ob-input { max-width: 100%; }
+.ob-twin-host:not(:empty) { margin: 10px 0; padding: 8px; border: 1px solid var(--accent, #1aff80); }
 .ob-picker .ob-btn { margin-right: 8px; }
 
 /* D#845 ON-20b: the install step's summary and merge. Paths wrap and the app's own region scrolls; the buttons wrap on a phone, and the GitHub link is a 44 px button too. */

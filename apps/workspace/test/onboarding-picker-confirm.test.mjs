@@ -20,6 +20,7 @@ vi.mock("../apps/_lib/api.js", () => {
       if (path === "/api/runners") return { runners: [{ id: M1, name: "box", state: "online_idle", facts: { engine: "microvm" } }] };
       if (path === "/api/machines") return { machines: [{ id: M1, name: "box", tier: "microvm", live: true, running: null }] };
       if (path === "/api/v1/engine/settings") return { watch_enabled: true, operate_enabled: false, can_edit: true, repos: [] };
+      if (method === "GET" && /^\/api\/v1\/repos\/[^/]+\/twin$/.test(path)) throw new ApiFailure(503, "not_configured", "SERVER WORDS"); // twins off: the picker's twin card draws nothing
       if (method === "POST" && path.endsWith("/place")) {
         const next = placeAnswers.shift();
         if (next) throw new ApiFailure(next.status, next.code, "SERVER WORDS", next.reason);
@@ -35,6 +36,7 @@ class FakeText extends FakeNode { constructor(t) { super(); this.text = t; } }
 class FakeEl extends FakeNode {
   constructor(tag) { super(); this.tag = tag; this.children = []; this.attrs = {}; this.listeners = {}; this.className = ""; }
   appendChild(c) { this.children.push(c); return c; }
+  replaceChildren(...n) { this.children = n.map((x) => (x instanceof FakeNode ? x : new FakeText(String(x)))); }
   setAttribute(k, v) { this.attrs[k] = v; }
   addEventListener(t, f) { this.listeners[t] = f; }
   get textContent() { return this.children.map((c) => (c instanceof FakeText ? c.text : c.textContent)).join(""); }

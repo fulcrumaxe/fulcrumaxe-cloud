@@ -10,7 +10,7 @@
 //    change it (the server says so with `can_change`); everyone else sees the value. It shows the value in force and where it comes from.
 // All words that describe approval come from the `copy` of GET /api/runners; what this file says itself is only labels around them.
 // A refusal is shown as a sentence of this file's own, chosen by status, never the server's message. Text only.
-import { h, timeNode } from "../_lib/dom.js";
+import { h, timeNode, TWIN_COST, droppedPaths, narrowWarning, parsePathLines, pathLines, readTwin, twinDetail, twinRefusal } from "../_lib/dom.js";
 import { api, ApiFailure } from "../_lib/api.js";
 import { moneyText } from "../runners/runners-fleet.js";
 
@@ -1062,6 +1062,9 @@ export function readServerAnswer(b) {
 }
 
 /** The sheet's controller: begin(repo), toggle, cancel, confirm. Exactly one POST per confirm; a double press is one request. */
+/** D#845 ON-27e: whether a removal ends the repo's private twin too: only one the sheet confirmed done, and only when it was opened from the twin card's "Remove everything". An unreadable answer, a 404 and the plain "Remove from fulcrumaxe" button never do. */
+export const endsTwinAfter = (ok, d) => ok === true && !!d && d.endsTwin === true;
+export const TWIN_ENDS_LINE = "The private twin ends with it: its open publish and sync pull requests are closed, and the private repo stays on GitHub.";
 export function createRemoveFlow({ call = api, signal, onChange = () => {}, onDone = () => {} } = {}) {
   let st = null; // { repoId, name, deleteSandbox, removalPr, server, deleteServer, phase: "ask" | "sending" | "done" | "error", error, answer }; `server` is null until a read finds the project's server
   let opened = 0;
@@ -1081,9 +1084,9 @@ export function createRemoveFlow({ call = api, signal, onChange = () => {}, onDo
   }
   return {
     get state() { return st; },
-    begin(repo) {
+    begin(repo, opts = {}) {
       if (st && st.phase === "sending") return;
-      set({ repoId: repo.id, name: repo.full_name || repo.product, deleteSandbox: DEFAULT_TICKS.deleteSandbox, removalPr: DEFAULT_TICKS.removalPr, server: null, deleteServer: false, phase: "ask", error: "", answer: null });
+      set({ repoId: repo.id, endsTwin: opts.twin === true, name: repo.full_name || repo.product, deleteSandbox: DEFAULT_TICKS.deleteSandbox, removalPr: DEFAULT_TICKS.removalPr, server: null, deleteServer: false, phase: "ask", error: "", answer: null });
       void loadServer(repo.id, ++opened);
     },
     toggle(key, value) {
@@ -1104,15 +1107,15 @@ export function createRemoveFlow({ call = api, signal, onChange = () => {}, onDo
           : readAnswer(await call("POST", removeUrl(asked.repoId), { delete_sandbox: asked.deleteSandbox, removal_pr: asked.removalPr }, signal));
         if (!answer) {
           set({ ...asked, phase: "error", error: REFUSALS.other });
-          onDone();
+          onDone(false, asked);
           return;
         }
         set({ ...asked, phase: "done", error: "", answer });
-        onDone();
+        onDone(true, asked);
       } catch (e) {
         if (cancelled(e)) return;
         set({ ...asked, phase: "error", error: refusalSentence(e) });
-        if (e && e.status === 404) onDone();
+        if (e && e.status === 404) onDone(false, asked);
       }
     },
   };
@@ -1164,6 +1167,7 @@ export function createRemoveSheet({ call = api, signal, doc = document, getRepo,
     const nodes = [
       h("p", null, h("bdi", { "data-testid": "repos-remove-name" }, d.name), " stops working with fulcrumaxe. The GitHub repo itself is never deleted."),
     ];
+    if (!done && d.endsTwin) nodes.push(h("p", { "data-testid": "repos-remove-twin" }, TWIN_ENDS_LINE));
     if (!done) {
       // MC-12: with the server box ticked the machine's own parts are skipped (its disk, sandbox and snapshots go with the server), so the stop fact and the sandbox box give way to one line.
       if (d.deleteServer) nodes.push(h("p", { "data-testid": "repos-remove-server-fact" }, SERVER_FACT));
@@ -1197,8 +1201,8 @@ export function createRemoveSheet({ call = api, signal, doc = document, getRepo,
 
   return {
     flow,
-    open(repo) {
-      flow.begin(repo);
+    open(repo, opts) {
+      flow.begin(repo, opts);
     },
     repaint() {
       if (dlg && flow.state) paint();
@@ -1214,3 +1218,341 @@ export function createRemoveSheet({ call = api, signal, doc = document, getRepo,
   };
 }
 
+// D#845 ON-27e: the Repos app's private twin card. It shows for either repo of a live twin: for the private repo "Publishes to <public repo>", the publish and sync pull requests, the
+// Private paths editor (owners and admins; a member reads the card without it), and the Pause, Stop publishing and Remove everything sheets, each saying what stays on GitHub.
+// The controller has no DOM (a call() stands in for the server) and is unit-tested; the view is built with h() only, so no server text is read as markup. With twins off (the routes answer
+// 503) or no twin, the card is empty. Nothing is sent until a button is pressed, and every click is wired as () => fn(), never with the event.
+const twinUrl = (repoId) => "/api/v1/repos/" + encodeURIComponent(repoId) + "/twin";
+const pathsUrl = (twinId) => "/api/v1/twins/" + encodeURIComponent(twinId) + "/paths";
+/** The sheets for the two twin-only undo routes. "Remove everything" is the repo's own removal sheet, followed by Stop publishing. */
+export const TWIN_SHEETS = {
+  pause: { title: "Pause the twin", confirm: "Pause", lines: ["Nothing is published or synced while the twin is paused. The engine keeps working in the private repo.", "Everything already on GitHub stays: both repos and any pull request that is open."] },
+  cancel: { title: "Cancel the twin", confirm: "Cancel the twin", lines: ["The twin is dropped before anything was copied into it.", "The empty private repo stays on GitHub. Delete it there if you don't want it; we never delete a repo."] },
+  stop: { title: "Stop publishing", confirm: "Stop publishing", lines: ["The twin ends here. Publish and sync pull requests that are still open are closed with a note.", "The private repo stays on GitHub as an ordinary project, and what was already published stays in the public repo. We never delete a repo."] },
+};
+export const REMOVE_EVERYTHING = "Remove everything";
+const PATHS_LOAD_FAILED = "The private paths couldn't be loaded.";
+const PATHS_SAVED = "Saved.";
+const FIXED_SHOWN = 50;
+export const MEMBER_TEXT = "Only owners and admins can see or change the private paths.";
+export const PATHS_HELP = "Files that match these paths are never published to the public repo. One path or pattern per line.";
+export const SECRET_RESIDUAL = "A secret that looks like nothing we know can still be published. The publish pull request is your last look: read it before you merge.";
+
+/** The card's state machine. `call(method, path, body, signal)` is the server; `phase`: loading, off (no twin, or twins are off), ready. */
+export function createTwinController({ call = api, signal, repoId, canChange = () => true }) {
+  const state = { phase: "loading", row: null, paths: null, pathsState: "idle", busy: false, error: "", notice: "", warn: "", draft: null, issues: { phase: "idle", list: [], canBring: false } };
+  let dead = false;
+  const aborted = (e) => e && e.name === "AbortError";
+  async function loadPaths() {
+    if (!state.row || !canChange()) { state.pathsState = "member"; return; }
+    state.pathsState = "loading";
+    try {
+      const p = await call("GET", pathsUrl(state.row.id), undefined, signal);
+      if (!p || !Array.isArray(p.overlay_globs) || !Array.isArray(p.binary_globs) || typeof p.revision !== "string") throw new Error("shape");
+      state.paths = { overlay: p.overlay_globs, binary: p.binary_globs, install: Array.isArray(p.install_paths) ? p.install_paths : [], fixed: Array.isArray(p.fixed_roots) ? p.fixed_roots : [], identifier: p.identifier_rules_path || "", plan: p.plan_data_rules_path || "", revision: p.revision };
+      state.pathsState = "ok";
+    } catch (e) {
+      if (aborted(e)) return;
+      state.pathsState = e && e.status === 403 ? "member" : "error";
+    }
+  }
+  async function load() {
+    try {
+      const body = await call("GET", twinUrl(repoId), undefined, signal);
+      if (dead) return;
+      state.row = body && typeof body === "object" && "twin" in body ? readTwin(body) : null;
+      state.phase = state.row ? "ready" : "off";
+    } catch (e) {
+      if (aborted(e) || dead) return;
+      state.row = null;
+      state.phase = "off"; // twins are off (503), or the repo has none: no card
+    }
+    if (state.row) await loadPaths();
+  }
+  /** pause, resume, stop or cancel. The answer is the twin as it now is. */
+  async function act(action) {
+    if (state.busy || !state.row) return false;
+    state.busy = true; state.error = ""; state.notice = "";
+    try {
+      const ends = action === "stop" || action === "cancel"; // both are the one DELETE: the twin row ends and the private repo stays on GitHub
+      const next = readTwin({ twin: await call(ends ? "DELETE" : "POST", "/api/v1/twins/" + state.row.id + (ends ? "" : "/" + action), undefined, signal) });
+      if (next) { state.row = next.state === "removed" ? null : next; if (!state.row) state.phase = "off"; }
+      state.busy = false;
+      return true;
+    } catch (e) {
+      if (aborted(e)) return false;
+      state.error = twinRefusal(e);
+      state.busy = false;
+      if (e && e.code === "twin_state") await load();
+      return false;
+    }
+  }
+  /** D#845 ON-27f: the public repo's open issues (newest 20, read through the App). Only a ready, paused or conflicting twin has them; "not configured" or a state that moved on draws no list. */
+  async function loadIssues() {
+    const live = state.row && ["ready", "paused", "conflict"].includes(state.row.state);
+    if (!live) { state.issues = { phase: "idle", list: [], canBring: false }; return; }
+    try {
+      const b = await call("GET", "/api/v1/twins/" + state.row.id + "/issues", undefined, signal);
+      if (!b || !Array.isArray(b.issues)) throw new Error("shape");
+      const pos = (n) => Number.isInteger(n) && n > 0;
+      const list = b.issues.filter((i) => i && pos(i.number) && typeof i.title === "string" && typeof i.author === "string" && (i.brought_issue === null || pos(i.brought_issue)));
+      state.issues = { phase: "ok", list: list.slice(0, 50).map((i) => ({ number: i.number, title: i.title, author: i.author, brought: i.brought_issue })), canBring: b.can_bring === true && canChange() };
+    } catch (e) {
+      if (aborted(e) || dead) return;
+      state.issues = { phase: e && (e.code === "not_configured" || e.code === "twin_state" || e.code === "not_found") ? "idle" : "error", list: [], canBring: false };
+    }
+  }
+  /** Bring one public issue into the private repo (once per issue: a second answer is the same private number). */
+  async function bring(n) {
+    if (state.busy || !state.row) return false;
+    state.busy = true; state.error = ""; state.notice = "";
+    let ok = false;
+    try {
+      const r = await call("POST", "/api/v1/twins/" + state.row.id + "/issues/" + n + "/bring", undefined, signal);
+      const hit = state.issues.list.find((i) => i.number === n);
+      if (hit && r && Number.isInteger(r.private_issue) && r.private_issue > 0) { hit.brought = r.private_issue; ok = true; } else throw new Error("shape");
+    } catch (e) {
+      if (aborted(e)) return false;
+      state.error = twinRefusal(e);
+      state.busy = false;
+      if (e && e.code === "twin_state") await load();
+      if (e && (e.code === "issue_not_open" || e.code === "twin_state")) await loadIssues();
+      return false;
+    }
+    state.busy = false;
+    return ok;
+  }
+  /** Check again: the sweep compares the two repos within a minute or two, so the answer is the twin as it reads now and the counts follow. */
+  async function check() {
+    if (state.busy || !state.row) return false;
+    state.busy = true; state.error = ""; state.notice = "";
+    try {
+      const next = readTwin({ twin: await call("POST", "/api/v1/twins/" + state.row.id + "/check", undefined, signal) });
+      if (next) state.row = next;
+      state.busy = false;
+      return true;
+    } catch (e) {
+      if (aborted(e)) return false;
+      state.error = twinRefusal(e);
+      state.busy = false;
+      if (e && e.code === "twin_state") await load();
+      return false;
+    }
+  }
+  /** Merge the open publish pull request (the sync one is the engine's). The cloud merges its own recorded pull request; whatever the answer, the twin is read again. */
+  async function merge() {
+    if (state.busy || !state.row) return false;
+    state.busy = true; state.error = ""; state.notice = "";
+    let done = false;
+    try {
+      await call("POST", "/api/v1/twins/" + state.row.id + "/merge", { pr: "publish" }, signal);
+      done = true;
+    } catch (e) {
+      if (aborted(e)) return false;
+      state.error = twinRefusal(e);
+    }
+    state.busy = false;
+    await load();
+    return done;
+  }
+  /** Save the editor's text. Narrowing the private set asks once (`state.warn`); the same save sent again is the confirmation. */
+  async function savePaths(overlayText, binaryText) {
+    if (state.busy || !state.paths || !state.row) return false;
+    state.draft = { overlay: overlayText, binary: binaryText }; // what was typed stays on screen through the warning, a refusal or a stale read
+    const overlay = parsePathLines(overlayText), binary = parsePathLines(binaryText);
+    const dropped = droppedPaths(state.paths.overlay, overlay);
+    const asked = narrowWarning(dropped);
+    if (dropped.length > 0 && state.warn !== asked) { state.warn = asked; state.notice = ""; return false; }
+    state.busy = true; state.error = ""; state.notice = ""; state.warn = "";
+    try {
+      await call("PUT", pathsUrl(state.row.id), { revision: state.paths.revision, overlay_globs: overlay, binary_globs: binary }, signal);
+      state.notice = PATHS_SAVED;
+      state.draft = null;
+      state.busy = false;
+      await loadPaths();
+      return true;
+    } catch (e) {
+      if (aborted(e)) return false;
+      state.error = e && e.status === 422 ? "One of those paths isn't allowed, or a rule file would no longer be private." : twinRefusal(e);
+      state.busy = false;
+      if (e && e.code === "twin_paths_changed") await loadPaths();
+      return false;
+    }
+  }
+  return { state, load, loadIssues, bring, act, check, merge, savePaths, dismissWarn() { state.warn = ""; }, destroy() { dead = true; } };
+}
+
+/**
+ * The card. `env`: { signal, repoId, getRepo(id), canChange(), removeRepo(repo), onChanged(), announce(text), call?, doc? }. `el` is empty until a twin is read.
+ */
+export function createTwinCard(env) {
+  const doc = env.doc || document;
+  const ctl = createTwinController({ call: env.call, signal: env.signal, repoId: env.repoId, canChange: env.canChange });
+  const el = h("section", { class: "repos-twin", "aria-label": "Private twin", "data-testid": "repos-twin" });
+  let sheet = null, overlayText = null, binaryText = null, warnHost = null, saveBtn = null;
+  const line = (t, id, cls, role) => h("p", { class: cls || "repos-muted", role, "data-testid": "repos-twin-" + id }, t);
+  // A request in flight sets aria-disabled and the press is ignored, like the Mode, Auto-merge and Remove controls: the button stays focusable, so focus is never lost to it.
+  const btn = (id, label, fn, extra) => h("button", { type: "button", class: "repos-btn", "data-testid": "repos-twin-" + id, "aria-disabled": ctl.state.busy ? "true" : "false", onClick: () => { if (!ctl.state.busy) fn(); }, ...extra }, label);
+  /** A repaint destroys the control that was pressed. Put focus on the first of `ids` that is still drawn, else on the page's stable target; never over focus the person has already moved elsewhere. */
+  function restore(...ids) {
+    const a = doc.activeElement;
+    if (a && a !== doc.body && !el.contains(a)) return;
+    for (const id of ids) {
+      const t = id && el.querySelector('[data-testid="' + id + '"]');
+      if (t) return t.focus();
+    }
+    if (env.focusFallback) env.focusFallback();
+  }
+  function closeSheet() { if (!sheet) return; sheet.dlg.close(); sheet.dlg.remove(); sheet = null; }
+  function openSheet(kind) {
+    const s = TWIN_SHEETS[kind];
+    const yes = h("button", { type: "button", class: "repos-btn", "data-testid": "repos-twin-sheet-confirm", onClick: () => confirm(kind) }, s.confirm);
+    const no = h("button", { type: "button", class: "repos-btn", "data-testid": "repos-twin-sheet-cancel", onClick: () => { closeSheet(); paint(); restore("repos-twin-" + kind); } }, "Cancel");
+    const dlg = h("dialog", { class: "repos-dialog", "data-testid": "repos-twin-sheet", "aria-labelledby": "repos-twin-h", onCancel: (e) => { e.preventDefault(); closeSheet(); restore("repos-twin-" + kind); } },
+      h("div", { class: "repos-dialog-body" }, h("h2", { class: "repos-subtitle", id: "repos-twin-h" }, s.title), s.lines.map((t) => h("p", null, t)), h("div", { class: "repos-actions" }, no, yes)));
+    doc.body.appendChild(dlg);
+    dlg.showModal();
+    sheet = { dlg, kind };
+    no.focus();
+  }
+  async function confirm(kind) {
+    closeSheet();
+    const run = ctl.act(kind); // busy is set before its first await, so this paint shows it
+    paint();
+    restore("repos-twin-" + kind);
+    if (await run) { env.announce(kind === "pause" ? "Paused." : kind === "cancel" ? "Cancelled." : "Stopped publishing."); env.onChanged(); }
+    paint();
+    restore(kind === "pause" ? "repos-twin-resume" : "", "repos-twin-" + kind); // Pause leaves Resume; Stop and Cancel end the card, so focus goes to the page's heading
+  }
+  async function resume() {
+    const run = ctl.act("resume");
+    paint();
+    restore("repos-twin-resume");
+    if (await run) env.announce("Resumed.");
+    paint();
+    restore("repos-twin-pause", "repos-twin-resume");
+  }
+  async function checkAgain() {
+    const run = ctl.check();
+    paint();
+    restore("repos-twin-check");
+    if (await run) env.announce("Checking again. The counts follow within a minute or two.");
+    paint();
+    restore("repos-twin-check");
+  }
+  async function mergePublish() {
+    const run = ctl.merge();
+    paint();
+    restore("repos-twin-merge");
+    const ok = await run;
+    if (ok) { env.announce("Merged."); env.onChanged(); }
+    paint();
+    restore("repos-twin-check", "repos-twin-pause", "repos-twin-resume"); // a merged pull request leaves the card, so focus goes to the nearest control that is still drawn
+  }
+  async function bringIssue(n) {
+    const run = ctl.bring(n);
+    paint();
+    restore("repos-twin-bring-" + n);
+    if (await run) env.announce("Brought as #" + ctl.state.issues.list.find((i) => i.number === n).brought + ".");
+    paint();
+    restore("repos-twin-brought-" + n, "repos-twin-bring-" + n);
+  }
+  /** The public repo's open issues: a title and author are the stranger's text, drawn as text only. Members read the list; the button is for an owner or admin. */
+  function issuesView() {
+    const I = ctl.state.issues;
+    if (I.phase === "error") return [line("The public repo's issues couldn't be read right now.", "issues-error", "repos-error", "alert"), btn("issues-retry", "Try again", async () => { await ctl.loadIssues(); paint(); })];
+    if (I.phase !== "ok") return [];
+    return [h("h4", { class: "repos-subtitle" }, "Issues on the public repo"),
+      I.list.length === 0 ? line("No open issues.", "issues-none") : h("ul", { class: "repos-twin-issues", "data-testid": "repos-twin-issues" }, I.list.map((i) => h("li", { "data-testid": "repos-twin-issue" },
+        h("span", null, "#" + i.number + " ", h("bdi", null, i.title), " · ", h("bdi", null, i.author)),
+        i.brought !== null ? line("Brought as #" + i.brought, "brought-" + i.number)
+          : I.canBring ? btn("bring-" + i.number, "Bring into private repo", () => bringIssue(i.number)) : "")))];
+  }
+  async function save() {
+    const run = ctl.savePaths(overlayText.value, binaryText.value);
+    paint(true);
+    if (await run) env.announce(ctl.state.notice);
+    paint(true);
+  }
+  /** The warning goes away as soon as the list is edited, with its "Save again" label, without rebuilding the box being typed in. */
+  function dismissWarn() {
+    if (!ctl.state.warn) return;
+    ctl.dismissWarn();
+    if (warnHost) warnHost.replaceChildren();
+    if (saveBtn) saveBtn.replaceChildren("Save");
+  }
+  function editor() {
+    const S = ctl.state, p = S.paths;
+    if (S.pathsState === "member") return [line(MEMBER_TEXT, "paths-member")];
+    if (S.pathsState === "loading" || S.pathsState === "idle") return [line("Loading the private paths…", "paths-loading")];
+    if (S.pathsState !== "ok" || !p) return [line(PATHS_LOAD_FAILED, "paths-error", "repos-error", "alert"), btn("paths-retry", "Try again", async () => { await ctl.load(); paint(); })];
+    overlayText = h("textarea", { class: "repos-input", rows: 5, id: "repos-twin-overlay", "data-testid": "repos-twin-overlay", "aria-disabled": S.busy ? "true" : "false", readOnly: S.busy, value: S.draft ? S.draft.overlay : pathLines(p.overlay), onInput: dismissWarn });
+    binaryText = h("textarea", { class: "repos-input", rows: 3, id: "repos-twin-binary", "data-testid": "repos-twin-binary", "aria-disabled": S.busy ? "true" : "false", readOnly: S.busy, value: S.draft ? S.draft.binary : pathLines(p.binary) });
+    // The install list can run to thousands of paths: the first FIXED_SHOWN are drawn, then one line says how many more there are.
+    const fixed = [...p.fixed, ...[p.identifier, p.plan].filter(Boolean), ...p.install.slice(0, FIXED_SHOWN)];
+    const more = p.install.length - Math.min(p.install.length, FIXED_SHOWN);
+    warnHost = h("div", null, ...(S.warn ? [line(S.warn + " Save again to confirm.", "paths-warn", "repos-error", "alert")] : []));
+    saveBtn = btn("paths-save", S.warn ? "Save and publish those files" : "Save", save);
+    return [
+      h("h4", { class: "repos-subtitle" }, "Private paths"),
+      line(PATHS_HELP, "paths-help"),
+      h("label", { class: "repos-label", for: "repos-twin-overlay" }, "Your private paths"), overlayText,
+      h("label", { class: "repos-label", for: "repos-twin-binary" }, "Binary files that may be published"), binaryText,
+      h("details", null, h("summary", null, "Always private (" + (fixed.length + more) + ")"), h("ul", { "data-testid": "repos-twin-fixed" }, fixed.map((x) => h("li", null, h("bdi", null, x))), more > 0 ? h("li", { "data-testid": "repos-twin-fixed-more" }, "and " + more + " more") : "")),
+      line(SECRET_RESIDUAL, "residual"),
+      warnHost,
+      saveBtn,
+    ];
+  }
+  /** Every repaint (a repo-list refresh included) keeps focus on the same control when it is still drawn. */
+  function paint(keepFocus) {
+    const a = doc.activeElement;
+    const held = a && a !== doc.body && el.contains(a) && a.getAttribute ? a.getAttribute("data-testid") : null;
+    draw(keepFocus);
+    if (held && !el.contains(doc.activeElement)) { const t = el.querySelector('[data-testid="' + held + '"]'); if (t) t.focus(); }
+  }
+  function draw(keepFocus) {
+    const S = ctl.state;
+    if (S.phase !== "ready" || !S.row) return el.replaceChildren();
+    const repo = env.getRepo(env.repoId);
+    const pub = env.getRepo(S.row.public_repo_id);
+    const own = S.row.private_repo_id === env.repoId;
+    const owner = repo && typeof repo.full_name === "string" ? repo.full_name.split("/")[0] : "";
+    const v = twinDetail(S.row, owner, pub && pub.full_name).twin;
+    if (!v) return el.replaceChildren();
+    const admin = env.canChange();
+    const acts = v.actions.filter((a) => a.id === "pause" || a.id === "resume" || a.id === "stop" || a.id === "cancel" || a.id === "check" || a.id === "merge");
+    // dom-insert-ok: every entry is built with h() (or is "" or a list of them), and the list is flattened and its empty entries dropped
+    el.replaceChildren(...[
+      h("h3", { class: "repos-subtitle" }, "Private twin"),
+      own ? line(["Publishes to ", h("bdi", null, pub ? pub.full_name : "your public repo")], "publishes", "repos-muted") : line(["Work runs in ", h("bdi", null, S.row.private_name)], "runs-in", "repos-muted"),
+      v.lines.map((t) => line(t, "line")),
+      line(TWIN_COST, "cost"),
+      v.private_url ? h("a", { href: v.private_url, target: "_blank", rel: "noopener noreferrer", "data-testid": "repos-twin-link" }, "Open " + S.row.private_name + " on GitHub") : "",
+      admin ? h("div", { class: "repos-actions" }, acts.map((a) => (a.id === "resume" ? btn("resume", a.label, resume) : a.id === "check" ? btn("check", a.label, checkAgain) : a.id === "merge" ? btn("merge", a.label, mergePublish) : btn(a.id, a.label, () => openSheet(a.id))))
+        .concat(S.row.private_repo_id === env.repoId && env.getRepo(env.repoId) ? [btn("remove", REMOVE_EVERYTHING, () => env.removeRepo(env.getRepo(env.repoId)))] : [])) : "",
+      S.error ? line(S.error, "error", "repos-error", "alert") : "",
+      issuesView(),
+      own ? editor() : "",
+    ].flat(2).filter(Boolean));
+    if (keepFocus) { const f = el.querySelector('[data-testid="repos-twin-paths-save"]'); if (f) f.focus(); }
+  }
+  async function load() {
+    await ctl.load();
+    paint();
+    await ctl.loadIssues(); // a read through GitHub: the card is drawn first
+    paint();
+  }
+  return {
+    el, ctl, load,
+    /** A re-read of the repo list repaints the card, but never over text the person is still typing. */
+    repaint() {
+      const P = ctl.state.paths, D = ctl.state.draft;
+      if (P && overlayText && el.contains(overlayText) && (overlayText.value !== (D ? D.overlay : pathLines(P.overlay)) || binaryText.value !== (D ? D.binary : pathLines(P.binary)))) return;
+      paint();
+    },
+    /** The repo's own removal was sent: the twin ends with it (Remove everything is that removal, then Stop publishing). A twin already ended is not an error. */
+    async stopAfterRemoval() { if (ctl.state.row && await ctl.act("stop")) env.onChanged(); paint(); },
+    destroy() { ctl.destroy(); closeSheet(); el.replaceChildren(); },
+  };
+}

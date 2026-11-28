@@ -61,7 +61,7 @@ function mountOnboarding(host, launchArg) {
   let wanted = wantedRepo(launchArg);
   const abort = new AbortController();
   const st = { steps: null, parsed: null, eng: null, error: "", ctx: {}, price: null, choosing: false, choiceError: "", planBusy: false, planNote: "", planLink: false };
-  let destroyed = false, busy = false, again = false, preview = null, payShown = false, picker = null, installPanel = null, installKey = "", survey = null, surveyKey = "", plan = null, planFor = "";
+  let destroyed = false, busy = false, again = false, preview = null, payShown = false, picker = null, installPanel = null, installKey = "", survey = null, surveyKey = "", twinChoice = null, twinKey = "", plan = null, planFor = "";
   // The plan picker opens once, into payHost, and stays until pay is done. The server decides when pay is done.
   function showPlans() {
     if (payShown) return;
@@ -89,6 +89,7 @@ function mountOnboarding(host, launchArg) {
   // D#845 ON-11b: the plan review keeps its edits and ticks in the same way, so its host outlives every redraw too.
   const planHost = h("div", { class: "ob-panel", "data-testid": "ob-plan-host" });
   const surveyHost = h("div", { class: "ob-panel", "data-testid": "ob-survey-host" });
+  const twinHost = h("div", { class: "ob-panel", "data-testid": "ob-twin-choice-host" }); // D#845 ON-27e (FU-297): the twin's plan choice, drawn for the setup's own repo
   // The scrolling region is itself focusable, so the keyboard can scroll it when no control is on screen.
   host.replaceChildren(h("div", { class: "ob-app", role: "region", "aria-label": "Setup progress", tabindex: 0, "data-testid": "ob-app" }, title, live, errorEl, body));
 
@@ -104,7 +105,7 @@ function mountOnboarding(host, launchArg) {
     return null;
   }
 
-  const render = (reread) => { renderBody(); syncPicker(); syncInstall(); syncSurvey(); syncPlan(reread === true); restoreFocus(); };
+  const render = (reread) => { renderBody(); syncPicker(); syncInstall(); syncSurvey(); syncTwinChoice(); syncPlan(reread === true); restoreFocus(); };
   /** D#845 ON-20b: the install panel is mounted for one setup's open pull request and goes when the step moves on or the pull request is another's. */
   function syncInstall() {
     const step = st.parsed && st.parsed.engine && shownTracks(st.parsed).includes("engine") ? st.parsed.engine.find((s) => s.step === "install") : null;
@@ -141,6 +142,16 @@ function mountOnboarding(host, launchArg) {
     if (survey) { survey.destroy(); survey = null; }
     surveyKey = key;
     if (key) survey = st.eng.mountSurveyStart(surveyHost, { setupId: setup.id, isAdmin: () => window.currentIsAdmin !== false, announce: (t) => (live.textContent = t), signal: abort.signal, onChanged: load });
+  }
+  /** D#845 ON-27e (FU-297): the twin's plan choice is mounted for the setup's own repository (`setup.repo_id`) while the survey has not started, so a reload keeps it. An owner or admin only. */
+  function syncTwinChoice() {
+    const setup = st.parsed ? st.parsed.setup : null;
+    const want = !destroyed && !!st.eng && !!setup && !!setup.repo_id && setup.phase === "survey" && setup.state === "started" && setup.survey_run_id === null && window.currentIsAdmin !== false && shownTracks(st.parsed).includes("engine");
+    const key = want ? setup.id + ":" + setup.repo_id : "";
+    if (twinKey === key) return;
+    if (twinChoice) { twinChoice.destroy(); twinChoice = null; }
+    twinKey = key;
+    if (key) twinChoice = st.eng.mountTwinPlanChoice(twinHost, { setup, signal: abort.signal, announce: (t) => (live.textContent = t) });
   }
   function renderBody() {
     if (destroyed) return;
@@ -217,7 +228,7 @@ function mountOnboarding(host, launchArg) {
   };
   // D#845 ON-20b: the install step's pull request (number and state) from the engine track, into the view-model's `install.pr`.
   const installCtx = () => { const pr = st.parsed && st.parsed.engine && st.eng ? st.eng.installPr(st.parsed.engine) : null; return pr ? { ...(st.ctx.install || {}), pr } : st.ctx.install; };
-  const engineEnv = () => ({ projectHost, installHost, planHost, surveyHost, ctx: { ...st.ctx, install: installCtx(), setup: st.parsed ? st.parsed.setup : null, machine: machineFacts(), origin: window.location.origin, isAdmin: window.currentIsAdmin !== false, price: st.price, planBusy: st.planBusy, installNote: st.installNote, planNote: st.planNote, planAdded: st.planAdded === true, planLink: st.planLink }, price: st.price, announce: (t) => (live.textContent = t), canOpen, openApp, runAction: runPlanAction });
+  const engineEnv = () => ({ projectHost, installHost, planHost, surveyHost, twinHost, ctx: { ...st.ctx, install: installCtx(), setup: st.parsed ? st.parsed.setup : null, machine: machineFacts(), origin: window.location.origin, isAdmin: window.currentIsAdmin !== false, price: st.price, planBusy: st.planBusy, installNote: st.installNote, planNote: st.planNote, planAdded: st.planAdded === true, planLink: st.planLink }, price: st.price, announce: (t) => (live.textContent = t), canOpen, openApp, runAction: runPlanAction });
   // D#845 ON-22: the project step's purchase buttons. Checkout is the existing one (the server never sells a second subscription: an account that already pays gets the item added, and the answer is its own success path).
   // Returning from Stripe reloads the app, which reads the step again. "Add an engine" changes the quantity on the subscription and reads now; the account follows the provider's confirmation, so the step says so and refreshes when the app is shown again (no timer here).
 const HELD_NOTE = "You already have the Engine plan.";
@@ -380,6 +391,7 @@ const ADDED_NOTE = "Engine added. This step updates when the provider confirms t
       if (picker) picker.destroy();
       if (installPanel) installPanel.destroy();
       if (plan) plan.destroy();
+      if (twinChoice) twinChoice.destroy();
       host.replaceChildren();
     },
   };

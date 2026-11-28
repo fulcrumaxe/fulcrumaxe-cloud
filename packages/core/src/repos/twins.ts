@@ -35,6 +35,8 @@ export interface RepoTwin {
   mergedCount: number | null;
   /** Changes on the public repo that the last parity check found waiting to come in; null before any check has run. */
   newChangesCount: number | null;
+  /** A closed word the cloud keeps beside the state: `public_repo_private` when the public repo has turned private (the twin keeps working), else null. */
+  note: 'public_repo_private' | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -62,7 +64,7 @@ export class TwinExistsError extends Error {
 }
 
 /** The twin's row with the counts of its last parity check (`twin_parity_checks`, 1112; app users read it under row security). No row, or a check that has not run, reads as null counts, never as zero. */
-const COLUMNS = `t.id, t.public_repo_id, t.private_repo_id, t.private_name, t.state, t.overlay_globs, t.published_private_sha, t.synced_public_sha, t.publish_pr, t.sync_pr, t.failure_code,
+const COLUMNS = `t.id, t.public_repo_id, t.private_repo_id, t.private_name, t.state, t.overlay_globs, t.published_private_sha, t.synced_public_sha, t.publish_pr, t.sync_pr, t.failure_code, t.note,
   CASE WHEN c.last_result IS NULL THEN NULL ELSE c.publish_count END AS merged_count, CASE WHEN c.last_result IS NULL THEN NULL ELSE c.sync_count END AS new_changes_count,
   to_char(t.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at, to_char(t.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS updated_at`;
 const FROM = 'repo_twins t LEFT JOIN twin_parity_checks c ON c.account_id = t.account_id AND c.twin_id = t.id';
@@ -81,24 +83,25 @@ interface Row {
   failure_code: string | null;
   merged_count: number | null;
   new_changes_count: number | null;
+  note: 'public_repo_private' | null;
   created_at: string;
   updated_at: string;
 }
 
 const toTwin = (r: Row): RepoTwin => ({
   id: r.id, publicRepoId: r.public_repo_id, privateRepoId: r.private_repo_id, privateName: r.private_name, state: r.state, overlayGlobs: r.overlay_globs,
-  publishedPrivateSha: r.published_private_sha, syncedPublicSha: r.synced_public_sha, publishPr: r.publish_pr, syncPr: r.sync_pr, failureCode: r.failure_code, mergedCount: r.merged_count, newChangesCount: r.new_changes_count,
+  publishedPrivateSha: r.published_private_sha, syncedPublicSha: r.synced_public_sha, publishPr: r.publish_pr, syncPr: r.sync_pr, failureCode: r.failure_code, mergedCount: r.merged_count, newChangesCount: r.new_changes_count, note: r.note,
   createdAt: r.created_at, updatedAt: r.updated_at,
 });
 
-/** Any active member. The live twin of a public repo (a removed one reads as none), or null. The repo must be the caller's own: another tenant's is a NotFoundError. */
-export async function getRepoTwin(ctx: RepoTwinCtx, publicRepoId: string): Promise<RepoTwin | null> {
-  assertRepoIdShape(publicRepoId);
+/** Any active member. The live twin that has this repo as either half, the public repo or the private twin (a removed one reads as none), or null. The repo must be the caller's own: another tenant's is a NotFoundError. */
+export async function getRepoTwin(ctx: RepoTwinCtx, repoId: string): Promise<RepoTwin | null> {
+  assertRepoIdShape(repoId);
   const { accountId, userId } = ctx.principal;
   return withTenant(ctx.pool, accountId, userId, async (client) => {
     await assertActiveMembership(client, accountId, userId);
-    if ((await client.query('SELECT 1 FROM repos WHERE account_id = $1 AND id = $2', [accountId, publicRepoId])).rows.length === 0) throw new NotFoundError(`repos ${publicRepoId} not found`);
-    const { rows } = await client.query<Row>(`SELECT ${COLUMNS} FROM ${FROM} WHERE t.account_id = $1 AND t.public_repo_id = $2 AND t.state <> 'removed'`, [accountId, publicRepoId]);
+    if ((await client.query('SELECT 1 FROM repos WHERE account_id = $1 AND id = $2', [accountId, repoId])).rows.length === 0) throw new NotFoundError(`repos ${repoId} not found`);
+    const { rows } = await client.query<Row>(`SELECT ${COLUMNS} FROM ${FROM} WHERE t.account_id = $1 AND (t.public_repo_id = $2 OR t.private_repo_id = $2) AND t.state <> 'removed' ORDER BY (t.public_repo_id = $2) DESC, t.created_at, t.id`, [accountId, repoId]);
     return rows[0] ? toTwin(rows[0]) : null;
   });
 }

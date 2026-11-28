@@ -12,7 +12,7 @@
   line-height: 1.45;
 }
 .repos-title { margin: 0; font-size: 1rem; letter-spacing: 0.06em; font-weight: 600; }
-.repos-subtitle { margin: 0 0 8px; font-size: 0.9rem; }
+.repos-subtitle { margin: 0 0 8px; font-size: 0.9rem; overflow-wrap: anywhere; }
 .repos-muted { color: var(--text-muted, rgba(26, 255, 128, 0.55)); }
 .repos-error { margin: 6px 0 0; color: #ff6b6b; }
 .repos-head { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
@@ -35,7 +35,7 @@
 .repos-btn:focus-visible, .repos-open:focus-visible, .repos-toggle input:focus-visible { outline: 2px solid var(--accent, #1aff80); outline-offset: 2px; }
 
 /* One column on a phone; list and settings side by side once the window is wide. */
-.repos-body { display: grid; grid-template-columns: 1fr; gap: 14px; }
+.repos-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
 @container (min-width: 640px) {
   .repos-body { grid-template-columns: minmax(220px, 1fr) minmax(280px, 1.2fr); align-items: start; }
 }
@@ -119,3 +119,9 @@
 .repos-dialog a { color: var(--accent, #1aff80); }
 .repos-dialog a:focus-visible { outline: 2px solid var(--accent, #1aff80); outline-offset: 2px; }
 .repos-dialog-body p { overflow-wrap: anywhere; }
+/* D#845 ON-27e: the private twin card */
+.repos-twin { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--border, #1a3a2a); }
+.repos-twin, .repos-twin li { overflow-wrap: anywhere; }
+.repos-label { display: block; margin: 8px 0 3px; }
+.repos-input { box-sizing: border-box; width: 100%; max-width: 100%; font: inherit; color: inherit; background: transparent; border: 1px solid var(--accent, #1aff80); padding: 6px; }
+.repos-input:focus-visible { outline: 2px solid var(--accent, #1aff80); outline-offset: 2px; }

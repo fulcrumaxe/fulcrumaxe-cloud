@@ -509,3 +509,123 @@ function mountPanel(host, { target, withBudget, heading, clock = { set: (f, ms) 
 export const mountRepoRules = (host, { repoId }) => mountPanel(host, { target: { repoId }, withBudget: true, heading: "h4" });
 /** One item's rules (with the repository's in force), for the Pipeline item pane. */
 export const mountItemRules = (host, { repoId, itemId }) => mountPanel(host, { target: { repoId, itemId }, withBudget: true, heading: "h3" });
+
+// D#845 ON-27a/ON-27e: the private twin's words and view-model, shared by Onboarding (the choice card, the create steps, the track rows) and Repos (the twin card).
+// Pure: no DOM, no storage, no request. Every sentence the server could influence (names, numbers) is checked here and joined as text by the caller's h().
+/** What each state of a private twin says, in plain words (no state name, no internal label). */
+const TWIN_WORDS = {
+  creating: "Creating the private repo…",
+  not_connected: "The private repo exists. Add it to the GitHub app so we can copy your code into it.",
+  seeding: "Copying your code into the private repo…",
+  ready: "Your work happens in the private repo. Merged work comes back as a pull request you merge.",
+  paused: "Paused. Nothing is published or synced, and the engine keeps working in the private repo.",
+  conflict: "Your public repo and the private repo changed in the same place. The sync pull request needs a hand.",
+  refused: "A change was held back because it looked like it contained something private.",
+  failed: "The twin stopped.",
+  removed: "Stopped. The private repo is still on GitHub.",
+};
+/** FU-319/FU-319b: a twin refused because its private repo turned public says how to come back; the note is for a public repo that turned private (the twin keeps working). */
+export const TWIN_NOT_PRIVATE = "The private repo is public now, so nothing is published or synced and the engine is held. Make it private again on GitHub, then Pause and Resume here.";
+const TWIN_NOTES = { public_repo_private: "Your public repo is private now. The twin keeps working, but there is nothing public to publish to until it is public again." };
+const TWIN_NAME_RE = /^[A-Za-z0-9._-]{1,100}$/;
+const TWIN_OWNER_RE = /^[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
+const TWIN_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const TWIN_COUNT = (n) => Number.isInteger(n) && n >= 0;
+const TWIN_UNCHECKED = "not checked yet";
+const TWIN_PR_NO = (n) => Number.isInteger(n) && n > 0;
+/** The three track rows the create shows before the normal survey, plan, install and live rows. */
+export const TWIN_ROW_LABELS = ["Private twin created", "Copying your code…", "Ready"];
+/** Where each state stands among the three rows: the index of the row that is current (3 = all done). */
+const TWIN_STAGE = { creating: 0, not_connected: 1, seeding: 1, failed: 1, ready: 3, paused: 3, conflict: 3, refused: 3 };
+/** { id, label, state: "done" | "active" | "failed" | "pending" } for each of the three rows; none for a removed twin. */
+export function twinRows(state) {
+  if (!Object.hasOwn(TWIN_STAGE, state)) return [];
+  return TWIN_ROW_LABELS.map((label, i) => ({ id: ["created", "copying", "ready"][i], label, state: i < TWIN_STAGE[state] ? "done" : i > TWIN_STAGE[state] ? "pending" : state === "failed" ? "failed" : "active" }));
+}
+/**
+ * D#845 ON-27a: the private twin's card from a twin row (the item of GET /api/v1/repos/:id/twin), the public repo's owner login and, optionally, the public repo's full name.
+ * A missing row, or a state this does not know, is empty. Returns { twin: { state, lines, actions: [{ id, label }], private_url, rows } }. The actions are the undo routes: Pause or Resume,
+ * Stop publishing, and Cancel before the seed (which leaves the empty private repo on GitHub and says so). An open publish or sync pull request adds a line; nothing here merges one.
+ */
+export function twinDetail(row, owner, publicName) {
+  if (!row || typeof row.state !== "string" || !Object.hasOwn(TWIN_WORDS, row.state) || typeof row.private_name !== "string" || !TWIN_NAME_RE.test(row.private_name)) return {};
+  const url = typeof owner === "string" && TWIN_OWNER_RE.test(owner) ? "https://github.com/" + owner + "/" + row.private_name : "";
+  const lines = [row.state === "refused" && row.failure_code === "twin_not_private" ? TWIN_NOT_PRIVATE : TWIN_WORDS[row.state]];
+  const actions = [];
+  const seeded = typeof row.published_private_sha === "string" && row.published_private_sha !== "";
+  const pub = typeof publicName === "string" && publicName !== "" ? publicName : "Your public repo";
+  const live = row.state === "ready" || row.state === "paused" || row.state === "conflict"; // the states a parity check and a merge apply to
+  if (row.state === "not_connected") actions.push({ id: "add_to_app", label: "Add " + row.private_name + " to the GitHub app" });
+  if (row.state === "paused") actions.push({ id: "resume", label: "Resume" });
+  else if (row.state !== "removed") actions.push({ id: "pause", label: "Pause" });
+  if (row.state === "ready" || row.state === "conflict") actions.push({ id: "check", label: "Check again" });
+  if (live && TWIN_PR_NO(row.publish_pr)) actions.push({ id: "merge", label: "Merge publish PR #" + row.publish_pr });
+  if (row.state !== "removed") actions.push(seeded ? { id: "stop", label: "Stop publishing" } : { id: "cancel", label: "Cancel" });
+  if (row.state === "removed" || (!seeded && row.state !== "ready")) lines.push("Delete " + row.private_name + " on GitHub if you don't want it. We never delete a repo.");
+  if (row.state !== "removed" && row.note === "public_repo_private") lines.push(TWIN_NOTES.public_repo_private);
+  // The counts come from the last parity check; a twin that has not been checked yet has null counts, and says so rather than showing zero.
+  const n = (c, one, many) => (TWIN_COUNT(c) ? c + " " + (c === 1 ? one : many) : "");
+  if (live && TWIN_PR_NO(row.publish_pr)) lines.push("Publish PR #" + row.publish_pr + " is open: merge it on GitHub");
+  else if (live) lines.push("Waiting to publish: " + (n(row.merged_count, "merged change", "merged changes") || TWIN_UNCHECKED));
+  if (live && TWIN_PR_NO(row.sync_pr)) lines.push(pub + " has " + (n(row.new_changes_count, "new change", "new changes") || "new changes") + ": bringing them in (PR #" + row.sync_pr + " on the private repo)");
+  else if (live) lines.push(TWIN_COUNT(row.new_changes_count) ? pub + " has " + n(row.new_changes_count, "new change", "new changes") : "New changes on " + pub + ": " + TWIN_UNCHECKED);
+  return { twin: { state: row.state, lines, actions, private_url: url, rows: twinRows(row.state) } };
+}
+/** An item of GET /api/v1/repos/:id/twin, kept only when it fits (ids are UUIDs, the state is known, the name is a repo name); anything else is "no twin". */
+export function readTwin(body) {
+  const t = body && typeof body === "object" ? body.twin : null;
+  if (!t || typeof t.id !== "string" || !TWIN_UUID_RE.test(t.id) || typeof t.public_repo_id !== "string" || !TWIN_UUID_RE.test(t.public_repo_id)) return null;
+  if (!Object.hasOwn(TWIN_WORDS, t.state) || typeof t.private_name !== "string" || !TWIN_NAME_RE.test(t.private_name)) return null;
+  const priv = typeof t.private_repo_id === "string" && TWIN_UUID_RE.test(t.private_repo_id) ? t.private_repo_id.toLowerCase() : null;
+  return { id: t.id.toLowerCase(), public_repo_id: t.public_repo_id.toLowerCase(), private_repo_id: priv, private_name: t.private_name, state: t.state, published_private_sha: typeof t.published_private_sha === "string" ? t.published_private_sha : null,
+    publish_pr: TWIN_PR_NO(t.publish_pr) ? t.publish_pr : null, sync_pr: TWIN_PR_NO(t.sync_pr) ? t.sync_pr : null,
+    failure_code: t.failure_code === "twin_not_private" ? t.failure_code : null, note: Object.hasOwn(TWIN_NOTES, t.note) ? t.note : null,
+    merged_count: TWIN_COUNT(t.merged_count) ? t.merged_count : null, new_changes_count: TWIN_COUNT(t.new_changes_count) ? t.new_changes_count : null };
+}
+/** Whether a twin's plan may be carried from the public repo: the server refuses anything else, and so does the page. */
+export const twinCanAdopt = (row) => !!row && (row.state === "ready" || row.state === "paused");
+
+/** The choice card for a public repo that has no twin (the picker, 4.1). `name` is the repo's own name. */
+export const twinChoice = (owner, name) => {
+  const mine = owner + "/" + name + "-private", pub = owner + "/" + name;
+  return {
+    make: "Make a private twin (recommended)",
+    makeText: "We'll create " + mine + ", copy your code into it, and run the engine there. Plans, Discussions and work stay private. Merged work comes back to " + pub + " as a pull request you merge.",
+    stay: "Stay public-only",
+    stayText: "The engine surveys this public repo and drafts a plan you review item by item. It can't run here yet.",
+  };
+};
+export const TWIN_COST = "CI on the private repo uses your GitHub Actions minutes (GitHub Free includes 2,000 a month). Public repos run Actions free.";
+export const ADOPT_COPY = { use: "Use my approved plan", again: "Survey again" };
+const TWIN_BY_CODE = {
+  twin_exists: "This repo already has a private twin.", pairing_exists: "This repo is paired with a public code repo. Remove the pairing first.", install_first: "Install the GitHub app first.",
+  twin_repo_not_public: "A private twin is made for a public repo.", rate_limited: "You've created a lot of repos lately. Try again later.", github_unavailable: "GitHub couldn't be reached. Try again in a minute.",
+  github_app_not_configured: "Creating a repo isn't available right now.", account_not_active: "This account isn't active, so a repo can't be created right now.",
+  validation_failed: "That name isn't a valid repo name. Use letters, numbers, dots, dashes and underscores.", twin_state: "The twin's state changed. Read it again.", twin_not_ready: "The private repo isn't ready yet. Try again when it is.",
+  twin_paths_changed: "The private paths changed in another window. They were read again; make your change again.",
+  twin_no_pr: "That pull request isn't open any more. The card was read again.",
+  twin_pr_changed: "The pull request was closed or changed on GitHub. The card was read again; look it over, then merge.",
+  twin_pr_blocked: "GitHub will not merge this yet; it may need a passing check or a review first. Finish those on GitHub, then try again.",
+  twin_not_private: TWIN_NOT_PRIVATE,
+  issue_not_open: "That issue is closed or is a pull request, so it can't be brought. The list was read again.",
+  issue_bring_in_progress: "That issue is being brought in right now. Look again in a moment.",
+};
+/** The words for a refused twin call (by closed code, then status); never the server's own text. */
+export function twinRefusal(e) {
+  const code = e && typeof e.code === "string" ? e.code : "";
+  if (Object.hasOwn(TWIN_BY_CODE, code)) return TWIN_BY_CODE[code];
+  if (e && e.status === 403) return "Only an owner or admin can change this.";
+  return "That didn't go through. Try again.";
+}
+/** What the page's address says about a twin create that just returned (`?twin=`): a sentence, or "" for ok and for anything unknown. */
+export const TWIN_RETURN = { not_found: "The repo wasn't found.", pairing_exists: TWIN_BY_CODE.pairing_exists, twin_exists: TWIN_BY_CODE.twin_exists, failed: "The private twin couldn't be recorded. Try again." };
+/** The adopt answer ({ adopted, reason }) in words. */
+export const adoptWords = (res) => (res && res.adopted === true ? "Your approved plan was carried over. Review it in the plan step."
+  : res && res.reason === "no_draft" ? "Your public repo has no plan to carry over, so the survey drafts one." : "This project's survey has already started, so the plan can't be carried over.");
+/** The Private paths editor's lists, one path per line. */
+export const pathLines = (list) => (Array.isArray(list) ? list.join("\n") : "");
+export const parsePathLines = (text) => String(text).split("\n").map((s) => s.trim()).filter(Boolean);
+/** The paths in `before` that `after` no longer lists: narrowing the private set lets those files be published. */
+export const droppedPaths = (before, after) => before.filter((p) => !after.includes(p));
+/** The warning shown before narrowing the private set. */
+export const narrowWarning = (dropped) => "Removing " + dropped.length + (dropped.length === 1 ? " path" : " paths") + " means files they covered would be published the next time they change.";

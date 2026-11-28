@@ -101,6 +101,8 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "issue_not_open",
   "issue_bring_in_progress",
   "twin_not_private",
+  "twin_not_ready",
+  "twin_paths_changed",
   "twin_repo_not_public",
   "code_repo_renamed",
   "content_changed",

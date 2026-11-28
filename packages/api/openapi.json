@@ -18331,7 +18331,7 @@
       },
       "get": {
         "operationId": "getRepoTwin",
-        "summary": "A public repo's live private twin, or null",
+        "summary": "The live private twin that has this repo as either half (the public repo or the private twin), or null",
         "security": [
           {
             "session": []
@@ -18349,7 +18349,7 @@
         ],
         "responses": {
           "200": {
-            "description": "A public repo's live private twin, or null",
+            "description": "The live private twin that has this repo as either half (the public repo or the private twin), or null",
             "content": {
               "application/json": {
                 "schema": {
@@ -18462,6 +18462,19 @@
                                 }
                               ]
                             },
+                            "note": {
+                              "anyOf": [
+                                {
+                                  "type": "string",
+                                  "enum": [
+                                    "public_repo_private"
+                                  ]
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
                             "created_at": {
                               "type": "string"
                             },
@@ -18483,6 +18496,7 @@
                             "failure_code",
                             "merged_count",
                             "new_changes_count",
+                            "note",
                             "created_at",
                             "updated_at"
                           ],
@@ -18538,6 +18552,533 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`not_configured`: private twins are not on yet.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/twins/{id}/paths": {
+      "get": {
+        "operationId": "getRepoTwinPaths",
+        "summary": "A twin's private paths and the revision to change them against (owner or admin)",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A twin's private paths and the revision to change them against (owner or admin)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "overlay_globs": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "binary_globs": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "install_paths": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fixed_roots": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "identifier_rules_path": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "plan_data_rules_path": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "revision": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "overlay_globs",
+                    "binary_globs",
+                    "install_paths",
+                    "fixed_roots",
+                    "identifier_rules_path",
+                    "plan_data_rules_path",
+                    "revision"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`not_configured`: private twins are not on yet.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "operationId": "setRepoTwinPaths",
+        "summary": "Change the person's private paths and binary globs (owner or admin); one audit row",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "revision": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "overlay_globs": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "binary_globs": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "revision"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Change the person's private paths and binary globs (owner or admin); one audit row",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "overlay_globs": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "binary_globs": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "install_paths": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "fixed_roots": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "identifier_rules_path": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "plan_data_rules_path": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "revision": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "overlay_globs",
+                    "binary_globs",
+                    "install_paths",
+                    "fixed_roots",
+                    "identifier_rules_path",
+                    "plan_data_rules_path",
+                    "revision"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`twin_paths_changed` (read the paths again) or `twin_state` (the twin was removed).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`invalid_role_settings_input`: a path is not allowed, or a rule file would no longer be private.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`not_configured`: private twins are not on yet.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/twins/{id}/adopt-plan": {
+      "post": {
+        "operationId": "adoptRepoTwinPlan",
+        "summary": "Use the public repo's approved plan as the twin setup's plan, with no survey (owner or admin; the twin must be ready or paused)",
+        "description": "`{id}` is the twin and `setup_id` the setup of its private repo. A plan that cannot be carried is `adopted: false` with the reason (`no_draft`: the public repo has none; `bad_state`: the setup has a survey or is past it).",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "setup_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  }
+                },
+                "required": [
+                  "setup_id"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Use the public repo's approved plan as the twin setup's plan, with no survey (owner or admin; the twin must be ready or paused)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "adopted": {
+                      "type": "boolean"
+                    },
+                    "draft_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "reason": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "no_draft",
+                            "bad_state"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "adopted",
+                    "draft_id",
+                    "reason"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`twin_not_ready`: the twin is not ready or paused. Nothing changed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
                 }
               }
             }
@@ -18694,6 +19235,19 @@
                         }
                       ]
                     },
+                    "note": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "public_repo_private"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
                     "created_at": {
                       "type": "string"
                     },
@@ -18715,6 +19269,7 @@
                     "failure_code",
                     "merged_count",
                     "new_changes_count",
+                    "note",
                     "created_at",
                     "updated_at"
                   ],
@@ -18944,6 +19499,19 @@
                         }
                       ]
                     },
+                    "note": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "public_repo_private"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
                     "created_at": {
                       "type": "string"
                     },
@@ -18965,6 +19533,7 @@
                     "failure_code",
                     "merged_count",
                     "new_changes_count",
+                    "note",
                     "created_at",
                     "updated_at"
                   ],
@@ -19195,6 +19764,19 @@
                         }
                       ]
                     },
+                    "note": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "public_repo_private"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
                     "created_at": {
                       "type": "string"
                     },
@@ -19216,6 +19798,7 @@
                     "failure_code",
                     "merged_count",
                     "new_changes_count",
+                    "note",
                     "created_at",
                     "updated_at"
                   ],
@@ -19909,6 +20492,19 @@
                         }
                       ]
                     },
+                    "note": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "public_repo_private"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
                     "created_at": {
                       "type": "string"
                     },
@@ -19930,6 +20526,7 @@
                     "failure_code",
                     "merged_count",
                     "new_changes_count",
+                    "note",
                     "created_at",
                     "updated_at"
                   ],

@@ -950,11 +950,11 @@ describe("twinDetail (D#845 ON-27a)", () => {
     const ids = (r) => twinDetail(r, "acme").twin.actions.map((a) => a.id);
     expect(ids(row({ state: "seeding" }))).toEqual(["pause", "cancel"]);
     expect(ids(row({ state: "not_connected" }))).toEqual(["add_to_app", "pause", "cancel"]);
-    expect(ids(row({ state: "ready", published_private_sha: SHA }))).toEqual(["pause", "stop"]);
+    expect(ids(row({ state: "ready", published_private_sha: SHA }))).toEqual(["pause", "check", "stop"]); // Check again: a ready or conflicting twin (D#845 Ruling 111)
     expect(ids(row({ state: "paused", published_private_sha: SHA }))).toEqual(["resume", "stop"]);
     expect(ids(row({ state: "removed" }))).toEqual([]);
     expect(twinDetail(row({ state: "not_connected" }), "acme").twin.actions[0].label).toBe("Add widgets-private to the GitHub app");
-    expect(twinDetail(row({ state: "ready", published_private_sha: SHA }), "acme").twin.actions.map((a) => a.label)).toEqual(["Pause", "Stop publishing"]);
+    expect(twinDetail(row({ state: "ready", published_private_sha: SHA }), "acme").twin.actions.map((a) => a.label)).toEqual(["Pause", "Check again", "Stop publishing"]);
   });
 
   it("a cancel before the seed, and a stopped twin, say the private repo stays on GitHub and is never deleted by us", () => {

@@ -11,7 +11,7 @@ import { api, ApiFailure, createRetryGate, isRateLimited, retryWords, waitSecond
 import { on, onRefresh } from "../../core/cloud-live.js";
 import { autoMergeDisabled, lockNote } from "./repos-lock.js";
 import { createAllowancePanel } from "./repos-allowances.js";
-import { createAutoMergeControl, createDialControl, createModeControl, createPlanWritebackControl, createRemoveSheet, createRunnersSection, queueView, removalLine } from "./repos-runners.js";
+import { createTwinCard, createAutoMergeControl, createDialControl, createModeControl, createPlanWritebackControl, createRemoveSheet, createRunnersSection, endsTwinAfter, queueView, removalLine } from "./repos-runners.js";
 
 const REPOS_URL = "/api/v1/repos";
 const allowancesUrl = (id) => "/api/runners/repos/" + encodeURIComponent(id) + "/sandbox-allowances";
@@ -107,8 +107,15 @@ function mountRepos(host, installNote) {
   const runners = createRunnersSection({ signal: abort.signal, onData: () => (dial && dial.repaint(), allowances.repaint()) });
   // D#845 ON-16a2: the Remove from fulcrumaxe sheet. It reads the repo as the list has it now, and the list is re-read once a removal was sent.
   const removeSheet = createRemoveSheet({
-    signal: abort.signal, getRepo: (id) => st.repos.find((r) => r.id === id), onDone: () => loadRepos(), onClosed: () => focusTestId("repos-remove-open"),
+    signal: abort.signal, getRepo: (id) => st.repos.find((r) => r.id === id), onDone: (ok, d) => { loadRepos(); if (twin && endsTwinAfter(ok, d)) twin.stopAfterRemoval(); }, onClosed: () => focusTestId("repos-remove-open"),
   });
+  // D#845 ON-27e: the open repo's private twin card; it is empty unless the repo is one half of a live twin (and twins are on).
+  let twin = null;
+  const makeTwin = () => {
+    if (twin) twin.destroy();
+    twin = st.openId ? createTwinCard({ signal: abort.signal, repoId: st.openId, getRepo: (id) => st.repos.find((r) => r.id === id), canChange: () => st.isAdmin, removeRepo: (r) => removeSheet.open(r, { twin: true }), onChanged: () => loadRepos(), announce: (t) => { st.note = t; renderHead(); }, focusFallback: () => focusTestId("repos-detail-title") }) : null;
+    if (twin) twin.load();
+  };
   // dom-insert-ok: runners.el is the section element createRunnersSection built with h()
   root.append(runners.el);
   // D#600 CX-9b: the open repo's context rules and budget (apps/_lib/dom.js). The slot keeps its own state across the detail rebuild.
@@ -227,7 +234,7 @@ function mountRepos(host, installNote) {
   function renderDetail() {
     const repo = openRepo();
     if (!repo) return detailEl.replaceChildren(line("Pick a repo to see its settings.", "repos-pick", "repos-muted"));
-    const title = h("h3", { class: "repos-subtitle" }, "Settings for ", h("bdi", null, repo.full_name || repo.product));
+    const title = h("h3", { class: "repos-subtitle", tabindex: "-1", "data-testid": "repos-detail-title" }, "Settings for ", h("bdi", null, repo.full_name || repo.product));
     if (st.settingsState === "loading") return detailEl.replaceChildren(title, line("Loading settings...", "repos-settings-loading", "repos-muted"));
     if (st.settingsState !== "ok" || !st.settings) return detailEl.replaceChildren(title, line("Settings aren't available right now.", "repos-settings-error", "", "alert"));
     if (planWriteback) planWriteback.repaint(); // its admin-only state follows st.isAdmin
@@ -256,6 +263,8 @@ function mountRepos(host, installNote) {
     );
     // dom-insert-ok: allowances.el is the section element createAllowancePanel built with h(); it keeps its own state across this rebuild
     detailEl.append(allowances.el);
+    // dom-insert-ok: twin.el is the section createTwinCard built with h(); it paints itself
+    if (twin) detailEl.append(twin.el);
     // dom-insert-ok: ctxSlot is an element built above with h(); the rules panel fills it and keeps its own state; a held focus inside it is put back
     const held = ctxSlot.contains(document.activeElement) ? document.activeElement : null;
     detailEl.append(ctxSlot);
@@ -293,7 +302,8 @@ function mountRepos(host, installNote) {
       st.loadFailed = true;
     }
     st.loading = false;
-    if (st.openId && !openRepo()) { st.openId = null; dial = null; mode = null; autoMerge = null; planWriteback = null; mountContext(); }
+    if (twin) twin.repaint();
+    if (st.openId && !openRepo()) { st.openId = null; dial = null; mode = null; autoMerge = null; planWriteback = null; makeTwin(); mountContext(); }
     render();
   }
 
@@ -328,6 +338,7 @@ function mountRepos(host, installNote) {
     st.openId = id;
     st.pendingOff = false; st.ack = false; st.ackError = false; st.saveError = "";
     makeDial();
+    makeTwin();
     mountContext();
     loadSettings(id, false);
     allowances.show(openRepo());
@@ -393,6 +404,7 @@ function mountRepos(host, installNote) {
       if (ctx) ctx.destroy();
       runners.destroy();
       removeSheet.destroy();
+      if (twin) twin.destroy();
       gate.cancel();
       abort.abort();
       unsubscribe();

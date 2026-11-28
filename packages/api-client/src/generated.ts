@@ -2075,6 +2075,7 @@ export interface Operations {
         failure_code: string | null;
         merged_count: (number) | (null);
         new_changes_count: (number) | (null);
+        note: ("public_repo_private") | (null);
         created_at: string;
         updated_at: string;
       }) | (null);
@@ -2090,6 +2091,56 @@ export interface Operations {
     };
     response: {
       authorize_url: string;
+    };
+  };
+  getRepoTwinPaths: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      overlay_globs: Array<string>;
+      binary_globs: Array<string>;
+      install_paths: Array<string>;
+      fixed_roots: Array<string>;
+      identifier_rules_path: string | null;
+      plan_data_rules_path: string | null;
+      revision: string;
+    };
+  };
+  setRepoTwinPaths: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: {
+      revision: string;
+      overlay_globs?: Array<string>;
+      binary_globs?: Array<string>;
+    };
+    response: {
+      overlay_globs: Array<string>;
+      binary_globs: Array<string>;
+      install_paths: Array<string>;
+      fixed_roots: Array<string>;
+      identifier_rules_path: string | null;
+      plan_data_rules_path: string | null;
+      revision: string;
+    };
+  };
+  adoptRepoTwinPlan: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: {
+      setup_id: string;
+    };
+    response: {
+      adopted: boolean;
+      draft_id: string | null;
+      reason: ("no_draft" | "bad_state") | (null);
     };
   };
   pauseRepoTwin: {
@@ -2112,6 +2163,7 @@ export interface Operations {
       failure_code: string | null;
       merged_count: (number) | (null);
       new_changes_count: (number) | (null);
+      note: ("public_repo_private") | (null);
       created_at: string;
       updated_at: string;
     };
@@ -2136,6 +2188,7 @@ export interface Operations {
       failure_code: string | null;
       merged_count: (number) | (null);
       new_changes_count: (number) | (null);
+      note: ("public_repo_private") | (null);
       created_at: string;
       updated_at: string;
     };
@@ -2160,6 +2213,7 @@ export interface Operations {
       failure_code: string | null;
       merged_count: (number) | (null);
       new_changes_count: (number) | (null);
+      note: ("public_repo_private") | (null);
       created_at: string;
       updated_at: string;
     };
@@ -2226,6 +2280,7 @@ export interface Operations {
       failure_code: string | null;
       merged_count: (number) | (null);
       new_changes_count: (number) | (null);
+      note: ("public_repo_private") | (null);
       created_at: string;
       updated_at: string;
     };
@@ -7489,6 +7544,39 @@ export const operations = {
   createRepoTwinIntent: {
     method: "POST",
     path: "/api/v1/repos/{id}/twin",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: true,
+  },
+  getRepoTwinPaths: {
+    method: "GET",
+    path: "/api/v1/twins/{id}/paths",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  setRepoTwinPaths: {
+    method: "PUT",
+    path: "/api/v1/twins/{id}/paths",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: true,
+  },
+  adoptRepoTwinPlan: {
+    method: "POST",
+    path: "/api/v1/twins/{id}/adopt-plan",
     tokenAccess: false,
     scope: null,
     tokenSelfOnly: false,
