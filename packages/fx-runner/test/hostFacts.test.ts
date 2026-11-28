@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { HelloMessage } from "@fulcrumaxe/runner-protocol";
-import { defaultRunnerName, hostFactsOf, memBucketOf, readHostFacts } from "../src/hostFacts.js";
+import { defaultRunnerName, hostFactsOf, memBucketOf, platformFactOf, readHostFacts } from "../src/hostFacts.js";
 
 const GB = 1024 ** 3;
 const hello = (facts: unknown) => HelloMessage.safeParse({ protocol_version: 1, binary_version: "0.1.0", model_auth_present: true, isolation: "host_sandbox", facts }).success;
@@ -72,5 +72,20 @@ describe("defaultRunnerName", () => {
   });
   it("gives nothing when nothing printable is left, so the register request carries no name", () => {
     for (const hostname of ["", "   ", "​\u0007", "⠀", "\n"]) expect(defaultRunnerName(hostname), JSON.stringify(hostname)).toBeUndefined();
+  });
+});
+
+describe("platformFactOf (D#587 B-7c)", () => {
+  it("names WSL2 as its own platform, beside plain Linux and macOS", () => {
+    expect(platformFactOf({ platform: "linux", wsl2: true })).toBe("wsl2");
+    expect(platformFactOf({ platform: "linux", wsl2: false })).toBe("linux");
+    expect(platformFactOf({ platform: "darwin", wsl2: false })).toBe("macos");
+  });
+  it("a macOS machine is macos even if the WSL2 flag were set, and a machine the facts do not name has none", () => {
+    expect(platformFactOf({ platform: "darwin", wsl2: true })).toBe("macos");
+    for (const platform of ["win32", "freebsd"] as const) expect(platformFactOf({ platform, wsl2: false })).toBeUndefined();
+  });
+  it("hostFactsOf itself carries no platform: it is added only after the cloud listed the capability", () => {
+    expect(hostFactsOf({ platform: "linux", arch: "x64", totalMemBytes: 16 * 1024 ** 3, cpus: 8 })).not.toHaveProperty("platform");
   });
 });

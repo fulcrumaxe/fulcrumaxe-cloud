@@ -300,6 +300,10 @@ export interface ReportedFacts {
   os: string;
   arch: string;
   engine: string;
+  /** D#587 B-7c: the platform the runner reported (`linux`, `wsl2`, `macos`), or null when it did not (an older runner or cloud): the machine then reads as its `os`. */
+  platform: string | null;
+  /** D#587 B-7c: the words of the platform row that stands for this machine (`platform ?? os`), from the runner's own support table; null when no row is there. Never a bare "supported" for a preview platform. */
+  support: string | null;
   preflight: Array<{ code: string; fix: string }> | null;
 }
 

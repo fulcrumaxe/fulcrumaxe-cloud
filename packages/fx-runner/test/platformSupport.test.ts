@@ -6,6 +6,13 @@ import { SandboxRefused, detectPlatform } from "../src/sandbox/platform.js";
 import { WSL_CODES } from "../src/sandbox/wslChecks.js";
 import { PACKAGE_DIR, srcFiles } from "./helpers/srcFiles.js";
 
+/** The table's one source file lives in the protocol package (the cloud reads the same rows); the runner's `src/platformSupport.ts` only re-exports it, so a phrase is spelled once in that file and in no runner source. */
+const TABLE_FILE = readFileSync(path.join(PACKAGE_DIR, "..", "runner-protocol", "src", "platformSupport.ts"), "utf8");
+const spelledOnce = (phrase: string): void => {
+  expect(srcFiles().filter(([, text]) => text.includes(phrase))).toEqual([]);
+  expect(TABLE_FILE.split(phrase).length - 1).toBeGreaterThanOrEqual(1);
+};
+
 const readme = readFileSync(path.join(PACKAGE_DIR, "README.md"), "utf8");
 /** The README's matrix rows as [platform, status]. */
 const matrix = [...readme.matchAll(/^\| (.+?) \| (.+?) \|$/gm)].map((m): [string, string] => [m[1]!, m[2]!]).filter(([platform]) => platform !== "Platform" && !platform.startsWith("---"));
@@ -13,8 +20,8 @@ const matrix = [...readme.matchAll(/^\| (.+?) \| (.+?) \|$/gm)].map((m): [string
 describe("the macOS preview label lives in one place", () => {
   it("is spelled once in src, in platformSupport.ts, and nowhere else", () => {
     expect(MACOS_PREVIEW_LABEL).toBe("preview, not yet verified");
-    const files = srcFiles().filter(([, text]) => text.includes("not yet verified"));
-    expect(files.map(([name]) => name)).toEqual(["src/platformSupport.ts"]);
+    spelledOnce("not yet verified");
+    expect(TABLE_FILE.match(/const MACOS_PREVIEW_LABEL = "preview, not yet verified"/g)).toHaveLength(1);
   });
 
   it("the README states exactly the notice the program prints", () => {
@@ -25,8 +32,7 @@ describe("the macOS preview label lives in one place", () => {
 
 describe("the Windows notice lives in one place", () => {
   it("is spelled once in src, in platformSupport.ts", () => {
-    const files = srcFiles().filter(([, text]) => text.includes("does not support Windows yet"));
-    expect(files.map(([name]) => name)).toEqual(["src/platformSupport.ts"]);
+    spelledOnce("does not support Windows yet");
     expect(WINDOWS_UNSUPPORTED_NOTICE).toBe("fx-runner does not support Windows yet, including WSL2. Linux and macOS are supported.");
   });
 });
@@ -93,6 +99,6 @@ describe("the README's support matrix", () => {
   });
 
   it("the WSL1 copy is spelled once in src, in platformSupport.ts", () => {
-    expect(srcFiles().filter(([, text]) => text.includes("Convert the distribution")).map(([name]) => name)).toEqual(["src/platformSupport.ts"]);
+    spelledOnce("Convert the distribution");
   });
 });

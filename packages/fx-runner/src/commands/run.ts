@@ -52,7 +52,7 @@ import { createJobsInHand } from "../daemon/jobsInHand.js";
 import { readVerifyAnswer } from "../daemon/answerFile.js";
 import { createVerifyLocal } from "../daemon/verifyLocal.js";
 import { readSignInState } from "../daemon/signInState.js";
-import { readHostFacts } from "../hostFacts.js";
+import { platformFactOf, readHostFacts } from "../hostFacts.js";
 import { chooseEngine, reasonChangeLine, RESTART_LINE, selectSandbox, UNWIRED_LINE } from "../vm/engineGate.js";
 import { RUNNER_BUILD_CAPABILITIES, RUNNER_PROTOCOL_VERSION, RUNNER_VERSION } from "../version.js";
 import { createSandboxCommandReceiver } from "../daemon/sandboxCommands.js";
@@ -75,7 +75,7 @@ import { computeConflictAttestation } from "../daemon/conflictAttest.js";
 import { createPlaneBaseLedger, createPlanePushHook, type PlaneBaseLedger } from "../daemon/planePush.js";
 import { createPlanePushGithub } from "../daemon/planePushGithub.js";
 import { createPlaneMergeHandler } from "../daemon/planeMerge.js";
-import { CONFLICT_FACTS_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, ENGINE_LEASE_HELLO_CAPABILITY, HEARTBEAT_INVENTORY_HELLO_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, MACHINE_LOGIN_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, MEMORY_LIMIT_CAPABILITY, ORDERED_FACTS_CAPABILITY, OVERLAP_FACTS_CAPABILITY, PROJECT_SETUP_CAPABILITY, SANDBOX_COMMAND_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, type LimitedBy, type PreflightCode } from "@fulcrumaxe/runner-protocol";
+import { CONFLICT_FACTS_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, ENGINE_LEASE_HELLO_CAPABILITY, HEARTBEAT_INVENTORY_HELLO_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, PLATFORM_FACT_HELLO_CAPABILITY, MACHINE_LOGIN_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, MEMORY_LIMIT_CAPABILITY, ORDERED_FACTS_CAPABILITY, OVERLAP_FACTS_CAPABILITY, PROJECT_SETUP_CAPABILITY, SANDBOX_COMMAND_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, type LimitedBy, type PreflightCode } from "@fulcrumaxe/runner-protocol";
 import { createGitTransport, createPublicHeadsReader } from "@fulcrumaxe/runner-protocol/planePush";
 import { createNixShell, findNix, findTool, identityVia } from "../daemon/nixShell.js";
 import { createDepsInstaller } from "../daemon/depsInstall.js";
@@ -450,6 +450,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     let cloudWatchMode = false;
     // D#845 ON-6c: true once a hello reply listed the `kvm_fact` capability; only then does a hello carry `facts.kvm`.
     let cloudKvmFact = false;
+    // D#587 B-7c: true once a hello reply listed the `platform_fact` capability; only then does a hello carry `facts.platform`.
+    let cloudPlatformFact = false;
     // D#845 ON-21b: true once a hello reply listed the `preflight` capability; only then does a hello carry `facts.preflight`.
     let cloudPreflight = false;
     // D#587 FU-179: true once a hello reply listed `heartbeat_inventory`; only then does a heartbeat carry the sandbox inventory.
@@ -696,6 +698,9 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       const factsPlain = readHostFacts(engine);
       const factsWithKvm = readHostFacts(engine, engineFacts?.kvm);
       let kvmSent = false;
+      // D#587 B-7c: WSL2 as its own platform, from the same probe `clearWsl` ran above (a machine that is not WSL2 says `linux` or `macos`). Said only after a reply that listed `platform_fact`; the first hello never carries it.
+      const platformFact = factsPlain === undefined ? undefined : platformFactOf({ platform: host.platform, wsl2: wsl.wsl2 });
+      let platformSent = false;
       // D#845 ON-21b: the preflight codes, read once per start and again at most hourly, off the hello's path (a reading touches the network). Declared (`preflight_v1`) on a Linux machine that has the readers; the codes
       // go only on a hello after a reply that listed `preflight`, and the first hello never carries them. A reading that is not there yet says nothing.
       const preflightPorts = host.platform === "linux" ? host.preflight : undefined;
@@ -752,17 +757,19 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
         return modelAuthValue;
       };
       const helloMessage = async () => {
-        const base = cloudKvmFact ? factsWithKvm : factsPlain;
+        const withKvm = cloudKvmFact ? factsWithKvm : factsPlain;
+        const base = withKvm === undefined || !cloudPlatformFact || platformFact === undefined ? withKvm : { ...withKvm, platform: platformFact };
         const codes = preflightNow();
         const facts = base === undefined || codes === undefined ? base : { ...base, preflight: codes };
         kvmSent = facts?.kvm !== undefined;
+        platformSent = facts?.platform !== undefined;
         preflightSent = codes === undefined || base === undefined ? undefined : JSON.stringify(codes);
         return helloBody(facts);
       };
       // `kvm_fact_v1` is declared only by a runner that has a KVM reading to send (a plain present or absent), so a runner without one says what it always said.
       // D#845 ON-8f2c: `project_setup_v1` is advertised only when the setup and update handlers exist further down (a microVM guest, or the host guest on the standard tier); they are built from the same two parts, which are known by now.
       const setupJobsPossible = vmDeps !== undefined || (host.engine.installCapture !== undefined && host.selfCommand !== undefined);
-      const capabilityList = async () => [...RUNNER_BUILD_CAPABILITIES.filter((c) => (c !== MACHINE_LOGIN_CAPABILITY || host.managedServer?.() === true) && (c !== PROJECT_SETUP_CAPABILITY || setupJobsPossible)), SANDBOX_COMMAND_CAPABILITY, ...(factsWithKvm?.kvm === undefined ? [] : [KVM_FACT_HELLO_CAPABILITY]), ...(preflightReporter === undefined ? [] : [PREFLIGHT_HELLO_CAPABILITY]), ...(inventoryReporter === undefined ? [] : [HEARTBEAT_INVENTORY_HELLO_CAPABILITY]), ...(engineLeaseArmed ? [ENGINE_LEASE_HELLO_CAPABILITY] : []), ...(await verifyLocal.capabilities())];
+      const capabilityList = async () => [...RUNNER_BUILD_CAPABILITIES.filter((c) => (c !== MACHINE_LOGIN_CAPABILITY || host.managedServer?.() === true) && (c !== PROJECT_SETUP_CAPABILITY || setupJobsPossible)), SANDBOX_COMMAND_CAPABILITY, ...(factsWithKvm?.kvm === undefined ? [] : [KVM_FACT_HELLO_CAPABILITY]), ...(platformFact === undefined ? [] : [PLATFORM_FACT_HELLO_CAPABILITY]), ...(preflightReporter === undefined ? [] : [PREFLIGHT_HELLO_CAPABILITY]), ...(inventoryReporter === undefined ? [] : [HEARTBEAT_INVENTORY_HELLO_CAPABILITY]), ...(engineLeaseArmed ? [ENGINE_LEASE_HELLO_CAPABILITY] : []), ...(await verifyLocal.capabilities())];
       const helloBody = async (facts: typeof factsPlain) => ({ protocol_version: RUNNER_PROTOCOL_VERSION, binary_version: RUNNER_VERSION, model_auth_present: await modelAuth(), isolation: "host_sandbox" as const, ...(facts === undefined ? {} : { facts }), capabilities: await capabilityList() });
       const firstHello = await helloMessage();
       let advertised = JSON.stringify(firstHello.capabilities);
@@ -789,6 +796,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
         engineBridgeAccepted = dropped !== undefined && !dropped.includes(ENGINE_BRIDGE_CAPABILITY);
         if (answer?.kind === "ok") cloudWatchMode = answer.watchMode === true;
         if (answer?.kind === "ok") cloudKvmFact = answer.kvmFact === true;
+        if (answer?.kind === "ok") cloudPlatformFact = answer.platformFact === true;
         if (answer?.kind === "ok") cloudPreflight = answer.preflight === true;
         if (answer?.kind === "ok") cloudHeartbeatInventory = answer.heartbeatInventory === true;
         // D#845 ON-13c3 (Ruling 15, two-way): the lease is acted on only while the latest answered hello echoed `engine_lease`; an answer without the echo withdraws any lease held. An unanswered hello changes nothing.
@@ -932,11 +940,13 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
           const due = helloAnswered && nowMs - advertCheckedAt >= 30_000;
           if (due) advertCheckedAt = nowMs;
           // D#845 ON-6c: the reply to an earlier hello changed whether `facts.kvm` may be sent (it listed `kvm_fact`, or a later one stopped listing it): say so at once, not on the 30 second check.
+          // D#587 B-7c: the same for `facts.platform`.
+          const platformStale = helloAnswered && (cloudPlatformFact && platformFact !== undefined) !== platformSent;
           const kvmStale = helloAnswered && (cloudKvmFact && factsWithKvm?.kvm !== undefined) !== kvmSent;
           // D#845 ON-21b: a reading is due (this asks for it at most hourly and never waits on it), and the codes a hello would carry now differ from the ones the last hello sent: say so at once.
           void preflightReporter?.refresh();
           const preflightStale = helloAnswered && (preflightNow() === undefined ? undefined : JSON.stringify(preflightNow())) !== preflightSent;
-          if (kvmStale || preflightStale || (due && (JSON.stringify(await capabilityList()) !== advertised || (await modelAuth()) !== advertisedAuth))) {
+          if (kvmStale || platformStale || preflightStale || (due && (JSON.stringify(await capabilityList()) !== advertised || (await modelAuth()) !== advertisedAuth))) {
             const changed = await helloMessage();
             advertised = JSON.stringify(changed.capabilities);
             advertisedAuth = changed.model_auth_present;

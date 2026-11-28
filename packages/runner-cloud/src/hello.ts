@@ -1,4 +1,4 @@
-import { ENGINE_LEASE_CAPABILITY, ENGINE_LEASE_HELLO_CAPABILITY, MACHINE_ONBOARDING_MIN_PROTOCOL, HEARTBEAT_INVENTORY_CAPABILITY, HEARTBEAT_INVENTORY_HELLO_CAPABILITY, SANDBOX_INVENTORY_MIN_PROTOCOL, HelloMessage, HelloReply, KVM_FACT_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, PREFLIGHT_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, WATCH_MIN_PROTOCOL, WATCH_MODE_CAPABILITY, WATCH_MODE_HELLO_CAPABILITY } from "@fulcrumaxe/runner-protocol";
+import { ENGINE_LEASE_CAPABILITY, ENGINE_LEASE_HELLO_CAPABILITY, MACHINE_ONBOARDING_MIN_PROTOCOL, HEARTBEAT_INVENTORY_CAPABILITY, HEARTBEAT_INVENTORY_HELLO_CAPABILITY, SANDBOX_INVENTORY_MIN_PROTOCOL, HelloMessage, HelloReply, KVM_FACT_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, PLATFORM_FACT_CAPABILITY, PLATFORM_FACT_HELLO_CAPABILITY, PREFLIGHT_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, WATCH_MIN_PROTOCOL, WATCH_MODE_CAPABILITY, WATCH_MODE_HELLO_CAPABILITY } from "@fulcrumaxe/runner-protocol";
 import { allowRunnerWake } from "@fx/core/src/pendingWork.js";
 import { runnersTakeEngineLease } from "./engineLease.js";
 import { configuredWakeKey, wakeGrantFor } from "./wakeToken.js";
@@ -31,6 +31,8 @@ export async function runnerHello(deps: RunnerCloudDeps, req: RunnerHttpRequest)
   }
   // D#845 ON-21b: whether migration 1051's column and definer exist, read from the catalog before the transaction (a failed read says no). Decides both the write below and the reply's capability.
   const takesPreflight = await runnersTakePreflight(deps);
+  // D#587 B-7c: whether migration 1122's column and definer exist, read from the catalog before the transaction (a failed read says no). Decides both the write below and the reply's capability.
+  const takesPlatform = await runnersTakePlatform(deps);
   let recorded: boolean;
   try {
     recorded = await withRunnerSession(deps.appUserPool, runner, async (client) => {
@@ -41,12 +43,15 @@ export async function runnerHello(deps: RunnerCloudDeps, req: RunnerHttpRequest)
       const facts = message.facts;
       if (facts !== undefined) {
         await client.query("SELECT runner_facts_record($1, $2, $3::int, $4::int, $5)", [facts.os, facts.arch, facts.mem_gb_bucket, facts.cpus, facts.sandbox_engine]);
+        // D#587 B-7c: the platform, rewritten on EVERY hello with facts when this database has the column (none sent is NULL, "not said"), so a downgraded runner stops being shown as WSL2. The definer ignores a platform that disagrees with the os.
+        if (takesPlatform) await client.query("SELECT runner_facts_platform_record($1::text)", [facts.platform ?? null]);
         // D#587 B-7a: the host limits and bootable templates, rewritten on every hello with facts (none sent is none stored). Routing and display only.
         await client.query("SELECT runner_sandbox_facts_record($1::int, $2::int, $3::int, $4::text[])", [facts.max_vms ?? null, facts.max_vcpus ?? null, facts.max_memory_mb ?? null, facts.bootable_templates ?? []]);
       }
       // D#483 S4-b2c: the capabilities, rewritten on EVERY hello (none sent is none stored), so a runner that is downgraded stops being offered
       // what it can no longer run. Same definer shape and the same transaction.
-      await client.query("SELECT runner_capabilities_record($1::text[])", [message.capabilities ?? []]);
+      // D#587 B-7c: `platform_fact_v1` is stored only by a database that has migration 1122 (its capability list takes it), so a cloud deployed ahead of the migration still records the hello.
+      await client.query("SELECT runner_capabilities_record($1::text[])", [(message.capabilities ?? []).filter((c) => takesPlatform || c !== PLATFORM_FACT_HELLO_CAPABILITY)]);
       // D#845 ON-21b: the preflight codes, rewritten on EVERY hello of a database that has them (none sent is NULL, "not said"), so a downgraded runner stops being credited. Same transaction, same session-named runner.
       if (takesPreflight) await client.query("SELECT runner_preflight_record($1::text[])", [message.facts?.preflight ?? null]);
       return true;
@@ -73,7 +78,9 @@ export async function runnerHello(deps: RunnerCloudDeps, req: RunnerHttpRequest)
   const heartbeatInventory = message.protocol_version >= SANDBOX_INVENTORY_MIN_PROTOCOL && (message.capabilities ?? []).includes(HEARTBEAT_INVENTORY_HELLO_CAPABILITY) && (await runnersTakeInventory(deps));
   // D#845 ON-13c3: said only to a runner that DECLARED `engine_lease_v1` on this hello at protocol 22 or later, and only when migration 1092's function exists. The claim and heartbeat replies then carry `engine_lease`.
   const engineLease = message.protocol_version >= MACHINE_ONBOARDING_MIN_PROTOCOL && (message.capabilities ?? []).includes(ENGINE_LEASE_HELLO_CAPABILITY) && (await runnersTakeEngineLease(deps));
-  const replyCapabilities = [...(watchMode ? [WATCH_MODE_CAPABILITY] : []), ...(kvmFact ? [KVM_FACT_CAPABILITY] : []), ...(preflight ? [PREFLIGHT_CAPABILITY] : []), ...(heartbeatInventory ? [HEARTBEAT_INVENTORY_CAPABILITY] : []), ...(engineLease ? [ENGINE_LEASE_CAPABILITY] : [])];
+  // D#587 B-7c: said only to a runner that DECLARED `platform_fact_v1` on this hello, and only when migration 1122 is present. The runner sends `facts.platform` from its next hello on.
+  const platformFact = (message.capabilities ?? []).includes(PLATFORM_FACT_HELLO_CAPABILITY) && takesPlatform;
+  const replyCapabilities = [...(watchMode ? [WATCH_MODE_CAPABILITY] : []), ...(kvmFact ? [KVM_FACT_CAPABILITY] : []), ...(preflight ? [PREFLIGHT_CAPABILITY] : []), ...(heartbeatInventory ? [HEARTBEAT_INVENTORY_CAPABILITY] : []), ...(engineLease ? [ENGINE_LEASE_CAPABILITY] : []), ...(platformFact ? [PLATFORM_FACT_CAPABILITY] : [])];
   return { status: 200, body: HelloReply.parse({ protocol_version: current, ...(wake ? { wake } : {}), ...(replyCapabilities.length > 0 ? { capabilities: replyCapabilities } : {}) }) };
 }
 
@@ -84,6 +91,17 @@ export async function runnersTakePreflight(deps: RunnerCloudDeps): Promise<boole
     return rows[0]?.ok === true;
   } catch {
     // fx-swallow-ok: a catalog read that fails says nothing about the column: the capability is simply not listed
+    return false;
+  }
+}
+
+/** True when migration 1122 is applied: `runner_facts.platform` exists. Read from the catalog, never assumed from the code's version; a failed read says no, so nothing is written and the capability is not listed. */
+export async function runnersTakePlatform(deps: RunnerCloudDeps): Promise<boolean> {
+  try {
+    const { rows } = await deps.appUserPool.query<{ ok: boolean }>("SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('public.runner_facts') AND attname = 'platform' AND NOT attisdropped) AND to_regproc('public.runner_facts_platform_record') IS NOT NULL AS ok");
+    return rows[0]?.ok === true;
+  } catch {
+    // fx-swallow-ok: a catalog read that fails says nothing about the column: nothing is written and the capability is simply not listed
     return false;
   }
 }

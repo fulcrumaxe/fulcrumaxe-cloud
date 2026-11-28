@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import {
   CLAIM_IDLE_RETRY_AFTER_SECONDS, ClaimMessage, ClaimReply, DoneMessage, DoneReply, DoneRetryReply, EventsMessage, EventsReply, HeartbeatMessage, HelloMessage,
   HeartbeatReply, HelloReply, SeqNotIncreasingReply, StopReply, WAKE_CAPABILITY, WakeGrant, jwkThumbprint, verifyRunnerRequest, type Ed25519Jwk, type LocalOnlyEvent,
-  KVM_FACT_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, PREFLIGHT_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, MEM_PROPOSAL_CAPABILITY, MEMORY_PROPOSALS_PATH, MemoryProposalsMessage, MemoryProposalsReply,
+  KVM_FACT_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, PLATFORM_FACT_CAPABILITY, PLATFORM_FACT_HELLO_CAPABILITY, PREFLIGHT_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, MEM_PROPOSAL_CAPABILITY, MEMORY_PROPOSALS_PATH, MemoryProposalsMessage, MemoryProposalsReply,
   type SignedJob, type StopReason,
 } from "@fulcrumaxe/runner-protocol";
 
@@ -38,6 +38,8 @@ export interface FakeMemory {
 export type FakeKvmCloud = "listed" | "unlisted" | "old";
 /** D#845 ON-21b: the same three states for the preflight codes (`preflight_v1` declared, `preflight` listed, `facts.preflight`). */
 export type FakePreflightCloud = FakeKvmCloud;
+/** D#587 B-7c: the same three states for the platform (`platform_fact_v1` declared, `platform_fact` listed, `facts.platform`). */
+export type FakePlatformCloud = FakeKvmCloud;
 
 export interface FakeWake {
   enabled: boolean;
@@ -100,6 +102,7 @@ export interface StrictRunnerCloud {
   memory: FakeMemory;
   kvmCloud: FakeKvmCloud;
   preflightCloud: FakePreflightCloud;
+  platformCloud: FakePlatformCloud;
   close(): Promise<void>;
 }
 
@@ -144,6 +147,7 @@ export async function startStrictRunnerCloud(): Promise<StrictRunnerCloud> {
     memory: { oldCloud: false, refuse: [], taken: new Map(), forceError: undefined },
     kvmCloud: "unlisted",
     preflightCloud: "unlisted",
+    platformCloud: "unlisted",
     close: async () => undefined,
   };
   /** Whether the runner's latest accepted hello listed `wake_v1` (the real cloud keeps this in runner_capabilities). */
@@ -263,6 +267,8 @@ export async function startStrictRunnerCloud(): Promise<StrictRunnerCloud> {
         const hello = message.data as { capabilities?: string[]; facts?: Record<string, unknown> };
         const askedKvm = (hello.capabilities ?? []).includes(KVM_FACT_HELLO_CAPABILITY);
         const askedPreflight = (hello.capabilities ?? []).includes(PREFLIGHT_HELLO_CAPABILITY);
+        const askedPlatform = (hello.capabilities ?? []).includes(PLATFORM_FACT_HELLO_CAPABILITY);
+        if (state.platformCloud === "old" && (askedPlatform || (hello.facts !== undefined && "platform" in hello.facts))) return refuse(400, "invalid_message");
         if (state.preflightCloud === "old" && (askedPreflight || (hello.facts !== undefined && "preflight" in hello.facts))) return refuse(400, "invalid_message");
         if (state.kvmCloud === "old" && (askedKvm || (hello.facts !== undefined && "kvm" in hello.facts))) return refuse(400, "invalid_message");
         const asked = ((message.data as { capabilities?: string[] }).capabilities ?? []).includes(WAKE_CAPABILITY);
@@ -272,7 +278,7 @@ export async function startStrictRunnerCloud(): Promise<StrictRunnerCloud> {
         if (askedMemory && state.memory.oldCloud) return refuse(400, "invalid_message");
         helloAskedMemory = askedMemory;
         return send(200, HelloReply.parse({ protocol_version: 1, ...grant(), ...(() => {
-          const listed = [...(askedKvm && state.kvmCloud === "listed" ? [KVM_FACT_CAPABILITY] : []), ...(askedPreflight && state.preflightCloud === "listed" ? [PREFLIGHT_CAPABILITY] : [])];
+          const listed = [...(askedKvm && state.kvmCloud === "listed" ? [KVM_FACT_CAPABILITY] : []), ...(askedPreflight && state.preflightCloud === "listed" ? [PREFLIGHT_CAPABILITY] : []), ...(askedPlatform && state.platformCloud === "listed" ? [PLATFORM_FACT_CAPABILITY] : [])];
           return listed.length === 0 ? {} : { capabilities: listed };
         })() }));
       }
