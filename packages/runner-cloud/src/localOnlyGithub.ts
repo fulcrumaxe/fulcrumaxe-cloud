@@ -267,6 +267,10 @@ export const SETUP_INSTALL_DOCUMENTS = Object.freeze({
  * D#845 ON-8f2b (A26): the engine's 11 labels, as the engine's own label bootstrap script creates them (a test reads that script against this table). The install step creates them in the project's
  * repository after the engine's files are pushed, one call each. The call is allowed only with exactly one of these rows as its body, so a runner, a job or a person can never choose a label.
  */
+/** D#845 ON-27f: the one label a brought issue carries in the private twin. */
+export const FROM_PUBLIC_LABEL = "from-public";
+/** D#845 ON-27f: a brought issue's body is at most this many characters: GitHub refuses an issue body over 65,536. */
+export const BROUGHT_ISSUE_BODY_MAX = 65_536;
 export const TWIN_SYNC_LABEL: Readonly<{ name: string; color: string; description: string }> = Object.freeze({ name: "fx-twin-sync", color: "5319E7", description: "Changes made on the public repository, brought into this private working copy" });
 export const SETUP_INSTALL_LABELS: readonly Readonly<{ name: string; color: string; description: string }>[] = Object.freeze(
   [
@@ -385,6 +389,10 @@ export const LOCAL_ONLY_ALLOWLIST: readonly LocalOnlyAllowlistEntry[] = Object.f
     { id: "A31", method: "POST", paths: ["/repos/{owner}/{repo}/issues/{n}/labels"], query: [], body: '{ labels: ["fx-twin-sync"] }', only: "setupInstall" },
     // D#845 ON-27d3: the verified sync commit's changes against its parent, with a renamed file's old path (GitHub's REST compare, two 40-hex commit ids, no query).
     { id: "A32", method: "GET", paths: ["/repos/{owner}/{repo}/compare/{range}"], query: [], body: "none", only: "setupInstall" },
+    // D#845 ON-27f: bringing one public issue into the private twin, on the same opt-in client (the `setup_labels` token: issues write, nothing else): the open issues (A33), one issue (A34), the one copy (A35).
+    { id: "A33", method: "GET", paths: ["/repos/{owner}/{repo}/issues"], query: ["state", "per_page"], body: "none; state is required and is exactly open", only: "setupInstall" },
+    { id: "A34", method: "GET", paths: ["/repos/{owner}/{repo}/issues/{n}"], query: [], body: "none", only: "setupInstall" },
+    { id: "A35", method: "POST", paths: ["/repos/{owner}/{repo}/issues"], query: [], body: '{ title, body, labels: ["from-public"] }', only: "setupInstall" },
   ].map((entry) => Object.freeze(entry) as LocalOnlyAllowlistEntry),
 );
 
@@ -572,6 +580,8 @@ function bodyFits(entry: LocalOnlyAllowlistEntry, body: unknown, gate1Attest: bo
       return documentBodyFits(body, SETUP_INSTALL_DOCUMENTS, SETUP_INSTALL_VARIABLES, "InstallPullRequest");
     case "A26":
       return isPlainObject(body) && hasExactKeys(body, ["name", "color", "description"]) && [...SETUP_INSTALL_LABELS, TWIN_SYNC_LABEL].some((row) => row.name === body.name && row.color === body.color && row.description === body.description);
+    case "A35":
+      return isPlainObject(body) && hasExactKeys(body, ["title", "body", "labels"]) && typeof body.title === "string" && seedTitleFits(body.title) && typeof body.body === "string" && body.body.length <= BROUGHT_ISSUE_BODY_MAX && Array.isArray(body.labels) && body.labels.length === 1 && body.labels[0] === FROM_PUBLIC_LABEL;
     case "A31":
       return isPlainObject(body) && hasExactKeys(body, ["labels"]) && Array.isArray(body.labels) && body.labels.length === 1 && body.labels[0] === TWIN_SYNC_LABEL.name;
     case "A22":
@@ -656,6 +666,8 @@ export function localOnlyViolation(req: Pick<GithubRequest, "method" | "path" | 
   const cut = req.path.search(/[?#]/);
   // A28 lists issues: without the label it would list every issue of the repository, so the label is REQUIRED, and as a query key (never written in the path).
   if (entry.id === "A28" && (cut >= 0 || (req.query ?? {}).labels !== TEAM_LOG_LABEL)) return NOT_ALLOWLISTED;
+  // A33 lists issues: only the open ones, as a query key (never written in the path).
+  if (entry.id === "A33" && (cut >= 0 || (req.query ?? {}).state !== "open")) return NOT_ALLOWLISTED;
   if (cut >= 0 && req.path[cut] === "?") {
     for (const pair of req.path.slice(cut + 1).split("#")[0]!.split("&").filter((p) => p.length > 0)) {
       const [rawKey, ...rest] = pair.split("=");

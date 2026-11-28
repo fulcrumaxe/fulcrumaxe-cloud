@@ -13,6 +13,7 @@ const TARGET = { repoId: "11111111-1111-4111-8111-111111111111", owner: "acme", 
 const LABELS = "/repos/acme/widgets/labels";
 const ROW = { name: "spec_ready", color: "0E8A16", description: "Spec is ready" };
 const PR_LABELS = "/repos/acme/widgets/issues/12/labels";
+const ISSUES = "/repos/acme/widgets/issues";
 let pem: string;
 beforeAll(() => {
   pem = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } }).privateKey;
@@ -34,6 +35,9 @@ function setup(opts: { appKind?: string; answer?: (p: Parameters<AccessTokenRequ
     if (method === "DELETE" && url.pathname === "/installation/token") return new Response(null, { status: 204 });
     if (method === "POST" && url.pathname === LABELS) return json(201, { id: 1, name: ROW.name });
     if (method === "POST" && url.pathname === PR_LABELS) return json(200, [{ name: "fx-twin-sync" }]);
+    if (method === "GET" && url.pathname === ISSUES) return json(200, [{ number: 7, title: "t", state: "open" }]);
+    if (method === "GET" && url.pathname === `${ISSUES}/7`) return json(200, { number: 7, title: "t", state: "open" });
+    if (method === "POST" && url.pathname === ISSUES) return json(201, { number: 3 });
     throw new Error(`unexpected fetch ${method} ${url}`);
   }) as unknown as typeof fetch);
   const open = createInstallationHttp({
@@ -171,6 +175,135 @@ describe("setup_labels installation kind: the twin sync label on a pull request 
       await expect(http.request({ method: "POST", path: PR_LABELS, body: { labels: ["fx-twin-sync"] } }), kind).rejects.toThrow(/path_refused|method_refused/);
     }
     expect(labelCalls(t)).toEqual([]);
+  });
+});
+
+describe("twin_issue and read installation kinds: bringing one public issue into the twin (D#845 ON-27f)", () => {
+  const copy = { title: "A title", body: "The quoted text", labels: ["from-public"] };
+
+  it("twin_issue opens the one copy through a fresh issues-write token for the one repository, and revokes it on close", async () => {
+    const t = setup();
+    const http = await t.open("twin_issue", TARGET);
+    expect(t.minted[0]).toMatchObject({ repositories: ["widgets"], permissions: { metadata: "read", issues: "write" } });
+    expect(Object.keys(t.minted[0]!.permissions as object).sort()).toEqual(["issues", "metadata"]);
+    expect(await http.request({ method: "POST", path: ISSUES, body: copy })).toEqual({ status: 201, body: { number: 3 } });
+    expect(labelCalls(t).map((c) => [c.method, c.url.pathname, c.auth])).toEqual([["POST", ISSUES, "Bearer ghs_setup_labels_1"]]);
+    await http.close?.();
+    expect(t.calls.at(-1)).toMatchObject({ method: "DELETE", auth: "Bearer ghs_setup_labels_1" });
+    await t.open("twin_issue", TARGET);
+    expect(t.minted).toHaveLength(2);
+  });
+
+  it.each([
+    ["a list of the issues", "GET", ISSUES, { state: "open" }, undefined],
+    ["a read of one issue", "GET", `${ISSUES}/7`, undefined, undefined],
+    ["the repository", "GET", "/repos/acme/widgets", undefined, undefined],
+    ["a label creation", "POST", LABELS, undefined, ROW],
+    ["a label on an issue", "POST", PR_LABELS, undefined, { labels: ["fx-twin-sync"] }],
+    ["a copy with another label", "POST", ISSUES, undefined, { ...copy, labels: ["bug"] }],
+    ["a copy with two labels", "POST", ISSUES, undefined, { ...copy, labels: ["from-public", "bug"] }],
+    ["a copy with an assignee", "POST", ISSUES, undefined, { ...copy, assignees: ["x"] }],
+    ["a copy with no body", "POST", ISSUES, undefined, undefined],
+    ["a copy with a query", "POST", ISSUES, { x: "1" }, copy],
+    ["a copy with a non-string title", "POST", ISSUES, undefined, { ...copy, title: 5 }],
+    ["a copy in another repository", "POST", "/repos/acme/other/issues", undefined, copy],
+    ["an edit of an issue", "PATCH", `${ISSUES}/7`, undefined, { state: "closed" }],
+    ["a comment on an issue", "POST", `${ISSUES}/7/comments`, undefined, { body: "x" }],
+    ["a delete", "DELETE", `${ISSUES}/7`, undefined, undefined],
+  ] as const)("twin_issue refuses %s (path_refused, nothing sent)", async (_name, method, path, query, body) => {
+    const t = setup();
+    const http = await t.open("twin_issue", TARGET);
+    await expect(http.request({ method, path, ...(query === undefined ? {} : { query }), ...(body === undefined ? {} : { body }) })).rejects.toThrow(/path_refused|method_refused/);
+    expect(labelCalls(t)).toEqual([]);
+  });
+
+  it("setup_labels itself holds no issue call any more: it neither lists, reads nor opens an issue (the install step's token cannot be used to write into a repository's issues)", async () => {
+    const t = setup();
+    const http = await t.open("setup_labels", TARGET);
+    for (const [method, path, query, body] of [["GET", ISSUES, { state: "open" }, undefined], ["GET", `${ISSUES}/7`, undefined, undefined], ["POST", ISSUES, undefined, copy]] as const) {
+      await expect(http.request({ method, path, ...(query === undefined ? {} : { query }), ...(body === undefined ? {} : { body }) }), `${method} ${path}`).rejects.toThrow(/path_refused|method_refused/);
+    }
+    expect(labelCalls(t)).toEqual([]);
+  });
+
+  it("the read kind lists and reads the public repository's issues with a token that holds no write, and cannot open one", async () => {
+    const t = setup();
+    const http = await t.open("read", TARGET);
+    expect(t.minted[0]!.permissions).toEqual({ metadata: "read", pull_requests: "read" });
+    expect((await http.request({ method: "GET", path: ISSUES, query: { state: "open", per_page: 100 } })).status).toBe(200);
+    expect((await http.request({ method: "GET", path: `${ISSUES}/7` })).status).toBe(200);
+    await expect(http.request({ method: "POST", path: ISSUES, body: copy })).rejects.toThrow(/method_refused|path_refused/);
+    expect(labelCalls(t).map((c) => [c.method, c.url.pathname])).toEqual([["GET", ISSUES], ["GET", `${ISSUES}/7`]]);
+  });
+
+  it("no other kind but twin_issue can open an issue: the pull request, repo-map and parity kinds are refused", async () => {
+    const t = setup();
+    for (const kind of ["runner_pr", "repo_map", "plane_parity"] as const) {
+      const http = await t.open(kind, TARGET);
+      await expect(http.request({ method: "POST", path: ISSUES, body: copy }), kind).rejects.toThrow(/path_refused|method_refused/);
+    }
+    expect(labelCalls(t)).toEqual([]);
+  });
+});
+
+describe("issue_read installation kind and token purpose (D#845 ON-27f, FU-324)", () => {
+  const readAnswer = { metadata: "read", issues: "read" };
+  it("mints exactly issues read and metadata read for the one repository, lists the open issues and reads one, and revokes the token on close", async () => {
+    const t = setup({ answer: () => readAnswer });
+    const http = await t.open("issue_read", TARGET);
+    expect(t.minted[0]).toMatchObject({ repositories: ["widgets"], permissions: { metadata: "read", issues: "read" } });
+    expect(Object.keys(t.minted[0]!.permissions as object).sort()).toEqual(["issues", "metadata"]);
+    expect((await http.request({ method: "GET", path: ISSUES, query: { state: "open", per_page: 100 } })).status).toBe(200);
+    expect((await http.request({ method: "GET", path: `${ISSUES}/7` })).status).toBe(200);
+    expect(labelCalls(t).map((c) => [c.method, c.url.pathname, c.auth])).toEqual([["GET", ISSUES, "Bearer ghs_setup_labels_1"], ["GET", `${ISSUES}/7`, "Bearer ghs_setup_labels_1"]]);
+    await http.close?.();
+    expect(t.calls.at(-1)).toMatchObject({ method: "DELETE", auth: "Bearer ghs_setup_labels_1" });
+    await t.open("issue_read", TARGET);
+    expect(t.minted).toHaveLength(2);
+  });
+
+  it.each([
+    ["a list with no state", "GET", ISSUES, undefined, undefined],
+    ["a list of closed issues", "GET", ISSUES, { state: "closed" }, undefined],
+    ["a list filtered by label", "GET", ISSUES, { state: "open", labels: "bug" }, undefined],
+    ["a list with a body", "GET", ISSUES, { state: "open" }, { x: 1 }],
+    ["an issue with a query", "GET", `${ISSUES}/7`, { state: "open" }, undefined],
+    ["issue zero", "GET", `${ISSUES}/0`, undefined, undefined],
+    ["the comments of an issue", "GET", `${ISSUES}/7/comments`, undefined, undefined],
+    ["the repository", "GET", "/repos/acme/widgets", undefined, undefined],
+    ["its contents", "GET", "/repos/acme/widgets/contents/README.md", undefined, undefined],
+    ["its pull requests", "GET", "/repos/acme/widgets/pulls", undefined, undefined],
+    ["another repository's issues", "GET", "/repos/acme/other/issues", { state: "open" }, undefined],
+    ["a post of an issue", "POST", ISSUES, undefined, { title: "T", body: "B", labels: ["from-public"] }],
+    ["an edit of an issue", "PATCH", `${ISSUES}/7`, undefined, { state: "closed" }],
+    ["a delete", "DELETE", `${ISSUES}/7`, undefined, undefined],
+  ] as const)("refuses %s (nothing sent)", async (_name, method, path, query, body) => {
+    const t = setup({ answer: () => readAnswer });
+    const http = await t.open("issue_read", TARGET);
+    await expect(http.request({ method, path, ...(query === undefined ? {} : { query }), ...(body === undefined ? {} : { body }) })).rejects.toThrow(/path_refused|method_refused/);
+    expect(labelCalls(t)).toEqual([]);
+  });
+
+  it("a mint whose answer holds a write, an extra permission, no issues read, or another repository is refused and revoked", async () => {
+    const answers: Array<Record<string, string>> = [{ metadata: "read", issues: "write" }, { metadata: "read", issues: "read", contents: "read" }, { metadata: "read" }];
+    for (const answer of answers) {
+      const t = setup({ answer: () => answer });
+      await expect(t.open("issue_read", TARGET), JSON.stringify(answer)).rejects.toThrow("token_scope_mismatch");
+      expect(t.calls.at(-1)).toMatchObject({ method: "DELETE", auth: "Bearer ghs_setup_labels_1" });
+    }
+  });
+
+  it("needs a read-capable App, refuses an installation-wide scope, and is never cached", async () => {
+    await expect(setup({ appKind: "sitekit" }).open("issue_read", TARGET)).rejects.toThrow();
+    const wide = { installationWide: true as const, permissions: { metadata: "read" } as const };
+    const creds = () => ({ appId: "1", privateKeyPem: pem, webhookSecret: "w" });
+    await expect(getInstallationToken({ installationId: 1, appKind: "team_readonly", purpose: "issue_read", role: "x", scope: wide, appCredentials: creds, requester: vi.fn(), cache: new InstallationTokenCache() })).rejects.toThrow("purpose_not_allowed");
+    const requester: AccessTokenRequester = vi.fn(async () => ({ token: "ghs_x", expiresAt: later(), permissions: readAnswer, repositories: ["r"] }));
+    const cache = new InstallationTokenCache();
+    const scope = { repositories: ["r"] as [string], permissions: { metadata: "read", issues: "read" } as never };
+    await getInstallationToken({ installationId: 1, appKind: "team_readonly", purpose: "issue_read", role: "x", scope, appCredentials: creds, requester, cache });
+    await getInstallationToken({ installationId: 1, appKind: "team_readonly", purpose: "issue_read", role: "x", scope, appCredentials: creds, requester, cache });
+    expect((requester as unknown as { mock: { calls: unknown[] } }).mock.calls).toHaveLength(2);
   });
 });
 

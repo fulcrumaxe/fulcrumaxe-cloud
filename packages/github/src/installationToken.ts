@@ -224,7 +224,7 @@ export class InstallationTokenCache {
  * permission set no other purpose may ask for (see MERGE_GATE_PERMISSIONS). It exists so the check-run, status and
  * branch-protection reads, and the commit-status write, are NOT in the allowlist of every other purpose.
  */
-export const MINT_PURPOSES = ["run", "preview_read", "sitekit_read", "merge_gate", "plan_read", "runner_git", "plane_push", "plane_merge", "plane_publish_read", "branch_delete", "branch_sync", "pairing_read", "receipt_block", "retraction", "revert_pr", "plane_parity", "setup_push", "setup_labels", "setup_finish", "setup_ready"] as const;
+export const MINT_PURPOSES = ["run", "preview_read", "sitekit_read", "merge_gate", "plan_read", "runner_git", "plane_push", "plane_merge", "plane_publish_read", "branch_delete", "branch_sync", "pairing_read", "issue_read", "receipt_block", "retraction", "revert_pr", "plane_parity", "setup_push", "setup_labels", "setup_finish", "setup_ready"] as const;
 export type MintPurpose = (typeof MINT_PURPOSES)[number];
 
 /**
@@ -517,6 +517,22 @@ export function assertPlanePublishReadToken(minted: Pick<MintedAccessToken, "per
   if (!readOnly || !coversOnly) throw new InstallationTokenError("token_scope_mismatch");
 }
 
+/**
+ * D#845 ON-27f (FU-324): the only permissions an `issue_read` token asks for: `metadata: read` and `issues: read` of ONE repository, to list and read the open issues of a twin's public repository. Read-only, fresh for every client and
+ * revoked by its `close()`. It is its own purpose so that the shared `read` kind (a pull request read) is not widened for every caller.
+ */
+export const ISSUE_READ_PERMISSIONS: Readonly<Record<string, "read">> = Object.freeze({ metadata: "read", issues: "read" });
+
+/** GitHub's answer to an `issue_read` mint must say the token covers exactly the one repository asked for, holds `issues: read` and nothing but reads of `metadata` and `issues`. */
+export function assertIssueReadToken(minted: Pick<MintedAccessToken, "permissions" | "repositories">, repo: string): void {
+  const perms = minted.permissions;
+  if (perms === undefined || perms === null || typeof perms !== "object" || Array.isArray(perms)) throw new InstallationTokenError("token_scope_mismatch");
+  const readOnly = Object.entries(perms).every(([k, v]) => v === "read" && k in ISSUE_READ_PERMISSIONS) && perms.issues === "read";
+  const repos = minted.repositories;
+  const coversOnly = Array.isArray(repos) && repos.length === 1 && repos[0]!.toLowerCase() === repo.toLowerCase();
+  if (!readOnly || !coversOnly) throw new InstallationTokenError("token_scope_mismatch");
+}
+
 /** GitHub's answer to a `pairing_read` mint must say the token covers exactly the one repository asked for and holds `metadata: read` and nothing else. */
 export function assertPairingReadToken(minted: Pick<MintedAccessToken, "permissions" | "repositories">, repo: string): void {
   const perms = minted.permissions;
@@ -682,6 +698,13 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
     allowed = Object.keys(REVERT_PR_PERMISSIONS);
     appKind = params.appKind;
     namespace = "revert_pr:";
+  } else if (params.purpose === "issue_read" && (params.appKind === "team" || params.appKind === "team_readonly")) {
+    // D#845 ON-27f (FU-324): one repository, metadata and issues read. Minted per client, never cached.
+    if (isWide(params.scope)) throw new InstallationTokenError("purpose_not_allowed");
+    scope = { repositories: params.scope.repositories, permissions: ISSUE_READ_PERMISSIONS };
+    allowed = Object.keys(ISSUE_READ_PERMISSIONS);
+    appKind = params.appKind;
+    namespace = "issue_read:";
   } else if (params.purpose === "pairing_read" && (params.appKind === "team" || params.appKind === "team_readonly")) {
     // D#598 PAIR-PICKER-API: one repository, metadata read. Minted per read, never cached.
     if (isWide(params.scope)) throw new InstallationTokenError("purpose_not_allowed");
@@ -724,7 +747,7 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
     throw new InstallationTokenError("permission_not_allowed");
   }
 
-  const neverCached = params.purpose === "plane_push" || params.purpose === "plane_merge" || params.purpose === "plane_publish_read" || params.purpose === "branch_delete" || params.purpose === "branch_sync" || params.purpose === "pairing_read" || params.purpose === "retraction" || params.purpose === "revert_pr" || params.purpose === "plane_parity" || params.purpose === "setup_push" || params.purpose === "setup_labels" || params.purpose === "setup_finish" || params.purpose === "setup_ready";
+  const neverCached = params.purpose === "issue_read" || params.purpose === "plane_push" || params.purpose === "plane_merge" || params.purpose === "plane_publish_read" || params.purpose === "branch_delete" || params.purpose === "branch_sync" || params.purpose === "pairing_read" || params.purpose === "retraction" || params.purpose === "revert_pr" || params.purpose === "plane_parity" || params.purpose === "setup_push" || params.purpose === "setup_labels" || params.purpose === "setup_finish" || params.purpose === "setup_ready";
   if (params.fresh === true && !neverCached) throw new InstallationTokenError("purpose_not_allowed");
   // D#598 C4: a plane_push token is never cached on any path, so it is fresh whatever the caller passes. Nothing is read from or written to the cache for it.
   // The same holds for a plane_publish_read token, which is minted and revoked for one proxied request.
@@ -774,6 +797,14 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
     try {
       // The same shape as the publish read: exactly metadata and contents at read, and the one repository.
       assertPlanePublishReadToken(minted, (scope as MergeGateScope).repositories[0]);
+    } catch (error) {
+      await params.revoke?.(minted.token).catch(() => undefined);
+      throw error;
+    }
+  }
+  if (params.purpose === "issue_read") {
+    try {
+      assertIssueReadToken(minted, (scope as MergeGateScope).repositories[0]);
     } catch (error) {
       await params.revoke?.(minted.token).catch(() => undefined);
       throw error;

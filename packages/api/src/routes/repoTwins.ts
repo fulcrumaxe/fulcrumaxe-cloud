@@ -21,7 +21,21 @@ export const twinRouteDeps: {
   closeSyncPr: ((input: { accountId: string; userId: string; twinId: string }) => Promise<unknown>) | null;
   /** D#845 ON-27d4c: Merge. Merges the open publish pull request through the App (set by the app). With none, the route answers 503 `not_configured`. */
   mergePr: ((input: { accountId: string; userId: string; twinId: string }) => Promise<TwinMergeAnswer>) | null;
-} = { enabled: TWIN_ENABLED, closePublishPr: null, closeSyncPr: null, mergePr: null };
+  /** D#845 ON-27f: the open issues of the twin's public repository (set by the app). With none, the route answers 503 `not_configured`. */
+  listIssues: ((input: { accountId: string; userId: string; twinId: string }) => Promise<TwinIssuesAnswer>) | null;
+  /** D#845 ON-27f: brings one public issue into the private twin (set by the app). With none, the route answers 503 `not_configured`. */
+  bringIssue: ((input: { accountId: string; userId: string; twinId: string; issue: number }) => Promise<TwinBringAnswer>) | null;
+} = { enabled: TWIN_ENABLED, closePublishPr: null, closeSyncPr: null, mergePr: null, listIssues: null, bringIssue: null };
+
+/** The answers `listIssues` and `bringIssue` give (the shapes of runner-cloud's `TwinIssueList` and `TwinIssueBring`, which this package cannot import). */
+export type TwinIssuesAnswer =
+  | { result: "ok"; issues: Array<{ number: number; title: string; author: string; brought: number | null }>; canBring: boolean }
+  | { result: "not_found" | "github_unavailable" }
+  | { result: "twin_state"; state: string };
+export type TwinBringAnswer =
+  | { result: "ok" | "already"; privateIssue: number }
+  | { result: "not_found" | "no_issue" | "issue_not_open" | "github_unavailable" | "not_private" | "visibility_unknown" | "in_progress" }
+  | { result: "twin_state"; state: string };
 
 /** The answer `mergePr` gives (the shape of runner-cloud's `TwinMerge`, which this package cannot import). */
 export type TwinMergeAnswer =
@@ -235,6 +249,84 @@ export const repoTwinRoutes: RouteEntry[] = [
           throw new ApiError(409, "twin_pr_changed", "the pull request was closed or changed on GitHub; look at it again");
         case "pr_blocked":
           throw new ApiError(409, "twin_pr_blocked", "GitHub will not merge this yet; it may need a passing check or a review first. Finish those on GitHub, then try again");
+        default:
+          throw new ApiError(503, "github_unavailable", "GitHub could not be reached; try again");
+      }
+    },
+  },
+  {
+    method: "GET",
+    path: "/api/v1/twins/{id}/issues",
+    operationId: "listRepoTwinIssues",
+    summary: "The open issues of the twin's public repo (newest 20, no pull requests), read through the GitHub App",
+    description: "Any member; `{id}` is the twin. Each item is the issue's number, title and author login, and `brought_issue`: the number of the private issue it was brought into, or null. `can_bring` is true for an owner or admin, who may bring one with the bring route.",
+    extraResponses: { "404": "`not_found`: no such twin.", "409": "`twin_state`: the twin is not ready, paused or in conflict (`data.state` is what it is).", "503": "`not_configured` (private twins are not on yet, or no GitHub App) or `github_unavailable`." },
+    minRole: "member",
+    idempotency: "never",
+    rateClass: "read",
+    paramsSchema: idParams,
+    responseSchema: z.object({
+      issues: z.array(z.object({ number: z.number().int(), title: z.string(), author: z.string(), brought_issue: z.number().int().nullable() })),
+      can_bring: z.boolean(),
+    }),
+    async handler(ctx, input) {
+      enabled();
+      assertRepoIdShape(input.params.id!);
+      if (twinRouteDeps.listIssues === null) throw new ApiError(503, "not_configured", "listing issues is not available now");
+      const out = await twinRouteDeps.listIssues({ accountId: ctx.principal.accountId, userId: ctx.principal.userId, twinId: input.params.id! });
+      switch (out.result) {
+        case "ok":
+          return { issues: out.issues.map((i) => ({ number: i.number, title: i.title, author: i.author, brought_issue: i.brought })), can_bring: out.canBring };
+        case "not_found":
+          throw new ApiError(404, "not_found", "no such twin");
+        case "twin_state":
+          throw new ApiError(409, "twin_state", `a twin that is ${out.state} has no issues to bring`, undefined, { state: out.state });
+        default:
+          throw new ApiError(503, "github_unavailable", "GitHub could not be reached; try again");
+      }
+    },
+  },
+  {
+    method: "POST",
+    path: "/api/v1/twins/{id}/issues/{number}/bring",
+    operationId: "bringRepoTwinIssue",
+    summary: "Bring one open issue of the public repo into the private twin as an issue there",
+    description:
+      "Owner or admin; `{id}` is the twin and `{number}` the public issue. The cloud reads that issue's title and body through the GitHub App and opens an issue in the private repo: the same title, the label `from-public`, and a body of a fixed header (who brought it; the text is the public author's and untrusted) and the original text, quoted and inert, cut to 64 KiB. No comments, no attachments. Once per public issue: a second call answers `already: true` and the private issue's number, and makes no GitHub call.",
+    extraResponses: {
+      "404": "`not_found`: no such twin or no such issue.",
+      "409": "`twin_state` (the twin is not ready, paused or in conflict; `data.state` is what it is), `issue_not_open` (it is a pull request or closed), `issue_bring_in_progress` (another click is bringing it right now) or `twin_not_private` (the private repo is no longer private: nothing was written).",
+      "422": "`validation_failed`: the issue number is not a number.",
+      "503": "`not_configured` (private twins are not on yet, or no GitHub App) or `github_unavailable`.",
+    },
+    minRole: "admin",
+    idempotency: "never",
+    rateClass: "write",
+    paramsSchema: z.object({ id: z.string(), number: z.string() }),
+    responseSchema: z.object({ private_issue: z.number().int(), already: z.boolean() }),
+    async handler(ctx, input) {
+      enabled();
+      assertRepoIdShape(input.params.id!);
+      const issue = /^[1-9][0-9]{0,8}$/.test(input.params.number ?? "") ? Number(input.params.number) : null;
+      if (issue === null) throw new ApiError(422, "validation_failed", "request failed validation", [{ path: "number", code: "invalid" }]);
+      if (twinRouteDeps.bringIssue === null) throw new ApiError(503, "not_configured", "bringing an issue is not available now");
+      const out = await twinRouteDeps.bringIssue({ accountId: ctx.principal.accountId, userId: ctx.principal.userId, twinId: input.params.id!, issue });
+      switch (out.result) {
+        case "ok":
+        case "already":
+          return { private_issue: out.privateIssue, already: out.result === "already" };
+        case "not_found":
+          throw new ApiError(404, "not_found", "no such twin");
+        case "no_issue":
+          throw new ApiError(404, "not_found", "no such issue");
+        case "twin_state":
+          throw new ApiError(409, "twin_state", `a twin that is ${out.state} cannot take an issue`, undefined, { state: out.state });
+        case "issue_not_open":
+          throw new ApiError(409, "issue_not_open", "only an open issue can be brought; this one is closed or is a pull request");
+        case "in_progress":
+          throw new ApiError(409, "issue_bring_in_progress", "this issue is being brought in right now; look again in a moment");
+        case "not_private":
+          throw new ApiError(409, "twin_not_private", "the private repo is no longer private, so nothing was brought into it");
         default:
           throw new ApiError(503, "github_unavailable", "GitHub could not be reached; try again");
       }

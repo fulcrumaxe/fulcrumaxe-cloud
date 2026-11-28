@@ -245,6 +245,11 @@ export class FakeGithub implements GithubClient {
       if (req.body !== undefined) this.deny("body on GET");
       return { label: "A28", handler: () => this.listIssues(m![1]!, m![2]!, query) };
     }
+    if (method === "GET" && (m = /^\/repos\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/issues\/([1-9]\d*)$/.exec(path))) {
+      noQuery([]);
+      if (req.body !== undefined) this.deny("body on GET");
+      return { label: "A34", handler: () => this.getIssue(m![1]!, m![2]!, Number(m![3])) };
+    }
     if (method === "POST" && (m = /^\/repos\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/issues$/.exec(path))) {
       noQuery([]);
       if (!keysAre(req.body, ["title", "body", "labels"])) this.deny("A29 body");
@@ -298,10 +303,19 @@ export class FakeGithub implements GithubClient {
     return ok(found.slice(0, perPage).map((i) => ({ number: i.number, title: i.title, body: i.body, state: i.state, labels: i.labels.map((n) => ({ name: n })), user: { login: (i.author ?? { login: FAKE_APP_LOGIN, type: "Bot" }).login, type: (i.author ?? { type: "Bot" }).type, id: 4242 }, ...(i.pull_request ? { pull_request: { url: "https://api.github.com/x" } } : {}) })));
   }
 
+  /** D#845 ON-27f (A34): one issue by number, in the service's shape: a pull request answers here too (with its `pull_request` key), a number with nothing behind it is 404. */
+  private getIssue(owner: string, name: string, number: number): GithubResponse {
+    const repo = this.repoOf(owner, name);
+    const i = repo?.issues.find((x) => x.number === number);
+    if (!repo || !i) return notFound();
+    return ok({ number: i.number, title: i.title, body: i.body, state: i.state, labels: i.labels.map((n) => ({ name: n })), user: { login: (i.author ?? { login: FAKE_APP_LOGIN, type: "Bot" }).login, type: (i.author ?? { type: "Bot" }).type, id: 4242 }, ...(i.pull_request ? { pull_request: { url: "https://api.example.test/x" } } : {}) });
+  }
+
   private createIssue(owner: string, name: string, body: { title: string; body: string; labels: string[] }): GithubResponse {
     const repo = this.repoOf(owner, name);
     if (!repo) return notFound();
     if (typeof body.title !== "string" || body.title.length < 1 || body.title.length > 256) throw new StrictFakeError("A29: an issue needs a title of 1 to 256 characters");
+    if (typeof body.body === "string" && body.body.length > 65536) throw new StrictFakeError("A29: an issue body is at most 65536 characters (GitHub answers 422)");
     if (typeof body.body !== "string" || !Array.isArray(body.labels) || !body.labels.every((l) => typeof l === "string")) throw new StrictFakeError("A29: body is text and labels are names");
     const number = repo.nextNumber++;
     repo.issues.push({ number, title: body.title, body: body.body, labels: [...body.labels], state: "open" });
@@ -520,19 +534,23 @@ export class FakeGithub implements GithubClient {
  *   - `runner_pr`:    `POST /graphql`, `GET` the repository, `GET` and `POST` its `/pulls`, `PATCH /pulls/<digits>`. Nothing else, so no `/labels`.
  *   - `setup_labels`: `POST /repos/<o>/<r>/labels` with a body of exactly name, color and description, no query. Nothing else.
  *   - `setup_ready`:  (D#845 ON-24a) `POST /graphql` and nothing else. Its token holds contents write, the only one of the pull request kinds besides `merge_gate` that does.
+ *   - `issue_read` and `twin_issue`: (D#845 ON-27f) see below.
  *   - `setup_finish`: (D#845 ON-13a4) `POST /graphql`, and `GET` and `POST` of `/repos/<o>/<r>/issues`. Nothing else: no repository read, no pulls, no labels.
  * A request outside the kind's list is rejected `path_refused` (as the live client does, before anything is sent) and counts in `denied`; one inside it is answered by the strict fake. The live lists are proven
  * against the real client in packages/github (setupLabels.test.ts) and apps/web (runnerPullRequest.test.ts); this keeps the port tests from passing on a path the live kind would refuse.
  */
 /** What the fake knows of the client behind a call: whether its token holds `contents: write`, and the one repository an installation token covers (absent: no limit). */
 export type FakeToken = { contentsWrite: boolean; repo?: { owner: string; name: string } };
-export type FakeInstallationKind = "runner_pr" | "setup_labels" | "setup_finish" | "merge_gate" | "setup_ready";
+export type FakeInstallationKind = "runner_pr" | "setup_labels" | "setup_finish" | "merge_gate" | "setup_ready" | "issue_read" | "twin_issue";
 export function installationKindClient(fake: FakeGithub, kind: FakeInstallationKind, repo?: { owner: string; name: string }): GithubClient {
   const repoRoot = /^\/repos\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+/;
   const allowed = (req: GithubRequest): boolean => {
     const rest = repoRoot.test(req.path) ? req.path.replace(repoRoot, "") : null;
     // `merge_gate` (D#845 ON-20a, the install merge): its live path rule is any path under the repository, so here too (the strict fake then answers or refuses by its own table). Its token holds contents write.
     if (kind === "merge_gate") return rest !== null;
+    // D#845 ON-27f: `issue_read` is the read-only kind (installationHttp.ts: GET alone, the open issues and one issue, a token of issues read and metadata read); `twin_issue` opens the one copy: POST /issues, a body of exactly title, body and the label `from-public`.
+    if (kind === "issue_read") return req.method === "GET" && req.body === undefined && ((rest === "/issues" && req.query?.state === "open" && Object.keys(req.query).every((k) => k === "state" || k === "per_page")) || (rest !== null && /^\/issues\/[1-9]\d{0,9}$/.test(rest) && req.query === undefined));
+    if (kind === "twin_issue") return req.method === "POST" && req.query === undefined && rest === "/issues" && keysAre(req.body, ["title", "body", "labels"]) && JSON.stringify((req.body as { labels: unknown }).labels) === '["from-public"]';
     if (kind === "setup_labels") return req.method === "POST" && req.query === undefined && ((rest === "/labels" && keysAre(req.body, ["name", "color", "description"])) || (rest !== null && /^\/issues\/[1-9]\d*\/labels$/.test(rest) && keysAre(req.body, ["labels"])));
     if (kind === "setup_ready") return req.method === "POST" && req.path === "/graphql";
     if (kind === "setup_finish") return (req.method === "POST" && req.path === "/graphql") || (rest === "/issues" && (req.method === "GET" || req.method === "POST"));
@@ -555,5 +573,5 @@ export function installationKindClient(fake: FakeGithub, kind: FakeInstallationK
   };
 }
 /** What `createRunPullRequestPort` is given as `open`: the pull request kind, or `setup_labels` / `setup_finish` / `setup_merge` when the port asks for it (`setup_merge` is the merge gate's installation kind). */
-export const openInstallationKinds = (fake: FakeGithub) => async (repo: { owner: string; name: string }, purpose?: "setup_labels" | "setup_finish" | "setup_merge" | "setup_ready"): Promise<GithubClient> =>
+export const openInstallationKinds = (fake: FakeGithub) => async (repo: { owner: string; name: string }, purpose?: "setup_labels" | "setup_finish" | "setup_merge" | "setup_ready" | "issue_read" | "twin_issue"): Promise<GithubClient> =>
   installationKindClient(fake, purpose === "setup_merge" ? "merge_gate" : (purpose ?? "runner_pr"), repo);

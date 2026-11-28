@@ -221,6 +221,7 @@ export { guardTwinVisibility, type TwinVisibilityGuard } from "./twinVisibility.
 export { checkTwinSeed, issueTwinSeed, type IssuedTwinSeed, type TwinSeedCheck } from "./twinSeed.js";
 export { buildTwinSyncText, checkTwinSync, closeTwinSyncPr, issueTwinSync, openTwinSyncPr, type IssuedTwinSync, type TwinSyncCheck, type TwinSyncClose, type TwinSyncPrOpen } from "./twinSync.js";
 export { mergeTwinPr, TwinMergeAuditFailed, TWIN_MERGE_AUDIT_FAILED_STAGE, type TwinMerge } from "./twinMerge.js";
+export { bringTwinIssue, listTwinIssues, TwinIssueRecordFailed, TWIN_ISSUE_RECORD_FAILED_STAGE, type TwinIssueBring, type TwinIssueItem, type TwinIssueList } from "./twinIssues.js";
 export { checkTwinPublish, closeTwinPublishPr, issueTwinPublish, TWIN_PUBLISH_CLOSE_COMMENT, type IssuedTwinPublish, type TwinPublishCheck, type TwinPublishClose } from "./twinPublish.js";
 export {
   moveEngineProject,

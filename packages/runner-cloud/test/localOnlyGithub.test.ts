@@ -107,6 +107,9 @@ describe("the local-only GitHub allowlist (D#6 R2b-3, body criterion 9, C22 sect
       { id: "A30", method: "POST", paths: ["/graphql"], query: [], body: "{ query: InstallPullRequest, variables: exactly owner, name, number, optional cursor }", only: "setupInstall" },
       { id: "A31", method: "POST", paths: ["/repos/{owner}/{repo}/issues/{n}/labels"], query: [], body: '{ labels: ["fx-twin-sync"] }', only: "setupInstall" },
       { id: "A32", method: "GET", paths: ["/repos/{owner}/{repo}/compare/{range}"], query: [], body: "none", only: "setupInstall" },
+      { id: "A33", method: "GET", paths: ["/repos/{owner}/{repo}/issues"], query: ["state", "per_page"], body: "none; state is required and is exactly open", only: "setupInstall" },
+      { id: "A34", method: "GET", paths: ["/repos/{owner}/{repo}/issues/{n}"], query: [], body: "none", only: "setupInstall" },
+      { id: "A35", method: "POST", paths: ["/repos/{owner}/{repo}/issues"], query: [], body: '{ title, body, labels: ["from-public"] }', only: "setupInstall" },
     ]);
     expect(Object.isFrozen(LOCAL_ONLY_ALLOWLIST)).toBe(true);
   });

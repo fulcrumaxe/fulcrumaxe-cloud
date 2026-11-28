@@ -116,10 +116,10 @@ describe('twin_merge_record [pg]', () => {
     expect(await merge(a, adminA, t)).toBe('ok');
   });
 
-  it("pins the audit policy's exact action list: 1116's eight plus twin.merged, nothing more and nothing less", async () => {
+  it("the audit policy still holds 1116's eight and twin.merged, and nothing outside the twin family (the exact current list is pinned by twin-issue-import.pg.test.ts, migration 1118, which restated it)", async () => {
     const pol = (await admin.query<{ with_check: string }>("SELECT with_check FROM pg_policies WHERE tablename = 'audit_log' AND policyname = 'repo_twins_owner_audit'")).rows[0]!;
     const actions = [...pol.with_check.matchAll(/'(twin\.[a-z_]+)'/g)].map((m) => m[1]).sort();
-    expect(actions).toEqual(['twin.connected', 'twin.created', 'twin.install_paths_added', 'twin.merged', 'twin.paused', 'twin.paths_changed', 'twin.refused', 'twin.removed', 'twin.resumed'].sort());
+    expect(actions).toEqual(expect.arrayContaining(['twin.connected', 'twin.created', 'twin.install_paths_added', 'twin.merged', 'twin.paused', 'twin.paths_changed', 'twin.refused', 'twin.removed', 'twin.resumed']));
     // every other quoted word in the check is the setting's name or empty: no action of another family slipped in
     const others = [...pol.with_check.matchAll(/'([a-z_.]+)'/g)].map((m) => m[1]!).filter((w) => !w.startsWith('twin.'));
     expect(others).toEqual(['app.account_id']);

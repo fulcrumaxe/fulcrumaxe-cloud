@@ -35,6 +35,15 @@ describe("createAppRunPullRequestPort", () => {
     expect((t.sent[0]!.body as { variables: unknown }).variables).toEqual({ owner: "acme", name: "widgets", number: 4 });
   });
 
+  it("D#845 ON-27f: the public repository's issues are listed and read through the read-only `issue_read` kind, and the one copy is opened through the `twin_issue` kind (never the labels or pull request kinds)", async () => {
+    const t = setup((req) => (req.method === "POST" ? { status: 201, body: { number: 5 } } : { status: 200, body: [] }));
+    await t.port.listOpenIssues({ repo: REPO, limit: 20 });
+    await t.port.createBroughtIssue({ repo: REPO, title: "T", body: "B" });
+    const T = { repoId: REPO.id, owner: "acme", name: "widgets" };
+    expect(t.opened).toEqual([["issue_read", T], ["twin_issue", T]]);
+    expect(t.sent.map((r) => [r.method, r.path])).toEqual([["GET", "/repos/acme/widgets/issues"], ["POST", "/repos/acme/widgets/issues"]]);
+  });
+
   it("opens the setup_ready kind for the install's mark-ready (D#845 ON-24a), and the runner_pr kind for the run's", async () => {
     const ready = { status: 200, body: { data: { markPullRequestReadyForReview: { pullRequest: { number: 4, isDraft: false } } } } };
     const t = setup(() => ready);

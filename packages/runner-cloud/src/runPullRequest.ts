@@ -2,7 +2,7 @@ import { COPY } from "@fulcrumaxe/runner-protocol";
 import { safeChildTitle } from "@fx/core/src/work-items/childTitle.js";
 import { cleanWorkItemTitle } from "@fx/core/src/work-items/title.js";
 import type { TenantQueryable } from "./acceptanceScope.js";
-import { LocalOnlyGithubError, SETUP_INSTALL_LABELS, TEAM_LOG_LABEL, TWIN_SYNC_LABEL, localOnlyGithub, type GithubClient, type GithubGraphqlOperation, type GithubResponse, type InstallMergePin, type LocalOnlyGithub } from "./localOnlyGithub.js";
+import { FROM_PUBLIC_LABEL, LocalOnlyGithubError, SETUP_INSTALL_LABELS, TEAM_LOG_LABEL, TWIN_SYNC_LABEL, localOnlyGithub, type GithubClient, type GithubGraphqlOperation, type GithubResponse, type InstallMergePin, type LocalOnlyGithub } from "./localOnlyGithub.js";
 
 /**
  * D#6 R2b-3e (C21 section 5, C22 section 6): the GitHub port the `done` route will use for a `runner_local` repo. There is no
@@ -141,6 +141,12 @@ export interface SetupInstallPort extends RunPullRequestPort {
   commitChanges(input: { repo: PullRequestRepo; base: string; head: string }): Promise<CommitChanges>;
   /** D#845 ON-27d3 (A26, A31): makes the twin sync label in the repository (one that exists counts as made) and puts it on pull request `number`, through the `setup_labels` client. */
   labelTwinSync(input: { repo: PullRequestRepo; number: number }): Promise<void>;
+  /** D#845 ON-27f (A33): the newest open issues of the repository that are not pull requests, at most `limit` (1 to 100), through the read-only `issue_read` client. */
+  listOpenIssues(input: { repo: PullRequestRepo; limit: number }): Promise<PublicIssue[]>;
+  /** D#845 ON-27f (A34): one issue as GitHub shows it now, or null when the repository has none of that number. */
+  readIssue(input: { repo: PullRequestRepo; number: number }): Promise<IssueRead | null>;
+  /** D#845 ON-27f (A35): opens an issue in the repository carrying the one label `from-public`, through the `twin_issue` client (that one call and nothing else); answers its number. The caller builds the text, and passes the twin's PRIVATE repository. */
+  createBroughtIssue(input: { repo: PullRequestRepo; title: string; body: string }): Promise<number>;
   /**
    * D#845 ON-20a (A10): squash-merges pull request `number` at head `sha`, on a client pinned to exactly that number and sha (any other call is refused before it is sent). `merged`; `changed` when GitHub says
    * the head moved (409); `blocked` when it will not merge yet (405: a required check or review, or a conflict). The install merge route is its ONLY caller: the install step, the watch and the reconcile never merge.
@@ -148,8 +154,24 @@ export interface SetupInstallPort extends RunPullRequestPort {
   mergeInstall(input: { repo: PullRequestRepo; number: number; sha: string }): Promise<"merged" | "changed" | "blocked">;
 }
 
-/** The clients the install flow opens besides the pull request client: the one that creates labels, and the one that merges (the merge gate's token). */
-export type InstallPurpose = "setup_labels" | "setup_finish" | "setup_merge" | "setup_ready";
+/** D#845 ON-27f: an open issue as the twin card lists it: the number, the title and the author's login, and nothing else. */
+export interface PublicIssue {
+  number: number;
+  title: string;
+  author: string;
+}
+/** D#845 ON-27f: one issue read in full. `pull` is a pull request (GitHub lists those among the issues). */
+export interface IssueRead extends PublicIssue {
+  body: string;
+  open: boolean;
+  pull: boolean;
+}
+
+/**
+ * The clients the install flow opens besides the pull request client: the one that creates labels, and the one that merges (the merge gate's token). D#845 ON-27f adds two for bringing an issue into a twin:
+ * `issue_read` is the READ-ONLY client (GET alone, no write token) for the public repository's issues, and `twin_issue` is the one that opens the one copy in the private repository (`POST /issues`, exact body, nothing else).
+ */
+export type InstallPurpose = "setup_labels" | "setup_finish" | "setup_merge" | "setup_ready" | "issue_read" | "twin_issue";
 export interface InstallPullRequest {
   state: "OPEN" | "CLOSED" | "MERGED";
   merged: boolean;
@@ -329,6 +351,15 @@ function isPermanentOpenFailure(error: unknown): boolean {
   if (typeof error !== "object" || error === null) return false;
   const e = error as { code?: unknown; reason?: unknown };
   return e.code === "installation_not_writable" || e.reason === "no_installation";
+}
+
+/** One issue row of GitHub's REST answer: number, title, author login (a deleted account has none: `ghost`), body (null is empty), state, and whether it is really a pull request. Any other shape is malformed. */
+function issueFrom(raw: unknown): IssueRead {
+  if (!isObject(raw) || !isCount(raw.number) || raw.number < 1 || typeof raw.title !== "string" || (raw.state !== "open" && raw.state !== "closed")) return malformed();
+  const user = raw.user;
+  if (user !== null && user !== undefined && !(isObject(user) && typeof user.login === "string")) return malformed();
+  if (raw.body !== null && raw.body !== undefined && typeof raw.body !== "string") return malformed();
+  return { number: raw.number, title: raw.title, author: isObject(user) ? (user.login as string) : "ghost", body: typeof raw.body === "string" ? raw.body : "", open: raw.state === "open", pull: raw.pull_request !== undefined };
 }
 
 const repoPath = (repo: PullRequestRepo): string => `/repos/${repo.owner}/${repo.name}`;
@@ -530,6 +561,51 @@ export function createRunPullRequestPort(deps: {
         checkStatus(await guarded(() => gh.request({ method: "POST", path: `${repoPath(repo)}/issues/${number}/labels`, body: { labels: [TWIN_SYNC_LABEL.name] } })), [200]);
       } finally {
         // The `setup_labels` token holds an issues write: it is revoked as soon as the call ends, whatever its answer.
+        await gh.close?.();
+      }
+    },
+
+    async listOpenIssues({ repo, limit }) {
+      if (!isCount(limit) || limit < 1 || limit > 100) return malformed();
+      const gh = await client(repo, { setupInstall: true, purpose: "issue_read" });
+      try {
+        const res = await guarded(() => gh.request({ method: "GET", path: `${repoPath(repo)}/issues`, query: { state: "open", per_page: 100 } }));
+        checkStatus(res, [200]);
+        if (!Array.isArray(res.body)) return malformed();
+        // The list holds pull requests too (each has a `pull_request` key) and is newest first; a row that is not an issue shape is a malformed answer, never skipped.
+        const out: PublicIssue[] = [];
+        for (const item of res.body as unknown[]) {
+          const one = issueFrom(item);
+          if (!one.pull && out.length < limit) out.push({ number: one.number, title: one.title, author: one.author });
+        }
+        return out;
+      } finally {
+        // The read-only client holds nothing to revoke; close() is still called.
+        await gh.close?.();
+      }
+    },
+
+    async readIssue({ repo, number }) {
+      if (!isCount(number) || number < 1) return malformed();
+      const gh = await client(repo, { setupInstall: true, purpose: "issue_read" });
+      try {
+        const res = await guarded(() => gh.request({ method: "GET", path: `${repoPath(repo)}/issues/${number}` }));
+        if (res.status === 404 || res.status === 410) return null;
+        checkStatus(res, [200]);
+        const one = issueFrom(res.body);
+        return one.number === number ? one : malformed();
+      } finally {
+        await gh.close?.();
+      }
+    },
+
+    async createBroughtIssue({ repo, title, body }) {
+      const gh = await client(repo, { setupInstall: true, purpose: "twin_issue" });
+      try {
+        const res = await guarded(() => gh.request({ method: "POST", path: `${repoPath(repo)}/issues`, body: { title, body, labels: [FROM_PUBLIC_LABEL] } }));
+        checkStatus(res, [201]);
+        return isObject(res.body) && isCount(res.body.number) && res.body.number >= 1 ? res.body.number : malformed();
+      } finally {
         await gh.close?.();
       }
     },

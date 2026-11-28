@@ -2178,6 +2178,34 @@ export interface Operations {
       pr: number;
     };
   };
+  listRepoTwinIssues: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      issues: Array<{
+        number: number;
+        title: string;
+        author: string;
+        brought_issue: (number) | (null);
+      }>;
+      can_bring: boolean;
+    };
+  };
+  bringRepoTwinIssue: {
+    path: {
+      id: string;
+      number: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      private_issue: number;
+      already: boolean;
+    };
+  };
   removeRepoTwin: {
     path: {
       id: string;
@@ -7512,6 +7540,28 @@ export const operations = {
     pathParams: ["id"],
     queryParams: [],
     hasBody: true,
+  },
+  listRepoTwinIssues: {
+    method: "GET",
+    path: "/api/v1/twins/{id}/issues",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  bringRepoTwinIssue: {
+    method: "POST",
+    path: "/api/v1/twins/{id}/issues/{number}/bring",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id","number"],
+    queryParams: [],
+    hasBody: false,
   },
   removeRepoTwin: {
     method: "DELETE",
