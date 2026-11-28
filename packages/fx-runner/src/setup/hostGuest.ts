@@ -40,7 +40,7 @@ import { EGRESS_FORWARD_PORT } from "./egressServe.js";
 
 /** Why the host guest refused. Closed set; no value of a job is in it. */
 export class HostGuestRefused extends Error {
-  constructor(readonly code: "env_refused" | "path_refused" | "sandbox_unavailable" | "closed" | "root_unusable" | "command_alive") {
+  constructor(readonly code: "env_refused" | "path_refused" | "sandbox_unavailable" | "closed" | "root_unusable" | "command_alive" | "wsl_mirrored_networking") {
     super(code);
     this.name = "HostGuestRefused";
   }
@@ -181,6 +181,8 @@ export function createHostGuest(deps: HostGuestDeps, name: string, root: string)
   const settingsNow = (): Record<string, unknown> => {
     let wslDeny: string[] | undefined;
     if (deps.wsl?.clearance !== undefined) {
+      // D#587 B-9d: the host guest runs a machine job in the host's own sandbox, so a clearance that was not granted for NAT networking refuses it, as for an ordinary job.
+      if (!deps.wsl.clearance.nat) throw new HostGuestRefused("wsl_mirrored_networking");
       const table = deps.wsl.mountinfo();
       if (deps.wsl.interopEntry() || table === undefined || table.trim() === "") throw new HostGuestRefused("sandbox_unavailable");
       wslDeny = [...new Set([...deps.wsl.clearance.denyPaths, ...wslDenyPaths(deps.wsl)])];

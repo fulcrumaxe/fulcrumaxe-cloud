@@ -29,7 +29,7 @@ import { toolchainReport } from "../sandbox/toolchain.js";
 import { findCliStubs } from "../daemon/cliStubs.js";
 import { ENGINE_LINES, engineLineOf, missingCaps, type VmHostFacts } from "../vm/limits.js";
 import { vmTokenLine, vmTokenStatus } from "../credentials/vmToken.js";
-import { loadSettings, omitsDevToken } from "../runnerSettings.js";
+import { gateEngine, loadSettings, omitsDevToken } from "../runnerSettings.js";
 import { vmInstallChecks, type VmInstallFacts } from "../vm/doctorChecks.js";
 import { VM_CHECKS, fixText, preflightChecks, probeNetwork, type NetworkPorts, type PreflightFacts } from "../daemon/preflight.js";
 import { updatesLine } from "./update.js";
@@ -119,7 +119,7 @@ async function sandboxCheck(ctx: CommandContext, host: DoctorHost, binaryPath: s
  * sandbox line because a cleared machine is what lets that line pass; anywhere else it prints nothing.
  */
 async function wslCheck(ctx: CommandContext, host: DoctorHost, binaryPath: string | undefined, line: (level: Level, label: string, detail: string) => void): Promise<void> {
-  const gate = await clearWsl({ platform: host.platform, osrelease: host.osrelease, home: host.home, stateDir: ctx.stateDir, binaryPath, xdgCacheHome: host.xdgCacheHome, searchPath: cleanEnv({ mode: "subscription" }).PATH ?? "", host: host.sandbox });
+  const gate = await clearWsl({ platform: host.platform, osrelease: host.osrelease, home: host.home, stateDir: ctx.stateDir, binaryPath, xdgCacheHome: host.xdgCacheHome, searchPath: cleanEnv({ mode: "subscription" }).PATH ?? "", host: host.sandbox, engine: gateEngine(ctx.stateDir) });
   if (!gate.wsl2) return;
   for (const item of gate.items) line(item.ok ? "PASS" : "FAIL", "WSL2", item.ok ? item.detail : `${item.code}: ${item.detail}`);
   if (gate.cleared) line("INFO", "WSL2", gate.loopback ? "networking mode is NAT: loopback allowances are granted as asked" : "networking mode is mirrored or not known: jobs may not ask for a loopback bind");

@@ -1,4 +1,5 @@
 import { mkdirSync, rmSync } from "node:fs";
+import { MIRRORED_NETWORKING_COPY } from "./wslGate.js";
 import path from "node:path";
 import { SURVEY_ROLE, type AgentHandle, type AgentRuntime, type NormalizedEvent } from "@fulcrumaxe/runner-protocol";
 import { cleanEnv, type CleanEnvOptions, type CredentialMode } from "../job/cleanEnv.js";
@@ -87,7 +88,7 @@ export interface HostSandboxConfig {
 
 /** Why a sandbox start was refused. Closed set. The message never carries a value from a job. */
 export class HostSandboxRefused extends Error {
-  constructor(readonly code: "network_rule_forbidden" | "env_not_clean" | "bad_workdir" | "sandbox_busy" | "sandbox_timeout" | "bad_sandbox_name" | "sandbox_exists" | "sandbox_allowance_forbidden" | "job_env_unsafe" | "no_publish_sandbox" | "wsl_machine_changed", detail?: string) {
+  constructor(readonly code: "network_rule_forbidden" | "env_not_clean" | "bad_workdir" | "sandbox_busy" | "sandbox_timeout" | "bad_sandbox_name" | "sandbox_exists" | "sandbox_allowance_forbidden" | "job_env_unsafe" | "no_publish_sandbox" | "wsl_machine_changed" | "wsl_mirrored_networking", detail?: string) {
     super(detail === undefined ? code : `${code}: ${detail}`);
     this.name = "HostSandboxRefused";
   }
@@ -188,6 +189,8 @@ export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
     // refuses the job; a drive mounted since start is denied too (the cleared list is only ever added to).
     let wslDeny: readonly string[] | undefined;
     if (config.wsl?.clearance !== undefined) {
+      // D#587 B-9d: a clearance that was not granted for NAT networking (a microVM run's) does not let the host sandbox start, whatever engine the run chose at start.
+      if (!config.wsl.clearance.nat) throw new HostSandboxRefused("wsl_mirrored_networking", MIRRORED_NETWORKING_COPY);
       const table = config.wsl.mountinfo();
       if (config.wsl.interopEntry() || table === undefined || table.trim() === "") throw new HostSandboxRefused("wsl_machine_changed");
       wslDeny = [...new Set([...config.wsl.clearance.denyPaths, ...wslDenyPaths(config.wsl)])];
@@ -202,7 +205,7 @@ export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
       if (!checked.ok) throw new HostSandboxRefused("sandbox_allowance_forbidden");
       grants = grantsOf(checked.entries);
       // WSL2: in mirrored (or unknown) networking mode the loopback is the Windows host's too, so a job may not ask for a loopback bind.
-      if (grants.loopback && config.wsl?.clearance !== undefined && !config.wsl.clearance.loopback) throw new HostSandboxRefused("sandbox_allowance_forbidden");
+      if (grants.loopback && config.wsl?.clearance !== undefined && !config.wsl.clearance.nat) throw new HostSandboxRefused("sandbox_allowance_forbidden");
     }
     let storeDir: string | undefined;
     if (allowances !== undefined && config.packageStoreRoot !== undefined) {
