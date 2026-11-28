@@ -537,6 +537,8 @@ describe('audit_write / audit_write_system: append-only, unforgeable audit_log (
         '1115_twin_sync_pr.sql',
         // 1123 (D#845 MC-9b2a) re-makes 1083's cleanup functions and reads 1035's project_placements and 1100's role, so it goes with them.
         '1123_state_carry.sql',
+        // 1124 (D#845 MC-9b2d) re-makes 1123's machine_cleanup_issue and reads 1100's role, so it goes with them.
+        '1124_state_carry_start.sql',
       ];
       const AUDIT_WRITE_MIGRATIONS = allFiles.filter(
         (f) => BUILDS_ON_HELD_BACK.includes(f) || isAuditWriteMigration(readFileSync(path.join(DEFAULT_MIGRATIONS_DIR, f), 'utf8')),

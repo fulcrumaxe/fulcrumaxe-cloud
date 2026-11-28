@@ -310,7 +310,13 @@ export function defaultReconcileDeps(): ReconcileHandlerDeps {
       const first = await issueSystemStarts(deps, scope);
       // D#845 ON-15c: the restart of a session whose engine update merged.
       const restarted = await issueSystemStarts(deps, { ...scope, cause: "engine_update" });
-      return { not_configured: queued.not_configured && first.not_configured && restarted.not_configured, issued: queued.issued + first.issued + restarted.issued, results: [...queued.results, ...first.results, ...restarted.results] };
+      // D#845 MC-9b2d: the start of a move whose carry is sealed.
+      const carried = await issueSystemStarts(deps, { ...scope, cause: "state_carry" });
+      return {
+        not_configured: queued.not_configured && first.not_configured && restarted.not_configured && carried.not_configured,
+        issued: queued.issued + first.issued + restarted.issued + carried.issued,
+        results: [...queued.results, ...first.results, ...restarted.results, ...carried.results],
+      };
     },
     getWorker,
     readSandboxReapDbMode: () => readSandboxReapDbMode(cachedPlatformOpsPool!),

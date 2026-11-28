@@ -93,7 +93,7 @@ describe("POST /api/runners/repos/:id/move, the real route [pg]", () => {
     const r = await rig();
     state.session = { accountId: r.who.accountId, userId: r.who.userId };
     const res = await post(r.who.repoId, { to_runner_id: r.to });
-    expect(res).toEqual({ status: 200, body: { repo_id: r.who.repoId, from_runner_id: r.from, to_runner_id: r.to, old_copy: "queued" } });
+    expect(res).toEqual({ status: 200, body: { repo_id: r.who.repoId, from_runner_id: r.from, to_runner_id: r.to, old_copy: "queued", carry: null } });
     const w = await world(r);
     expect(w.placement).toEqual([r.to]);
     // The start the old machine already held is left alone; the new machine gets its own.

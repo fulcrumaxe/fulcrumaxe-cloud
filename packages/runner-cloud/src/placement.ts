@@ -20,7 +20,7 @@ import { requireMemberRole } from "./memberRole.js";
 /** A machine needs at least this much free memory and free disk (megabytes) to take an engine. */
 export const PLACEMENT_MIN_MEM_AVAIL_MB = 4096;
 export const PLACEMENT_MIN_DISK_FREE_MB = 10240;
-/** The most a carried state directory may weigh. The carry itself is not built yet, so a request for it is refused (see `moveProject`). */
+/** The most a carried state directory may weigh. */
 /** A host-load reading older than this many report intervals is as good as none. */
 export const LOAD_STALE_AFTER_INTERVALS = 3;
 /** The size lives with the carry's protocol (D#845 MC-9b2); this name stays for the callers that read it here. */
@@ -222,12 +222,11 @@ export const lockRunners = async (client: PoolClient, ids: readonly string[]): P
  * is no longer accepted by ingest and only the new machine's is), and the `project.moved` audit row (ids and an enum only). Any refusal changes nothing.
  *
  * Not here: stopping the session on the old machine and starting it on the new one, and removing the old copy. Those are ON-13a's stop and start paths and follow it.
- * The state-directory carry (cap `STATE_CARRY_MAX_BYTES`) has no transport yet either: `carryState: true` is refused with 409 `state_carry_unavailable`, so asking for the
- * team's memory is never silently dropped. The default, false, starts the new machine fresh.
+ * `carryState: true` only records `carry: "on"` in `project.moved`: the request for the state-directory carry (cap `STATE_CARRY_MAX_BYTES`) and its gates are `moveEngineProject`'s, in the same
+ * transaction, so asking for the team's memory is never silently dropped. The default, false, starts the new machine fresh.
  */
 export async function moveProject(client: PoolClient, a: Actor, input: { repoId: string; toRunnerId: string; carryState?: boolean; now?: Date; wakeEnabled?: boolean }): Promise<{ from_runner_id: string; to_runner_id: string }> {
   await requireOwnerOrAdmin(client);
-  if (input.carryState === true) throw refuse(409, "state_carry_unavailable", "carrying the team's memory to the new machine is not available yet");
   await requireRepo(client, a.accountId, input.repoId);
   // The placement row is held to the end: a second move of this repo waits, then reads the committed machine.
   const cur = await client.query<{ runner_id: string }>("SELECT runner_id FROM project_placements WHERE account_id = $1 AND repo_id = $2 FOR UPDATE", [a.accountId, input.repoId]);
@@ -256,7 +255,7 @@ export async function moveProject(client: PoolClient, a: Actor, input: { repoId:
       const next = r.id === from ? r.allowed.filter((id) => id !== input.repoId) : [...new Set([...r.allowed, input.repoId])];
       await client.query("SELECT runner_repos_set($1, $2::uuid[])", [r.id, next]);
     }
-    await client.query("SELECT audit_write('project.moved', $1::jsonb)", [JSON.stringify({ repo_id: input.repoId, from_runner_id: from, to_runner_id: input.toRunnerId, carry: "off" })]);
+    await client.query("SELECT audit_write('project.moved', $1::jsonb)", [JSON.stringify({ repo_id: input.repoId, from_runner_id: from, to_runner_id: input.toRunnerId, carry: input.carryState === true ? "on" : "off" })]);
   } catch (error) {
     if (pgCode(error) === "23505") throw refuse(409, "machine_single_project", "this machine already runs a project");
     throw error;

@@ -76,8 +76,10 @@ describe('engine_start_definer [pg]', () => {
       { proname: 'engine_system_starts_due', prosecdef: true, proconfig: pinned, app: false, ops: true, pub: false },
       // 1109: the lister of the restart that follows a merged engine update.
       { proname: 'engine_update_starts_due', prosecdef: true, proconfig: pinned, app: false, ops: true, pub: false },
-      // 1123: the state carry's start guard (a trigger function on machine_jobs) and its sweep.
+      // 1123: the state carry's start guard (a trigger function on machine_jobs) and its sweep; 1124: the lister and issuer of the start that follows a sealed carry.
       { proname: 'state_carry_start_guard', prosecdef: true, proconfig: pinned, app: true, ops: false, pub: false },
+      { proname: 'state_carry_start_issue', prosecdef: true, proconfig: pinned, app: false, ops: true, pub: false },
+      { proname: 'state_carry_starts_due', prosecdef: true, proconfig: pinned, app: false, ops: true, pub: false },
       { proname: 'state_carry_sweep', prosecdef: true, proconfig: pinned, app: false, ops: true, pub: false },
     ]);
     for (const fn of ['engine_plan_ended(uuid)', 'engine_repo_operated(uuid, uuid)']) {

@@ -7,6 +7,7 @@ import { RunnerHttpError, pgCode, type RunnerCloudDeps, type RunnerHttpResponse,
 import { requireMemberRole } from "./memberRole.js";
 import type { EngineCommandSigner } from "./engineCommands.js";
 import { RunPullRequestError } from "./runPullRequest.js";
+import { carryPending, openCarry } from "./stateCarryMove.js";
 
 /**
  * D#845 ON-13a2: the cloud issues the three engine session jobs (start, stop, delete) and the gates in front of a start.
@@ -21,7 +22,7 @@ import { RunPullRequestError } from "./runPullRequest.js";
  *   3. the runner's own admission (one engine per machine, memory) is the runner's, on the signed job.
  * A STOP and a DELETE are never gated (stopping is the safe direction); they sign the epoch as it is now, so an `operate_off` stop signs the post-off epoch. A stop or delete already issued and not yet ended is returned, not issued twice.
  *
- * Refusals: 403 `forbidden`; 404 `not_found`; 409 `not_placed`, `runner_removed`, `operate_off`, `start_pending`, `session_changed`, `default_branch_empty`; 402 `plan_required`, `account_held`, `engine_quantity`;
+ * Refusals: 403 `forbidden`; 404 `not_found`; 409 `not_placed`, `runner_removed`, `operate_off`, `start_pending`, `carry_pending`, `session_changed`, `default_branch_empty`; 402 `plan_required`, `account_held`, `engine_quantity`;
  * 503 `not_configured`, `github_unavailable`; 502 `github_refused`.
  */
 
@@ -206,6 +207,8 @@ export async function issueEngineSessionStart(deps: RunnerCloudDeps, principal: 
     if (!operate.enabled || operate.epoch < 1 || !(await repoOperated(client, accountId, repoId))) throw refuse(409, "operate_off", "operate is off, so the engine cannot be started");
     await hooks.afterGate?.();
     if ((await pendingJob(client, accountId, repoId, "engine_session_start")) !== null) throw refuse(409, "start_pending", "a start is already waiting for the machine");
+    // A carry that is open (being exported, or failed and waiting for the person) owns the next start: it is signed from the sealed carry, or the person abandons the carry first.
+    if ((await openCarry(client, accountId, repoId)) !== null) throw carryPending();
     // Resume when the machine still lists this engine's sandbox, or has started it before (a sandbox the machine evicted is then taken fresh and reported so).
     const resume = await hadSession(client, accountId, target);
     const jobId = await insertJob(client, deps, signer, target, { kind: "engine_session_start", args: { at_sha: head, resume, operate_epoch: operate.epoch } });

@@ -13,6 +13,7 @@ import {
   stateCarrySealPath,
 } from "@fulcrumaxe/runner-protocol";
 import type { PoolClient } from "pg";
+import { markRunnerWork } from "@fx/core/src/pendingWork.js";
 import type { StateCarrySealer } from "@fx/model-connection";
 import { CARRY_CHUNK_BODY_BYTES, RunnerHttpError, asRunner, parseJsonBody, parseMessage, pgCode, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse } from "./http.js";
 import { verifyRunnerRequest, withRunnerSession, type VerifiedRunner } from "./verifyRunnerRequest.js";
@@ -25,7 +26,7 @@ import { verifyRunnerRequest, withRunnerSession, type VerifiedRunner } from "./v
  *   begin     POST .../carry/begin     the old machine's stop declares the size, the chunk count and the whole bundle's sha256 (once; the same again is a no-op).
  *   chunk     PUT  .../carry/chunk/:i  raw bytes, at most 4 MiB, with the chunk's sha256 in a header. The sha256 is checked BEFORE sealing; the chunk is sealed under the machine key with the AAD
  *             `account:carry:index` and only the sealed parts reach the database.
- *   seal      POST .../carry/seal      every index present and the sizes adding up: the carry is sealed, and nothing can be written to it after.
+ *   seal      POST .../carry/seal      every index present and the sizes adding up: the carry is sealed, and nothing can be written to it after. The account's machines are woken (`markRunnerWork`).
  *   fail      POST .../carry/fail      the export failed (a closed code); the content is deleted and the carry stays open for a person to decide.
  *   chunk     GET  .../carry/chunk/:i  the new machine's start takes a chunk once per job. The chunk is opened inside the same transaction as the take, so one that cannot be opened is not counted as taken.
  *   imported  POST .../carry/imported  the start came up with the memory: the content rows go and the carry closes.
@@ -128,6 +129,8 @@ export async function stateCarrySealRun(deps: RunnerCloudDeps, req: RunnerHttpRe
   const job = jobOf(jobId);
   parseMessage(StateCarryEmptyBody, parseJsonBody(req));
   await inSession(deps, runner, (client) => client.query("SELECT state_carry_seal($1::uuid)", [job]));
+  // After the commit: the new machine is woken, so the start the system issuer signs from the sealed carry (migration 1124) reaches it at its next claim.
+  void markRunnerWork(runner.accountId);
   return OK();
 }
 

@@ -3,6 +3,7 @@ import { withTenant } from "@fx/db/src/withTenant.js";
 import { RunnerHttpError, type RunnerCloudDeps, type SessionPrincipal } from "./http.js";
 import { markRunnerWork } from "@fx/core/src/pendingWork.js";
 import { moveProject } from "./placement.js";
+import { carryPending, openCarry, requireCarryMove, requireCarryReady } from "./stateCarryMove.js";
 import { configuredWakeKey } from "./wakeToken.js";
 import { RunPullRequestError } from "./runPullRequest.js";
 import {
@@ -17,11 +18,14 @@ import {
  *      `engine_session_stop {reason: "move"}` at once, and `engine_session_delete` only after the NEW session's first heartbeat, so a start that never comes up leaves the old copy in place, and a machine that is offline
  *      gets both when it comes back. There is no "Remove the old copy" button;
  *   4. `engine_session_start {at_sha: <default branch head>, resume: false}` to the NEW machine, person-issued behind the coverage and operate gates every start has.
+ * With `carryState` (the tick "Bring the team's memory along", MC-9b2) step 4 does not happen and no GitHub read is made: the gates of `stateCarryMove.ts` run first, a `state_carries` request is written for the cleanup of step 3
+ * (so the old machine's stop exports the state directory), and the answer is `start_job_id: null` with the carry's id. The start is signed later by the system issuer, once the carry is sealed. A move while the repo has an open
+ * carry re-targets that carry to the new machine (with the tick) or is refused 409 `carry_pending` (without it: the person finishes or abandons the carry first).
  * A machine that was removed has nothing to stop or delete, so it gets no request; the move is the placement and the start. After the commit the old machine is woken so its claim comes at once.
  *
  * Gates, before anything is signed or written: 403 `forbidden`; 404 `not_found` (a repo or machine that is not the account's); 409 `project_not_placed`, `machine_not_eligible`, `machine_single_project`, `removal_pending`
- * (the target still has to finish removing or moving off this repo), `operate_off`, `session_changed`, `default_branch_empty`; 402 `plan_required`, `account_held`, `engine_quantity`; 409 `state_carry_unavailable` (the carry is
- * MC-9b2); 503 `not_configured`, `github_unavailable`; 502 `github_refused`. Every query names the account itself, on top of row security.
+ * (the target still has to finish removing or moving off this repo), `operate_off`, `session_changed`, `default_branch_empty`; 402 `plan_required`, `account_held`, `engine_quantity`; 409 `state_carry_unavailable` (with a `reason`) and
+ * `carry_pending`; 503 `not_configured`, `github_unavailable`; 502 `github_refused`. Every query names the account itself, on top of row security.
  */
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SHA40 = /^[0-9a-f]{40}$/;
@@ -30,7 +34,10 @@ const refuse = (status: number, code: string, message: string): RunnerHttpError 
 export interface MovedEngine {
   from_runner_id: string;
   to_runner_id: string;
-  start_job_id: string;
+  /** Null for a move with the carry: the start waits for the sealed carry. */
+  start_job_id: string | null;
+  /** The carry this move opened or re-targeted; null without the tick. */
+  carry: { id: string } | null;
   operate_epoch: number;
   /** `queued`: the old machine has a stop and a delete to run when it claims. `none`: it never ran this engine, or it was removed. */
   old_copy: "queued" | "none";
@@ -84,9 +91,11 @@ export async function moveEngineProject(deps: RunnerCloudDeps, principal: Sessio
     return placed;
   }));
   // After the role check: a member is told 403 whether or not the cloud can sign a job.
-  const signer = await signerOf(deps);
-  if (first.owner === null || first.name === null) throw refuse(409, "default_branch_empty", "the repository has no name on record");
-  const head = await defaultBranchHead(deps, { id: repoId, owner: first.owner, name: first.name });
+  const carry = input.carryState === true;
+  // A move with the carry signs no start and reads no head: the system issuer does both once the carry is sealed.
+  const signer = carry ? null : await signerOf(deps);
+  if (!carry && (first.owner === null || first.name === null)) throw refuse(409, "default_branch_empty", "the repository has no name on record");
+  const head = carry ? null : await defaultBranchHead(deps, { id: repoId, owner: first.owner!, name: first.name! });
 
   const moved = await asPerson(() => tenant(async (client) => {
     await requireOwnerOrAdmin(client);
@@ -98,14 +107,29 @@ export async function moveEngineProject(deps: RunnerCloudDeps, principal: Sessio
     const operate = await readOperate(client, accountId, true);
     if (!operate.enabled || operate.epoch < 1 || !(await repoOperated(client, accountId, repoId))) throw refuse(409, "operate_off", "operate is off, so the engine cannot be started on the new machine");
     // Whether the old machine has anything to clean up, read before its undelivered start is taken back.
-    const needed = !placed.removed && ((await hadSession(client, accountId, { repoId, ghRepoId: placed.ghRepoId, owner: null, name: null, runnerId: placed.runnerId })) || (await liveStart(client, accountId, repoId, placed.runnerId)));
-    const out = await moveProject(client, { accountId, userId: principal.userId }, { repoId, toRunnerId, carryState: input.carryState, now: (deps.now ?? (() => new Date()))(), wakeEnabled: configuredWakeKey(deps.wakeKey) !== null });
+    const ran = !placed.removed && (await hadSession(client, accountId, { repoId, ghRepoId: placed.ghRepoId, owner: null, name: null, runnerId: placed.runnerId }));
+    const needed = ran || (!placed.removed && (await liveStart(client, accountId, repoId, placed.runnerId)));
+    const open = await openCarry(client, accountId, repoId);
+    if (open && !carry) throw carryPending();
+    if (carry) {
+      // A carry already open follows the project (its source stays the first machine): only the new machine has to be able. A first carry needs the old machine to have run the engine.
+      if (open) await requireCarryReady(client, deps, accountId, [toRunnerId]);
+      else await requireCarryMove(client, deps, accountId, { removed: placed.removed, ran, from: placed.runnerId, to: toRunnerId });
+    }
+    const out = await moveProject(client, { accountId, userId: principal.userId }, { repoId, toRunnerId, carryState: carry, now: (deps.now ?? (() => new Date()))(), wakeEnabled: configuredWakeKey(deps.wakeKey) !== null });
     await client.query("SELECT machine_cleanup_supersede_starts($1, $2)", [repoId, out.from_runner_id]);
-    if (needed) await client.query("SELECT machine_cleanup_request_move($1, $2)", [repoId, out.from_runner_id]);
+    const cleanup = needed ? (await client.query<{ id: string }>("SELECT machine_cleanup_request_move($1, $2) AS id", [repoId, out.from_runner_id])).rows[0]!.id : null;
+    if (carry) {
+      let carryId = open?.id ?? "";
+      if (open) {
+        if (!(await client.query<{ ok: boolean }>("SELECT state_carry_retarget($1, $2) AS ok", [repoId, toRunnerId])).rows[0]!.ok) throw carryPending();
+      } else carryId = (await client.query<{ id: string }>("SELECT state_carry_request($1, $2) AS id", [cleanup, toRunnerId])).rows[0]!.id;
+      return { from_runner_id: out.from_runner_id, to_runner_id: out.to_runner_id, start_job_id: null, carry: { id: carryId }, operate_epoch: operate.epoch, old_copy: needed ? ("queued" as const) : ("none" as const) };
+    }
     const session: SessionTarget = { repoId, ghRepoId: placed.ghRepoId, owner: first.owner, name: first.name, runnerId: out.to_runner_id };
-    const startJobId = await insertJob(client, deps, signer, session, { kind: "engine_session_start", args: { at_sha: head, resume: false, operate_epoch: operate.epoch } });
+    const startJobId = await insertJob(client, deps, signer!, session, { kind: "engine_session_start", args: { at_sha: head!, resume: false, operate_epoch: operate.epoch } });
     await client.query("SELECT audit_write('engine_session.started', $1::jsonb)", [JSON.stringify({ repo_id: repoId, job_id: startJobId, resume: false })]);
-    return { from_runner_id: out.from_runner_id, to_runner_id: out.to_runner_id, start_job_id: startJobId, operate_epoch: operate.epoch, old_copy: needed ? ("queued" as const) : ("none" as const) };
+    return { from_runner_id: out.from_runner_id, to_runner_id: out.to_runner_id, start_job_id: startJobId, carry: null, operate_epoch: operate.epoch, old_copy: needed ? ("queued" as const) : ("none" as const) };
   }));
   // The wake: the old machine claims within seconds and its claim issues the stop.
   if (moved.old_copy === "queued") void markRunnerWork(accountId);

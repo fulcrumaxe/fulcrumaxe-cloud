@@ -271,7 +271,6 @@ describe("placing and moving a project [pg]", () => {
       expect(await code(move(rFree, b))).toBe("409 project_not_placed");
       expect(await code(move(rA, a))).toBe("400 invalid_message");
       expect(await code(move(rA, b, { user: f.m1 }))).toBe("403 forbidden");
-      expect(await code(move(rA, b, { carryState: true }))).toBe("409 state_carry_unavailable");
       expect(await code(move(rA, b))).toBe("409 machine_single_project");
       expect(await code(move(rA, c3))).toBe("409 machine_not_eligible");
       expect(await code(move(rA, randomUUID()))).toBe("404 not_found");

@@ -85,7 +85,7 @@ describe("the machine list and the move route [pg]", () => {
     await place(r, a);
     const res = await move(r, { to_runner_id: b });
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ repo_id: r, from_runner_id: a, to_runner_id: b, old_copy: "none" });
+    expect(res.body).toEqual({ repo_id: r, from_runner_id: a, to_runner_id: b, old_copy: "none", carry: null });
     expect(await placementOf(r)).toBe(b);
   });
 
