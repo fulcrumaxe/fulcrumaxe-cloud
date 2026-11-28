@@ -60,6 +60,8 @@ export interface ServerView {
   price: PriceTriple | null;
   /** Derived on each read from the linked runner's own hello (`runners.model_auth_present`), never stamped on the row: true or false once the machine has said, null when no live runner is linked or it has not said. */
   claude_signed_in: boolean | null;
+  /** Derived on each read: true when the linked runner's latest hello listed `gh_login_v1` (a GitHub sign-in can be started from here), else false. Not whether GitHub is signed in. */
+  gh_login: boolean;
   created_at: string;
   /** The server's own runner once it has registered, else null. The sign-in panel targets this id, never a name. */
   runner_id: string | null;
@@ -183,16 +185,17 @@ export async function quoteServer(ctx: ServerCtx, input: { serverType: string; l
 
 interface Row {
   id: string; name: string; status: string; server_type: string | null; location: string | null; public_ipv4: string | null; failure_code: string | null;
-  price_hourly_gross: string | null; price_monthly_gross: string | null; ipv4_monthly_gross: string | null; currency: string; claude_signed_in: boolean | null; created_at: Date;
+  price_hourly_gross: string | null; price_monthly_gross: string | null; ipv4_monthly_gross: string | null; currency: string; claude_signed_in: boolean | null; gh_login: boolean; created_at: Date;
   runner_id: string | null; status_at: Date; kept: boolean; last_seen_at: Date | null;
 }
 const COLUMNS = `id, name, status, server_type, location, host(public_ipv4) AS public_ipv4, failure_code, price_hourly_gross::text, price_monthly_gross::text, ipv4_monthly_gross::text, currency,
-  (SELECT r.model_auth_present FROM runners r WHERE r.account_id = managed_servers.account_id AND r.id = managed_servers.runner_id AND r.revoked_at IS NULL) AS claude_signed_in, created_at,
+  (SELECT r.model_auth_present FROM runners r WHERE r.account_id = managed_servers.account_id AND r.id = managed_servers.runner_id AND r.revoked_at IS NULL) AS claude_signed_in,
+  COALESCE((SELECT 'gh_login_v1' = ANY (c.capabilities) FROM runner_capabilities c JOIN runners r ON r.id = c.runner_id AND r.account_id = c.account_id WHERE c.account_id = managed_servers.account_id AND c.runner_id = managed_servers.runner_id AND r.revoked_at IS NULL), false) AS gh_login, created_at,
   runner_id, status_at, (kept_at IS NOT NULL) AS kept, (SELECT r.last_seen_at FROM runners r WHERE r.account_id = managed_servers.account_id AND r.id = managed_servers.runner_id) AS last_seen_at`;
 const viewOf = (r: Row): ServerView => ({
   id: r.id, name: r.name, kind: "hetzner_cloud", status: r.status, server_type: r.server_type, location: r.location, public_ipv4: r.public_ipv4, failure_code: r.failure_code,
   // A server found by the orphan sweep was not made through a create, so no price was stamped: it has none, and says so.
-  price: r.price_hourly_gross === null || r.price_monthly_gross === null || r.ipv4_monthly_gross === null ? null : { currency: r.currency, hourly_gross: r.price_hourly_gross, monthly_gross: r.price_monthly_gross, ipv4_monthly_gross: r.ipv4_monthly_gross }, claude_signed_in: r.claude_signed_in, created_at: r.created_at.toISOString(),
+  price: r.price_hourly_gross === null || r.price_monthly_gross === null || r.ipv4_monthly_gross === null ? null : { currency: r.currency, hourly_gross: r.price_hourly_gross, monthly_gross: r.price_monthly_gross, ipv4_monthly_gross: r.ipv4_monthly_gross }, claude_signed_in: r.claude_signed_in, gh_login: r.gh_login, created_at: r.created_at.toISOString(),
   runner_id: r.runner_id, status_at: r.status_at.toISOString(), kept: r.kept, last_seen_at: r.last_seen_at === null ? null : r.last_seen_at.toISOString(),
 });
 

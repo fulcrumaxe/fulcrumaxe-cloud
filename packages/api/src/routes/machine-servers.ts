@@ -58,6 +58,7 @@ export const serverSchema = z.object({
   failure_code: z.string().nullable(),
   price: priceSchema.nullable(),
   claude_signed_in: z.boolean().nullable(),
+  gh_login: z.boolean(),
   created_at: z.string(),
   runner_id: z.string().uuid().nullable(),
   status_at: z.string(),

@@ -12,7 +12,7 @@ import {
   KVM_NOTE, MACHINES_UNAVAILABLE, NO_MACHINES, ONLY_ADMINS_ADD, TABS, addSteps, createMachines, tierText, needsVmInstall, vmInstallLine, VM_INSTALL_COMMAND, needsVmToken, VM_TOKEN_COMMAND, VM_TOKEN_LINE, VM_TOKEN_STAYS,
   BILLED_BY, CONNECT_FIRST, HETZNER_REFUSED, HETZNER_STEPS, ONLY_ADMINS_CREATE, ONLY_ADMINS_HETZNER, ONLY_ADMINS_SEE, PRICES_FAILED, SLOW_DOWN, TIER_NOTICE, availableIn, connectedText, createCreator, createSentence, createServers, offeredIn, priceLine, specsText, totalText, unlabelledText,
 } from "./runners-fleet.js";
-import { LOGOUT_SENTENCE, ONLY_ADMINS_ACT, REBOOT_SENTENCE, SERVER_WORDS, SLOW_WORDS, createSignIn, deleteSentence, isStuck, moveProject, moveTargets, notConnectedYet, orphanSentence, serverAct, serverActions, serverLines } from "./runners-fleet.js";
+import { LOGOUT_SENTENCE, ONLY_ADMINS_ACT, REBOOT_SENTENCE, SERVER_WORDS, SLOW_WORDS, createGhSignIn, GH_LOGOUT_SENTENCE, createSignIn, deleteSentence, isStuck, moveProject, moveTargets, notConnectedYet, orphanSentence, serverAct, serverActions, serverLines } from "./runners-fleet.js";
 import { retryWords } from "../_lib/api.js";
 
 const FULC = window.FULC;
@@ -290,7 +290,7 @@ function mountApp(contentEl) {
     if (!f || !f.isAdmin) return;
     servers.loadCredential();
     // A server that waits for a Claude sign-in has its request read once, so a page opened mid-sign-in shows where it is; a live one is then followed by the panel itself.
-    servers.loadList().then(() => servers.list.items.filter((s) => s.runnerId && needsSignIn(s)).forEach((s) => signin.load(s.runnerId, s.statusAt)));
+    servers.loadList().then(() => servers.list.items.filter((s) => s.runnerId).forEach((s) => (needsSignIn(s) && signin.load(s.runnerId, s.statusAt), s.ghLogin && gh.load(s.runnerId, s.statusAt))));
   }
   function selectTab(id) {
     tab = id;
@@ -464,6 +464,7 @@ function mountApp(contentEl) {
   const notes = new Map(); // a server id: what its last action said, until the next Refresh
   const drafts = new Map(); // a runner id: the code typed so far, kept across repaints
   const signin = createSignIn({ signal: ac.signal, onChange: () => paint() });
+  const gh = createGhSignIn({ signal: ac.signal, onChange: () => paint() });
   const sid = (s, part) => "runners-srv-" + s.id + "-" + part;
   const note = (s, text, bad) => (notes.set(s.id, { text, bad: !!bad }), paint());
 
@@ -560,6 +561,27 @@ function mountApp(contentEl) {
     }
     return box(v.words ? h("p", { class: "runners-error", role: "alert", "data-testid": "runners-signin-words" }, v.words) : null, start(v.words ? "Start again" : "Sign in to Claude on " + s.name), said);
   }
+  function ghSignOut(s, from) {
+    confirmSheet({ from, title: "Sign " + s.name + " out of GitHub?", body: h("p", null, GH_LOGOUT_SENTENCE), label: "Sign out", run: async () => ((await gh.logout(s.runnerId)) ? "" : gh.get(s.runnerId).error || "That didn't work. Try again."), done: afterAction(s, "Sign-out sent. This updates when the server next reports.") });
+  }
+  /** The GitHub sign-in panel of a server that lists the capability: the button, then the address and the code while the person enters it on GitHub, then the result. */
+  function ghPanel(s, admin) {
+    const id = s.runnerId;
+    const v = gh.get(id);
+    const off = !admin || v.busy;
+    const said = v.error ? h("p", { class: "runners-error", role: "alert", "data-testid": "runners-gh-error" }, v.error) : null;
+    const box = (...kids) => h("div", { class: "runners-signin", "data-testid": "runners-gh" }, ...kids);
+    if (v.status === "pending") return box(h("p", { role: "status", "data-testid": "runners-gh-status" }, "Starting the GitHub sign-in on " + s.name + "…"), button("Cancel", { id: sid(s, "gh-cancel"), "aria-disabled": off ? "true" : "false", "data-testid": "runners-gh-cancel" }, () => !off && gh.cancel(id)), said);
+    if (v.status === "awaiting_code") {
+      return box(v.url ? h("div", null, h("a", { href: v.url, target: "_blank", rel: "noopener noreferrer", class: "runners-link", "data-testid": "runners-gh-open" }, "Open GitHub's sign-in page"),
+        h("p", null, "Enter this code there: ", h("strong", { "data-testid": "runners-gh-code" }, v.code), " ", button("Copy code", { id: sid(s, "gh-copy"), "data-testid": "runners-gh-copy" }, () => copyText(v.code)))) : h("p", { "data-testid": "runners-gh-nolink" }, "Waiting for the link…"),
+      h("p", { role: "status", "data-testid": "runners-gh-status" }, "Waiting for you to enter the code on GitHub…"), button("Cancel", { id: sid(s, "gh-cancel"), "aria-disabled": off ? "true" : "false", "data-testid": "runners-gh-cancel" }, () => !off && gh.cancel(id)), said);
+    }
+    if (v.status === "done") return box(h("p", { role: "status", "data-testid": "runners-gh-status" }, "Signed in to GitHub."), said);
+    return box(v.words ? h("p", { class: "runners-error", role: "alert", "data-testid": "runners-gh-words" }, v.words) : null,
+      h("span", { class: "runners-control" }, button(v.words ? "Start again" : "Sign in to GitHub on " + s.name, { id: sid(s, "gh-start"), "aria-disabled": off ? "true" : "false", "aria-describedby": admin ? null : sid(s, "gh-why"), "data-testid": "runners-gh-start" }, () => !off && gh.start(id)),
+        admin ? null : h("span", { id: sid(s, "gh-why"), class: "runners-reason runners-muted", "data-testid": "runners-reason" }, ONLY_ADMINS_ACT)), said);
+  }
   function serverExtras(s) {
     const admin = isAdmin();
     if (s.runnerId && s.state === "ready" && s.claudeIn === "yes") signin.forget(s.runnerId); // the list shows it signed in: what was seen of its request is spent
@@ -572,13 +594,15 @@ function mountApp(contentEl) {
         a.why ? h("span", { id: from + "-why", class: "runners-reason runners-muted", "data-testid": "runners-reason" }, a.why) : null);
     });
     if (s.state === "ready" && s.claudeIn === "yes" && s.runnerId && admin) acts.push(button("Sign out of Claude", { id: sid(s, "signout"), "data-testid": "runners-srv-signout" }, () => signOut(s, sid(s, "signout"))));
+    const ghOn = s.ghLogin && s.runnerId && ["ready", "needs_claude_login"].includes(s.state);
+    if (ghOn && admin) acts.push(button("Sign out of GitHub", { id: sid(s, "gh-signout"), "data-testid": "runners-srv-gh-signout" }, () => ghSignOut(s, sid(s, "gh-signout"))));
     const hosted = !s.placedKnown || !["ready", "needs_claude_login"].includes(s.state) ? null
       : s.placed.length === 0 ? h("p", { "data-testid": "runners-srv-noprojects" }, "No projects" + (s.cost ? " · " + s.cost : ""))
       : h("ul", { class: "runners-tokens", "data-testid": "runners-srv-projects" }, s.placed.map((p) => h("li", null, h("bdi", null, p.name), h("span", { class: "runners-control" }, button("Move to another machine", { id: sid(s, "move-" + p.id), "aria-label": "Move to another machine: " + p.name, "aria-disabled": admin ? "false" : "true", "aria-describedby": admin ? null : sid(s, "move-" + p.id) + "-why", "data-testid": "runners-srv-move" }, () => admin && moveSheet(s, p, sid(s, "move-" + p.id))),
         admin ? null : h("span", { id: sid(s, "move-" + p.id) + "-why", class: "runners-reason runners-muted", "data-testid": "runners-reason" }, ONLY_ADMINS_ACT)))));
     return [
       ...serverLines(s, offlineOf(s), Date.now()).map((t) => h("p", { class: t === SLOW_WORDS ? "runners-note" : "runners-muted", "data-testid": "runners-server-line" }, t)),
-      hosted, needsSignIn(s) ? signInPanel(s, admin) : null,
+      hosted, needsSignIn(s) ? signInPanel(s, admin) : null, ghOn ? ghPanel(s, admin) : null,
       acts.length ? h("div", { class: "runners-controls" }, acts) : null,
       n ? h("p", { class: n.bad ? "runners-error" : "runners-muted", role: n.bad ? "alert" : "status", "data-testid": "runners-server-note" }, n.text) : null,
     ];
@@ -729,6 +753,7 @@ function mountApp(contentEl) {
       adder.close();
       servers.stop();
       signin.stop();
+      gh.stop();
       creator.close();
       if (dialog) {
         dialog.dlg.close();
