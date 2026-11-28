@@ -27,9 +27,10 @@ import { detectDistro, sandboxFixLines } from "../sandbox/sandboxFix.js";
 import { checkJobShell } from "../sandbox/jobShellProbe.js";
 import { toolchainReport } from "../sandbox/toolchain.js";
 import { findCliStubs } from "../daemon/cliStubs.js";
-import { ENGINE_LINES, engineLineOf, missingCaps, type VmHostFacts } from "../vm/limits.js";
+import { ENGINE_LINES, engineLineOf, missingCaps, type SandboxEngine, type VmHostFacts } from "../vm/limits.js";
 import { vmTokenLine, vmTokenStatus } from "../credentials/vmToken.js";
-import { gateEngine, loadSettings, omitsDevToken } from "../runnerSettings.js";
+import { loadSettings, omitsDevToken } from "../runnerSettings.js";
+import { chooseEngine } from "../vm/engineGate.js";
 import { vmInstallChecks, type VmInstallFacts } from "../vm/doctorChecks.js";
 import { VM_CHECKS, fixText, preflightChecks, probeNetwork, type NetworkPorts, type PreflightFacts } from "../daemon/preflight.js";
 import { updatesLine } from "./update.js";
@@ -115,11 +116,21 @@ async function sandboxCheck(ctx: CommandContext, host: DoctorHost, binaryPath: s
 }
 
 /**
+ * The engine `run` would use on this machine: what `chooseEngine` answers for the engine line (the setting, the host facts and the limits) and whether this build has a live microVM
+ * stack. A `microvm` setting on a machine with no KVM, no helper, missing limits or an unwired build is `os_sandbox`, so the networking line is judged on the same answer `run` acts on.
+ */
+function chosenEngine(ctx: CommandContext, host: DoctorHost): SandboxEngine {
+  const settings = loadSettings(ctx.stateDir);
+  const line = engineLineOf({ platform: host.platform, engine: settings.unreadable === true ? "invalid" : (settings.sandboxEngine ?? "os_sandbox"), caps: settings.microvm, facts: host.vm });
+  return chooseEngine(line, host.microvmWired === true);
+}
+
+/**
  * On WSL2, the gate (D#587 B-9b): one line per check and live probe, each failure with its closed code and the fix, then the VM-mode line. It runs before the
  * sandbox line because a cleared machine is what lets that line pass; anywhere else it prints nothing.
  */
 async function wslCheck(ctx: CommandContext, host: DoctorHost, binaryPath: string | undefined, line: (level: Level, label: string, detail: string) => void): Promise<void> {
-  const gate = await clearWsl({ platform: host.platform, osrelease: host.osrelease, home: host.home, stateDir: ctx.stateDir, binaryPath, xdgCacheHome: host.xdgCacheHome, searchPath: cleanEnv({ mode: "subscription" }).PATH ?? "", host: host.sandbox, engine: gateEngine(ctx.stateDir) });
+  const gate = await clearWsl({ platform: host.platform, osrelease: host.osrelease, home: host.home, stateDir: ctx.stateDir, binaryPath, xdgCacheHome: host.xdgCacheHome, searchPath: cleanEnv({ mode: "subscription" }).PATH ?? "", host: host.sandbox, engine: chosenEngine(ctx, host) });
   if (!gate.wsl2) return;
   for (const item of gate.items) line(item.ok ? "PASS" : "FAIL", "WSL2", item.ok ? item.detail : `${item.code}: ${item.detail}`);
   if (gate.cleared) line("INFO", "WSL2", gate.loopback ? "networking mode is NAT: loopback allowances are granted as asked" : "networking mode is mirrored or not known: jobs may not ask for a loopback bind");

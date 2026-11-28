@@ -12,6 +12,7 @@ import { createClaudeKit } from "../../src/engines/claude/kit.js";
 import { MIN_CLAUDE_VERSION } from "../../src/engines/claude/pin.js";
 import { generateRunnerKey, saveRunnerKey } from "../../src/keys.js";
 import { setSetting } from "../../src/runnerSettings.js";
+import type { VmHostFacts } from "../../src/vm/limits.js";
 import { runCli } from "../../src/cli.js";
 import { MACOS_PREVIEW_NOTICE, WSL1_CONVERT_NOTICE, WSL2_NOT_CLEARED_NOTICE } from "../../src/platformSupport.js";
 import { FULL_HELP, authText, helpWithout, makeFake, type Fake } from "../engines/claude/harness.js";
@@ -504,12 +505,41 @@ describe("the sandbox check", () => {
     }
   });
 
-  it("D#587 B-9d: a runner set to microvm is not failed for mirrored networking", async () => {
-    register();
+  // The engine the networking line is judged on is the one `run` uses: `chooseEngine`'s answer, not the setting. A `microvm` setting is `microvm` only with KVM, the helper, every limit and a wired build.
+  const VM_FACTS: VmHostFacts = { kvm: "present", helperSocket: "present", helperSocketPath: "/fake/helper.sock", totalMemMb: 16384, cpus: 8, readMemAvailableBytes: () => 8 * 1024 ** 3 };
+  const setMicrovm = (limits = true): void => {
     setSetting(stateDir, "sandbox_engine", "microvm");
-    const result = await doctor({ host: { sandbox: fakeWslMachine({ networking: "mirrored" }), osrelease: WSL2 } });
+    if (limits) for (const [key, value] of [["microvm.max_vms", "2"], ["microvm.max_vcpus", "4"], ["microvm.max_memory_mb", "4096"], ["microvm.snapshot_dir", "/srv/fx/snaps"], ["microvm.snapshot_quota_bytes", "8589934592"]] as const) setSetting(stateDir, key, value);
+  };
+  const mirroredDoctor = (host: Partial<DoctorHost>): Promise<Result> => doctor({ host: { sandbox: fakeWslMachine({ networking: "mirrored" }), osrelease: WSL2, ...host } });
+
+  it("D#587 B-9d: a runner set to microvm that really runs microvm (KVM, helper, limits, wired build) is not failed for mirrored networking", async () => {
+    register();
+    setMicrovm();
+    const result = await mirroredDoctor({ vm: VM_FACTS, microvmWired: true });
     expect(wslLines(result.out).join("\n")).not.toMatch(/FAIL.*wsl_mirrored_networking/);
     expect(wslLines(result.out).join("\n")).toContain("microVM");
+  });
+
+  it.each([
+    ["the build has no live microVM stack", { vm: VM_FACTS, microvmWired: false }, true],
+    ["the build does not say it is wired", { vm: VM_FACTS }, true],
+    ["there is no KVM", { vm: { ...VM_FACTS, kvm: "absent" as const }, microvmWired: true }, true],
+    ["the helper is missing", { vm: { ...VM_FACTS, helperSocket: "absent" as const }, microvmWired: true }, true],
+    ["the host facts cannot be read", { microvmWired: true }, true],
+    ["a limit is not set", { vm: VM_FACTS, microvmWired: true }, false],
+  ] as const)("D#587 B-9d: a runner set to microvm that `run` would put on os_sandbox (%s) still FAILs wsl_mirrored_networking", async (_why, host, limits) => {
+    register();
+    setMicrovm(limits);
+    const result = await mirroredDoctor(host);
+    expect(result.out).toMatch(/FAIL {2}WSL2: +wsl_mirrored_networking: /);
+    expect(result.code).not.toBe(0);
+  });
+
+  it("D#587 B-9d: a runner left on os_sandbox is failed for mirrored networking even on a machine that could run microvm (no setting, no microvm)", async () => {
+    register();
+    const result = await mirroredDoctor({ vm: VM_FACTS, microvmWired: true });
+    expect(result.out).toMatch(/FAIL {2}WSL2: +wsl_mirrored_networking: /);
   });
 
   it("D#587 B-9d: a damaged settings file is the host sandbox, so mirrored networking still FAILs", async () => {

@@ -3,7 +3,7 @@ import { markRunnerWork } from "@fx/core/src/pendingWork.js";
 import { emitSetupChanged } from "@fx/core/src/onboarding/engineTrack.js";
 import { writeEngineAudit } from "@fx/db/src/engineAudit.js";
 import { lockEngineBridge } from "@fx/db/src/engineBridge.js";
-import { readRepoGithubIdentity, setRepoGithubIdentity } from "@fx/db/src/repoGithubIdentity.js";
+import { GithubIdentityForbidden, readRepoGithubIdentity, setRepoGithubIdentity } from "@fx/db/src/repoGithubIdentity.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { EngineRemovalError, buildEngineRemovalPr, type EngineRemovalCode } from "./engineRemovalPr.js";
 import { hadSession } from "./engineSession.js";
@@ -168,7 +168,8 @@ export async function removeProjectRoute(deps: RunnerCloudDeps, principal: Sessi
     });
   } catch (error) {
     if (error instanceof RunnerHttpError) throw error;
-    if (pgCode(error) === "42501") throw refuse(403, "forbidden", "only an owner or admin can remove a project");
+    // The identity reset (a personal identity goes back to the app) throws its own class for the same 42501, so both mean "not an owner or admin of an active account".
+    if (error instanceof GithubIdentityForbidden || pgCode(error) === "42501") throw refuse(403, "forbidden", "only an owner or admin can remove a project");
     // 40P01: two changes to one machine waited on each other and Postgres ended this one, which wrote nothing. Retrying is safe.
     if (pgCode(error) === "40P01") throw refuse(409, "placement_busy", "Another change to this machine is in progress. Try again.");
     throw error;
