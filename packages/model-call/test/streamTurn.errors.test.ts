@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { connect } from '@fx/model-connection';
 import { streamTurn } from '../src/index.js';
 import { CREDITS_EXHAUSTED_ANSWERS } from '../../model-connection/test/helpers/creditsAnswers.js';
 import { baseParams, fakeKey, startWorld, turnEvents } from './helpers/streamWorld.js';
@@ -14,6 +15,20 @@ describe('streamTurn errors and states', () => {
     w.messages.replies.push({ kind: 'status', status: 401, errorType: 'authentication_error', message: 'invalid x-api-key' });
     await expect(streamTurn(t.ctx, baseParams)).rejects.toMatchObject({ code: 'key_rejected', status: 401 });
     expect(await w.connectionStatus(t.accountId)).toBe('broken');
+  });
+
+  it('CC-5a-5 (late 401): the key is rotated while the turn is in flight: the old key is rejected and the new connection stays ok', async () => {
+    const t = await w.tenant(fakeKey('api03', 'late401'));
+    w.messages.replies.push({ kind: 'status', status: 401, errorType: 'authentication_error', message: 'invalid x-api-key' });
+    const ctx = {
+      ...t.ctx,
+      fetchImpl: (async (...a: Parameters<typeof fetch>) => {
+        await connect({ pool: t.ctx.pool, platformOpsPool: t.ctx.platformOpsPool, principal: t, httpClient: { validate: async () => ({ kind: 'ok' as const }) }, kek: t.ctx.kek }, { provider: 'ai_gateway', key: 'vck_stream_rotated_0123456789' });
+        return t.ctx.fetchImpl!(...a);
+      }) as typeof fetch,
+    };
+    await expect(streamTurn(ctx, baseParams)).rejects.toMatchObject({ code: 'key_rejected', status: 401 });
+    expect(await w.connectionStatus(t.accountId)).not.toBe('broken');
   });
 
   it('CC-5a-5: the credits-exhausted answer gives credits_exhausted and records it', async () => {

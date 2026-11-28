@@ -18,6 +18,12 @@ export class ModelCallError extends Error {
 
 const MAX_ERROR_BODY_CHARS = 500;
 
+/** The connection row and key seal a call actually used: a late 401 is tied back to these, never to whatever is stored by then. */
+export interface UsedConnection {
+  connectionId: string;
+  nonce: Buffer;
+}
+
 /** S2g: no API-side subscription path -- an OAuth-token-shaped credential is never sent, on the JSON path or the stream path. */
 function refuseSubscriptionCredential(key: string): void {
   if (matchesShape(key, SK_ANT_OAT_PATTERN_SOURCE)) {
@@ -30,7 +36,7 @@ function refuseSubscriptionCredential(key: string): void {
  * sends it, and is gone. No module-level state (S2b).
  */
 export async function callWithKey(ctx: KeyAccessCtx, fetchImpl: typeof fetch, timeoutMs: number, p: RequestParams) {
-  return withOpenedKey(ctx, async ({ provider, key }) => {
+  return withOpenedKey(ctx, async ({ provider, key, connectionId, nonce }) => {
     refuseSubscriptionCredential(key);
     const req = requestFor(provider, key, p);
     const controller = new AbortController();
@@ -41,7 +47,7 @@ export async function callWithKey(ctx: KeyAccessCtx, fetchImpl: typeof fetch, ti
       const raw = await res.text();
       // Redact BEFORE truncating: cutting first could split the key and dodge the exact-match redaction.
       const text = res.ok ? raw : redactText(raw, [key]).slice(0, MAX_ERROR_BODY_CHARS);
-      return { provider, status: res.status, text };
+      return { provider, status: res.status, text, used: { connectionId, nonce } };
     } catch {
       // Never interpolate the underlying error: undici embeds header values (the key) in some messages.
       if (controller.signal.aborted) throw new ModelCallError('timeout', `model-call: provider call exceeded ${timeoutMs} ms`);
@@ -64,8 +70,8 @@ export async function streamWithKey<T>(
   build: (provider: string, key: string) => { url: string; headers: Record<string, string>; body: string } | null,
   consume: (body: ReadableStream<Uint8Array> | null, signal: AbortSignal, provider: string) => Promise<T>,
   stop?: AbortSignal,
-): Promise<{ status: number; text: string; value: T | null }> {
-  return withOpenedKey(ctx, async ({ provider, key }) => {
+): Promise<{ status: number; text: string; value: T | null; used: UsedConnection }> {
+  return withOpenedKey(ctx, async ({ provider, key, connectionId, nonce }) => {
     refuseSubscriptionCredential(key);
     const req = build(provider, key);
     if (!req) throw new ModelCallError('unsupported_provider', 'model-call: streaming is not available for this provider');
@@ -76,8 +82,8 @@ export async function streamWithKey<T>(
     stop?.addEventListener('abort', onStop, { once: true });
     try {
       const res = await fetchImpl(req.url, { method: 'POST', headers: req.headers, body: req.body, signal: controller.signal, redirect: 'error' });
-      if (!res.ok) return { status: res.status, text: redactText(await res.text(), [key]).slice(0, MAX_ERROR_BODY_CHARS), value: null };
-      return { status: res.status, text: '', value: await consume(res.body, controller.signal, provider) };
+      if (!res.ok) return { status: res.status, text: redactText(await res.text(), [key]).slice(0, MAX_ERROR_BODY_CHARS), value: null, used: { connectionId, nonce } };
+      return { status: res.status, text: '', value: await consume(res.body, controller.signal, provider), used: { connectionId, nonce } };
     } catch (e) {
       if (e instanceof ModelCallError) throw e;
       if (controller.signal.aborted) throw new ModelCallError('timeout', `model-call: provider call exceeded ${timeoutMs} ms`);

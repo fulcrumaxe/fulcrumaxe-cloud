@@ -65,7 +65,21 @@ export async function markBrokenWithClient(
   client: PoolClient,
   accountId: string,
   code: BrokenConnectionCode,
+  /**
+   * The connection row and key seal the failing call used. When given, the row is locked and re-read first, and nothing
+   * is written unless it is still that row with that key_nonce (a rotation or a remove-and-reconnect since then makes
+   * the answer stale: the new key is untouched). validate.ts's recordInitialValidation checks the same pair.
+   */
+  used?: { connectionId: string; nonce: Buffer },
 ): Promise<void> {
+  if (used) {
+    const { rows } = await client.query<{ id: string; key_nonce: Buffer }>(
+      `SELECT id, key_nonce FROM model_connections WHERE account_id = $1 FOR UPDATE`,
+      [accountId],
+    );
+    const live = rows[0];
+    if (!live || live.id !== used.connectionId || !live.key_nonce.equals(used.nonce)) return;
+  }
   await client.query(
     `UPDATE model_connections SET status = 'broken', last_error_code = $2, broken_at = COALESCE(broken_at, now()) WHERE account_id = $1`,
     [accountId, String(code)],
@@ -86,8 +100,9 @@ export async function markBroken(
   platformOpsPool: Pool,
   accountId: string,
   code: BrokenConnectionCode,
+  used?: { connectionId: string; nonce: Buffer },
 ): Promise<void> {
-  await withPlatformOps(platformOpsPool, (client) => markBrokenWithClient(client, accountId, code));
+  await withPlatformOps(platformOpsPool, (client) => markBrokenWithClient(client, accountId, code, used));
 }
 
 /** A real `ConnectionStatusPort`, bound to `platformOpsPool` -- mirrors PR #50's `createTestConnectionStatusPort()` shape. */

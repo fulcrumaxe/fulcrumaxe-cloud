@@ -1,11 +1,12 @@
 import type { Pool } from 'pg';
 import { isCreditsExhaustedAnswer, markBroken, markCreditsExhausted, type Principal } from '@fx/model-connection';
-import { ModelCallError } from './keyUse.js';
+import { ModelCallError, type UsedConnection } from './keyUse.js';
 
 /** The non-2xx handling shared by completeJson and streamTurn. Returns for a 2xx; throws a ModelCallError otherwise. */
-export async function failOnStatus(ctx: { platformOpsPool: Pool; principal: Principal }, role: string, res: { status: number; text: string }): Promise<void> {
+export async function failOnStatus(ctx: { platformOpsPool: Pool; principal: Principal }, role: string, res: { status: number; text: string; used: UsedConnection }): Promise<void> {
   if (res.status === 401 || res.status === 403) {
-    await markBroken(ctx.platformOpsPool, ctx.principal.accountId, res.status); // S2i
+    // S2i: bound to the connection and key this call used, so an answer for a replaced key cannot break the new one.
+    await markBroken(ctx.platformOpsPool, ctx.principal.accountId, res.status, res.used);
     throw new ModelCallError('key_rejected', `model-call (${role}): provider rejected the key (HTTP ${res.status})`, res.status);
   }
   // D#483 S5-k2: the provider says the customer's credits ran out: its own code, and the connection is recorded broken for credits.
