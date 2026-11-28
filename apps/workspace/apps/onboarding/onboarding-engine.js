@@ -573,6 +573,7 @@ export function mountProjectPicker(host, env) {
       if (hit) { choose(hit, true); return; }
       S.note = back.outcome === "ok" ? "The new repo isn't in your list yet. Reload the list to see it." : CREATE_OUTCOMES[back.outcome];
     }
+    if (preselect()) return;
     S.stage = S.loadFailed ? "failed" : "pick";
     draw();
   }
@@ -597,6 +598,15 @@ export function mountProjectPicker(host, env) {
     });
   }
   const say = (t) => env.announce(t);
+  /** D#845 ON-14c: the Team app opens this step for one repo it listed; the id is used only when this read lists it, and only while the list is showing. */
+  function preselect() {
+    const want = env.wanted ? env.wanted() : "";
+    const hit = want && S.data && S.stage !== "confirm" && S.data.repos.find((r) => r.id === want);
+    if (!hit) return false;
+    env.wantedDone();
+    choose(hit, false);
+    return true;
+  }
   async function reload() { S.busy = true; draw(); try { await read(); } catch { return; } S.busy = false; if (S.loadFailed) S.stage = "failed"; else if (S.stage === "failed" || S.stage === "loading") S.stage = "pick"; draw(); } // fx-swallow-ok: an aborted read means the picker was closed
   async function install() {
     S.busy = true; draw();
@@ -708,7 +718,7 @@ export function mountProjectPicker(host, env) {
     ];
   }
   start();
-  return { destroy() { dead = true; host.replaceChildren(); } };
+  return { preselect() { if (!S.busy && (S.stage === "pick" || S.stage === "failed")) preselect(); }, destroy() { dead = true; host.replaceChildren(); } };
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------

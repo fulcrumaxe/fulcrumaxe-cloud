@@ -15,7 +15,7 @@
 import { api, isRateLimited, retryWords, waitSeconds } from "../_lib/api.js";
 import { usd as dollars } from "../_lib/dom.js";
 import { readFleet } from "../runners/runners-fleet.js";
-import { NO_OP, agentWords, createOperate, describeEngineUpdate, describeHalt, describeOperate, describeStopFailed, isAgentId, readEngineUpdate, readStopFailed, stopOf } from "./team-operate.js";
+import { NO_OP, agentWords, createOperate, describeEngineUpdate, describeHalt, describeNext, describeOperate, describeStopFailed, isAgentId, readEngineUpdate, readFacts, readStopFailed, sessionChip, stopOf } from "./team-operate.js";
 
 // The Team app's one door to the cloud, below: every URL and every request the app makes, written against the engine routes' documented shapes (the per-repo list envelope, the
 // settings read, the settings write, the command channel and the decision dials). The model and the page never build a path of their own. It lives in this file so the app stays
@@ -39,6 +39,9 @@ export const watchUrl = (repoId) => REPOS_URL + "/" + enc(repoId) + "/watch";
 export const haltUrl = (repoId) => REPOS_URL + "/" + enc(repoId) + "/halt";
 export const retryStopUrl = (repoId) => REPOS_URL + "/" + enc(repoId) + "/retry-stop";
 export const updateUrl = (repoId) => REPOS_URL + "/" + enc(repoId) + "/update";
+export const startUrl = (repoId) => REPOS_URL + "/" + enc(repoId) + "/start";
+export const moveUrl = (repoId) => RUNNERS_URL + "/repos/" + enc(repoId) + "/move";
+export const CHECKOUT_URL = "/api/v1/billing/checkout-session";
 export const clearHaltUrl = (repoId) => haltUrl(repoId) + "/clear";
 export const dialsUrl = (repoId) => "/api/v1/repos/" + enc(repoId) + "/decision-settings";
 export const dialUrl = (repoId) => dialsUrl(repoId) + "/dial";
@@ -64,6 +67,9 @@ export function createTeamApi(call = api) {
     unwatch: (repoId, browserId) => call("DELETE", watchUrl(repoId) + "?browser_id=" + enc(browserId)),
     retryStop: (repoId, signal) => call("POST", retryStopUrl(repoId), undefined, signal),
     startUpdate: (repoId, signal) => call("POST", updateUrl(repoId), undefined, signal),
+    startEngine: (repoId, signal) => call("POST", startUrl(repoId), undefined, signal),
+    moveProject: (repoId, toRunnerId, signal) => call("POST", moveUrl(repoId), { to_runner_id: toRunnerId }, signal),
+    checkout: (signal) => call("POST", CHECKOUT_URL, { plan: "engine", quantity: 1, success_path: "/", cancel_path: "/" }, signal),
     halt: (repoId, signal) => call("POST", haltUrl(repoId), {}, signal),
     clearHalt: (repoId, signal) => call("POST", clearHaltUrl(repoId), {}, signal),
     dials: (repoId, signal) => call("GET", dialsUrl(repoId), undefined, signal),
@@ -268,7 +274,7 @@ export function readRepos(raw) {
     id: idKey(r.repo_id), name: r.full_name, runner: typeof r.runner_name === "string" ? r.runner_name : "", liveness: typeof r.liveness === "string" ? r.liveness : "never",
     lastHeard: typeof r.last_heard_at === "string" ? r.last_heard_at : "", operate: r.operate_enabled === true, halted: r.halted === true, haltPending: r.halt_pending === true,
     haltedAt: typeof r.halted_at === "string" ? r.halted_at : "", haltedBy: isObj(r.halted_by) && typeof r.halted_by.display_name === "string" && r.halted_by.display_name !== "" ? r.halted_by.display_name : "",
-    stopFailed: readStopFailed(r.stop_failed), engineUpdate: readEngineUpdate(r.engine_update),
+    stopFailed: readStopFailed(r.stop_failed), engineUpdate: readEngineUpdate(r.engine_update), facts: readFacts(r),
   }));
 }
 export function readSettings(raw) {
@@ -281,6 +287,8 @@ export function readSettings(raw) {
 
 // ── what the page draws ─────────────────────────────────────────────────────────────────────────────────────────────────────
 export function chipOf(repo) {
+  const own = sessionChip(repo); // a stopped or starting session is never "Live" or "Stale"
+  if (own) return own;
   if (repo.liveness === "stale") return repo.lastHeard && hm(repo.lastHeard) ? "Stale since " + hm(repo.lastHeard) : "Stale";
   return CHIP[repo.liveness] || "Unknown";
 }
@@ -477,7 +485,7 @@ export function describe(st, nowMs) {
   const lane = lanes ? laneRows(lanes, gates, nowMs, repo.name) : null;
   const rows = agents ? agents.items.map((a) => agentRow(a, live, nowMs, repo.name)).filter((r) => r.state !== "stopped").map((r) => ({ ...r, stop: r.state === "running" ? stopOf(st, r.stopId) : null, who: agentWords(r) })) : [];
   return {
-    kind: "ready", ...base, operate: describeOperate(shown, nowMs, repo, asOf, rows), halt: describeHalt(st, repo, nowMs), stopFail: describeStopFailed(st, repo), updateCard: describeEngineUpdate(st, repo),
+    kind: "ready", ...base, operate: describeOperate(shown, nowMs, repo, asOf, rows), halt: describeHalt(st, repo, nowMs), stopFail: describeStopFailed(st, repo), updateCard: describeEngineUpdate(st, repo), next: describeNext(st, repo, nowMs),
     repos: st.repos.map((r) => ({ id: r.id, name: r.name, selected: r.id === repo.id })),
     chip: chipOf(repo), runner: repo.runner, banner: gapBanner(envs), notices: sourceNotices(envs, lanes),
     watch: st.watchMod ? st.watchMod.watchView(st.watch, repo, nowMs) : null,
@@ -501,7 +509,7 @@ const NO_PANELS = { agents: null, lanes: null, gates: null, log: null, plan: nul
 const NO_LOG = { rows: [], cursor: "", pages: 0, released: 0, loading: false, failed: false, said: "" };
 const aborted = (e, signal) => (signal && signal.aborted) || (e && e.name === "AbortError");
 
-export function createTeam({ client = createTeamApi(), signal, liveView = false, onChange = () => {}, setTimer = setTimeout, clearTimer = clearTimeout, setRepeat = setInterval, clearRepeat = clearInterval, now = Date.now } = {}) {
+export function createTeam({ client = createTeamApi(), signal, liveView = false, onChange = () => {}, setTimer = setTimeout, clearTimer = clearTimeout, setRepeat = setInterval, clearRepeat = clearInterval, now = Date.now, assign } = {}) {
   let st = { status: "loading", settings: null, repos: [], selectedId: "", panels: NO_PANELS, log: NO_LOG, planPage: 0, provOpen: [], sheetOpen: false, saving: false, confirmDelete: false, notice: "", refreshFailed: false, failedKeys: [], op: NO_OP, draft: null, fleet: null, runnerPick: "", runnersMod: null, bridge: { repoId: "", data: null, failed: false, busy: false, notice: "", runnerPick: "", rootPick: "" }, bridgeMod: null, watch: null, watchMod: null };
   let safetyTimer = null, started = false, retryTimer = null, busy = false, queued = new Set(), lastFull = -Infinity, pick = 0, stopFn = null, saveVer = 0, hiddenFn = () => false;
   // Which parts a notice asked for, and when each may be read again. Every read, whoever asked for it, is marked here, so no part is read twice inside the gate.
@@ -509,7 +517,7 @@ export function createTeam({ client = createTeamApi(), signal, liveView = false,
   // A save starting or ending moves saveVer. A read remembers it when it starts; if it has moved, or a save is out, by the time the answer lands
   // the answer was asked before the save changed things and is dropped (the read that follows the save shows the server's answer).
   const set = (patch) => { if (("saving" in patch && patch.saving !== st.saving) || (patch.op && patch.op.saving !== st.op.saving)) saveVer += 1; st = { ...st, ...patch }; onChange(); };
-  const operate = createOperate({ client, signal, get: () => st, set, refresh: () => refresh(), aborted: (e) => aborted(e, signal) });
+  const operate = createOperate({ client, signal, get: () => st, set, refresh: () => refresh(), aborted: (e) => aborted(e, signal), ...(assign ? { assign } : {}) });
   // One-click Connect lives in its own module, fetched the first time the Settings sheet opens (the page does not need it before). A module that cannot be fetched leaves the sheet without the panel.
   let bridgeCtl = null;
   async function bridgeOn() {
@@ -583,6 +591,7 @@ export function createTeam({ client = createTeamApi(), signal, liveView = false,
         set(st.settings ? { refreshFailed: true } : { status: "error" });
         return;
       }
+      if (!fleet && repos.some((r) => r.facts && r.facts.session && r.facts.session.reason === "plan")) fleet = await readFleetSafe().catch(() => null); // Renew is for an owner only, and the machines list says which role this is
       if (ver !== saveVer || st.saving || st.op.saving) return;
       // The same answer as the last one keeps the same objects, so nothing that shows them is redrawn.
       if (st.settings && JSON.stringify(st.settings) === JSON.stringify(settings)) settings = st.settings;

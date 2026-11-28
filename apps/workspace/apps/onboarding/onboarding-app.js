@@ -53,7 +53,12 @@ const CHOICE_TITLE = "Choose how to set up your workspace";
 /** An optional read: a failure leaves that detail out (the steps then show their generic state); only an abort passes through. */
 const soft = (p) => p.catch((e) => { if (e && e.name === "AbortError") throw e; return null; });
 
-function mountOnboarding(host) {
+const REPO_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** The repo another app (the Team app) asked this one to open at the project step: a repo id, or "". It is untrusted, and the picker uses it only when its own list holds that id. */
+const wantedRepo = (arg) => (arg && typeof arg === "object" && typeof arg.repo_id === "string" && REPO_ID.test(arg.repo_id.toLowerCase()) ? arg.repo_id.toLowerCase() : "");
+
+function mountOnboarding(host, launchArg) {
+  let wanted = wantedRepo(launchArg);
   const abort = new AbortController();
   const st = { steps: null, parsed: null, eng: null, error: "", ctx: {}, price: null, choosing: false, choiceError: "", planBusy: false, planNote: "", planLink: false };
   let destroyed = false, busy = false, again = false, preview = null, payShown = false, picker = null, installPanel = null, installKey = "", survey = null, surveyKey = "", plan = null, planFor = "";
@@ -114,7 +119,7 @@ function mountOnboarding(host) {
     const step = st.parsed && st.parsed.engine && shownTracks(st.parsed).includes("engine") ? st.parsed.engine.find((s) => s.step === "project") : null;
     const want = !destroyed && !!st.eng && !!step && step.state === "active" && !step.plan_gate && window.currentIsAdmin !== false;
     if (!want && picker) { picker.destroy(); picker = null; }
-    else if (want && !picker) picker = st.eng.mountProjectPicker(projectHost, { announce: (t) => (live.textContent = t), openApp, canOpen, onPlaced: load, search: window.location.search, signal: abort.signal, clearReturn: () => window.history.replaceState(null, "", window.location.pathname + window.location.hash) });
+    else if (want && !picker) picker = st.eng.mountProjectPicker(projectHost, { wanted: () => wanted, wantedDone: () => { wanted = ""; }, announce: (t) => (live.textContent = t), openApp, canOpen, onPlaced: load, search: window.location.search, signal: abort.signal, clearReturn: () => window.history.replaceState(null, "", window.location.pathname + window.location.hash) });
   }
   /** The plan review is mounted while the setup waits at the plan (its draft to review, or the approved one waiting for its install), and goes when the setup moves on or is another one. */
   function syncPlan(reread) {
@@ -366,6 +371,7 @@ const ADDED_NOTE = "Engine added. This step updates when the provider confirms t
 
   return {
     refresh: load,
+    launch(arg) { wanted = wantedRepo(arg); if (picker) picker.preselect(); },
     destroy() {
       destroyed = true;
       abort.abort();
@@ -388,9 +394,12 @@ FULC.register({
   title: "Onboarding",
   icon: "✓",
   defaultSize: { w: 640, h: 560 },
-  onOpen({ contentEl }) {
+  onOpen({ contentEl, launchArg }) {
     if (current) current.destroy();
-    current = mountOnboarding(contentEl);
+    current = mountOnboarding(contentEl, launchArg);
+  },
+  onLaunch({ launchArg }) {
+    if (current) current.launch(launchArg);
   },
   onFocus: refresh,
   onShow: refresh,

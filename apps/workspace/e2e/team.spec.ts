@@ -73,6 +73,17 @@ interface Mock {
   updates: string[];
   updateStatus: number;
   updateCode: string;
+  /** Every POST to a repo's start route (the repo id), and its answer: 200 (the repo then reports its session as starting), or an error status with `startCode`. */
+  starts: string[];
+  startStatus: number;
+  startCode: string;
+  /** Every POST to a repo's move route (the body sent), and its answer: 200 (the repo then reports its session as starting), or an error status with `moveCode`. */
+  moves: Obj[];
+  moveStatus: number;
+  moveCode: string;
+  /** Every POST to the checkout route (the body sent) and its answer. */
+  checkouts: Obj[];
+  checkoutAnswer: Obj;
   /** The answer to GET /api/runners (the fleet read), or null for a 500. */
   runners: Obj | null;
   /** One-click Connect: the answer to GET .../bridge (a test edits it to play the runner), every POST body and DELETE sent to it, and the status a POST or DELETE answers with. */
@@ -96,7 +107,7 @@ function fresh(over: Partial<Mock> = {}): Mock {
     log: F.envelope([F.logLine({ line_id: "aaaa000000000001", pr: 7 }), F.logLine({ line_id: "aaaa000000000002", actor_role: "executor", category: "spawned", pr: null }), F.logLine({ line_id: "aaaa000000000003", discussion: null, pr: 9, category: "gate_passed" })]),
     plan: F.plan(), stats: F.stats(), usage: F.usage(), logPage: null,
     puts: [], reads: [], fail: [], putStatus: 200, putCode: "", streaming: false, streamFrame: null,
-    commands: { commands: [] }, dials: F.dials(), posts: [], deletes: [], postStatus: 201, postCode: "", dialStatus: 200, dialCode: "", halts: [], haltStatus: 200, haltCode: "", haltPends: true, updates: [], updateStatus: 200, updateCode: "", retries: [], retryStatus: 200, retryCode: "", retryAnswer: { job_id: "j0000000-0000-4000-8000-000000000001", kind: "engine_session_stop", operate_epoch: 1, already_issued: false }, runners: F.fleet([F.runner()]),
+    commands: { commands: [] }, dials: F.dials(), posts: [], deletes: [], postStatus: 201, postCode: "", dialStatus: 200, dialCode: "", halts: [], haltStatus: 200, haltCode: "", haltPends: true, updates: [], updateStatus: 200, updateCode: "", retries: [], retryStatus: 200, retryCode: "", retryAnswer: { job_id: "j0000000-0000-4000-8000-000000000001", kind: "engine_session_stop", operate_epoch: 1, already_issued: false }, starts: [], startStatus: 200, startCode: "", moves: [], moveStatus: 200, moveCode: "", checkouts: [], checkoutAnswer: { already_held: true }, runners: F.fleet([F.runner(), F.runner({ id: "9d2c7b1e-5f3a-4e8b-8a6d-1c2b3a4d5e77", name: "Garage box" })]),
     bridgePosts: [], bridgeDeletes: 0, bridgeStatus: 201, bridgeCode: "", watch: { posts: [], deletes: [], status: 200, code: "", answer: { lease_id: LEASE, expires_at: new Date(Date.now() + 90_000).toISOString(), session_ends_at: new Date(Date.now() + 4 * 3600_000).toISOString(), limits: { per_repo: 2, per_account: 4 }, command: "held", machine: "online", last_seen: new Date().toISOString(), detail_as_of: null }, streams: [], failStream: false }, ...over, bridge: { phase: "idle", plan: "send", runners: [{ id: BRIDGE_RUNNER, name: "Workshop laptop", has_name: true, online: true, protocol_ok: true, last_seen_at: F.iso(120) }], connected: null, command: null, ...(over.bridge ?? {}) },
   };
 }
@@ -167,6 +178,19 @@ async function setup(page: Page, mock: Mock, opts: { clock?: boolean; stream?: b
     mock.dials = { ...mock.dials, dials: mock.dials.dials.map((d: Obj) => (d.decision_type === body.decision_type ? { ...d, disposition: body.disposition } : d)) };
     return json(route, 200, mock.dials);
   });
+  // The routes the next-step card's buttons call (ON-14c): the move route and the checkout route; Start engine is in the engine handler below.
+  await page.route((u) => /^\/api\/runners\/repos\/[^/]+\/move$/.test(u.pathname), async (route) => {
+    const body = route.request().postDataJSON();
+    mock.moves.push(body);
+    if (mock.moveStatus !== 200) return json(route, mock.moveStatus, { error: { code: mock.moveCode, message: SERVER_TEXT, request_id: "r" } });
+    const id = decodeURIComponent(new URL(route.request().url()).pathname.split("/")[4]);
+    mock.repos = mock.repos.map((r) => (r.repo_id === id ? { ...r, liveness: "never", session: { ...r.session, state: "starting", stopped_reason: null } } : r));
+    return json(route, 200, { repo_id: id, from_runner_id: null, to_runner_id: body.to_runner_id, old_copy: "none" });
+  });
+  await page.route((u) => u.pathname === "/api/v1/billing/checkout-session", async (route) => {
+    mock.checkouts.push(route.request().postDataJSON());
+    return json(route, 200, mock.checkoutAnswer);
+  });
   await page.route((u) => u.pathname === "/api/runners", async (route) => {
     mock.reads.push("/api/runners");
     if (mock.runners === null) return json(route, 500, { error: { code: "server_error", message: SERVER_TEXT, request_id: "r" } });
@@ -221,6 +245,14 @@ async function setup(page: Page, mock: Mock, opts: { clock?: boolean; stream?: b
       if (!mock.retryAnswer.queued) mock.repos = mock.repos.map((r) => (r.repo_id === decodeURIComponent(rm[1]) ? { ...r, stop_failed: null } : r));
       return json(route, 200, mock.retryAnswer);
     }
+    const sm = req.method() === "POST" ? url.pathname.match(new RegExp(`^${BASE}/repos/([^/]+)/start$`)) : null;
+    if (sm) {
+      mock.starts.push(decodeURIComponent(sm[1]));
+      expect(req.postData()).toBeNull(); // no body
+      if (mock.startStatus !== 200) return json(route, mock.startStatus, { error: { code: mock.startCode, message: SERVER_TEXT, request_id: "r" } });
+      mock.repos = mock.repos.map((r) => (r.repo_id === decodeURIComponent(sm[1]) ? { ...r, session: { ...r.session, state: "starting", stopped_reason: null } } : r));
+      return json(route, 200, { job_id: "j0000000-0000-4000-8000-000000000002", kind: "engine_session_start", operate_epoch: 1, already_issued: false });
+    }
     const um = req.method() === "POST" ? url.pathname.match(new RegExp(`^${BASE}/repos/([^/]+)/update$`)) : null;
     if (um) {
       mock.updates.push(decodeURIComponent(um[1]));
@@ -253,7 +285,7 @@ async function setup(page: Page, mock: Mock, opts: { clock?: boolean; stream?: b
       if (typeof body.watch_enabled === "boolean") mock.settings = { ...mock.settings, watch_enabled: body.watch_enabled };
       if (typeof body.operate_enabled === "boolean") {
         mock.settings = { ...mock.settings, operate_enabled: body.operate_enabled };
-        mock.repos = mock.repos.map((r) => ({ ...r, operate_enabled: body.operate_enabled }));
+        mock.repos = mock.repos.map((r) => ({ ...r, operate_enabled: body.operate_enabled, ...(body.operate_enabled && r.session?.stopped_reason === "operate_off" ? { session: { ...r.session, state: "starting", stopped_reason: null } } : {}) }));
       }
       if (Array.isArray(body.repo_ids)) mock.settings = { ...mock.settings, repos: mock.settings.repos.map((r: Obj) => ({ ...r, enabled: body.repo_ids.includes(r.repo_id) })) };
       return json(route, 200, { ok: true });
@@ -2591,6 +2623,281 @@ test.describe("Team app", () => {
     await expect(t(page, "tm-stop-chip")).toBeHidden();
     await expect(t(page, "tm-stopfail")).toBeHidden();
     await clean(page, errors);
+  });
+
+  // ── The next step of the open repo (ON-14c) ─────────────────────────────────────────────────────────────────────────────
+  // Every row of the chip table, with real clicks on its button, at phone, tablet and desktop. The words are pinned in test/team-next.test.mjs; here the page is the subject: that the button is a
+  // real control in the Tab order, calls the route once, and the card, the chip and the live line follow the answer, and that nothing sticks out sideways.
+  const AT_ISO = new Date(Date.now() - 30 * 60_000).toISOString();
+  const hhmm = (iso: string) => { const d = new Date(iso); return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0"); };
+  const sess = (state: string, over: Obj = {}) => ({ state, last_start_mode: "created", last_start_at: AT_ISO, stopped_reason: null, state_at: AT_ISO, ...over });
+  const setupDone = { status: "done", phase: "done", sub_step: null, state: "ok", failure_code: null };
+  const stepRepo = (over: Obj = {}, settingsOver: Obj = {}, mockOver: Partial<Mock> = {}) => {
+    const F = makeFixtures(Date.now());
+    return operateOn({ settings: F.settings({ operate_enabled: true, ...settingsOver }), repos: [F.repo({ operate_enabled: true, machine_name: "Studio laptop", setup: setupDone, session: sess("running"), ...over })], ...mockOver });
+  };
+  const nextText = (page: Page) => t(page, "tm-next-text");
+  async function fitsAcross(page: Page) {
+    // A phone window is first drawn at its default size and then fitted to the screen; measure after the fit.
+    if (test.info().project.name === "phone") await expect.poll(() => page.evaluate((sel) => (document.querySelector(sel) as HTMLElement).getBoundingClientRect().width <= innerWidth + 1, WIN)).toBe(true);
+    await noSideways(page);
+    const card = await box(t(page, "tm-next"));
+    const win = await box(page.locator(WIN));
+    expect(card.x + card.width).toBeLessThanOrEqual(win.x + win.width + 1);
+  }
+
+  test("a running engine has no next-step card", async ({ page }) => {
+    const { errors } = await setup(page, stepRepo());
+    await open(page);
+    await expect(t(page, "tm-next")).toBeHidden();
+    await clean(page, errors);
+  });
+
+  test("never + an open setup: the sentence names the step and Open Onboarding opens the Onboarding window", async ({ page }) => {
+    const { errors } = await setup(page, stepRepo({ liveness: "never", setup: { ...setupDone, status: "open", phase: "install" }, session: sess("never") }));
+    await open(page);
+    await expect(nextText(page)).toHaveText("Setting up: installing the engine");
+    await expect(t(page, "tm-chip")).toContainText("Never connected");
+    await fitsAcross(page); // before the hand-off: a phone shows one window, and the Team window is hidden once another opens
+    await press(t(page, "tm-next-onboarding"));
+    await expect(page.locator(`#windows-container .fulc-window[data-app-id="onboarding"]`)).toBeVisible();
+    expect(errors.filter((x) => !/onboarding|\/api\//i.test(x))).toEqual([]);
+  });
+
+  test("never + no setup: Set up the engine opens Onboarding", async ({ page }) => {
+    await setup(page, stepRepo({ liveness: "never", setup: { status: "none", phase: null, sub_step: null, state: null, failure_code: null }, session: sess("never") }));
+    await open(page);
+    await expect(nextText(page)).toHaveText("This repo isn't set up on a machine yet");
+    await fitsAcross(page);
+    await press(t(page, "tm-next-setup"));
+    await expect(page.locator(`#windows-container .fulc-window[data-app-id="onboarding"]`)).toBeVisible();
+  });
+
+  test("never + setup done, operate off: Turn on operate saves the switch, and the card then offers Start engine", async ({ page }) => {
+    const mock = stepRepo({ liveness: "never", operate_enabled: false, session: sess("never") }, { operate_enabled: false });
+    const { errors } = await setup(page, mock);
+    await open(page);
+    await expect(nextText(page)).toHaveText("Operate is off, so the engine isn't running on Studio laptop");
+    const btn = t(page, "tm-next-operate");
+    await expect(btn).toHaveText("Turn on operate");
+    await press(btn);
+    await expect.poll(() => mock.puts).toEqual([{ path: `${BASE}/settings`, body: { operate_enabled: true } }]);
+    await expect(nextText(page)).toHaveText("The engine isn't running on Studio laptop");
+    await expect(t(page, "tm-next-start")).toHaveText("Start engine");
+    await fitsAcross(page);
+    await clean(page, errors);
+  });
+
+  test("never + setup done, operate on: Start engine sends one POST, and the chip and card follow the start", async ({ page }) => {
+    const mock = stepRepo({ liveness: "never", session: sess("never") });
+    const { errors } = await setup(page, mock);
+    await open(page);
+    await expect(nextText(page)).toHaveText("The engine isn't running on Studio laptop");
+    await press(t(page, "tm-next-start"));
+    await expect.poll(() => mock.starts).toEqual([REPO_A]);
+    await expect(t(page, "tm-live")).toContainText("Asked the machine to start the engine.");
+    await expect(nextText(page)).toHaveText("Starting the engine on Studio laptop…");
+    await expect(t(page, "tm-chip")).toHaveText("Engine connection: Starting");
+    await expect(t(page, "tm-next-start")).toHaveCount(0);
+    await fitsAcross(page);
+    await clean(page, errors);
+  });
+
+  test("stale: the card says to start the runner, and Open Machines opens the Machines window", async ({ page }) => {
+    await setup(page, stepRepo({ liveness: "stale", session: sess("stale"), last_heard_at: new Date(Date.now() - 3600_000).toISOString() }));
+    await open(page);
+    await expect(t(page, "tm-chip")).toContainText("Stale since");
+    await expect(nextText(page)).toHaveText("Start the runner on Studio laptop");
+    await fitsAcross(page);
+    await press(t(page, "tm-next-machines"));
+    await expect(page.locator(`#windows-container .fulc-window[data-app-id="runners"]`)).toBeVisible();
+  });
+
+  test("runner removed: Move to another machine opens a picker, Move sends the chosen machine, and Cancel closes the picker", async ({ page }) => {
+    const mock = stepRepo({ liveness: "runner_removed", session: sess("runner_removed") });
+    const { errors } = await setup(page, mock);
+    await open(page);
+    await expect(nextText(page)).toHaveText("Its machine was removed");
+    await expect(t(page, "tm-chip")).toContainText("Runner removed");
+    await press(t(page, "tm-next-move"));
+    const pick = t(page, "tm-move-pick");
+    await expect(pick.locator("option")).toHaveText(["Workshop laptop", "Garage box"]);
+    expect(await activeId(page)).toBe("tm-move-pick");
+    await press(t(page, "tm-move-cancel"));
+    await expect(t(page, "tm-move")).toHaveCount(0);
+    await expect(t(page, "tm-next-move")).toBeVisible();
+    await press(t(page, "tm-next-move"));
+    await pick.selectOption({ label: "Garage box" });
+    await fitsAcross(page);
+    await press(t(page, "tm-move-go"));
+    await expect.poll(() => mock.moves).toEqual([{ to_runner_id: "9d2c7b1e-5f3a-4e8b-8a6d-1c2b3a4d5e77" }]);
+    await expect(t(page, "tm-live")).toContainText("Moved. The engine starts on the new machine.");
+    await expect(nextText(page)).toHaveText("Starting the engine on Studio laptop…");
+    await clean(page, errors);
+  });
+
+  test("a refused move says why in fixed words and keeps the picker", async ({ page }) => {
+    const mock = stepRepo({ liveness: "runner_removed", session: sess("runner_removed") });
+    mock.moveStatus = 409;
+    mock.moveCode = "machine_single_project";
+    const { errors } = await setup(page, mock);
+    await open(page);
+    await press(t(page, "tm-next-move"));
+    await press(t(page, "tm-move-go"));
+    await expect(t(page, "tm-next-note")).toHaveText("That machine can't take the project right now. Pick another.");
+    await expect(t(page, "tm-move")).toBeVisible();
+    await clean(page, errors);
+  });
+
+  for (const [reason, sentence, id, label] of [
+    ["person", `Stopped ${hhmm(AT_ISO)}`, "start", "Start engine"], ["halt", `Stopped ${hhmm(AT_ISO)}`, "start", "Start engine"],
+    ["operate_off", `Stopped at ${hhmm(AT_ISO)} because operate was turned off`, "operate", "Turn on operate"], ["plan", "Plan ended: the engine is stopped", "renew", "Renew"],
+  ]) {
+    test(`session stopped (${reason}) with ${label}, and the chip is Stopped, never Live`, async ({ page }) => {
+      const mock = stepRepo({ session: sess("stopped", { stopped_reason: reason }) });
+      const { errors } = await setup(page, mock);
+      await open(page);
+      await expect(nextText(page)).toHaveText(sentence);
+      await expect(t(page, "tm-chip")).toHaveText("Engine connection: Stopped");
+      const btn = t(page, `tm-next-${id}`);
+      await expect(btn).toHaveText(label);
+      await btn.focus();
+      expect(await activeId(page)).toBe(`tm-next-${id}`);
+      await page.keyboard.press("Enter"); // the keyboard reaches the button and Enter presses it
+      if (id === "start") await expect.poll(() => mock.starts).toEqual([REPO_A]);
+      if (id === "operate") await expect.poll(() => mock.puts).toEqual([{ path: `${BASE}/settings`, body: { operate_enabled: true } }]);
+      if (id === "renew") await expect.poll(() => mock.checkouts).toEqual([{ plan: "engine", quantity: 1, success_path: "/", cancel_path: "/" }]);
+      if (id === "renew") await expect(t(page, "tm-live")).toContainText("You already have the Engine plan.");
+      await fitsAcross(page);
+      await clean(page, errors);
+    });
+  }
+
+  // Operate off while a cloud session is listed: the engine is stopping or stopped, so the card offers Turn on operate (never a start the server refuses) and the chip is never Live or Stale.
+  const OFF_LINE = "Operate is off, so the engine isn't running on Studio laptop";
+  for (const [name, over, sentence, chip, action] of [
+    ["stale (machine offline)", { liveness: "stale", last_heard_at: new Date(Date.now() - 3600_000).toISOString(), session: sess("stale") }, "Stopping when Studio laptop comes back", "Operate off", null],
+    ["running (stop in transit)", { liveness: "live", session: sess("running") }, OFF_LINE, "Operate off", "operate"],
+    ["stopped by a person", { session: sess("stopped", { stopped_reason: "person" }) }, OFF_LINE, "Stopped", "operate"],
+    ["stopped by a halt", { session: sess("stopped", { stopped_reason: "halt" }) }, OFF_LINE, "Stopped", "operate"],
+    ["stopped by a move", { session: sess("stopped", { stopped_reason: "move" }) }, OFF_LINE, "Stopped", "operate"],
+  ] as [string, Obj, string, string, string | null][]) {
+    test(`operate off, ${name}: "${sentence}", chip ${chip}, ${action ? "Turn on operate and no start" : "no button"}`, async ({ page }) => {
+      const mock = stepRepo({ ...over, operate_enabled: false }, { operate_enabled: false });
+      const { errors } = await setup(page, mock);
+      await open(page);
+      await expect(nextText(page)).toHaveText(sentence);
+      await expect(t(page, "tm-chip")).toHaveText(`Engine connection: ${chip}`);
+      await expect(t(page, "tm-next-start")).toHaveCount(0);
+      await expect(t(page, "tm-next-machines")).toHaveCount(0);
+      if (action) await expect(t(page, "tm-next-operate")).toHaveText("Turn on operate");
+      else await expect(t(page, "tm-next-operate")).toHaveCount(0);
+      expect(mock.starts).toEqual([]);
+      await fitsAcross(page);
+      await clean(page, errors);
+    });
+  }
+
+  test("operate off: a member sees the sentence and the ask line", async ({ page }) => {
+    const mock = stepRepo({ operate_enabled: false, liveness: "live", session: sess("running") }, { operate_enabled: false, can_edit: false });
+    await setup(page, mock);
+    await open(page);
+    await expect(nextText(page)).toHaveText(OFF_LINE);
+    await expect(t(page, "tm-next-ask")).toHaveText("Ask an owner or admin to turn on operate");
+    await expect(t(page, "tm-next-operate")).toHaveCount(0);
+  });
+
+  test("a watch-only repo with no listed sandbox keeps its Live chip", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    await setup(page, fresh({ repos: [F.repo({ operate_enabled: false })] }));
+    await open(page);
+    await expect(t(page, "tm-chip")).toHaveText("Engine connection: Live");
+    await expect(t(page, "tm-next")).toBeHidden();
+  });
+
+  test("a removed project has no Start engine button", async ({ page }) => {
+    await setup(page, stepRepo({ session: sess("stopped", { stopped_reason: "remove" }) }));
+    await open(page);
+    await expect(nextText(page)).toHaveText(`Stopped ${hhmm(AT_ISO)}`);
+    await expect(t(page, "tm-next-start")).toHaveCount(0);
+  });
+
+  test("plan ended: an admin sees the ask line and no Renew button", async ({ page }) => {
+    const F = makeFixtures(Date.now());
+    const mock = stepRepo({ session: sess("stopped", { stopped_reason: "plan" }) }, {}, { runners: F.fleet([F.runner()], "admin") });
+    await setup(page, mock);
+    await open(page);
+    await expect(nextText(page)).toHaveText("Plan ended: the engine is stopped");
+    await expect(t(page, "tm-next-ask")).toHaveText("Ask an owner to renew the plan");
+    await expect(t(page, "tm-next-renew")).toHaveCount(0);
+    expect(mock.checkouts).toEqual([]);
+  });
+
+  test("a halted engine says when it stopped, and Start engine sends one POST", async ({ page }) => {
+    const mock = stepRepo({ halted: true, session: sess("halted") });
+    await setup(page, mock);
+    await open(page);
+    await expect(nextText(page)).toHaveText(`Stopped ${hhmm(AT_ISO)}`);
+    await press(t(page, "tm-next-start"));
+    await expect.poll(() => mock.starts).toEqual([REPO_A]);
+  });
+
+  test("a start the cloud refuses says why in fixed words, never the server's", async ({ page }) => {
+    const mock = stepRepo({ session: sess("stopped", { stopped_reason: "person" }) });
+    mock.startStatus = 402;
+    mock.startCode = "plan_required";
+    const { errors } = await setup(page, mock);
+    await open(page);
+    await press(t(page, "tm-next-start"));
+    await expect(t(page, "tm-next-note")).toHaveText("The engine needs the Engine plan. Choose it in Onboarding.");
+    await expect(t(page, "tm-next-start")).toBeVisible();
+    await clean(page, errors);
+  });
+
+  test("a running engine that came up fresh says when", async ({ page }) => {
+    const { errors } = await setup(page, stepRepo({ session: sess("running", { last_start_mode: "fresh" }) }));
+    await open(page);
+    await expect(t(page, "tm-fresh")).toHaveText(`Started fresh at ${hhmm(AT_ISO)}`);
+    await expect(t(page, "tm-chip")).toHaveText("Engine connection: Live");
+    await fitsAcross(page);
+    await clean(page, errors);
+  });
+
+  // The page's clock is pinned (never the real time of day), so the countdown is the same at any hour the suite runs.
+  for (const [state, clock, words] of [
+    ["session_full", "2026-11-16T22:00:00Z", "in 2 h"], ["repo_full", "2026-11-16T23:02:00Z", "in 58 min"],
+    ["session_full", "2026-11-16T23:59:30Z", "in under a minute"], ["repo_full", "2026-11-17T00:00:01Z", "in 24 h"],
+  ]) {
+    test(`the event limit (${state}) at ${clock}: the copy counts down to 00:00 UTC (${words}), and the data age stays on screen`, async ({ page }) => {
+      await page.clock.setFixedTime(new Date(clock));
+      const reset = new Date(Math.floor(Date.parse(clock) / 86_400_000) * 86_400_000 + 86_400_000);
+      const { errors } = await setup(page, stepRepo({ quota: { state, session_used: 5000, session_limit: 5000, repo_used: 20000, repo_limit: 20000, resets_at: reset.toISOString() } }));
+      await open(page);
+      await expect(t(page, "tm-quota")).toHaveText(`Today's event limit is reached. Updates resume at 00:00 UTC (${words})`);
+      await expect(t(page, "tm-agents-asof")).toContainText("As of");
+      await fitsAcross(page);
+      await clean(page, errors);
+    });
+  }
+
+  test("a member sees the sentence without the button, and the line that says who can act", async ({ page }) => {
+    const mock = stepRepo({ session: sess("stopped", { stopped_reason: "operate_off" }) }, { can_edit: false });
+    const { errors } = await setup(page, mock);
+    await open(page);
+    await expect(nextText(page)).toHaveText(`Stopped at ${hhmm(AT_ISO)} because operate was turned off`);
+    await expect(t(page, "tm-next-ask")).toHaveText("Ask an owner or admin to turn on operate");
+    await expect(t(page, "tm-next-operate")).toHaveCount(0);
+    expect(mock.puts).toEqual([]);
+    await clean(page, errors);
+  });
+
+  test("a long machine name stays text and wraps inside the card", async ({ page }) => {
+    const { errors } = await setup(page, stepRepo({ liveness: "never", session: sess("never"), machine_name: HOSTILE + " " + "x".repeat(80) }));
+    await open(page);
+    await expect(nextText(page).locator("img, script")).toHaveCount(0);
+    await expect(nextText(page).locator("bdi")).toHaveCount(1);
+    await fitsAcross(page);
+    expect(errors).toEqual([]);
   });
 
   // ── The engine update card (ON-15d) ─────────────────────────────────────────────────────────────────────────────────
