@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   STATE_CARRY_CHUNK_BYTES,
   STATE_CARRY_CHUNK_SHA_HEADER,
@@ -19,6 +19,8 @@ import { harness, newKey, registerKey, respond, signed, type Harness, type TestK
  * [pg] D#845 MC-9b2: the state carry's five runner routes over the real HTTP path (the RFC 9421 signature, the single-use nonce), the real definers of migration 1123 as the runner login, row security forced, and
  * the real sealer under a test machine key. The jobs are rows as the cloud's own issuer leaves them (delivered), because the issuer for a carry stop and start is a later change.
  */
+const wake = vi.hoisted(() => vi.fn(async (_accountId: string): Promise<void> => undefined));
+vi.mock("@fx/core/src/pendingWork.js", async (original) => ({ ...(await original<typeof import("@fx/core/src/pendingWork.js")>()), markRunnerWork: wake }));
 const KEY = { FX_MACHINE_KEK_V1: Buffer.alloc(32, 9).toString("base64") };
 const sha = (b: Uint8Array): string => createHash("sha256").update(b).digest("hex");
 const MIB4 = STATE_CARRY_CHUNK_BYTES;
@@ -133,6 +135,19 @@ describe("state carry routes [pg]", () => {
     expect((await take(r, startJob, 1)).status).toBe(409);
     const retry = await start(r, MIB4 + 5, 2, "c".repeat(64));
     expect(Buffer.from(((await take(r, retry, 1)) as { binary: Uint8Array }).binary).equals(c1)).toBe(true);
+  });
+
+  it("a seal wakes the account's machines (so the start signed from the sealed carry reaches the new one), and a refused seal does not", async () => {
+    const r = await rig();
+    const stopJob = await stop(r);
+    expect((await begin(r, stopJob, 5, 1)).status).toBe(200);
+    wake.mockClear();
+    refused(await sealRoute(r, stopJob)); // no chunk yet
+    expect(wake).not.toHaveBeenCalled();
+    expect((await put(r, stopJob, 0, Buffer.from("tail!"))).status).toBe(200);
+    expect((await sealRoute(r, stopJob)).status).toBe(200);
+    expect(wake).toHaveBeenCalledTimes(1);
+    expect(wake).toHaveBeenCalledWith(r.a.accountId);
   });
 
   describe("route auth: a runner for its own job only", () => {

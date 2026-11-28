@@ -33,8 +33,8 @@ export async function listMachines(deps: RunnerCloudDeps, principal: SessionPrin
  * POST /api/runners/repos/:id/move with exactly `{ to_runner_id, carry_state? }`. Owner or admin only. A repo id or machine id that is not a UUID, and any other body, is 400 `invalid_message`.
  * It runs the whole move (`moveEngineProject`, MC-9b1): the placement, the start on the new machine and the old machine's cleanup request, in one transaction. Refusals pass through with their own
  * codes: 403 `forbidden` or the plan-holder code, 404 `not_found`, 409 `project_not_placed`, `machine_not_eligible`, `machine_single_project`, `removal_pending`, `operate_off`, `session_changed`,
- * `default_branch_empty` and `state_carry_unavailable`, 402 `plan_required`, `account_held` and `engine_quantity`, 503 `not_configured` and `github_unavailable`, 502 `github_refused`; a deadlock with another
- * change to the machine is 409 `placement_busy` (try again). Answers 200 with the machine it left, the one it reached, and `old_copy`: `queued` while the old machine still has its copy to stop and delete.
+ * `default_branch_empty`, `carry_pending` and `state_carry_unavailable` (with a `reason`), 402 `plan_required`, `account_held` and `engine_quantity`, 503 `not_configured` and `github_unavailable`, 502 `github_refused`; a deadlock with another
+ * change to the machine is 409 `placement_busy` (try again). Answers 200 with the machine it left, the one it reached, `old_copy` (`queued` while the old machine still has its copy to stop and delete) and `carry` (`{id}` when the team's memory is being moved and no start is issued yet, else null).
  */
 export async function moveProjectRoute(deps: RunnerCloudDeps, principal: SessionPrincipal, repoId: string, input: unknown): Promise<RunnerHttpResponse> {
   if (!UUID.test(repoId)) throw invalid();
@@ -53,5 +53,5 @@ export async function moveProjectRoute(deps: RunnerCloudDeps, principal: Session
     if (pgCode(error) === "40P01") throw new RunnerHttpError(409, "placement_busy", "Another change to this machine is in progress. Try again.");
     throw error;
   }
-  return { status: 200, body: { repo_id: repoId, from_runner_id: moved.from_runner_id, to_runner_id: moved.to_runner_id, old_copy: moved.old_copy }, headers: { "cache-control": "no-store" } };
+  return { status: 200, body: { repo_id: repoId, from_runner_id: moved.from_runner_id, to_runner_id: moved.to_runner_id, old_copy: moved.old_copy, carry: moved.carry }, headers: { "cache-control": "no-store" } };
 }

@@ -11,10 +11,10 @@ import { RunPullRequestError, type RunPullRequestPort } from "./runPullRequest.j
  * on every call. The default branch head is read through the App port outside any transaction, once per repo; a GitHub that cannot be asked leaves the repo due. The spend guard runs once per account's batch before anything is read or signed.
  */
 
-export type SystemStartCause = "first_start" | "operate_on" | "engine_update";
+export type SystemStartCause = "first_start" | "operate_on" | "engine_update" | "state_carry";
 export type SystemStartResult =
   | "issued" | "cause_gone" | "plan" | "busy" | "epoch_moved" | "not_placed"
-  | "github_unavailable" | "github_refused" | "default_branch_empty" | "hosted_engine_unavailable" | "error";
+  | "github_unavailable" | "github_refused" | "default_branch_empty" | "hosted_engine_unavailable" | "carry_gone" | "import_failed" | "error";
 
 type HeadReader = Pick<RunPullRequestPort, "defaultBranch" | "branchState">;
 
@@ -44,13 +44,20 @@ export interface SystemStartPass {
   results: Array<{ account_id: string; repo_id: string; result: SystemStartResult }>;
 }
 
-interface DueRow { o_account: string; o_repo: string; o_runner: string; o_repo_gh_id: string; o_owner: string | null; o_name: string | null; o_epoch: number; o_resume: boolean }
+interface DueRow {
+  o_account: string; o_repo: string; o_runner: string; o_repo_gh_id: string; o_owner: string | null; o_name: string | null; o_epoch: number; o_resume: boolean;
+  /** `state_carry` rows only: the sealed carry the start imports (its id, size, chunk count and whole-bundle sha256, as the row has them). */
+  o_carry?: string; o_bytes?: number; o_chunks?: number; o_sha256?: string;
+}
 
 const ROUTE = "reconcile.engine_session_starts";
 const SHA40 = /^[0-9a-f]{40}$/;
 
-/** `first_start` lists the finished installs that still hold `start_pending`; `operate_on` lists the repos whose queue row (ON-13c2) the drain has claimed; `engine_update` lists the repos whose merged update waits for its restart (ON-15c). */
-const LISTERS: Record<SystemStartCause, string> = { first_start: "engine_system_starts_due", operate_on: "engine_operate_on_starts_due", engine_update: "engine_update_starts_due" };
+/**
+ * `first_start` lists the finished installs that still hold `start_pending`; `operate_on` lists the repos whose queue row (ON-13c2) the drain has claimed; `engine_update` lists the repos whose merged update waits for its restart (ON-15c);
+ * `state_carry` (D#845 MC-9b2d) lists the sealed carries of a move: its start has the carry's facts in its args and is written by `state_carry_start_issue` (1124), which also binds the carry to its repo and machine.
+ */
+const LISTERS: Record<SystemStartCause, string> = { first_start: "engine_system_starts_due", operate_on: "engine_operate_on_starts_due", engine_update: "engine_update_starts_due", state_carry: "state_carry_starts_due" };
 const listDue = async (pool: Pool, cause: SystemStartCause, accountId: string | null, repoId: string | null, limit: number): Promise<DueRow[]> =>
   (await pool.query<DueRow>(`SELECT * FROM ${LISTERS[cause]}($1::uuid, $2::uuid, $3::integer)`, [accountId, repoId, limit])).rows;
 
@@ -75,13 +82,19 @@ async function issueOne(deps: SystemStartDeps, sign: (job: MachineJob) => unknow
   const expires = new Date(issued.getTime() + MACHINE_JOB_MAX_LIFE_S * 1000);
   const signed = sign({
     v: 1, job_id: jobId, runner_id: row.o_runner, repo_gh_id: Number(row.o_repo_gh_id), requires_engine: "any", issued_at: issued.toISOString(), expires_at: expires.toISOString(),
-    kind: "engine_session_start", args: { at_sha: head, resume: row.o_resume, operate_epoch: row.o_epoch },
+    kind: "engine_session_start",
+    args: cause === "state_carry"
+      ? { at_sha: head, resume: false, operate_epoch: row.o_epoch, carry: { id: row.o_carry, bytes: row.o_bytes, chunks: row.o_chunks, sha256: row.o_sha256 } }
+      : { at_sha: head, resume: row.o_resume, operate_epoch: row.o_epoch },
   } as MachineJob);
   const client = await deps.pool.connect();
   try {
     await client.query("BEGIN");
     const result = (await client.query<{ result: SystemStartResult }>(
-      "SELECT engine_system_start_issue($1::uuid, $2::uuid, $3::uuid, $4, $5::jsonb, $6::timestamptz, $7::timestamptz) AS result", [jobId, row.o_account, row.o_repo, cause, JSON.stringify(signed), issued, expires],
+      cause === "state_carry"
+        ? "SELECT state_carry_start_issue($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::jsonb, $6::timestamptz, $7::timestamptz) AS result"
+        : "SELECT engine_system_start_issue($1::uuid, $2::uuid, $3::uuid, $4, $5::jsonb, $6::timestamptz, $7::timestamptz) AS result",
+      [jobId, row.o_account, row.o_repo, cause === "state_carry" ? row.o_carry : cause, JSON.stringify(signed), issued, expires],
     )).rows[0]!.result;
     await client.query("COMMIT");
     return result;

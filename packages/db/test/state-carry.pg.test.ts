@@ -693,13 +693,13 @@ describe('state carry (1123) [pg]', () => {
            FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.proname LIKE 'state\\_carry\\_%' ORDER BY p.proname`,
       );
       expect(rows.map((x) => x.proname)).toEqual(['state_carry_abandon', 'state_carry_begin', 'state_carry_chunk_put', 'state_carry_chunk_take', 'state_carry_fail', 'state_carry_for_job', 'state_carry_imported', 'state_carry_job_carry',
-        'state_carry_person', 'state_carry_request', 'state_carry_retarget', 'state_carry_retry', 'state_carry_seal', 'state_carry_start_guard', 'state_carry_sweep']);
+        'state_carry_person', 'state_carry_request', 'state_carry_retarget', 'state_carry_retry', 'state_carry_seal', 'state_carry_start_guard', 'state_carry_start_issue', 'state_carry_starts_due', 'state_carry_sweep', 'state_carry_unsupported']);
       for (const x of rows) {
         const invoker = ['state_carry_person', 'state_carry_for_job'].includes(x.proname);
-        const ops = ['state_carry_sweep', 'state_carry_start_guard'].includes(x.proname);
+        const ops = ['state_carry_sweep', 'state_carry_start_guard', 'state_carry_start_issue', 'state_carry_starts_due'].includes(x.proname);
         expect(x.proconfig, x.proname).toEqual(['search_path=pg_catalog, public, pg_temp']);
         expect(x.owner, x.proname).toBe(ops ? 'engine_start_definer' : 'machine_jobs_owner');
-        expect(x.grantees, x.proname).toEqual(invoker ? [] : x.proname === 'state_carry_sweep' ? ['platform_ops'] : ['app_user']);
+        expect(x.grantees, x.proname).toEqual(invoker ? [] : ['state_carry_sweep', 'state_carry_start_issue', 'state_carry_starts_due'].includes(x.proname) ? ['platform_ops'] : ['app_user']);
         expect(x.prosecdef, x.proname).toBe(!invoker);
       }
     });

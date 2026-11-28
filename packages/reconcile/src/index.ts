@@ -42,6 +42,7 @@ export { createMachineServerSweep, MACHINE_SERVER_SWEEP_JOB, type MachineSweepSt
 export { createEngineSessionStops, ENGINE_SESSION_STOPS_JOB, type EngineSessionStopsPass } from './jobs/engineSessionStops.js';
 export { createEngineSessionStarts, ENGINE_SESSION_STARTS_JOB, type EngineSessionStartsPass } from './jobs/engineSessionStarts.js';
 export { createMachinePrune, machinePrune, MACHINE_PRUNE_JOB } from './jobs/machinePrune.js';
+export { stateCarrySweep, STATE_CARRY_SWEEP_JOB } from './jobs/stateCarrySweep.js';
 export { createOnboardingPrune, onboardingPrune, ONBOARDING_PRUNE_JOB } from './jobs/onboardingPrune.js';
 export { createMemorySweep, memorySweep, MEMORY_SWEEP_JOB, MEMORY_SWEEPS, type MemorySweep } from './jobs/memorySweep.js';
 export {

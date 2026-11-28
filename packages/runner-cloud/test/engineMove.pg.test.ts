@@ -404,7 +404,7 @@ describe("moving an engine to another machine [pg]", () => {
       const out = await move(r, to.runnerId);
       await claimIssue(r);
       await finish(byKind(await jobs(r), "engine_session_stop")[0]!.id, "done");
-      await finish(out.start_job_id, "failed");
+      await finish(out.start_job_id!, "failed");
       for (let i = 0; i < 3; i += 1) expect(await claimIssue(r)).toBe(0);
       expect(byKind(await jobs(r), "engine_session_delete")).toHaveLength(0);
     });

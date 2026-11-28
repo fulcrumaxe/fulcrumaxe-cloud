@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
-import { MACHINE_JOB_MAX_LIFE_S, type MachineJob } from "@fulcrumaxe/runner-protocol";
+import { ENGINE_CARRY_CAPABILITY, MACHINE_JOB_MAX_LIFE_S, type MachineJob } from "@fulcrumaxe/runner-protocol";
 import { RUNNER_ONLINE_SECONDS, runnerLiveSql } from "@fx/runner";
 import { pgCode, type RunnerCloudDeps } from "./http.js";
 
@@ -19,6 +19,22 @@ interface DueRow { o_cleanup: string; o_repo: string; o_gh_repo_id: string; o_ki
 
 /** One closed log line: an event name and a code, never an id or a message. */
 const logLine = (deps: RunnerCloudDeps, event: string, code: string): void => (deps.log ?? console.warn)(JSON.stringify({ event, code }));
+
+/**
+ * D#845 MC-9b2d: the carry this cleanup's stop must export for (open, unsealed, unfailed; the source machine's own row, by the runner session). The stop signs its id only when the machine's last hello still lists
+ * `engine_carry_v1`: a runner that does not would refuse the whole job. Then the carry fails (`runner_update_needed`, by `state_carry_unsupported`) and the stop is plain. Named by the account, on top of row security.
+ */
+async function carryOfStop(client: PoolClient, cleanupId: string, runnerId: string): Promise<{ id: string } | null> {
+  const acct = "NULLIF(current_setting('app.account_id', true), '')::uuid";
+  const carry = (await client.query<{ id: string }>(
+    `SELECT id FROM state_carries WHERE account_id = ${acct} AND cleanup_id = $1 AND from_runner_id = $2 AND closed_at IS NULL AND sealed_at IS NULL AND failure_code IS NULL`, [cleanupId, runnerId],
+  )).rows[0];
+  if (!carry) return null;
+  const capable = (await client.query(`SELECT 1 FROM runner_capabilities WHERE account_id = ${acct} AND runner_id = $1 AND $2::text = ANY (capabilities)`, [runnerId, ENGINE_CARRY_CAPABILITY])).rows.length > 0;
+  if (capable) return carry;
+  await client.query("SELECT state_carry_unsupported($1)", [cleanupId]);
+  return null;
+}
 
 /**
  * In the claim's runner session: each due chain (the stop, then the delete 1 ms later so `machine_job_pending` hands the stop over first), one savepoint per chain, rolled back whole on
@@ -64,7 +80,8 @@ export async function issueDueCleanups(client: PoolClient, deps: RunnerCloudDeps
         const jobId = randomUUID();
         const issuedAt = new Date(base + i);
         const expiresAt = new Date(issuedAt.getTime() + MACHINE_JOB_MAX_LIFE_S * 1000);
-        const args = row.o_kind === "engine_session_stop" ? { reason: row.o_reason, operate_epoch: row.o_epoch } : { operate_epoch: row.o_epoch };
+        const carry = row.o_kind === "engine_session_stop" ? await carryOfStop(client, cleanupId, runner.runnerId) : null;
+        const args = row.o_kind === "engine_session_stop" ? { reason: row.o_reason, operate_epoch: row.o_epoch, ...(carry ? { carry: { id: carry.id } } : {}) } : { operate_epoch: row.o_epoch };
         const job = {
           v: 1, job_id: jobId, runner_id: runner.runnerId, repo_gh_id: Number(row.o_gh_repo_id), requires_engine: "any", issued_at: issuedAt.toISOString(), expires_at: expiresAt.toISOString(), kind: row.o_kind, args,
         } as MachineJob;
