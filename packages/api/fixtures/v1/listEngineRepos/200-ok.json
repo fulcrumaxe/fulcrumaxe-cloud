@@ -16,6 +16,7 @@
       "halted_at": null,
       "halted_by": null,
       "halt_epoch": 0,
+      "github_identity": "app",
       "stop_failed": { "reason": "person", "code": "snapshot_failed", "at": "2026-11-16T10:00:10.000Z" },
       "machine_name": "Studio laptop",
       "setup": { "status": "done", "phase": "done", "sub_step": null, "state": "ok", "failure_code": null },

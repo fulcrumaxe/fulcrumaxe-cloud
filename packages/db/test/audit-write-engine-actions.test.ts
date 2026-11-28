@@ -51,10 +51,17 @@ describe('audit_write allowlist carries the engine bridge actions', () => {
   it("1098 lists exactly 1095's actions (1068's list plus machine_server.credential_rebound) plus project.public_survey_consented, and every engine action is on it", () => {
     const one098 = allowlistOf('1098_survey_public_consent.sql');
     expect(one098.slice(-2)).toEqual(['machine_server.credential_rebound', 'project.public_survey_consented']);
-    for (const action of ENGINE_AUDIT_ACTIONS) expect(one098).toContain(action);
+    for (const action of ENGINE_AUDIT_ACTIONS.filter((a) => a !== 'project.github_identity_changed')) expect(one098).toContain(action);
     expect(new Set(one098).size).toBe(one098.length);
     expect(one098.length).toBe(allowlistOf('1068_engine_session_sandboxes.sql').length + 2);
     for (const action of allowlistOf('1068_engine_session_sandboxes.sql')) expect(one098).toContain(action);
+  });
+
+  it("1121 lists exactly 1098's actions plus project.github_identity_changed, and every engine action is on it", () => {
+    const one098 = allowlistOf('1098_survey_public_consent.sql');
+    const one121 = allowlistOf('1121_repo_github_identity.sql');
+    expect(one121).toEqual([...one098, 'project.github_identity_changed']);
+    for (const action of ENGINE_AUDIT_ACTIONS) expect(one121).toContain(action);
   });
 
   it('the action names are exactly the ones later rows depend on', () => {
@@ -68,6 +75,7 @@ describe('audit_write allowlist carries the engine bridge actions', () => {
       'engine_decision.recorded',
       'engine_halt.cleared',
       'engine_halt.set',
+      'project.github_identity_changed',
       'project.public_survey_consented',
     ]);
   });

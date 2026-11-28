@@ -63,6 +63,7 @@ import { engineRoutes } from "./engine.js";
 import { engineHaltRoutes } from "./engine-halt.js";
 import { engineWatchRoutes } from "./engine-watch.js";
 import { enginePlanRoutes } from "./enginePlan.js";
+import { repoGithubIdentityRoutes } from "./repo-github-identity.js";
 
 /**
  * The one array every other piece of API-1 reads from: the catch-all's
@@ -150,6 +151,7 @@ export const ROUTES: RouteEntry[] = [
   ...engineHaltRoutes,
   ...engineWatchRoutes,
   ...enginePlanRoutes,
+  ...repoGithubIdentityRoutes,
 ];
 
 // Fails fast (at import time, so both the test suite and `next start`

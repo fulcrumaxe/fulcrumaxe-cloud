@@ -1617,3 +1617,20 @@ describe("halt: the state, who sees controls, the questions and the requests", (
     expect(readRepos([{ repo_id: REPO_A, full_name: "a/b", halted: true, halt_pending: true }])[0]).toMatchObject({ halted: true, haltPending: true });
   });
 });
+
+describe("ON-19a: the GitHub identity chip", () => {
+  const rows = (over) => ({ ["GET " + SETTINGS_URL]: F.settings({ operate_enabled: true }), ["GET " + REPOS_URL]: F.list([F.repo({ operate_enabled: true, ...over })]) });
+  it("reads personal only when the list says exactly personal; anything else is the app", () => {
+    for (const [value, want] of [["personal", "personal"], ["app", "app"], [undefined, "app"], ["PERSONAL", "app"], [true, "app"]]) {
+      expect(readRepos([{ repo_id: REPO_A, full_name: "a/b", github_identity: value }])[0].identity).toBe(want);
+    }
+  });
+  it("a personal project shows the fixed chip words beside the liveness chip; an app project shows none", async () => {
+    const personal = team({}, rows({ github_identity: "personal" }));
+    await personal.t.load();
+    expect(personal.t.view().identityChip).toBe("Acting as you on GitHub (all your repos)");
+    const app = team({}, rows({ github_identity: "app" }));
+    await app.t.load();
+    expect(app.t.view().identityChip).toBe("");
+  });
+});

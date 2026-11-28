@@ -53,10 +53,12 @@ function mountApp(contentEl) {
   const chip = h("span", { class: "tm-chip", "data-testid": "tm-chip" });
   const haltChip = h("span", { class: "tm-chip tm-halt-chip", "data-testid": "tm-halt-chip" });
   const stopChip = h("span", { class: "tm-chip tm-stop-chip", "data-testid": "tm-stop-chip" });
+  const identityChip = h("span", { class: "tm-chip tm-identity-chip", "data-testid": "tm-identity-chip" });
+  identityChip.hidden = true;
   stopChip.hidden = true;
   const runner = h("span", { class: "tm-runner", "data-testid": "tm-runner" });
   const sheetBtn = h("button", { type: "button", class: "tm-btn", "data-testid": "tm-settings-btn", "aria-expanded": "false", "aria-controls": "tm-sheet", onClick: () => team.toggleSheet() }, WORDS.settings);
-  const bar = h("div", { class: "tm-bar" }, picker, chip, haltChip, stopChip, runner, sheetBtn);
+  const bar = h("div", { class: "tm-bar" }, picker, chip, haltChip, stopChip, identityChip, runner, sheetBtn);
   const live = h("p", { class: "tm-live", role: "status", "aria-live": "polite", "data-testid": "tm-live" });
   const watchBar = h("div", { class: "tm-watch", "data-testid": "tm-liveview" });
   const banner = h("p", { class: "tm-banner", "data-testid": "tm-banner", role: "note" });
@@ -441,6 +443,8 @@ function mountApp(contentEl) {
     picker.hidden = chip.hidden = runner.hidden = !hasRepos;
     sheetBtn.hidden = d.kind === "loading" || d.kind === "error";
     sheetBtn.setAttribute("aria-expanded", d.sheet && d.sheet.open ? "true" : "false");
+    setText(identityChip, hasRepos ? d.identityChip : "");
+    identityChip.hidden = identityChip.textContent === "";
     const chipText = hasRepos ? d.chip : "";
     if (chip.dataset.liveness !== chipText) {
       chip.dataset.liveness = chipText;

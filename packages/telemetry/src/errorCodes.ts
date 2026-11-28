@@ -701,6 +701,8 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "removal_pending",
   // Operate on a public repo waits for the decide rule for work from strangers (D#845 S-8): 409 from the settings write and the project confirm.
   "operate_public_pending",
+  // A personal GitHub identity is refused on a public repo (D#845 ON-19a, 409).
+  "personal_identity_public_repo",
   // The plan draft and Approve (D#845 ON-11a): a stale edit, a plan that cannot be approved, and a public-repo plan not yet read in full.
   "draft_conflict",
   "plan_invalid",

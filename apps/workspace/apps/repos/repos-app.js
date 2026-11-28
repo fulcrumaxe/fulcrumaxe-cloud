@@ -11,7 +11,7 @@ import { api, ApiFailure, createRetryGate, isRateLimited, retryWords, waitSecond
 import { on, onRefresh } from "../../core/cloud-live.js";
 import { autoMergeDisabled, lockNote } from "./repos-lock.js";
 import { createAllowancePanel } from "./repos-allowances.js";
-import { createTwinCard, createAutoMergeControl, createDialControl, createModeControl, createPlanWritebackControl, createRemoveSheet, createRunnersSection, endsTwinAfter, queueView, removalLine } from "./repos-runners.js";
+import { IDENTITY_WORDS, createTwinCard, createAutoMergeControl, createDialControl, createGithubIdentityControl, createModeControl, createPlanWritebackControl, createRemoveSheet, createRunnersSection, endsTwinAfter, queueView, removalLine } from "./repos-runners.js";
 
 const REPOS_URL = "/api/v1/repos";
 const allowancesUrl = (id) => "/api/runners/repos/" + encodeURIComponent(id) + "/sandbox-allowances";
@@ -104,6 +104,7 @@ function mountRepos(host, installNote) {
   let mode = null; // D#6 R5b-2b-iii: the mode picker of the open repo
   let autoMerge = null; // D#6 R2b: the local-review auto-merge control of the open repo
   let planWriteback = null; // D#598 P5c-a: the switch for merging plan updates automatically
+  let identity = null; // D#845 ON-19a: the GitHub identity setting of the open repo
   const runners = createRunnersSection({ signal: abort.signal, onData: () => (dial && dial.repaint(), allowances.repaint()) });
   // D#845 ON-16a2: the Remove from fulcrumaxe sheet. It reads the repo as the list has it now, and the list is re-read once a removal was sent.
   const removeSheet = createRemoveSheet({
@@ -136,6 +137,9 @@ function mountRepos(host, installNote) {
     if (mode) mode.load();
     planWriteback = st.openId ? createPlanWritebackControl({ signal: abort.signal, repoId: st.openId, canChange: () => st.isAdmin }) : null;
     if (planWriteback) planWriteback.load();
+    if (identity) identity.destroy();
+    identity = st.openId ? createGithubIdentityControl({ signal: abort.signal, repoId: st.openId, getRepoName: () => (openRepo() && (openRepo().full_name || openRepo().product)) || "", canChange: () => st.isAdmin, onSaved: (v) => { const r = st.repos.find((x) => x.id === st.openId); if (r) { r.github_identity = v; renderList(); } } }) : null;
+    if (identity) identity.load();
   };
 
   // ── the wait after a 429 on the install link: "Try again in N seconds", the install buttons off until it ends ──
@@ -194,6 +198,7 @@ function mountRepos(host, installNote) {
           h("bdi", { class: "repos-name" }, r.full_name || r.product),
           h("span", { class: "repos-state", "data-testid": "repos-state" }, r.install_state === "installed" ? "Installed" : "Not installed")),
         removalLine(r.removal), // dom-insert-ok: removalLine built this with h(); the machine's name is a text node in <bdi>
+        r.github_identity === "personal" ? line(IDENTITY_WORDS.acting, "repos-row-identity", "repos-muted") : null,
         r.app_kind === "team_readonly" ? line("Read-only. Install the write App to run work.", "repos-readonly", "repos-muted repos-readonly") : null)
     )));
   }
@@ -238,6 +243,7 @@ function mountRepos(host, installNote) {
     if (st.settingsState === "loading") return detailEl.replaceChildren(title, line("Loading settings...", "repos-settings-loading", "repos-muted"));
     if (st.settingsState !== "ok" || !st.settings) return detailEl.replaceChildren(title, line("Settings aren't available right now.", "repos-settings-error", "", "alert"));
     if (planWriteback) planWriteback.repaint(); // its admin-only state follows st.isAdmin
+    if (identity) identity.repaint();
     detailEl.replaceChildren(
       title,
       ...(lockNote(st.settings) ? [line(lockNote(st.settings), "repos-human-merge-only", "repos-muted")] : []),
@@ -256,6 +262,8 @@ function mountRepos(host, installNote) {
       ...(autoMerge ? [autoMerge.el] : []),
       // dom-insert-ok: planWriteback.el is the element createPlanWritebackControl built with h(); it repaints itself
       ...(planWriteback ? [planWriteback.el] : []),
+      // dom-insert-ok: identity.el is the element createGithubIdentityControl built with h(); it repaints itself
+      ...(identity ? [identity.el] : []),
       // D#845 ON-16a2: owners and admins open the sheet; nothing is sent until its confirm button is pressed
       button("Remove from fulcrumaxe…", "repos-remove-open", () => removeSheet.open(repo), { disabled: !st.isAdmin || st.saving, "aria-describedby": st.isAdmin ? null : "repos-admin-only-detail" }),
       ...(st.isAdmin ? [] : [h("p", { id: "repos-admin-only-detail", class: "repos-muted", "data-testid": "repos-settings-admin-only" }, ADMIN_ONLY)]),
@@ -303,7 +311,7 @@ function mountRepos(host, installNote) {
     }
     st.loading = false;
     if (twin) twin.repaint();
-    if (st.openId && !openRepo()) { st.openId = null; dial = null; mode = null; autoMerge = null; planWriteback = null; makeTwin(); mountContext(); }
+    if (st.openId && !openRepo()) { st.openId = null; if (identity) { identity.destroy(); identity = null; } dial = null; mode = null; autoMerge = null; planWriteback = null; makeTwin(); mountContext(); }
     render();
   }
 

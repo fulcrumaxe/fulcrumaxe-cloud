@@ -462,6 +462,7 @@ describe('ask_routes (0836)', () => {
       'machine.linked_notified',
       'machine_server.credential_rebound',
       'project.public_survey_consented',
+      'project.github_identity_changed',
     ];
 
     it('audit_write accepts every expected action', async () => {
