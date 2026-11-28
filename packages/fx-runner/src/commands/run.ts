@@ -32,7 +32,7 @@ import { machineMemoryBytes, realResourceProbe, type ResourceProbe } from "../da
 import { CANARY_BLOCK_HINT, claimBlockReason, ensureInstructionCanary } from "../instructionCanaryState.js";
 import { isDraining, isPaused, loadSettings, omitsDevToken, setDraining } from "../runnerSettings.js";
 import { completeCaps, engineLineOf, engineMismatchClaimBlock, limitsClaimBlock, type ClaimBlock, type SandboxEngine, type VmHostFacts } from "../vm/limits.js";
-import { createLiveMicrovm, type LiveMicrovm, type LiveMicrovmParts } from "../vm/sandboxd/live.js";
+import { createLiveMicrovm, liveMicrovmComplete, type LiveMicrovm, type LiveMicrovmParts } from "../vm/sandboxd/live.js";
 import { createSetupVmParts, createVmClaimGuard, createVmJobDeps, runEventHooks, type VmRunBlock } from "../daemon/vmJobDeps.js";
 import { createEngineUpdateHandler } from "../setup/engineUpdate.js";
 import { createTwinSeedHandler } from "../setup/twinSeed.js";
@@ -104,7 +104,7 @@ import { loadRunnerKey } from "../keys.js";
 import { gitProxyHashFor, keyringFor, type PinnedGitProxies, type PinnedKeyrings } from "../keyring.js";
 import { createHostSandbox } from "../sandbox/hostSandbox.js";
 import { SandboxRefused, wslFacts } from "../sandbox/platform.js";
-import { clearWsl } from "../sandbox/wslGate.js";
+import { MIRRORED_NETWORKING_COPY, clearWsl } from "../sandbox/wslGate.js";
 import { refusalNotice } from "../platformSupport.js";
 import { probeMachine, type SandboxHost } from "../sandbox/probe.js";
 import { pathsOverlap } from "../sandbox/sandboxSettings.js";
@@ -371,7 +371,15 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
   const searchPath = hooks.searchPath ?? cleanEnv(credentials).PATH ?? "";
   // D#587 B-9b: on WSL2 every check and live probe runs now, before any claim; a probe that cannot run is a refusal. A no-op anywhere else.
   // Failures are said one per line; the refusal itself is the one `localTools` gives next, because the machine is then not cleared.
-  const wsl = await clearWsl({ platform: host.platform, osrelease: host.osrelease, home, stateDir: ctx.stateDir, binaryPath: locateOrUndefined(host, searchPath), xdgCacheHome: host.xdgCacheHome, searchPath, host: host.sandbox });
+  // The engine this run will really use, as `chooseEngine` decides it below (a `microvm` setting on a machine with no live microVM stack or no KVM is `os_sandbox`), so the
+  // networking exemption is judged on that and not on the setting alone. The real choice is checked again, and every host-sandbox job and machine job re-checks the clearance.
+  // Asked only when the networking mode is not NAT, so the machine facts are not read an extra time anywhere else.
+  const gateEngine = async (): Promise<SandboxEngine> => {
+    const gateSettings = loadSettings(ctx.stateDir);
+    const gateFacts = await host.vmFacts?.().catch(() => undefined); // fx-swallow-ok: facts that cannot be read are "unreadable" in the engine line, which is not microvm
+    return chooseEngine(engineLineOf({ platform: host.platform, engine: gateSettings.unreadable === true ? "invalid" : (gateSettings.sandboxEngine ?? "os_sandbox"), caps: gateSettings.microvm, facts: gateFacts }), liveMicrovmComplete(host.microvm));
+  };
+  const wsl = await clearWsl({ platform: host.platform, osrelease: host.osrelease, home, stateDir: ctx.stateDir, binaryPath: locateOrUndefined(host, searchPath), xdgCacheHome: host.xdgCacheHome, searchPath, host: host.sandbox, engine: gateEngine });
   for (const item of wsl.items) if (!item.ok) ctx.out(`fx-runner: WSL2 ${item.code}: ${item.detail}`);
   // An explicit refusal, not left to `detectPlatform` alone: a WSL2 machine that is not cleared starts nothing.
   if (wsl.wsl2 && !wsl.cleared) throw new CliError(`wsl2_unsupported: ${refusalNotice("wsl2")}; fx-runner cannot run jobs here`);
@@ -467,6 +475,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     const settingsAtStart = loadSettings(stateDir);
     const engineFacts = await host.vmFacts?.().catch(() => undefined); // fx-swallow-ok: facts that cannot be read are "unreadable" in the engine line, which is not microvm
     const engine = chooseEngine(engineLineOf({ platform: host.platform, engine: settingsAtStart.unreadable === true ? "invalid" : (settingsAtStart.sandboxEngine ?? "os_sandbox"), caps: settingsAtStart.microvm, facts: engineFacts }), built !== undefined);
+    // D#587 B-9d: a clearance granted for a microVM run says nothing about the host sandbox. When the engine the run really uses is not `microvm`, the networking mode must have been NAT.
+    if (engine !== "microvm" && host.sandbox.wsl?.clearance !== undefined && !host.sandbox.wsl.clearance.nat) throw new CliError(`wsl_mirrored_networking: ${MIRRORED_NETWORKING_COPY}`);
     /** The live stack only when this run's engine is `microvm`: an `os_sandbox` runner reports no inventory and takes no signed VM command. */
     const vm = engine === "microvm" ? built : undefined;
     // One reporter serves the claim and the heartbeat, so the two share what was last sent. A host with no VM stack has none.

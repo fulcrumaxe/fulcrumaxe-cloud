@@ -18,8 +18,17 @@ import { linuxKernel } from "./platform.js";
 import { PROBE_MARKER, probeSettings, sandboxLaunch, type SandboxHost, type SandboxProbeInput } from "./probe.js";
 import { WSL_CONF, wslDenyPaths, wslDoctorFindings, type WslCode } from "./wslChecks.js";
 
-export const WSL_PROBE_CODES = ["wsl_no_windows_drive", "wsl_canary_readable", "wsl_exe_launchable", "wsl_probe_unrun"] as const;
+export const WSL_PROBE_CODES = ["wsl_no_windows_drive", "wsl_canary_readable", "wsl_exe_launchable", "wsl_mirrored_networking", "wsl_probe_unrun"] as const;
 export type WslProbeCode = (typeof WSL_PROBE_CODES)[number];
+
+/** The words a person sees when a host-sandbox job is refused for the networking mode (D#587 B-9d). */
+export const MIRRORED_NETWORKING_COPY = "This machine uses WSL mirrored networking. Switch WSL to NAT networking (the default), then try again.";
+
+/**
+ * `wslinfo` by its absolute path, with no PATH lookup and no fallback: it is part of WSL2's own userland, and a bare name looked up on a search path is a name that anything able
+ * to write to one of its directories could answer for. A machine that has it elsewhere gets no answer, which counts as mirrored (refused), never as NAT.
+ */
+export const WSLINFO = "/usr/bin/wslinfo";
 
 export const CANARY_DIR = "/mnt/c/Users";
 export const CMD_EXE = "/mnt/c/Windows/System32/cmd.exe";
@@ -46,6 +55,8 @@ export interface WslGateResult {
   loopback: boolean;
 }
 
+export type GateEngine = "os_sandbox" | "microvm";
+
 export interface WslGateFacts {
   platform: NodeJS.Platform;
   osrelease: string | undefined;
@@ -55,6 +66,8 @@ export interface WslGateFacts {
   xdgCacheHome: string | undefined;
   searchPath: string;
   host: SandboxHost;
+  /** The sandbox engine this run uses. Only `microvm` (its own egress proxy) is let through on a networking mode that is not NAT; left out, or any other value, is the host sandbox. */
+  engine?: GateEngine | (() => Promise<GateEngine>) | undefined;
 }
 
 const unrun = (detail: string): WslGateItem => ({ code: "wsl_probe_unrun", ok: false, detail: `${detail}. WSL2 does not start without every live probe answering.` });
@@ -84,7 +97,7 @@ export async function clearWsl(facts: WslGateFacts): Promise<WslGateResult> {
   const settings = probeSettings(input);
   // The probes need the sandbox tool, which `detectPlatform` hands out for WSL2 only when cleared. They get a copy of the host that carries a trial clearance;
   // the shared machine object is never touched until every check and probe has passed, so a failure of any kind leaves no clearance behind.
-  const trialHost: SandboxHost = { ...host, wsl: { ...wsl, clearance: { denyPaths, loopback: false } } };
+  const trialHost: SandboxHost = { ...host, wsl: { ...wsl, clearance: { denyPaths, nat: false } } };
   try {
     const sandboxed = async (script: string): Promise<{ code: number | null; stdout: string } | undefined> => {
       const launch = sandboxLaunch(input, settings, env.PATH ?? "", ["/bin/sh", "-c", script], trialHost);
@@ -128,11 +141,16 @@ export async function clearWsl(facts: WslGateFacts): Promise<WslGateResult> {
     else if (exit[1] === "0" || launched.includes(CMD_MARKER)) items.push({ code: "wsl_exe_launchable", ok: false, detail: "a job could start cmd.exe: Windows interop is live. Set [interop] enabled=false in /etc/wsl.conf and run wsl --shutdown from Windows." });
     else items.push({ code: "wsl_exe_launchable", ok: true, detail: "cmd.exe cannot be started from the job's sandbox" });
 
-    // Not a gate: loopback allowances are granted only when the networking mode is known to be NAT.
-    const mode = await plain("wslinfo --networking-mode");
+    // The networking mode (D#587 B-9d). Mirrored networking shares loopback and the host address with Windows, and the allowed names are resolved by Claude Code's own proxy,
+    // which this runner cannot check; so a host-sandbox job is refused unless `wslinfo` says NAT. An answer that cannot be had counts as mirrored. A microVM has its own
+    // egress proxy, so it is not refused here (it still gets no loopback allowance).
+    const mode = await plain(`${WSLINFO} --networking-mode`);
     const loopback = mode.code === 0 && mode.stdout.trim() === "nat";
+    if (loopback) items.push({ code: "wsl_mirrored_networking", ok: true, detail: "networking mode is NAT" });
+    else if ((typeof facts.engine === "function" ? await facts.engine() : facts.engine) === "microvm") items.push({ code: "wsl_mirrored_networking", ok: true, detail: "networking mode is mirrored or not known; jobs run in a microVM, which has its own egress proxy" });
+    else items.push({ code: "wsl_mirrored_networking", ok: false, detail: MIRRORED_NETWORKING_COPY });
     // Only now, with every check and probe passed, does the shared machine get its clearance.
-    if (items.every((item) => item.ok)) wsl.clearance = { denyPaths, loopback };
+    if (items.every((item) => item.ok)) wsl.clearance = { denyPaths, nat: loopback };
     return result(loopback);
   } catch {
     // fx-swallow-ok: a probe that threw is a probe that did not run: reported as such, with no error text, and nothing starts

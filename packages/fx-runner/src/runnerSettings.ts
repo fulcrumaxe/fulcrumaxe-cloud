@@ -449,3 +449,9 @@ export function setDraining(stateDir: string, draining: boolean): void {
   if (draining) writePrivateFile(stateDir, DRAIN_FILE, "drain\n");
   else rmSync(path.join(stateDir, DRAIN_FILE), { force: true });
 }
+
+/** The engine the WSL2 gate judges the networking mode for: `microvm` only when the settings file says so and can be read; anything else is the host sandbox (fail closed). */
+export function gateEngine(stateDir: string): "os_sandbox" | "microvm" {
+  const settings = loadSettings(stateDir);
+  return settings.unreadable !== true && settings.sandboxEngine === "microvm" ? "microvm" : "os_sandbox";
+}

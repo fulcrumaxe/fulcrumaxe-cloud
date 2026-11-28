@@ -5,7 +5,7 @@ import { SandboxRefused, detectPlatform, wslFacts } from "../src/sandbox/platfor
 import { sandboxSettings } from "../src/sandbox/sandboxSettings.js";
 import { bwrapArgs } from "../src/sandbox/probe.js";
 import { WSL_CODES, wslDenyPaths, wslChecks } from "../src/sandbox/wslChecks.js";
-import { CANARY_DIR, CMD_EXE, WSL_PROBE_CODES, clearWsl, type WslGateFacts, type WslGateResult } from "../src/sandbox/wslGate.js";
+import { CANARY_DIR, CMD_EXE, MIRRORED_NETWORKING_COPY, WSLINFO, WSL_PROBE_CODES, clearWsl, type WslGateFacts, type WslGateResult } from "../src/sandbox/wslGate.js";
 import { PACKAGE_DIR } from "./helpers/srcFiles.js";
 import { ROOT_MOUNT, WSL2_KERNEL, fakeWslMachine, toolDir, type WslMachineOptions } from "./helpers/fakeWslMachine.js";
 
@@ -24,18 +24,52 @@ const failures = (result: WslGateResult): string[] => result.items.filter((item)
 describe("a WSL2 machine set up as the README says", () => {
   it("is cleared: every check and probe passes, in order, and the machine carries the clearance", async () => {
     const { host, result } = await gate();
-    expect(result).toMatchObject({ wsl2: true, cleared: true, loopback: false });
-    expect(result.items.map((item) => item.code)).toEqual([...WSL_CODES, "wsl_canary_readable", "wsl_exe_launchable"]);
+    expect(result).toMatchObject({ wsl2: true, cleared: true, loopback: true });
+    expect(result.items.map((item) => item.code)).toEqual([...WSL_CODES, "wsl_canary_readable", "wsl_exe_launchable", "wsl_mirrored_networking"]);
     expect(host.wsl?.clearance?.denyPaths).toEqual(["/mnt", "/mnt/c", "/run/WSL"]);
     expect(detectPlatform({ platform: "linux", osrelease: WSL2_KERNEL, ...wslFacts(host.wsl) })).toBe("linux");
   });
 
   it("allows a loopback bind only when wslinfo says NAT; mirrored, anything else and no answer all refuse it", async () => {
     expect((await gate({ networking: "nat" })).result.loopback).toBe(true);
-    for (const networking of ["mirrored", "virtioproxy", "", undefined]) expect((await gate({ networking })).result).toMatchObject({ cleared: true, loopback: false });
-    expect((await gate({ networking: "nat", networkingExit: 1 })).result.loopback).toBe(false);
-    expect((await gate({ networking: "nat" })).host.wsl?.clearance?.loopback).toBe(true);
-    expect((await gate({ networking: "mirrored" })).host.wsl?.clearance?.loopback).toBe(false);
+    expect((await gate({ networking: "nat" })).host.wsl?.clearance?.nat).toBe(true);
+    for (const options of [{ networking: "mirrored" }, { networking: "nat", networkingExit: 1 }]) expect((await gate(options, { engine: "microvm" })).result).toMatchObject({ cleared: true, loopback: false });
+  });
+
+  it("D#587 B-9d: mirrored, unknown, empty and failing answers refuse a host-sandbox job with wsl_mirrored_networking and the exact copy; no clearance is left behind", async () => {
+    const cases: WslMachineOptions[] = [{ networking: "mirrored" }, { networking: "virtioproxy" }, { networking: "" }, { networking: undefined }, { networking: "nat", networkingExit: 1 }, { networking: "mirrored", networkingExit: 1 }, { networking: "NAT" }, { networking: "Nat" }, { networking: "nat-ish" }, { networking: "natx" }, { networking: "nat mirrored" }, { networking: "nat", networkingTimesOut: true }];
+    for (const options of cases) {
+      for (const over of [{}, { engine: "os_sandbox" as const }]) {
+        const { host, result } = await gate(options, over);
+        expect(failures(result)).toEqual(["wsl_mirrored_networking"]);
+        expect(result).toMatchObject({ wsl2: true, cleared: false, loopback: false });
+        expect(result.items.find((item) => !item.ok)?.detail).toBe("This machine uses WSL mirrored networking. Switch WSL to NAT networking (the default), then try again.");
+        expect(MIRRORED_NETWORKING_COPY).toBe("This machine uses WSL mirrored networking. Switch WSL to NAT networking (the default), then try again.");
+        expect(host.wsl?.clearance).toBeUndefined();
+      }
+    }
+  });
+
+  it("NAT is allowed for the host sandbox, and a microVM runner is not refused on a mirrored or unknown answer (it still gets no loopback)", async () => {
+    expect((await gate({ networking: "nat" }, { engine: "os_sandbox" })).result).toMatchObject({ cleared: true, loopback: true });
+    for (const networking of ["mirrored", undefined]) {
+      const { host, result } = await gate({ networking }, { engine: "microvm" });
+      expect(result).toMatchObject({ cleared: true, loopback: false });
+      expect(failures(result)).toEqual([]);
+      expect(host.wsl?.clearance?.nat).toBe(false);
+    }
+  });
+
+  it("the answer is read exactly: surrounding whitespace is dropped, nothing else is forgiven, and wslinfo is asked by its absolute path", async () => {
+    for (const networking of ["nat", "nat\n"]) expect((await gate({ networking })).result).toMatchObject({ cleared: true, loopback: true });
+    expect(WSLINFO).toBe("/usr/bin/" + "wslinfo");
+    const { host } = await gate();
+    expect(host.calls.filter((call) => call.command === "/bin/sh" && String(call.args[1]).includes("wslinfo")).map((call) => call.args[1])).toEqual([`${WSLINFO} --networking-mode`]);
+  });
+
+  it("the networking refusal does not hide another failure: both are reported when a probe also fails", async () => {
+    const { result } = await gate({ networking: "mirrored", honoursDenies: false });
+    expect(failures(result)).toEqual(["wsl_canary_readable", "wsl_mirrored_networking"]);
   });
 
   it("asks the canary and the program-launch probe through the sandbox tool, and the controls outside it", async () => {
@@ -43,7 +77,7 @@ describe("a WSL2 machine set up as the README says", () => {
     const sandboxed = host.calls.filter((call) => call.command.endsWith("/bwrap"));
     expect(sandboxed).toHaveLength(3);
     const outside = host.calls.filter((call) => call.command === "/bin/sh").map((call) => call.args[1]);
-    expect(outside).toEqual([`ls -A ${CANARY_DIR}`, `test -f ${CMD_EXE} && readlink -f ${CMD_EXE}`, "wslinfo --networking-mode"]);
+    expect(outside).toEqual([`ls -A ${CANARY_DIR}`, `test -f ${CMD_EXE} && readlink -f ${CMD_EXE}`, `${WSLINFO} --networking-mode`]);
   });
 });
 
@@ -159,7 +193,7 @@ describe("every probe and every control refuses when it does not hold", () => {
 
   it("a clearance left from an earlier start is dropped when the machine is no longer WSL2", async () => {
     const host = fakeWslMachine();
-    host.wsl!.clearance = { denyPaths: ["/mnt"], loopback: true };
+    host.wsl!.clearance = { denyPaths: ["/mnt"], nat: true };
     await clearWsl(facts(host, { osrelease: "6.6.0-generic" }));
     expect(host.wsl?.clearance).toBeUndefined();
   });
@@ -188,7 +222,7 @@ describe("every probe and every control refuses when it does not hold", () => {
 
   it("a failure at the very last probe still leaves no clearance, even when an earlier start left one", async () => {
     const machine = fakeWslMachine({ interopLive: true, honoursDenies: true });
-    machine.wsl!.clearance = { denyPaths: ["/mnt"], loopback: true };
+    machine.wsl!.clearance = { denyPaths: ["/mnt"], nat: true };
     const inner = machine.run;
     machine.run = async (command, args, env, timeoutMs) => {
       const out = await inner(command, args, env, timeoutMs);
@@ -221,7 +255,7 @@ describe("every probe and every control refuses when it does not hold", () => {
 
   it("clears a clearance from an earlier start before deciding afresh", async () => {
     const host = fakeWslMachine({ drive: false });
-    host.wsl!.clearance = { denyPaths: ["/mnt"], loopback: true };
+    host.wsl!.clearance = { denyPaths: ["/mnt"], nat: true };
     expect((await clearWsl(facts(host))).cleared).toBe(false);
     expect(host.wsl?.clearance).toBeUndefined();
   });

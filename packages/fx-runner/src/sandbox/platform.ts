@@ -39,8 +39,12 @@ export interface WslMachine {
 export interface WslClearance {
   /** Paths added to both the read and the write deny list of every job. */
   denyPaths: readonly string[];
-  /** Whether a `loopback` allowance may be granted: only when the networking mode is known to be NAT (mirrored mode shares loopback with Windows). */
-  loopback: boolean;
+  /**
+   * Whether the networking mode was known to be NAT when the machine was cleared. Mirrored mode (or an answer that could not be had) shares loopback and the host address with
+   * Windows, so a host-sandbox job and a host-guest command are refused (`wsl_mirrored_networking`) unless this is true. It is read again for every job, because the engine
+   * a job runs in can change after start (a `microvm` setting switched to `os_sandbox`), and a clearance granted for a microVM run says nothing about the host sandbox.
+   */
+  nat: boolean;
 }
 
 /** The WSL2 facts of `PlatformProbe`, read from the machine object in one place, so no caller can forget the clearance. */

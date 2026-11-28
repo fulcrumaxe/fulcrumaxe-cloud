@@ -1,7 +1,7 @@
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { PROBE_MARKER } from "../../src/sandbox/probe.js";
-import { CANARY_DIR, CMD_EXE, CMD_MARKER } from "../../src/sandbox/wslGate.js";
+import { CANARY_DIR, CMD_EXE, CMD_MARKER, WSLINFO } from "../../src/sandbox/wslGate.js";
 import { fakeSandboxHost, type FakeSandboxHost } from "./fakeSandboxHost.js";
 import { tempDir } from "./tempTree.js";
 
@@ -34,6 +34,8 @@ export interface WslMachineOptions {
   probesTimeOut?: boolean;
   /** The exit status of `wslinfo`, whatever it prints. */
   networkingExit?: number;
+  /** `wslinfo` does not answer in time. */
+  networkingTimesOut?: boolean;
   /** The status `ls` ends with for the canary inside the sandbox, whatever the sandbox hides (127: the shell found no `ls`). */
   canaryStatus?: number;
   /** A sandbox that stands an empty directory where the canary is: the listing works, empty, exit 0. */
@@ -72,7 +74,7 @@ export function toolDir(): string {
  * missing from the settings therefore changes what the probes see, which is what the mutation checks rely on.
  */
 export function fakeWslMachine(options: WslMachineOptions = {}): FakeSandboxHost {
-  const o = { drive: true, cmdExe: true, cmdRealPath: CMD_EXE, interopLive: false, honoursDenies: true, ...options };
+  const o = { drive: true, cmdExe: true, cmdRealPath: CMD_EXE, interopLive: false, honoursDenies: true, networking: "nat" as string | undefined, ...options };
   const base = fakeSandboxHost({ files: { "/etc/wsl.conf": CONF_OK, ...o.files }, dirs: ["/mnt", "/run/WSL", "/mnt/c", "/home/dev"], wsl: { interop: false, mountinfo: o.mountinfo ?? [ROOT_MOUNT, DRIVE_MOUNT].join("\n") } });
   const wsl = { ...base.wsl!, realPath: (target: string) => o.links?.[target] ?? target };
   const hidden = (tmpfs: string[], target: string): boolean => o.honoursDenies && tmpfs.some((dir) => target === dir || target.startsWith(`${dir}/`));
@@ -88,7 +90,7 @@ export function fakeWslMachine(options: WslMachineOptions = {}): FakeSandboxHost
         if (script.startsWith("ls -A") && o.driveEmpty) return ok("");
         if (script.startsWith("ls -A")) return o.drive ? ok("Default\ndev\n", o.driveExit ?? 0) : ok("", 2);
         if (script.startsWith("test -f")) return o.cmdExe ? ok(`${o.cmdRealPath}\n`) : ok("", 1);
-        if (script.startsWith("wslinfo")) return o.networking === undefined ? ok("", 127) : ok(`${o.networking}\n`, o.networkingExit ?? 0);
+        if (script.startsWith(`${WSLINFO} `)) return o.networkingTimesOut ? { code: null, stdout: "nat\n", stderr: "", timedOut: true } :  o.networking === undefined ? ok("", 127) : ok(`${o.networking}\n`, o.networkingExit ?? 0);
         return ok("");
       }
       // Through the sandbox tool: the script follows `--`, and what is hidden is every `--tmpfs` directory.

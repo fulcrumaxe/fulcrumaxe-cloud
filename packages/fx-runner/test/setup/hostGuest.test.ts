@@ -81,6 +81,21 @@ async function drain(command: Awaited<ReturnType<ReturnType<typeof guestOf>["gue
   return { out, exit: (await command.wait()).exitCode };
 }
 
+describe("D#587 B-9d: WSL2 networking mode", () => {
+  const machine = (nat: boolean): NonNullable<HostGuestDeps["wsl"]> => ({ interopEntry: () => false, mountinfo: () => "26 1 8:16 / / rw,relatime - ext4 /dev/sdb rw\n", clearance: { denyPaths: ["/mnt"], nat } });
+
+  it("a machine job on a clearance that was not granted for NAT (the microVM exemption, then a switch to os_sandbox) starts nothing, as an ordinary job does; a NAT clearance runs it", async () => {
+    const refused = world();
+    refused.deps.wsl = machine(false);
+    await expect(guestOf(refused).guest.runCommand({ cmd: "true", detached: true })).rejects.toMatchObject({ code: "wsl_mirrored_networking" });
+    expect(refused.started).toEqual([]);
+    const allowed = world();
+    allowed.deps.wsl = machine(true);
+    await guestOf(allowed).guest.runCommand({ cmd: "true", detached: true });
+    expect(allowed.started).toHaveLength(1);
+  });
+});
+
 describe("what a command is started with", () => {
   it("runs under bubblewrap with the settings' rules: no write outside the job root, the home, state and agent directories hidden, the shared temp directories hidden, no network", async () => {
     const w = world();

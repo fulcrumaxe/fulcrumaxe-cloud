@@ -85,7 +85,8 @@ export type CheckedAllowances = { ok: true; entries: AllowanceEntry[] } | { ok: 
 /**
  * Parses the set, resolves its paths once, and checks the protocol's floor on the entries as written and on the resolved entries. The entries it
  * returns are the very list that was checked: the caller binds these and resolves nothing again, so there is no swap window between check and bind.
- * (A hostname that resolves to a private address is not caught here: the egress proxy connects, and this runner does not.)
+ * (A hostname that resolves to a private address is not caught here: the egress proxy connects, and this runner does not. On WSL2 that gap is closed by refusal: the WSL gate
+ * refuses host-sandbox jobs unless `wslinfo` says the networking mode is NAT, `wsl_mirrored_networking`.)
  */
 export function checkedAllowances(grant: { entries: readonly AllowanceEntry[]; commandTimeoutS: number }): CheckedAllowances {
   const parsed = parseAllowanceSet({ entries: grant.entries, command_timeout_s: grant.commandTimeoutS });

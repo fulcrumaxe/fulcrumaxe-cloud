@@ -1371,12 +1371,12 @@ describe("6. the claim gate in the composed daemon (D#6 R4a-6, C16 section 1.3)"
     const sandbox = fakeWslMachine({ networking: "nat" });
     const run = start({ host: { sandbox, osrelease: WSL2_KERNEL } });
     await until(() => claims() >= 1);
-    expect(sandbox.wsl?.clearance).toEqual({ denyPaths: ["/mnt", "/mnt/c", "/run/WSL"], loopback: true });
-    expect(sandbox.calls.some((call) => call.command === "wslinfo" || call.args[1]?.includes("wslinfo"))).toBe(true);
+    expect(sandbox.wsl?.clearance).toEqual({ denyPaths: ["/mnt", "/mnt/c", "/run/WSL"], nat: true });
+    expect(sandbox.calls.some((call) => call.args[1]?.includes("wslinfo"))).toBe(true);
     expect((await stop(run)).code).toBe(0);
   });
 
-  it.each([["no Windows drive to test with", { drive: false }, "wsl_no_windows_drive"], ["a sandbox that does not hide the canary", { honoursDenies: false }, "wsl_canary_readable"], ["a probe that cannot run", { throws: true }, "wsl_probe_unrun"]] as Array<[string, WslMachineOptions, string]>)("a WSL2 machine with %s refuses to start: no claim, the failing code on the terminal", async (_name, options, code) => {
+  it.each([["no Windows drive to test with", { drive: false }, "wsl_no_windows_drive"], ["a sandbox that does not hide the canary", { honoursDenies: false }, "wsl_canary_readable"], ["a probe that cannot run", { throws: true }, "wsl_probe_unrun"], ["mirrored networking", { networking: "mirrored" }, "wsl_mirrored_networking"], ["a networking mode that cannot be read", { networking: undefined }, "wsl_mirrored_networking"]] as Array<[string, WslMachineOptions, string]>)("a WSL2 machine with %s refuses to start: no claim, the failing code on the terminal", async (_name, options, code) => {
     const sandbox = fakeWslMachine(options);
     cloud.enqueue(queuedJob());
     const result = await start({ host: { sandbox, osrelease: WSL2_KERNEL } }).done;
@@ -1991,6 +1991,47 @@ describe("D#587 B-5b-3a: the microVM engine in the composed daemon", () => {
     expect(fake.spawnCount()).toBe(0);
     await stop(run);
     expect((await run.done).out).toContain(RESTART_LINE);
+  }, 60_000);
+
+  // D#587 B-9d: the networking exemption is for the engine the run really uses, not the one the settings name.
+  const MIRRORED_COPY = "This machine uses WSL mirrored networking. Switch WSL to NAT networking (the default), then try again.";
+  it.skipIf(process.platform !== "linux")("WSL2 on mirrored networking, set to microvm but with no microVM stack in the build: the run is an os_sandbox run and refuses to start; the later switch to os_sandbox has nothing to start", async () => {
+    enableMicrovm("microvm");
+    const sandbox = fakeWslMachine({ networking: "mirrored" });
+    cloud.enqueue(queuedJob());
+    const result = await start({ host: { sandbox, osrelease: WSL2_KERNEL, vmFacts: async () => goodFacts } }).done;
+    expect(result.message).toMatch(/^wsl2_unsupported: /);
+    expect(result.out.join("\n")).toContain(`WSL2 wsl_mirrored_networking: ${MIRRORED_COPY}`);
+    expect(claims()).toBe(0);
+    expect(cloud.runs.size).toBe(0);
+    expect(sandbox.wsl?.clearance).toBeUndefined();
+  });
+
+  it.skipIf(process.platform !== "linux")("WSL2 on mirrored networking, set to microvm, a wired build, but the machine facts fail the second time they are read (no KVM answer): the run is os_sandbox and refuses to start, with the code and the copy", async () => {
+    enableMicrovm("microvm");
+    const sandbox = fakeWslMachine({ networking: "mirrored" });
+    cloud.enqueue(queuedJob());
+    let calls = 0;
+    const vmFacts = async (): Promise<VmHostFacts> => {
+      calls += 1;
+      if (calls >= 2) throw new Error("transient");
+      return goodFacts;
+    };
+    const result = await start({ host: { sandbox, osrelease: WSL2_KERNEL, vmFacts, microvm: wiredParts() } }).done;
+    expect(result.message).toBe(`wsl_mirrored_networking: ${MIRRORED_COPY}`);
+    expect(claims()).toBe(0);
+    expect(cloud.runs.size).toBe(0);
+    expect(fake.spawnCount()).toBe(0);
+  });
+
+  it.skipIf(process.platform !== "linux")("WSL2 on mirrored networking with a microVM run that really is microvm starts (the exemption holds) and claims as microvm", async () => {
+    enableMicrovm("microvm");
+    const sandbox = fakeWslMachine({ networking: "mirrored" });
+    const run = start({ host: { sandbox, osrelease: WSL2_KERNEL, vmFacts: async () => goodFacts, microvm: wiredParts() } });
+    await until(() => claims() >= 1);
+    expect(sentHello().facts).toMatchObject({ sandbox_engine: "microvm" });
+    expect(sandbox.wsl?.clearance?.nat).toBe(false);
+    await stop(run);
   }, 60_000);
 
   it.skipIf(process.platform !== "linux")("a runner started on os_sandbox whose setting is changed to microvm while it runs stops claiming at the next claim: no job runs in the OS sandbox", async () => {

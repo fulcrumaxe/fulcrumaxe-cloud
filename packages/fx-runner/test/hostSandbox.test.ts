@@ -8,6 +8,8 @@ import { AgentRunFailed, HostSandboxRefused, createHostSandbox } from "../src/sa
 import type { NetworkRule, StartDetachedOptions } from "../src/sandbox/port.js";
 import type { WslMachine } from "../src/sandbox/platform.js";
 import { tempDir } from "./helpers/tempTree.js";
+import { MIRRORED_NETWORKING_COPY, clearWsl, type WslGateFacts } from "../src/sandbox/wslGate.js";
+import { WSL2_KERNEL, fakeWslMachine, toolDir } from "./helpers/fakeWslMachine.js";
 
 type Block = { filesystem: { allowWrite: string[]; denyWrite: string[]; allowRead: string[] }; network: { allowedDomains: string[] } } & Record<string, unknown>;
 const HOME = "/home/jane";
@@ -15,7 +17,7 @@ const ROOT_TABLE = "26 1 8:16 / / rw,relatime - ext4 /dev/sdb rw\n";
 /** The runner state directory must be writable: the per-job env file is made under it (D#6 C44-1). */
 const STATE = tempDir("r4b13_state-");
 
-function setup(over: { hold?: boolean; done?: unknown; stopFails?: boolean; envOptions?: CleanEnvOptions; mirrorsRoot?: string; wsl?: { denyPaths: readonly string[]; loopback: boolean }; machine?: WslMachine } = {}) {
+function setup(over: { hold?: boolean; done?: unknown; stopFails?: boolean; envOptions?: CleanEnvOptions; mirrorsRoot?: string; wsl?: { denyPaths: readonly string[]; nat: boolean }; machine?: WslMachine } = {}) {
   const blocks: Block[] = [];
   const runIds: unknown[] = [];
   const starts: unknown[] = [];
@@ -125,7 +127,7 @@ describe("hostSandbox: refusals happen before anything is built or started", () 
 
 describe("hostSandbox: WSL2 (D#587 B-9b)", () => {
   const loopback = { entries: [{ kind: "loopback" as const, value: "127.0.0.1", access: "bind" as const, reason: "dev server" }], commandTimeoutS: 600, storeKey: "acme__widgets" };
-  const WSL = { denyPaths: ["/mnt", "/mnt/c", "/run/WSL"], loopback: false };
+  const WSL = { denyPaths: ["/mnt", "/mnt/c", "/run/WSL"], nat: true };
 
   it("puts every Windows-side path in both deny lists of the job's block", async () => {
     const t = setup({ wsl: WSL });
@@ -137,15 +139,27 @@ describe("hostSandbox: WSL2 (D#587 B-9b)", () => {
     }
   });
 
-  it("refuses a loopback allowance where the networking mode is mirrored or unknown, before any runtime is built", async () => {
-    const t = setup({ wsl: WSL });
-    const handle = await t.create();
-    expect(() => t.host.startDetached(handle, t.opts({ allowances: loopback }))).toThrow("sandbox_allowance_forbidden");
+  it("D#587 B-9d: a clearance that was not granted for NAT (the microVM exemption) refuses every host-sandbox job, with or without allowances, before any runtime is built", async () => {
+    const t = setup({ wsl: { ...WSL, nat: false } });
+    for (const allowances of [undefined, loopback]) {
+      const handle = await t.create(`rn-${allowances === undefined ? "a" : "b"}`);
+      expect(() => t.host.startDetached(handle, t.opts(allowances === undefined ? {} : { allowances }))).toThrow(`wsl_mirrored_networking: ${MIRRORED_NETWORKING_COPY}`);
+    }
+    expect(t.blocks).toEqual([]);
+  });
+
+  it("D#587 B-9d: a clearance obtained under the microvm engine on mirrored networking stops the host sandbox after a live switch to os_sandbox", async () => {
+    const machine = fakeWslMachine({ networking: "mirrored" });
+    const facts: WslGateFacts = { platform: "linux", osrelease: WSL2_KERNEL, home: "/home/dev", stateDir: "/home/dev/.local/state/fx", binaryPath: undefined, xdgCacheHome: undefined, searchPath: toolDir(), host: machine, engine: "microvm" };
+    expect((await clearWsl(facts)).cleared).toBe(true); // the runner started as a microVM runner
+    const t = setup({ machine: machine.wsl! });
+    const handle = await t.create("rn-live2");
+    expect(() => t.host.startDetached(handle, t.opts())).toThrow("wsl_mirrored_networking");
     expect(t.blocks).toEqual([]);
   });
 
   it("grants it where the mode is NAT, and grants it anywhere that is not WSL2", async () => {
-    for (const wsl of [{ ...WSL, loopback: true }, undefined]) {
+    for (const wsl of [WSL, undefined]) {
       const t = setup({ wsl });
       await t.host.startDetached(await t.create(), t.opts({ allowances: loopback })).hookFired;
       expect((t.blocks[0]!.network as unknown as { allowLocalBinding: boolean }).allowLocalBinding).toBe(true);
@@ -163,13 +177,13 @@ describe("hostSandbox: WSL2 (D#587 B-9b)", () => {
     if (!(await launches(undefined))) return;
     const uncleared: WslMachine = { interopEntry: () => true, mountinfo: () => ROOT_TABLE, clearance: undefined };
     expect(await launches(uncleared)).toBe(false);
-    expect(await launches({ ...uncleared, interopEntry: () => false, clearance: { denyPaths: ["/mnt"], loopback: false } })).toBe(true);
+    expect(await launches({ ...uncleared, interopEntry: () => false, clearance: { denyPaths: ["/mnt"], nat: true } })).toBe(true);
   });
 
   it("re-reads the machine for every job: a drive mounted after start is denied, an interop entry that came back or an unreadable mount table refuses the job", async () => {
     let table: string | undefined = ROOT_TABLE;
     let interop = false;
-    const machine: WslMachine = { interopEntry: () => interop, mountinfo: () => table, clearance: { denyPaths: ["/mnt", "/run/WSL"], loopback: false } };
+    const machine: WslMachine = { interopEntry: () => interop, mountinfo: () => table, clearance: { denyPaths: ["/mnt", "/run/WSL"], nat: true } };
     const t = setup({ machine });
     const deny = (): string[] => (t.blocks.at(-1)!.filesystem as unknown as { denyRead: string[] }).denyRead;
     await t.host.startDetached(await t.create("rn-a"), t.opts({ runId: "a" })).hookFired;

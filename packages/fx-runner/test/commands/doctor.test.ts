@@ -489,10 +489,34 @@ describe("the sandbox check", () => {
   it("a WSL2 machine set up as the README says passes every check and both live probes, and the sandbox line passes too (the mount is denied now)", async () => {
     register();
     const result = await doctor({ host: { sandbox: fakeWslMachine(), osrelease: WSL2 } });
-    expect(wslLines(result.out).map((line) => line.slice(0, 4))).toEqual(["PASS", "PASS", "PASS", "PASS", "PASS", "PASS", "INFO", "INFO"]);
+    expect(wslLines(result.out).map((line) => line.slice(0, 4))).toEqual(["PASS", "PASS", "PASS", "PASS", "PASS", "PASS", "PASS", "INFO", "INFO"]);
     expect(result.out).not.toContain("wsl_drvfs_exposed");
     expect(wslLines(result.out).at(-1)).toMatch(/VM mode not supported$/);
     expect(levelOf(result.out, "Sandbox")).toBe("PASS");
+  });
+
+  it("D#587 B-9d: a WSL2 machine on mirrored or unknown networking FAILs wsl_mirrored_networking with the copy, and the run exit code is not 0", async () => {
+    register();
+    for (const networking of ["mirrored", undefined]) {
+      const result = await doctor({ host: { sandbox: fakeWslMachine({ networking }), osrelease: WSL2 } });
+      expect(result.out).toMatch(/FAIL {2}WSL2: +wsl_mirrored_networking: This machine uses WSL mirrored networking\. Switch WSL to NAT networking \(the default\), then try again\./);
+      expect(result.code).not.toBe(0);
+    }
+  });
+
+  it("D#587 B-9d: a runner set to microvm is not failed for mirrored networking", async () => {
+    register();
+    setSetting(stateDir, "sandbox_engine", "microvm");
+    const result = await doctor({ host: { sandbox: fakeWslMachine({ networking: "mirrored" }), osrelease: WSL2 } });
+    expect(wslLines(result.out).join("\n")).not.toMatch(/FAIL.*wsl_mirrored_networking/);
+    expect(wslLines(result.out).join("\n")).toContain("microVM");
+  });
+
+  it("D#587 B-9d: a damaged settings file is the host sandbox, so mirrored networking still FAILs", async () => {
+    register();
+    writeFileSync(path.join(stateDir, "runner-settings.json"), "{not json", { mode: 0o600 });
+    const result = await doctor({ host: { sandbox: fakeWslMachine({ networking: "mirrored" }), osrelease: WSL2 } });
+    expect(result.out).toMatch(/FAIL {2}WSL2: +wsl_mirrored_networking: /);
   });
 
   it("a WSL2 machine with no Windows drive to test with FAILs by name, and the sandbox line still refuses", async () => {
