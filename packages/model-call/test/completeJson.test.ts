@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import { z } from 'zod';
 import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
-import { buildAad, connect, seal } from '@fx/model-connection';
+import { buildAad, connect, remove, seal } from '@fx/model-connection';
 import { fakeKekSource } from '../../model-connection/test/helpers/fakeKek.js';
 import { seedAccountWithMember } from '../../model-connection/test/helpers/seed.js';
 import { CREDITS_EXHAUSTED_ANSWERS, NOT_CREDITS_ANSWERS } from '../../model-connection/test/helpers/creditsAnswers.js';
@@ -174,6 +174,66 @@ describe('completeJson (fake provider only)', () => {
     fake.reply({}, 500);
     await expect(completeJson(t.ctx, params)).rejects.toMatchObject({ code: 'http_error', status: 500 });
     expect(await status(t.accountId)).not.toBe('broken');
+  });
+
+  // PI-2b carries: a rotation reaches the next call, and a late 401 only ever blames the key it was sent with.
+  const httpClient = { validate: async () => ({ kind: 'ok' as const }) };
+  const rotate = (t: { accountId: string; userId: string }, key: string) =>
+    connect({ pool, platformOpsPool: opsPool, principal: t, httpClient, kek }, { provider: 'ai_gateway', key });
+  const brokenAt = async (id: string) => (await admin.query(`SELECT key_broken_at FROM accounts WHERE id = $1`, [id])).rows[0].key_broken_at;
+
+  it('S2b (behavioural): a rotated key is the one sent on the next call; removing the key refuses the call before any request', async () => {
+    const t = await tenant('vck_rotate_old_0123456789');
+    fake.reply(gatewayReply(GOOD));
+    await completeJson(t.ctx, params);
+    await rotate(t, 'vck_rotate_new_0123456789');
+    await completeJson(t.ctx, params);
+    await rotate(t, 'vck_rotate_newer_0123456789');
+    await completeJson(t.ctx, params);
+    expect(fake.seen.map(keyOf)).toEqual(['vck_rotate_old_0123456789', 'vck_rotate_new_0123456789', 'vck_rotate_newer_0123456789']);
+    await remove({ pool, platformOpsPool: opsPool, principal: t, httpClient, kek });
+    await expect(completeJson(t.ctx, params)).rejects.toThrow(/no connection/);
+    expect(fake.seen).toHaveLength(3);
+  });
+
+  it('S2i (late 401): the key is rotated while the call is in flight and the old key is then rejected: the new connection stays ok', async () => {
+    const t = await tenant('vck_late_old_0123456789');
+    fake.reply({}, 401);
+    const inner = fake.fetchImpl();
+    const ctx = {
+      ...t.ctx,
+      fetchImpl: (async (...a: Parameters<typeof fetch>) => {
+        await rotate(t, 'vck_late_new_0123456789');
+        return inner(...a);
+      }) as typeof fetch,
+    };
+    await expect(completeJson(ctx, params)).rejects.toMatchObject({ code: 'key_rejected', status: 401 });
+    expect(fake.seen.map(keyOf)).toEqual(['vck_late_old_0123456789']);
+    expect(await status(t.accountId)).not.toBe('broken');
+    expect(await brokenAt(t.accountId)).toBeNull();
+    // The new key is the one in use, and a real 401 for it still breaks it.
+    fake.reply({}, 401);
+    await expect(completeJson(t.ctx, params)).rejects.toMatchObject({ code: 'key_rejected' });
+    expect(fake.seen.map(keyOf)[1]).toBe('vck_late_new_0123456789');
+    expect(await status(t.accountId)).toBe('broken');
+    expect(await brokenAt(t.accountId)).not.toBeNull();
+  });
+
+  it('S2i (late 403): the connection is removed and a new one connected in flight: the new one stays ok', async () => {
+    const t = await tenant('vck_gone_old_0123456789');
+    fake.reply({}, 403);
+    const inner = fake.fetchImpl();
+    const ctx = {
+      ...t.ctx,
+      fetchImpl: (async (...a: Parameters<typeof fetch>) => {
+        await remove({ pool, platformOpsPool: opsPool, principal: t, httpClient, kek });
+        await rotate(t, 'vck_gone_new_0123456789');
+        return inner(...a);
+      }) as typeof fetch,
+    };
+    await expect(completeJson(ctx, params)).rejects.toMatchObject({ code: 'key_rejected', status: 403 });
+    expect(await status(t.accountId)).not.toBe('broken');
+    expect(await brokenAt(t.accountId)).toBeNull();
   });
 
   // D#483 S5-k2: the out-of-credit answers on the one-call path. One fixture per provider shape, the same ones the classifier and runner tests use.

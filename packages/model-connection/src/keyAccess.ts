@@ -31,7 +31,7 @@ interface KeyRow extends Sealed {
  */
 export async function withOpenedKey<T>(
   ctx: KeyAccessCtx,
-  use: (opened: { provider: Provider; key: string }) => Promise<T>,
+  use: (opened: { provider: Provider; key: string; connectionId: string; nonce: Buffer }) => Promise<T>,
 ): Promise<T> {
   const { accountId, userId } = ctx.principal;
   const missing = () => new NotFoundError(`model_connections: no connection for account ${accountId}`);
@@ -47,5 +47,6 @@ export async function withOpenedKey<T>(
   });
   if (!row) throw missing();
   const key = open({ kek: ctx.kek.keyFor(row.kek_version), aad: connectionAad({ accountId, connectionId: row.id, credentialKind: row.credential_kind, aadVersion: row.aad_version }) }, row);
-  return use({ provider: row.provider, key });
+  // connectionId and nonce name the exact row and seal this key came from, so a late answer can be tied back to it.
+  return use({ provider: row.provider, key, connectionId: row.id, nonce: row.nonce });
 }
