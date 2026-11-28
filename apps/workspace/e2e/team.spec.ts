@@ -75,6 +75,8 @@ interface Mock {
   updateCode: string;
   /** Every POST to a repo's start route (the repo id), and its answer: 200 (the repo then reports its session as starting), or an error status with `startCode`. */
   starts: string[];
+  /** D#845 MC-9b2e: every POST to a repo's carry routes, as `kind repo` with its body; the repo then reports no carry (Try again: a fresh one that is exporting). */
+  carries: string[];
   startStatus: number;
   startCode: string;
   /** Every POST to a repo's move route (the body sent), and its answer: 200 (the repo then reports its session as starting), or an error status with `moveCode`. */
@@ -107,7 +109,7 @@ function fresh(over: Partial<Mock> = {}): Mock {
     log: F.envelope([F.logLine({ line_id: "aaaa000000000001", pr: 7 }), F.logLine({ line_id: "aaaa000000000002", actor_role: "executor", category: "spawned", pr: null }), F.logLine({ line_id: "aaaa000000000003", discussion: null, pr: 9, category: "gate_passed" })]),
     plan: F.plan(), stats: F.stats(), usage: F.usage(), logPage: null,
     puts: [], reads: [], fail: [], putStatus: 200, putCode: "", streaming: false, streamFrame: null,
-    commands: { commands: [] }, dials: F.dials(), posts: [], deletes: [], postStatus: 201, postCode: "", dialStatus: 200, dialCode: "", halts: [], haltStatus: 200, haltCode: "", haltPends: true, updates: [], updateStatus: 200, updateCode: "", retries: [], retryStatus: 200, retryCode: "", retryAnswer: { job_id: "j0000000-0000-4000-8000-000000000001", kind: "engine_session_stop", operate_epoch: 1, already_issued: false }, starts: [], startStatus: 200, startCode: "", moves: [], moveStatus: 200, moveCode: "", checkouts: [], checkoutAnswer: { already_held: true }, runners: F.fleet([F.runner(), F.runner({ id: "9d2c7b1e-5f3a-4e8b-8a6d-1c2b3a4d5e77", name: "Garage box" })]),
+    commands: { commands: [] }, dials: F.dials(), posts: [], deletes: [], postStatus: 201, postCode: "", dialStatus: 200, dialCode: "", halts: [], haltStatus: 200, haltCode: "", haltPends: true, updates: [], updateStatus: 200, updateCode: "", retries: [], retryStatus: 200, retryCode: "", retryAnswer: { job_id: "j0000000-0000-4000-8000-000000000001", kind: "engine_session_stop", operate_epoch: 1, already_issued: false }, starts: [], carries: [], startStatus: 200, startCode: "", moves: [], moveStatus: 200, moveCode: "", checkouts: [], checkoutAnswer: { already_held: true }, runners: F.fleet([F.runner(), F.runner({ id: "9d2c7b1e-5f3a-4e8b-8a6d-1c2b3a4d5e77", name: "Garage box" })]),
     bridgePosts: [], bridgeDeletes: 0, bridgeStatus: 201, bridgeCode: "", watch: { posts: [], deletes: [], status: 200, code: "", answer: { lease_id: LEASE, expires_at: new Date(Date.now() + 90_000).toISOString(), session_ends_at: new Date(Date.now() + 4 * 3600_000).toISOString(), limits: { per_repo: 2, per_account: 4 }, command: "held", machine: "online", last_seen: new Date().toISOString(), detail_as_of: null }, streams: [], failStream: false }, ...over, bridge: { phase: "idle", plan: "send", runners: [{ id: BRIDGE_RUNNER, name: "Workshop laptop", has_name: true, online: true, protocol_ok: true, last_seen_at: F.iso(120) }], connected: null, command: null, ...(over.bridge ?? {}) },
   };
 }
@@ -244,6 +246,13 @@ async function setup(page: Page, mock: Mock, opts: { clock?: boolean; stream?: b
       if (mock.retryStatus !== 200) return json(route, mock.retryStatus, { error: { code: mock.retryCode, message: SERVER_TEXT, request_id: "r" } });
       if (!mock.retryAnswer.queued) mock.repos = mock.repos.map((r) => (r.repo_id === decodeURIComponent(rm[1]) ? { ...r, stop_failed: null } : r));
       return json(route, 200, mock.retryAnswer);
+    }
+    const cm = req.method() === "POST" ? url.pathname.match(new RegExp(`^${BASE}/repos/([^/]+)/carry/(retry|abandon)$`)) : null;
+    if (cm) {
+      mock.carries.push(`${cm[2]} ${decodeURIComponent(cm[1])} ${req.postData()}`);
+      const id = decodeURIComponent(cm[1]);
+      mock.repos = mock.repos.map((r) => (r.repo_id !== id ? r : cm[2] === "retry" ? { ...r, carry: { ...(r.carry as object), state: "exporting", failure_code: null, parts_done: null, parts_total: null } } : { ...r, carry: null, session: { ...r.session, state: "starting", stopped_reason: null } }));
+      return json(route, 200, cm[2] === "retry" ? { carry: { id: "c1" } } : { job_id: "j0000000-0000-4000-8000-000000000003" });
     }
     const sm = req.method() === "POST" ? url.pathname.match(new RegExp(`^${BASE}/repos/([^/]+)/start$`)) : null;
     if (sm) {
@@ -2748,6 +2757,31 @@ test.describe("Team app", () => {
     await expect(t(page, "tm-move")).toBeVisible();
     await clean(page, errors);
   });
+
+  // D#845 MC-9b2e: a project moved with its team memory, in every state of the carry, at phone, tablet and desktop. The words are pinned in test/team-next.test.mjs; here the buttons are real controls that call the route once.
+  const carryOf = (state: string, over: Obj = {}) => ({ state, failure_code: null, from_name: "Studio laptop", to_name: "Garage box", parts_done: null, parts_total: null, ...over });
+  for (const [name, carry, sentence, buttons] of [
+    ["waiting", carryOf("waiting_machine"), "Waiting for Studio laptop to hand over the team's memory. It's offline; the project starts on Garage box once Studio laptop is back.", ["carry-abandon"]],
+    ["exporting", carryOf("exporting", { parts_done: 1, parts_total: 3 }), "Bringing the team's memory from Studio laptop (part 2 of 3).", []],
+    ["too large", carryOf("failed", { failure_code: "too_large" }), "The team's memory is over 50 MB, so it can't be carried.", ["carry-abandon"]],
+    ["failed", carryOf("failed", { failure_code: "export_failed" }), "The team's memory couldn't be brought from Studio laptop.", ["carry-retry", "carry-abandon"]],
+  ] as Array<[string, Obj, string, string[]]>) {
+    test(`a carry that is ${name}: its sentence, its buttons${buttons.length ? " and a click that calls the route once" : ""}`, async ({ page }) => {
+      const mock = stepRepo({ session: sess("stopped", { stopped_reason: "move" }), carry });
+      const { errors } = await setup(page, mock);
+      await open(page);
+      await expect(nextText(page)).toHaveText(sentence);
+      for (const id of ["carry-retry", "carry-abandon"]) await expect(t(page, `tm-next-${id}`)).toHaveCount(buttons.includes(id) ? 1 : 0);
+      if (buttons.includes("carry-abandon")) await expect(t(page, "tm-carry-note")).toHaveText("Studio laptop's copy of the project is deleted once Garage box is running.");
+      await fitsAcross(page);
+      if (buttons[0]) {
+        await press(t(page, `tm-next-${buttons[0]}`));
+        await expect.poll(() => mock.carries).toEqual([`${buttons[0].slice(6)} ${REPO_A} {}`]);
+        await expect(t(page, "tm-live")).toContainText(buttons[0] === "carry-retry" ? "Trying again." : "Starting the engine on the new machine without the team's memory.");
+      }
+      await clean(page, errors);
+    });
+  }
 
   for (const [reason, sentence, id, label] of [
     ["person", `Stopped ${hhmm(AT_ISO)}`, "start", "Start engine"], ["halt", `Stopped ${hhmm(AT_ISO)}`, "start", "Start engine"],

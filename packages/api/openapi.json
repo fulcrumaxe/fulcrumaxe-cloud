@@ -16950,6 +16950,72 @@
                               "app",
                               "personal"
                             ]
+                          },
+                          "carry": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "state": {
+                                    "type": "string",
+                                    "enum": [
+                                      "waiting_machine",
+                                      "exporting",
+                                      "starting",
+                                      "failed"
+                                    ]
+                                  },
+                                  "failure_code": {
+                                    "type": [
+                                      "string",
+                                      "null"
+                                    ]
+                                  },
+                                  "from_name": {
+                                    "type": "string"
+                                  },
+                                  "to_name": {
+                                    "type": "string"
+                                  },
+                                  "parts_done": {
+                                    "anyOf": [
+                                      {
+                                        "type": "integer",
+                                        "minimum": -9007199254740991,
+                                        "maximum": 9007199254740991
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  },
+                                  "parts_total": {
+                                    "anyOf": [
+                                      {
+                                        "type": "integer",
+                                        "minimum": -9007199254740991,
+                                        "maximum": 9007199254740991
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "state",
+                                  "failure_code",
+                                  "from_name",
+                                  "to_name",
+                                  "parts_done",
+                                  "parts_total"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           }
                         },
                         "required": [
@@ -16960,7 +17026,8 @@
                           "app_kind",
                           "full_name",
                           "removal",
-                          "github_identity"
+                          "github_identity",
+                          "carry"
                         ],
                         "additionalProperties": false
                       }
@@ -17168,6 +17235,72 @@
                         "app",
                         "personal"
                       ]
+                    },
+                    "carry": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "state": {
+                              "type": "string",
+                              "enum": [
+                                "waiting_machine",
+                                "exporting",
+                                "starting",
+                                "failed"
+                              ]
+                            },
+                            "failure_code": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "from_name": {
+                              "type": "string"
+                            },
+                            "to_name": {
+                              "type": "string"
+                            },
+                            "parts_done": {
+                              "anyOf": [
+                                {
+                                  "type": "integer",
+                                  "minimum": -9007199254740991,
+                                  "maximum": 9007199254740991
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "parts_total": {
+                              "anyOf": [
+                                {
+                                  "type": "integer",
+                                  "minimum": -9007199254740991,
+                                  "maximum": 9007199254740991
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            }
+                          },
+                          "required": [
+                            "state",
+                            "failure_code",
+                            "from_name",
+                            "to_name",
+                            "parts_done",
+                            "parts_total"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     }
                   },
                   "required": [
@@ -17178,7 +17311,8 @@
                     "app_kind",
                     "full_name",
                     "removal",
-                    "github_identity"
+                    "github_identity",
+                    "carry"
                   ],
                   "additionalProperties": false
                 }
@@ -54654,6 +54788,72 @@
                               "null"
                             ]
                           },
+                          "carry": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "state": {
+                                    "type": "string",
+                                    "enum": [
+                                      "waiting_machine",
+                                      "exporting",
+                                      "starting",
+                                      "failed"
+                                    ]
+                                  },
+                                  "failure_code": {
+                                    "type": [
+                                      "string",
+                                      "null"
+                                    ]
+                                  },
+                                  "from_name": {
+                                    "type": "string"
+                                  },
+                                  "to_name": {
+                                    "type": "string"
+                                  },
+                                  "parts_done": {
+                                    "anyOf": [
+                                      {
+                                        "type": "integer",
+                                        "minimum": -9007199254740991,
+                                        "maximum": 9007199254740991
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  },
+                                  "parts_total": {
+                                    "anyOf": [
+                                      {
+                                        "type": "integer",
+                                        "minimum": -9007199254740991,
+                                        "maximum": 9007199254740991
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "state",
+                                  "failure_code",
+                                  "from_name",
+                                  "to_name",
+                                  "parts_done",
+                                  "parts_total"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
                           "setup": {
                             "type": "object",
                             "properties": {
@@ -54949,6 +55149,7 @@
                           "github_identity",
                           "stop_failed",
                           "machine_name",
+                          "carry",
                           "setup",
                           "session",
                           "quota",

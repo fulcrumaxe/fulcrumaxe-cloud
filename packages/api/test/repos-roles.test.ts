@@ -153,7 +153,7 @@ describe('D#31 API-8a: repos, settings and roles', () => {
     expect(body1.data.map((r) => r.id)).toEqual([c.repoId, b.repoId]);
     expect(body1.data[0]).toMatchObject({ install_state: 'not_installed', app_kind: null });
     expect(body1.data[1]).toMatchObject({ install_state: 'installed', app_kind: 'sitekit' });
-    expect(Object.keys(body1.data[0]!).sort()).toEqual(['app_kind', 'full_name', 'gh_repo_id', 'github_identity', 'id', 'install_state', 'product', 'removal']);
+    expect(Object.keys(body1.data[0]!).sort()).toEqual(['app_kind', 'carry', 'full_name', 'gh_repo_id', 'github_identity', 'id', 'install_state', 'product', 'removal']);
     // D#845 ON-16a1: no removal is waiting for a machine.
     expect(body1.data.map((r) => (r as unknown as { removal: unknown }).removal)).toEqual([null, null]);
     expect(body1.next_cursor).not.toBeNull();
@@ -184,6 +184,26 @@ describe('D#31 API-8a: repos, settings and roles', () => {
     // Removing the machine closes the cleanup: the field reads null again.
     await admin.query(`UPDATE runners SET revoked_at = now() WHERE id = $1`, [runnerId]);
     expect(((await (await call(owner, 'GET', `/repos/${repo.repoId}`)).json()) as { removal: unknown }).removal).toBeNull();
+  });
+
+  it('D#845 MC-9b2e: carry says where the team\'s memory is while a project moves, on the list and the single read, and only for the account that owns it', async () => {
+    const owner = await seedAccountWithMember(admin, { role: 'owner' });
+    const other = await seedAccountWithMember(admin, { role: 'owner' });
+    const repo = await seedRepo(owner.accountId, 'team');
+    const second = await seedRepo(owner.accountId, 'team');
+    const [from, to] = [await insertRunner(admin, owner.accountId, owner.userId), await insertRunner(admin, owner.accountId, owner.userId)];
+    for (const [id, name] of [[from, 'Studio box'], [to, 'Garage box']]) await admin.query(`INSERT INTO runner_settings (runner_id, account_id, name) VALUES ($1, $2, $3)`, [id, owner.accountId, name]);
+    const cleanup = (await admin.query<{ id: string }>(`INSERT INTO machine_cleanups (account_id, repo_id, runner_id, reason, delete_sandbox, requested_by) VALUES ($1, $2, $3, 'move', true, $4) RETURNING id`, [owner.accountId, repo.repoId, from, owner.userId])).rows[0]!.id;
+    await admin.query(`INSERT INTO state_carries (account_id, repo_id, from_runner_id, to_runner_id, cleanup_id, requested_by, failure_code) VALUES ($1, $2, $3, $4, $5, $6, 'expired')`, [owner.accountId, repo.repoId, from, to, cleanup, owner.userId]);
+    const want = { state: 'failed', failure_code: 'expired', from_name: 'Studio box', to_name: 'Garage box', parts_done: null, parts_total: null };
+    const list = (await (await call(owner, 'GET', '/repos')).json()) as { data: Array<Item & { carry: unknown }> };
+    expect(list.data.find((r) => r.id === repo.repoId)?.carry).toEqual(want);
+    expect(list.data.find((r) => r.id === second.repoId)?.carry).toBeNull(); // a second repo of the same account is not shown the first one's carry
+    expect(((await (await call(owner, 'GET', `/repos/${repo.repoId}`)).json()) as { carry: unknown }).carry).toEqual(want);
+    expect((await call(other, 'GET', `/repos/${repo.repoId}`)).status).toBe(404);
+    // Once a person decides, the carry is closed and the field reads null again.
+    await admin.query(`UPDATE state_carries SET closed_at = now(), closed_reason = 'abandoned' WHERE repo_id = $1`, [repo.repoId]);
+    expect(((await (await call(owner, 'GET', `/repos/${repo.repoId}`)).json()) as { carry: unknown }).carry).toBeNull();
   });
 
   it('criterion 1: full_name is owner/name once a sync wrote both, and null before one or when half is missing', async () => {

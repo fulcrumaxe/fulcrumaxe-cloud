@@ -520,12 +520,14 @@ function mountApp(contentEl) {
   function moveSheet(s, p, from) {
     const targets = moveTargets(machines.state.list, s.runnerId);
     const pick = h("select", { id: "runners-move-to", class: "runners-input", "data-testid": "runners-move-to" }, targets.map((m) => h("option", { value: m.id }, m.name)));
+    const memory = h("input", { type: "checkbox", id: "runners-move-memory", "data-testid": "runners-move-memory" });
     confirmSheet({
       from, title: "Move " + p.name + " to another machine?", label: "Move project", off: targets.length === 0,
       body: targets.length
-        ? h("div", null, h("p", null, p.name + " stops running on " + s.name + " and starts on the machine you choose. Its team memory is not carried along; it starts fresh there."), h("label", { for: "runners-move-to" }, "Move to"), pick)
+        ? h("div", null, h("p", null, p.name + " stops running on " + s.name + " and starts on the machine you choose. Tick the box to bring the team's memory along. The project then starts on the new machine once the memory arrives. Without it, the team starts fresh there."), h("label", { for: "runners-move-to" }, "Move to"), pick,
+          h("label", { class: "runners-choice", for: "runners-move-memory" }, memory, h("span", null, "Bring the team's memory along")))
         : h("p", { "data-testid": "runners-move-none" }, "No other machine is online with room for it. Add a machine first."),
-      run: () => moveProject(p.id, pick.value, { signal: ac.signal }), done: () => (note(s, p.name + " was moved."), servers.loadList(), machines.load()),
+      run: () => moveProject(p.id, pick.value, { signal: ac.signal, carry: memory.checked }), done: () => (note(s, memory.checked ? p.name + " is moving. Follow the team's memory on the Team page." : p.name + " was moved."), servers.loadList(), machines.load()),
     });
   }
   function signOut(s, from) {

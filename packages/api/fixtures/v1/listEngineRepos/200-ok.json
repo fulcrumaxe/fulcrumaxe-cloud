@@ -19,6 +19,7 @@
       "github_identity": "app",
       "stop_failed": { "reason": "person", "code": "snapshot_failed", "at": "2026-11-16T10:00:10.000Z" },
       "machine_name": "Studio laptop",
+      "carry": null,
       "setup": { "status": "done", "phase": "done", "sub_step": null, "state": "ok", "failure_code": null },
       "session": { "state": "running", "last_start_mode": "fresh", "last_start_at": "2026-11-16T09:50:00.000Z", "stopped_reason": null, "state_at": "2026-11-16T09:50:05.000Z" },
       "quota": { "state": "ok", "session_used": 1200, "session_limit": 5000, "repo_used": 3400, "repo_limit": 20000, "resets_at": "2026-11-17T00:00:00.000Z" },

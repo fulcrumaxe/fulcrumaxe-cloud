@@ -208,6 +208,7 @@ export {
   stateCarryImportedRun,
   stateCarrySealRun,
 } from "./stateCarry.js";
+export { abandonCarryRoute, readRepoCarries, retryCarryRoute, type RepoCarry } from "./stateCarryPerson.js";
 export {
   machineJobClaimRun,
   machineJobProgressRun,

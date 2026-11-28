@@ -6,5 +6,6 @@
   "app_kind": "team",
   "full_name": "acme/widgets",
   "removal": null,
+  "carry": null,
   "github_identity": "app"
 }

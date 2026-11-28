@@ -20,7 +20,7 @@ import {
 } from "@fx/core/src/engine/panels.js";
 import { assertRepoIdShape } from "@fx/core/src/repos/read.js";
 import { NotFoundError } from "@fx/core/src/tenancy/errors.js";
-import { readEngineUpdateCard } from "@fx/runner-cloud";
+import { readEngineUpdateCard, readRepoCarries } from "@fx/runner-cloud";
 import { ApiError, InvalidCursorError } from "../errors.js";
 import { parseLimit } from "../pagination.js";
 import type { RouteEntry } from "../registry.js";
@@ -67,6 +67,11 @@ const repoItem = z.object({
   halted_at: nstr, halted_by: z.object({ id: z.string(), display_name: z.string() }).nullable(), halt_epoch: z.number().int(), github_identity: z.enum(["app", "personal"]),
   stop_failed: z.object({ reason: z.enum(["person", "halt", "move", "remove", "operate_off", "plan"]).nullable(), code: nstr, at: z.string() }).nullable(),
   machine_name: nstr,
+  /** D#845 MC-9b2e: the team's memory being moved with this project, derived on each read; null when none is open. */
+  carry: z.object({
+    state: z.enum(["waiting_machine", "exporting", "starting", "failed"]), failure_code: z.string().nullable(), from_name: z.string(), to_name: z.string(),
+    parts_done: z.number().int().nullable(), parts_total: z.number().int().nullable(),
+  }).nullable(),
   setup: z.object({ status: z.enum(["none", "open", "done"]), phase: nstr, sub_step: nstr, state: z.enum(["started", "ok", "failed"]).nullable(), failure_code: nstr }),
   session: z.object({
     state: z.enum(["never", "starting", "running", "stale", "stopped", "halted", "runner_removed"]),
@@ -183,8 +188,10 @@ export const engineRoutes: RouteEntry[] = [
       const { accountId, userId } = ctx.principal;
       return withTenant(ctx.pool, accountId, userId, async (client) => {
         // The update card of each installed repo (ON-15d), read on the same tenant client and named by account as well as repo.
-        const items: Array<Awaited<ReturnType<typeof readEngineRepos>>[number] & { engine_update: Awaited<ReturnType<typeof readEngineUpdateCard>> }> = [];
-        for (const row of await readEngineRepos(client, accountId)) items.push({ ...row, engine_update: await readEngineUpdateCard(client, accountId, row.repo_id) });
+        const items: Array<Awaited<ReturnType<typeof readEngineRepos>>[number] & { carry: Awaited<ReturnType<typeof readRepoCarries>> extends Map<string, infer C> ? C | null : never; engine_update: Awaited<ReturnType<typeof readEngineUpdateCard>> }> = [];
+        const rows = await readEngineRepos(client, accountId);
+        const carries = await readRepoCarries(client, accountId, rows.map((r) => r.repo_id));
+        for (const row of rows) items.push({ ...row, carry: carries.get(row.repo_id) ?? null, engine_update: await readEngineUpdateCard(client, accountId, row.repo_id) });
         const newest = items.map((i) => i.last_heard_at).filter((x): x is string => x !== null).sort().pop() ?? null;
         const heard = newest === null ? null : Math.max(0, Math.round((Date.now() - Date.parse(newest)) / 1000));
         return { items, next_cursor: null, as_of: newest ?? new Date().toISOString(), heard_age_s: heard, source_ages_s: {}, gaps: [], missing_events: 0, held_events: 0, oldest_seq: null };

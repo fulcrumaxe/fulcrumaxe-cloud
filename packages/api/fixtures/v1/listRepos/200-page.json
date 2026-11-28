@@ -8,6 +8,7 @@
       "app_kind": "team",
       "full_name": "acme/widgets",
       "removal": null,
+      "carry": null,
       "github_identity": "personal"
     },
     {
@@ -21,6 +22,14 @@
         "state": "waiting_machine",
         "machine_name": "Studio box",
         "failure_code": null
+      },
+      "carry": {
+        "state": "exporting",
+        "failure_code": null,
+        "from_name": "Studio box",
+        "to_name": "Garage box",
+        "parts_done": 1,
+        "parts_total": 3
       },
       "github_identity": "app"
     }

@@ -76,7 +76,7 @@ interface Mock {
   /** D#845 MC-10b1: the Hetzner credential, the servers, the catalog and the quote, and what the app sent. */
   hz: Hz;
 }
-interface Answer { status: number; code: string; retryAfter?: number }
+interface Answer { status: number; code: string; retryAfter?: number; reason?: string }
 interface Hz {
   credential: Record<string, unknown>;
   credentialFail: number;
@@ -110,8 +110,8 @@ const hzDefaults = (): Hz => ({
   credential: fx("getHetznerCredential", "200-none.json"), credentialFail: 0, servers: (fx("listHetznerServers", "200-list.json").servers as unknown[]).slice(1), serversFail: false, catalogFail: false, quoteFail: false, quoteDelay: 0, createDelay: 0, listReads: 0, quotePatch: {},
   connect: null, creates: [], removeFail: 0, connects: [], created: [], removes: 0, quotes: [], acts: [], actRefusals: [], login: {},
 });
-const refusal = (route: Route, status: number, code: string, retryAfter?: number) =>
-  route.fulfill({ status, contentType: "application/json", headers: retryAfter ? { "Retry-After": String(retryAfter) } : {}, body: JSON.stringify({ error: { code, message: SERVER_TEXT, request_id: "r" } }) });
+const refusal = (route: Route, status: number, code: string, retryAfter?: number, reason?: string) =>
+  route.fulfill({ status, contentType: "application/json", headers: retryAfter ? { "Retry-After": String(retryAfter) } : {}, body: JSON.stringify({ error: { code, message: SERVER_TEXT, request_id: "r" }, ...(reason ? { reason } : {}) }) });
 
 async function setup(page: Page, tweak: Omit<Partial<Mock>, "hz"> & { hz?: Partial<Hz> } = {}) {
   const errors: string[] = [];
@@ -180,7 +180,7 @@ async function setup(page: Page, tweak: Omit<Partial<Mock>, "hz"> & { hz?: Parti
     if ((sa && req.method() !== "GET") || ra || /^\/api\/runners\/repos\/[^/]+\/move$/.test(p)) {
       hz.acts.push({ method: req.method(), path: p + new URL(req.url()).search, body: req.postData() ? JSON.parse(req.postData()!) : undefined });
       const no = hz.actRefusals.shift();
-      if (no) return refusal(route, no.status, no.code, no.retryAfter);
+      if (no) return refusal(route, no.status, no.code, no.retryAfter, no.reason);
       if (sa) hz.servers = hz.servers.map((s) => ((s as { id: string }).id !== sa[1] ? s : sa[2] === "keep" ? { ...(s as object), kept: true } : sa[2] === "reboot" ? s : { ...(s as object), status: "deleting" }));
       if (ra && ra[2] !== "claude-logout") hz.login[ra[1]!] = { request: { request_id: "66666666-6666-4666-8666-666666666666", status: ra[2] === "claude-login" ? "pending" : "code_ready", expires_at: "2099-01-01T00:00:00.000Z", auth_url: null, failure_code: null } };
       return json(route, 200, {});
@@ -1613,7 +1613,9 @@ test.describe("D#845 MC-10b2: move to another machine", () => {
     await press(move);
     const dlg = dlgOf(page);
     await expect(dlg.locator("h2")).toHaveText("Move acme/web to another machine?");
-    await expect(dlg).toContainText("acme/web stops running on fx-s1 and starts on the machine you choose. Its team memory is not carried along; it starts fresh there.");
+    await expect(dlg).toContainText("acme/web stops running on fx-s1 and starts on the machine you choose. Tick the box to bring the team's memory along. The project then starts on the new machine once the memory arrives. Without it, the team starts fresh there.");
+    await expect(dlg.locator('[data-testid="runners-move-memory"]')).not.toBeChecked();
+    await expect(dlg.locator("label[for=runners-move-memory]")).toHaveText("Bring the team's memory along");
     await expect(dlg.locator('[data-testid="runners-move-to"] option')).toHaveText(["Laptop"]);
     mock.hz.actRefusals = [{ status: 409, code: "machine_single_project" }];
     await press(yes(page));
@@ -1622,6 +1624,36 @@ test.describe("D#845 MC-10b2: move to another machine", () => {
     await expect(dlg).toHaveCount(0);
     expect(mock.hz.acts.at(-1)).toEqual({ method: "POST", path: `/api/runners/repos/${REPO_WEB}/move`, body: { to_runner_id: RUN2 } });
     await expect(t(page, "runners-server-note")).toHaveText("acme/web was moved.");
+    await clean(page, errors);
+  });
+
+  test("with the box ticked the move asks for the team's memory, a refusal says why in plain words, and the note points to the Team page", async ({ page }) => {
+    const { mock, errors } = await setup(page, {
+      machines: [mach(RUN, "fx-s1"), mach(RUN2, "Laptop")],
+      hz: { credential: CONNECTED, servers: [sv(1, { runner_id: RUN, last_seen_at: ago(0), placed_projects: placed })] },
+    });
+    await openServers(page);
+    await press(t(page, "runners-srv-move"));
+    const dlg = dlgOf(page);
+    await dlg.locator('[data-testid="runners-move-memory"]').check();
+    const reasons: Array<[string, string]> = [
+      ["runner_update_needed", "Update fx-runner on both machines to bring the team's memory along, or untick the box to move without it"],
+      ["machine_kek_unset", "The team's memory can't be carried right now. Untick the box to move without it, or try again later"],
+      ["no_session", "This project hasn't run on its machine yet, so there's no team memory to bring. Untick the box to move it"],
+      ["source_removed", "The old machine was removed, so it can't hand over the team's memory. Untick the box to move without it"],
+    ];
+    for (const [reason, words] of reasons) {
+      mock.hz.actRefusals = [{ status: 409, code: "state_carry_unavailable", reason }];
+      await press(yes(page));
+      await expect(dlg.locator('[data-testid="runners-confirm-error"]')).toHaveText(words);
+    }
+    mock.hz.actRefusals = [{ status: 409, code: "carry_pending" }];
+    await press(yes(page));
+    await expect(dlg.locator('[data-testid="runners-confirm-error"]')).toHaveText("The team's memory is still on its way from the last move. Wait for it, or choose Start without the memory on the Team page");
+    await press(yes(page));
+    await expect(dlg).toHaveCount(0);
+    expect(mock.hz.acts.at(-1)).toEqual({ method: "POST", path: `/api/runners/repos/${REPO_WEB}/move`, body: { to_runner_id: RUN2, carry_state: true } });
+    await expect(t(page, "runners-server-note")).toHaveText("acme/web is moving. Follow the team's memory on the Team page.");
     await clean(page, errors);
   });
 

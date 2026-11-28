@@ -241,7 +241,7 @@ export const NEXT_WORDS = {
   operateOff: (at) => (at ? "Stopped at " + at + " because operate was turned off" : "Stopped because operate was turned off"),
   idleOperateOff: ["Operate is off, so the engine isn't running on ", ""], idle: ["The engine isn't running on ", ""], starting: ["Starting the engine on ", "…"], runner: ["Start the runner on ", ""],
   fresh: (at) => "Started fresh at " + at, quota: (inw) => "Today's event limit is reached. Updates resume at 00:00 UTC (" + inw + ")",
-  ask: { turnOn: ASK("turn on operate"), start: ASK("start the engine"), setup: ASK("set up the engine"), renew: "Ask an owner to renew the plan", move: ASK("move it") },
+  ask: { carry: ASK("start without the memory"), turnOn: ASK("turn on operate"), start: ASK("start the engine"), setup: ASK("set up the engine"), renew: "Ask an owner to renew the plan", move: ASK("move it") },
   phases: { survey: "surveying the project", plan: "writing the plan", install: "installing the engine", await_merge: "waiting for the install pull request", finish: "finishing the install" },
   sent: "Asked the machine to start the engine.", already: "A start is already on its way.", moved: "Moved. The engine starts on the new machine.", held: "You already have the Engine plan.", added: "Engine added. This updates when the provider confirms the change.",
   alias: { project_not_placed: "not_placed", machine_single_project: "machine_not_eligible" },
@@ -250,8 +250,35 @@ export const NEXT_WORDS = {
     plan_required: "The engine needs the Engine plan. Choose it in Onboarding.", engine_quantity: "Every engine on your plan is in use. Add an engine in Onboarding.", plan_ended: "The Engine plan ended. Renew it first.",
     account_held: "This account is on hold.", operate_off: "Operate is off. Turn it on first.", start_pending: "A start is already waiting for the machine.", not_placed: "This project isn't on a machine.",
     machine_not_eligible: "That machine can't take the project right now. Pick another.",
+    carry_pending: "The team's memory is still being moved. Wait for it, or start without it.", no_carry: "That was already settled. Reload the page.", carry_not_failed: "The team's memory is still on its way.",
+    nothing_to_retry: "The old machine can't hand the memory over again. Start without it.",
   },
+  carryRetried: "Trying again. The team's memory is being brought from the old machine.", carryAbandoned: "Starting the engine on the new machine without the team's memory.",
+  carryRefusals: { runner_update_needed: "Update fx-runner on both machines to bring the team's memory along.", machine_kek_unset: "The team's memory can't be carried right now. Start without it, or try again later." },
 };
+// D#845 MC-9b2e: the carry of a project moved with its team memory. The cloud sends the derived state and a closed failure code; the sentence is chosen here, with each machine's name in its own run.
+const CARRY_STATES = ["waiting_machine", "exporting", "starting", "failed"];
+const CARRY_LINES = {
+  too_large: () => ["The team's memory is over 50 MB, so it can't be carried."], source_removed: (o) => [{ bdi: o }, " was removed before it handed over the team's memory."],
+  expired: (o, n) => ["The team's memory expired before ", { bdi: n }, " came online."], runner_update_needed: (o) => ["Update fx-runner on ", { bdi: o }, " to bring the memory along."],
+  other: (o) => ["The team's memory couldn't be brought from ", { bdi: o }, "."],
+};
+const NO_RETRY = ["too_large", "source_removed"];
+/** The closed shape of a repo's open carry; anything else reads as no carry. */
+export function readCarry(c) {
+  if (!isObj(c) || !CARRY_STATES.includes(c.state)) return null;
+  const name = (v, d) => (typeof v === "string" && v.trim() !== "" ? v : d), n = (v) => (Number.isInteger(v) && v >= 0 ? v : null);
+  return { state: c.state, code: typeof c.failure_code === "string" && FACT_WORD.test(c.failure_code) ? c.failure_code : "", from: name(c.from_name, "the old machine"), to: name(c.to_name, "the new machine"), done: n(c.parts_done), of: n(c.parts_total) };
+}
+/** The sentence and the controls of a carry that is waiting, exporting or failed; null once it is sealed (the normal start progress takes over). */
+function carryCard(c) {
+  if (c.state === "starting") return null;
+  const parts = c.state === "waiting_machine" ? ["Waiting for ", { bdi: c.from }, " to hand over the team's memory. It's offline; the project starts on ", { bdi: c.to }, " once ", { bdi: c.from }, " is back."]
+    : c.state === "exporting" ? ["Bringing the team's memory from ", { bdi: c.from }, c.of ? " (part " + Math.min((c.done || 0) + 1, c.of) + " of " + c.of + ")." : "."]
+      : (CARRY_LINES[c.code] || CARRY_LINES.other)(c.from, c.to);
+  const acts = c.state === "exporting" ? [] : [...(c.state === "failed" && !NO_RETRY.includes(c.code) ? [{ id: "carry-retry", label: "Try again" }] : []), { id: "carry-abandon", label: "Start without the memory" }];
+  return { parts, acts, note: acts.length ? [{ bdi: c.from }, "'s copy of the project is deleted once ", { bdi: c.to }, " is running."] : null };
+}
 const FACT_STATES = ["never", "starting", "running", "stale", "stopped", "halted", "runner_removed"], FACT_MODES = ["created", "resumed", "fresh"], FACT_QUOTA = ["ok", "session_full", "repo_full"];
 const FACT_REASONS = ["person", "halt", "move", "remove", "operate_off", "plan"], FACT_SETUP = ["none", "open", "done"], FACT_WORD = /^[a-z][a-z0-9_]{0,63}$/;
 /** The closed shape of a repo's session facts; a list without them (an older server) reads as null and shows no next step (fail closed). */
@@ -282,8 +309,10 @@ export const sessionChip = (repo) => {
 };
 
 /** The next-step card of the open repo, or null. `parts` is the sentence with a machine name in its own run ({bdi}); `action` is {id, label} or null; a member gets the sentence and the line that says who can act. */
+const NO_FACTS = { machine: "", setup: { status: "none", phase: "", failed: false }, session: null, quota: null };
 export function describeNext(st, repo, nowMs) {
-  const f = repo && repo.facts;
+  const carry = repo && repo.carry ? carryCard(repo.carry) : null;
+  const f = repo && (repo.facts || (carry ? NO_FACTS : null));
   if (!st.settings || !f) return null;
   const can = st.settings.canEdit === true, W = NEXT_WORDS, m = f.machine, s = f.session;
   const named = (pair) => (m ? [pair[0], { bdi: m }, pair[1]] : null);
@@ -292,7 +321,11 @@ export function describeNext(st, repo, nowMs) {
   const act = (id, label, askKey) => { if (id === "renew" ? can && owner : can) action = { id, label }; else ask = W.ask[askKey]; };
   // Operate is off while a cloud session (a listed sandbox) is still up or stopped: the engine is being or has been stopped, so a start or a runner start would only be refused (409 operate_off).
   const winding = s && s.at !== "" && repo.operate !== true && s.state !== "never" && !(s.state === "stopped" && s.reason === "plan");
-  if (winding) {
+  let acts = [];
+  if (carry) {
+    parts = carry.parts;
+    if (can) acts = carry.acts; else if (carry.acts.length) ask = W.ask.carry;
+  } else if (winding) {
     if (s.state === "stale") parts = m ? ["Stopping when ", { bdi: m }, " comes back"] : ["Stopping when the machine comes back"];
     else if (s.state === "stopped" && s.reason === "operate_off") { parts = [W.operateOff(clock(s.at))]; act("operate", "Turn on operate", "turnOn"); }
     else if (s.state === "runner_removed") { parts = ["Its machine was removed, and operate is off"]; act("operate", "Turn on operate", "turnOn"); }
@@ -314,10 +347,11 @@ export function describeNext(st, repo, nowMs) {
   const fresh = s && s.state === "running" && s.mode === "fresh" && clock(s.startAt) ? W.fresh(clock(s.startAt)) : "";
   const quota = f.quota && f.quota.state !== "ok" ? W.quota(untilWords(f.quota.resetsAt, nowMs)) : "";
   if (!parts && !fresh && !quota) return null;
+  const carryNote = carry && acts.length ? carry.note : null;
   const mine = st.op.nextRepo === repo.id;
   const move = mine ? st.op.move : null;
   return {
-    id: repo.id, parts: parts || [], text: parts ? parts.map((p) => (typeof p === "string" ? p : p.bdi)).join("") : "", action: move ? null : action, ask, fresh, quota,
+    id: repo.id, parts: parts || [], text: parts ? parts.map((p) => (typeof p === "string" ? p : p.bdi)).join("") : "", action: move ? null : action, acts, carryNote, ask, fresh, quota,
     busy: st.op.nextBusy === true, note: mine ? st.op.nextNote : "", move,
   };
 }
@@ -326,6 +360,7 @@ export function nextFailure(e) {
   if (isRateLimited(e)) return retryWords(waitSeconds(e));
   const st = e && Number.isInteger(e.status) ? e.status : 0, W = NEXT_WORDS.errors;
   const code = e && typeof e.code === "string" ? NEXT_WORDS.alias[e.code] || e.code : "";
+  if (code === "state_carry_unavailable") return Object.hasOwn(NEXT_WORDS.carryRefusals, e.reason) ? NEXT_WORDS.carryRefusals[e.reason] : W.other;
   return st === 401 ? W.signedOut : st === 403 ? W.forbidden : st === 404 ? W.notFound : Object.hasOwn(W, code) && !["forbidden", "notFound", "signedOut", "other"].includes(code) ? W[code] : W.other;
 }
 /** The card's nodes. A button is aria-disabled (not disabled) while a call is out, so it keeps its place in the Tab order; a click calls `go(id)`, and the move picker calls `mv.pick(id)`, `mv.go()` and `mv.cancel()`. */
@@ -337,9 +372,14 @@ export function nextNodes(v, go, mv) {
       : h("select", { class: "tm-select", "aria-label": "Machine to move it to", "data-testid": "tm-move-pick", "data-focus": "next-move-pick", onChange: (e) => mv.pick(e.target.value) }, mvs.choices.map((c) => h("option", { value: c.id, selected: c.id === mvs.pick }, c.name))),
     none ? null : h("button", { type: "button", class: "tm-btn", "data-testid": "tm-move-go", "data-focus": "next-move-go", "aria-disabled": v.busy ? "true" : "false", onClick: () => { if (!v.busy) mv.go(); } }, "Move"),
     h("button", { type: "button", class: "tm-btn", "data-testid": "tm-move-cancel", "data-focus": "next-move-cancel", onClick: () => mv.cancel() }, "Cancel")) : null;
+  const words = (parts) => parts.map((p) => (typeof p === "string" ? p : h("bdi", null, p.bdi)));
+  const acts = v.acts.map((a) => {
+    const b = h("button", { type: "button", class: "tm-btn", "data-testid": "tm-next-" + a.id, "data-focus": "next-" + a.id, "aria-disabled": v.busy ? "true" : "false", onClick: () => { if (b.getAttribute("aria-disabled") !== "true") go(a.id); } }, a.label);
+    return b;
+  });
   return [
-    v.parts.length ? h("p", { class: "tm-next-text", "data-testid": "tm-next-text" }, v.parts.map((p) => (typeof p === "string" ? p : h("bdi", null, p.bdi)))) : null,
-    btn, picker,
+    v.parts.length ? h("p", { class: "tm-next-text", "data-testid": "tm-next-text" }, words(v.parts)) : null,
+    btn, ...acts, v.carryNote ? h("p", { class: "tm-muted", "data-testid": "tm-carry-note" }, words(v.carryNote)) : null, picker,
     v.ask ? h("p", { class: "tm-muted", "data-testid": "tm-next-ask" }, v.ask) : null,
     v.fresh ? h("p", { class: "tm-next-text", "data-testid": "tm-fresh" }, v.fresh) : null,
     v.quota ? h("p", { class: "tm-next-text", "data-testid": "tm-quota" }, v.quota) : null,
@@ -642,6 +682,8 @@ export function createOperate({ client, signal, get, set, refresh, aborted, assi
       patch({ move: { loading: false, choices, pick: choices.length ? choices[0].id : "" } });
       return true;
     },
+    retryCarry() { return api.nextCall((repo) => client.retryCarry(repo.id, signal), () => NEXT_WORDS.carryRetried); },
+    abandonCarry() { return api.nextCall((repo) => client.abandonCarry(repo.id, signal), () => NEXT_WORDS.carryAbandoned); },
     pickMove(id) { const mv = get().op.move; if (mv && mv.choices.some((c) => c.id === id)) patch({ move: { ...mv, pick: id } }); },
     cancelMove() { patch({ move: null }); },
     moveNow() {

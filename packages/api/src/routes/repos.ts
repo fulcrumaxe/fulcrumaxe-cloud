@@ -3,7 +3,7 @@ import { INSTALLATION_APP_KINDS } from "@fx/core/src/repos/appKinds.js";
 import { assertRepoIdShape, getRepo, listRepos, type RepoDTO } from "@fx/core/src/repos/read.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { readPersonalRepoIds } from "@fx/db/src/repoGithubIdentity.js";
-import { readRepoRemovals, type RepoRemoval } from "@fx/runner-cloud";
+import { readRepoCarries, readRepoRemovals, type RepoCarry, type RepoRemoval } from "@fx/runner-cloud";
 import { getRepoGuardSettings, isRepoHumanMergeOnly, setRepoGuardSettings } from "@fx/core/src/role-settings/guardSettings.js";
 import type { RepoGuardSettings } from "@fx/core/src/role-settings/types.js";
 import type { RouteEntry } from "../registry.js";
@@ -24,6 +24,11 @@ export const repoResponseSchema = z.object({
   removal: z.object({ state: z.enum(["waiting_machine", "removing", "failed"]), machine_name: z.string(), failure_code: z.string().nullable() }).nullable(),
   /** D#845 ON-19a: the project's GitHub identity, `app` unless a person switched it to `personal`. */
   github_identity: z.enum(["app", "personal"]),
+  /** D#845 MC-9b2e: the team's memory being moved with this project, derived on each read (never stored); null when none is open. */
+  carry: z.object({
+    state: z.enum(["waiting_machine", "exporting", "starting", "failed"]), failure_code: z.string().nullable(), from_name: z.string(), to_name: z.string(),
+    parts_done: z.number().int().nullable(), parts_total: z.number().int().nullable(),
+  }).nullable(),
 });
 
 const listReposResponseSchema = z.object({
@@ -61,6 +66,12 @@ const patchSettingsBodySchema = z
   .strict()
   .refine((b) => Object.keys(b).length > 0);
 
+/** The open carry of each repo of the page, in one read (the same account, on top of row security). */
+async function carriesOf(ctx: { pool: Parameters<typeof withTenant>[0]; principal: { accountId: string; userId: string } }, repoIds: string[]): Promise<Map<string, RepoCarry>> {
+  if (repoIds.length === 0) return new Map();
+  return withTenant(ctx.pool, ctx.principal.accountId, ctx.principal.userId, (client) => readRepoCarries(client, ctx.principal.accountId, repoIds));
+}
+
 /** The removal of each repo of the page, in one read (the same account, on top of row security). */
 async function removalsOf(ctx: { pool: Parameters<typeof withTenant>[0]; principal: { accountId: string; userId: string } }, repoIds: string[]): Promise<Map<string, RepoRemoval>> {
   if (repoIds.length === 0) return new Map();
@@ -73,9 +84,10 @@ async function personalOf(ctx: { pool: Parameters<typeof withTenant>[0]; princip
   return withTenant(ctx.pool, ctx.principal.accountId, ctx.principal.userId, (client) => readPersonalRepoIds(client, ctx.principal.accountId, repoIds));
 }
 
-function toRepoItem(repo: RepoDTO, removal: RepoRemoval | null = null, personal = false): z.infer<typeof repoResponseSchema> {
+function toRepoItem(repo: RepoDTO, removal: RepoRemoval | null = null, personal = false, carry: RepoCarry | null = null): z.infer<typeof repoResponseSchema> {
   return {
     removal,
+    carry,
     github_identity: personal ? "personal" : "app",
     id: repo.id,
     product: repo.product,
@@ -119,8 +131,9 @@ export const repoRoutes: RouteEntry[] = [
       );
       const removals = await removalsOf(ctx, result.data.map((r) => r.id));
       const personal = await personalOf(ctx, result.data.map((r) => r.id));
+      const carries = await carriesOf(ctx, result.data.map((r) => r.id));
       return {
-        data: result.data.map((r) => toRepoItem(r, removals.get(r.id) ?? null, personal.has(r.id))),
+        data: result.data.map((r) => toRepoItem(r, removals.get(r.id) ?? null, personal.has(r.id), carries.get(r.id) ?? null)),
         next_cursor: result.nextCursor ? encodeCursor(result.nextCursor.createdAt, result.nextCursor.id) : null,
       };
     },
@@ -139,7 +152,7 @@ export const repoRoutes: RouteEntry[] = [
     responseSchema: repoResponseSchema,
     async handler(ctx, input) {
       const repo = await getRepo({ pool: ctx.pool, principal: ctx.principal }, input.params.id!);
-      return toRepoItem(repo, (await removalsOf(ctx, [repo.id])).get(repo.id) ?? null, (await personalOf(ctx, [repo.id])).has(repo.id));
+      return toRepoItem(repo, (await removalsOf(ctx, [repo.id])).get(repo.id) ?? null, (await personalOf(ctx, [repo.id])).has(repo.id), (await carriesOf(ctx, [repo.id])).get(repo.id) ?? null);
     },
   },
   {
