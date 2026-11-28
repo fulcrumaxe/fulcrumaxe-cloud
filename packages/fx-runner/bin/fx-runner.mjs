@@ -4,7 +4,7 @@
 // start, the real signal source and this program's own path are handed to `run`, `doctor` and `service`, so that nothing under
 // src/ has to name them. The two Anthropic variables reach `doctor` as names only, never as values.
 import { execFile, spawn, spawnSync } from "node:child_process";
-import { lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import { accessSync, constants as fsConstants, lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { userInfo } from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -286,12 +286,28 @@ const claudeLogin = {
       return undefined;
     }
   },
+  // D#845 ON-19c: the installed `gh`, found on the same clean search path (an absolute directory, a real file the runner may execute); none found means no GitHub sign-in can start.
+  locateGh: () => {
+    for (const dir of (cleanEnv({ mode: "subscription" }).PATH ?? "").split(path.delimiter)) {
+      if (dir === "" || !path.isAbsolute(dir)) continue;
+      try {
+        const real = realpathSync(path.join(dir, "gh"));
+        if (lstatSync(real).isFile()) {
+          accessSync(real, fsConstants.X_OK);
+          return real;
+        }
+      } catch {
+        // a directory without a runnable gh is skipped
+      }
+    }
+    return undefined;
+  },
   env: () => ({ ...claudeLoginEnv(), PATH: cleanEnv({ mode: "subscription" }).PATH ?? "" }),
   launch: (spec) => {
-    const child = spawn(spec.file, spec.args, { cwd: spec.cwd, env: spec.env, detached: true, stdio: ["pipe", "pipe", "pipe"] });
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdin.on("error", () => undefined); // the CLI may exit before it has read everything
+    const child = spawn(spec.file, spec.args, { cwd: spec.cwd, env: spec.env, detached: true, stdio: spec.ignoreStdio === true ? ["ignore", "ignore", "ignore"] : ["pipe", "pipe", "pipe"] });
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdin?.on("error", () => undefined); // the CLI may exit before it has read everything
     let exited = false;
     const exitCallbacks = [];
     const onceExit = (code) => {
@@ -302,10 +318,10 @@ const claudeLogin = {
     child.on("error", () => onceExit(null)); // a start that failed has no pid
     child.on("close", (code) => onceExit(code)); // after the pipes have drained, so the last output is read before the end
     return {
-      write: (text) => void child.stdin.write(text),
+      write: (text) => void child.stdin?.write(text),
       onOutput: (cb) => {
-        child.stdout.on("data", cb);
-        child.stderr.on("data", cb);
+        child.stdout?.on("data", cb);
+        child.stderr?.on("data", cb);
       },
       onExit: (cb) => (exited ? cb(null) : void exitCallbacks.push(cb)),
       kill: () => {

@@ -13,9 +13,16 @@ const ALLOWED: Readonly<Record<string, readonly string[]>> = {
   "packages/fx-runner/src/credentials/vmToken.ts": ["setup-token"],
 };
 
+/** D#845 ON-19c: the GitHub sign-in relay's one device address is a public web page the person opens, not a place a login is stored. In the one protocol file that holds its constant and its pattern, `/login` may appear only inside those two exact literals (the second is the same address spelled as a regular expression). */
+const EXACT_LITERALS: Readonly<Record<string, { term: string; literals: readonly string[] }>> = {
+  "packages/runner-protocol/src/machineCommands.ts": { term: "/login", literals: ["https://github.com/login/device", String.raw`https:\/\/github\.com\/login\/device`] },
+};
+
 export function credentialHits(files: ReadonlyArray<readonly [string, string]>): string[] {
   const hits: string[] = [];
-  for (const [name, text] of files) {
+  for (const [name, original] of files) {
+    const exact = EXACT_LITERALS[name];
+    const text = exact === undefined ? original : exact.literals.reduce((t, literal) => t.split(literal).join(""), original);
     for (const term of BANNED) if (text.includes(term) && !(ALLOWED[name] ?? []).includes(term)) hits.push(`${name}: ${term}`);
   }
   return hits;
@@ -52,6 +59,16 @@ describe("credential grep", () => {
     for (const term of BANNED.filter((t) => t !== "setup-token")) expect(credentialHits([[vm, `const a = "${term}";`]]), term).toHaveLength(1);
     const withToken = srcFiles().filter(([, text]) => text.includes("setup-token")).map(([name]) => name);
     expect(withToken).toEqual(["src/credentials/vmToken.ts"]);
+  });
+
+  it("allows /login only as the exact device address, and only in the protocol's machine commands file", () => {
+    const f = "packages/runner-protocol/src/machineCommands.ts";
+    expect(credentialHits([[f, 'const a = "https://github.com/login/device"; const b = /^https:\\/\\/github\\.com\\/login\\/device$/;']])).toEqual([]);
+    for (const other of ['const a = "/login";', 'const a = "https://github.com/login/oauth/authorize";', 'const a = "~/.config/gh/login";']) expect(credentialHits([[f, other]]), other).toEqual([`${f}: /login`]);
+    expect(credentialHits([["packages/fx-runner/src/daemon/ghLogin.ts", 'const a = "https://github.com/login/device";']])).toEqual(["packages/fx-runner/src/daemon/ghLogin.ts: /login"]);
+    for (const term of BANNED.filter((t) => t !== "/login")) expect(credentialHits([[f, `const a = "${term}";`]]), term).toHaveLength(1);
+    const withLogin = [...srcFiles().map(([name, text]): [string, string] => [`packages/fx-runner/${name}`, text]), ...protocolSources()].filter(([, text]) => text.includes("/login")).map(([name]) => name);
+    expect(withLogin).toEqual([f]);
   });
 
   it("the file that names setup-token imports no process module, spawns nothing and reads no Claude sign-in store", () => {

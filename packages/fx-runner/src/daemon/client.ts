@@ -4,7 +4,7 @@
  * list is never sent and a reply it does not describe is never believed: it is an error with a closed code.
  */
 import {
-  CURRENT_PROTOCOL_VERSION, MACHINE_LOGIN_CAPABILITY, MACHINE_ONBOARDING_MIN_PROTOCOL, MachineLoginCode, MachineLoginReport, machineLoginCodePath, machineLoginReportPath, SANDBOX_COMMAND_CAPABILITY, SANDBOX_INVENTORY_MIN_PROTOCOL, VERIFY_SIGN_IN_MIN_PROTOCOL, type VerifySignInState,
+  CURRENT_PROTOCOL_VERSION, MACHINE_LOGIN_CAPABILITY, MACHINE_ONBOARDING_MIN_PROTOCOL, MachineLoginCode, MachineLoginReport, machineLoginCodePath, machineLoginReportPath, GhLoginReport, ghLoginReportPath, GH_LOGIN_CAPABILITY, SANDBOX_COMMAND_CAPABILITY, SANDBOX_INVENTORY_MIN_PROTOCOL, VERIFY_SIGN_IN_MIN_PROTOCOL, type VerifySignInState,
   CLAIM_PATH, ClaimMessage, ClaimRateLimitedReply, type ConflictAttestation, HelloMessage, HelloReply, ClaimReply, WAKE_CAPABILITY, type WakeGrant, DoneMessage, DoneReply, DoneRetryReply, EventsMessage, EventsReply, HeartbeatMessage,
   GitTicketMessage, GitTicketReply, GIT_TICKET_PATH, HeartbeatReply, SeqNotIncreasingReply, StopReply,
   CONFLICT_FACTS_CAPABILITY, DISCOVERY_ANALYST_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, PROJECT_SETUP_CAPABILITY, TWIN_CAPABILITY, PLATFORM_FACT_HELLO_CAPABILITY, PLATFORM_FACT_CAPABILITY, ENGINE_CARRY_CAPABILITY, SURVEY_CAPABILITY, SURVEY_PUBLIC_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, HEARTBEAT_INVENTORY_HELLO_CAPABILITY, ENGINE_LEASE_HELLO_CAPABILITY, ENGINE_LEASE_CAPABILITY, type EngineLease, WATCH_MODE_HELLO_CAPABILITY, ORDERED_FACTS_CAPABILITY, OVERLAP_FACTS_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, MEMORY_PROPOSALS_PATH, MemoryProposalsMessage, MemoryProposalsReply, MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, PLANE_MERGE_CLAIM_PATH, PLANE_MERGE_REPORT_PATH, PLANE_MERGE_VERIFY_PATH, PlaneMergeClaimMessage, PlaneMergeClaimReply, PlaneMergeReportMessage, PlaneMergeReportReply, PlaneMergeRetryReply, PlaneMergeVerifyMessage, PlaneMergeVerifyReply,
@@ -160,6 +160,8 @@ export interface RunnerClient {
   /** D#845 MC-8b. The two signed calls of one Claude sign-in request: report the link or the end, and take the person's code (once). */
   machineLoginReport(requestId: string, report: MachineLoginReport): Promise<MachineLoginReportResult>;
   machineLoginCode(requestId: string): Promise<MachineLoginCodeResult>;
+  /** D#845 ON-19c: the GitHub sign-in's report (the device address and code, or the end). */
+  ghLoginReport(requestId: string, report: GhLoginReport): Promise<MachineLoginReportResult>;
   setupPushToken(setupId: string, jobId: string): Promise<SetupPushTokenResult>;
 }
 
@@ -246,10 +248,11 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
       // D#845 MC-8b: `machine_login_v1` is the newest build capability of all, so it goes first after the three browser and deploy ones (which are only advertised while their settings and probe pass): a cloud without it keeps every other capability, and the runner then answers every sign-in command as unsupported.
       // D#845 ON-13c3 and ON-10e1: `survey_public_v1` is the newest of all, so it goes first, then `engine_lease_v1`: an old cloud refuses the hello only because of the newest one, each retry costs one capability alone, the runner is then never offered a public survey, and never waits for a lease.
       // D#845 ON-8f2c: `project_setup_v1` is the newest of all, so it goes before everything else: an old cloud refuses the hello only because of it, so the one retry costs that capability alone, and the runner is then never offered a setup, an engine update or a removal.
+      // D#845 ON-19c: `gh_login_v1` goes right after `platform_fact_v1` and `engine_carry_v1` (Ruling 128.1: the platform fact stays first, then the carry), ahead of every older capability: a cloud without it keeps every other capability and the runner is never sent a GitHub sign-in.
       // D#845 ON-27d4c: `twin_v1` is the newest of all, so it goes before everything else: an old cloud refuses the hello only because of it, so the one retry costs that capability alone, and the runner is then never offered a twin job.
       // D#845 MC-9b2 (Ruling 128.1): `engine_carry_v1` sits right after `platform_fact_v1` and before `twin_v1`: an old cloud refuses the hello only because of it, so the one retry costs that capability alone and the runner is never sent a carry.
       // D#587 B-7c: `platform_fact_v1` is the newest capability of all, so it goes before everything else: an old cloud refuses the hello only because of it, so the one retry costs that capability alone, and the runner never sends `facts.platform` (the cloud then shows the machine by its os).
-      for (const drop of [PLATFORM_FACT_HELLO_CAPABILITY, ENGINE_CARRY_CAPABILITY, TWIN_CAPABILITY, PROJECT_SETUP_CAPABILITY, SURVEY_PUBLIC_CAPABILITY, ENGINE_LEASE_HELLO_CAPABILITY, HEARTBEAT_INVENTORY_HELLO_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, SANDBOX_COMMAND_CAPABILITY, BROWSER_PLAYWRIGHT_CAPABILITY, BROWSER_CHROME_CAPABILITY, DEPLOY_ORDER_CAPABILITY, SURVEY_CAPABILITY, MACHINE_LOGIN_CAPABILITY, WATCH_MODE_HELLO_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, OVERLAP_FACTS_CAPABILITY, MEM_PROPOSAL_CAPABILITY, TIP_PUBLISH_CAPABILITY, ORDERED_FACTS_CAPABILITY, CONFLICT_FACTS_CAPABILITY, DISCOVERY_ANALYST_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, WAKE_CAPABILITY] as const) {
+      for (const drop of [PLATFORM_FACT_HELLO_CAPABILITY, ENGINE_CARRY_CAPABILITY, GH_LOGIN_CAPABILITY, TWIN_CAPABILITY, PROJECT_SETUP_CAPABILITY, SURVEY_PUBLIC_CAPABILITY, ENGINE_LEASE_HELLO_CAPABILITY, HEARTBEAT_INVENTORY_HELLO_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, SANDBOX_COMMAND_CAPABILITY, BROWSER_PLAYWRIGHT_CAPABILITY, BROWSER_CHROME_CAPABILITY, DEPLOY_ORDER_CAPABILITY, SURVEY_CAPABILITY, MACHINE_LOGIN_CAPABILITY, WATCH_MODE_HELLO_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, OVERLAP_FACTS_CAPABILITY, MEM_PROPOSAL_CAPABILITY, TIP_PUBLISH_CAPABILITY, ORDERED_FACTS_CAPABILITY, CONFLICT_FACTS_CAPABILITY, DISCOVERY_ANALYST_CAPABILITY, PLANE_MERGE_QUEUE_CAPABILITY, MEMORY_LIMIT_CAPABILITY, PLANE_MERGE_CAPABILITY, WAKE_CAPABILITY] as const) {
         if (!refused(reply) || !(parsed.capabilities ?? []).includes(drop)) continue;
         dropped = [...dropped, drop];
         // D#587 B-7c: a cloud that refuses `platform_fact_v1` also refuses the `facts.platform` key (a cloud rolled back after it listed `platform_fact`), so the retry carries neither.
@@ -540,6 +543,18 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
       const parsed = MachineLoginReport.safeParse(report);
       if (!parsed.success || !UUID_TEXT.test(requestId)) return fail(undefined, "invalid_message");
       const reply = await send(machineLoginReportPath(requestId), parsed.data);
+      if (reply?.status === 200) return { kind: "recorded" };
+      if (reply?.status === 404 || reply?.status === 409) {
+        const code = errorCodeOf(reply.body);
+        return { kind: "refused", status: reply.status, ...(code === undefined ? {} : { code }) };
+      }
+      return fail(reply);
+    },
+
+    async ghLoginReport(requestId, report) {
+      const parsed = GhLoginReport.safeParse(report);
+      if (!parsed.success || !UUID_TEXT.test(requestId)) return fail(undefined, "invalid_message");
+      const reply = await send(ghLoginReportPath(requestId), parsed.data);
       if (reply?.status === 200) return { kind: "recorded" };
       if (reply?.status === 404 || reply?.status === 409) {
         const code = errorCodeOf(reply.body);

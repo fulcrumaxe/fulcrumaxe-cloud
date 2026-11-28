@@ -1,5 +1,5 @@
 import type { NextRequest } from "next/server";
-import { applyRunnerSetting, cancelClaudeLogin, checkRunner, enqueueSandboxCommand, readClaudeLogin, removeRunner, setRunnerRepos, signOutOfClaude, startClaudeLogin, submitClaudeLoginCode, type FleetSettingAction } from "@fx/runner-cloud";
+import { applyRunnerSetting, cancelClaudeLogin, cancelGhLogin, checkRunner, enqueueSandboxCommand, readClaudeLogin, readGhLogin, removeRunner, setRunnerRepos, signOutOfClaude, signOutOfGh, startClaudeLogin, startGhLogin, submitClaudeLoginCode, type FleetSettingAction } from "@fx/runner-cloud";
 import { handleSessionRequest } from "../../../../lib/runnerRoutes";
 
 /**
@@ -34,3 +34,9 @@ export const claudeLoginReadHandler = (req: NextRequest, runnerId: string) => ha
 export const claudeLoginCodeHandler = (req: NextRequest, runnerId: string) => handleSessionRequest(req, (deps, principal, body) => submitClaudeLoginCode(deps, principal, runnerId, body), { json: true });
 export const claudeLoginCancelHandler = (req: NextRequest, runnerId: string) => handleSessionRequest(req, (deps, principal) => cancelClaudeLogin(deps, principal, runnerId));
 export const claudeLogoutHandler = (req: NextRequest, runnerId: string) => handleSessionRequest(req, (deps, principal) => signOutOfClaude(deps, principal, runnerId));
+
+/** D#845 ON-19c: the GitHub sign-in relay's four routes, session routes for an owner or admin like the Claude ones (a runner signature gets 401; the database decides the rest). */
+export const ghLoginStartHandler = (req: NextRequest, runnerId: string) => handleSessionRequest(req, (deps, principal) => startGhLogin(deps, principal, runnerId));
+export const ghLoginReadHandler = (req: NextRequest, runnerId: string) => handleSessionRequest(req, (deps, principal) => readGhLogin(deps, principal, runnerId));
+export const ghLoginCancelHandler = (req: NextRequest, runnerId: string) => handleSessionRequest(req, (deps, principal) => cancelGhLogin(deps, principal, runnerId));
+export const ghLogoutHandler = (req: NextRequest, runnerId: string) => handleSessionRequest(req, (deps, principal) => signOutOfGh(deps, principal, runnerId));

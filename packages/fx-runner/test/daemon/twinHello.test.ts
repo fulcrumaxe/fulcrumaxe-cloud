@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { HelloMessage, MACHINE_JOB_CAPABILITY, PROJECT_SETUP_CAPABILITY, TWIN_CAPABILITY, type HelloMessage as Hello } from "@fulcrumaxe/runner-protocol";
+import { GH_LOGIN_CAPABILITY, HelloMessage, MACHINE_JOB_CAPABILITY, PROJECT_SETUP_CAPABILITY, TWIN_CAPABILITY, type HelloMessage as Hello } from "@fulcrumaxe/runner-protocol";
 import { createRunnerClient } from "../../src/daemon/client.js";
 import { generateRunnerKey } from "../../src/keys.js";
 import { RUNNER_BUILD_CAPABILITIES, RUNNER_PROTOCOL_VERSION, RUNNER_VERSION } from "../../src/version.js";
@@ -21,7 +21,9 @@ function cloud(unknown: string[]) {
 
 describe("twin_v1 on the build and on the hello", () => {
   it("is last on the build and the hello it makes is a valid one", () => {
-    expect(RUNNER_BUILD_CAPABILITIES.at(-1)).toBe(TWIN_CAPABILITY);
+    // D#845 ON-19c: `gh_login_v1` is newer and goes after it; the order is checked by index, never from the end.
+    expect(RUNNER_BUILD_CAPABILITIES.indexOf(TWIN_CAPABILITY)).toBe(RUNNER_BUILD_CAPABILITIES.indexOf(GH_LOGIN_CAPABILITY) - 1);
+    expect(RUNNER_BUILD_CAPABILITIES.indexOf(GH_LOGIN_CAPABILITY)).toBe(RUNNER_BUILD_CAPABILITIES.length - 1);
     expect(HelloMessage.safeParse({ ...base, capabilities: [...RUNNER_BUILD_CAPABILITIES] }).success).toBe(true);
   });
 
@@ -34,12 +36,13 @@ describe("twin_v1 on the build and on the hello", () => {
   });
 
   it("a cloud that does not know it costs one retry that drops it alone and keeps project_setup_v1 and every other capability", async () => {
-    const { client, sent } = cloud([TWIN_CAPABILITY]);
+    // a cloud that lacks twin_v1 lacks the newer gh_login_v1 too, which goes first
+    const { client, sent } = cloud([TWIN_CAPABILITY, GH_LOGIN_CAPABILITY]);
     const answer = await client.hello({ ...base, capabilities: [...RUNNER_BUILD_CAPABILITIES] });
-    expect(answer).toEqual({ kind: "ok", dropped: [TWIN_CAPABILITY] });
-    expect(sent).toHaveLength(2);
-    expect(sent[1]).toEqual(RUNNER_BUILD_CAPABILITIES.filter((c) => c !== TWIN_CAPABILITY));
-    expect(sent[1]).toContain(PROJECT_SETUP_CAPABILITY);
+    expect(answer).toEqual({ kind: "ok", dropped: [GH_LOGIN_CAPABILITY, TWIN_CAPABILITY] });
+    expect(sent).toHaveLength(3);
+    expect(sent[2]).toEqual(RUNNER_BUILD_CAPABILITIES.filter((c) => c !== TWIN_CAPABILITY && c !== GH_LOGIN_CAPABILITY));
+    expect(sent[2]).toContain(PROJECT_SETUP_CAPABILITY);
   });
 
   it("a cloud that knows it keeps it: one hello, nothing dropped", async () => {

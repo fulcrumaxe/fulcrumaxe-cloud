@@ -51,6 +51,7 @@ runner/machine-job/[job_id]/carry/seal/route.ts
 runner/machine-job/[job_id]/progress/route.ts
 runner/machine-job/claim/route.ts
 runner/machine-login/[request_id]/code/route.ts
+runner/machine-login/[request_id]/gh-report/route.ts
 runner/machine-login/[request_id]/report/route.ts
 runner/memory-proposals/route.ts
 runner/plane-merge-claim/route.ts
@@ -74,6 +75,9 @@ runners/[id]/claude-login/code/route.ts
 runners/[id]/claude-login/route.ts
 runners/[id]/claude-logout/route.ts
 runners/[id]/drain/route.ts
+runners/[id]/gh-login/cancel/route.ts
+runners/[id]/gh-login/route.ts
+runners/[id]/gh-logout/route.ts
 runners/[id]/labels/route.ts
 runners/[id]/pause/route.ts
 runners/[id]/plan-consent/route.ts

@@ -22,7 +22,7 @@ import { listApprovalsHandler } from "../app/api/runners/approvals/handler";
 import { planConsentHandler } from "../app/api/runners/[id]/plan-consent/handler";
 import { getPlanApprovalDialHandler, putPlanApprovalDialHandler } from "../app/api/runners/repos/[id]/plan-approval-dial/handler";
 import { getSandboxAllowancesHandler, putSandboxAllowancesHandler } from "../app/api/runners/repos/[id]/sandbox-allowances/handler";
-import { claudeLoginCancelHandler, claudeLoginCodeHandler, claudeLoginReadHandler, claudeLoginStartHandler, claudeLogoutHandler, fleetCheckHandler, fleetRemoveHandler, fleetReposHandler, fleetSettingHandler } from "../app/api/runners/[id]/controls";
+import { claudeLoginCancelHandler, claudeLoginCodeHandler, claudeLoginReadHandler, claudeLoginStartHandler, claudeLogoutHandler, fleetCheckHandler, ghLoginCancelHandler, ghLoginReadHandler, ghLoginStartHandler, ghLogoutHandler, fleetRemoveHandler, fleetReposHandler, fleetSettingHandler } from "../app/api/runners/[id]/controls";
 import { FLEET_SETTING_ACTIONS } from "@fx/runner-cloud";
 import { makeRegisterHandler } from "../app/api/runner/register/handler";
 import { REGISTER_LIMIT_PER_IP_PER_MINUTE } from "../lib/runnerRoutes";
@@ -87,7 +87,7 @@ describe("who may set app.runner_id, and who may use the runner door (D#6 R2a, C
   });
 
   it("only runner-cloud's own code opens a runner session or verifies a runner request", () => {
-    const allowed = ["packages/runner-cloud/src/claim.ts", "packages/runner-cloud/src/deployOrder.ts", "packages/runner-cloud/src/deviceFlow.ts", "packages/runner-cloud/src/done.ts", "packages/runner-cloud/src/engineCommands.ts", "packages/runner-cloud/src/engineDecide.ts", "packages/runner-cloud/src/engineDials.ts", "packages/runner-cloud/src/gitTicket.ts", "packages/runner-cloud/src/handoff.ts", "packages/runner-cloud/src/heartbeat.ts", "packages/runner-cloud/src/hello.ts", "packages/runner-cloud/src/index.ts", "packages/runner-cloud/src/ingestEngineEvents.ts", "packages/runner-cloud/src/ingestEvents.ts", "packages/runner-cloud/src/machineJob.ts", "packages/runner-cloud/src/machineLogin.ts", "packages/runner-cloud/src/memoryProposals.ts", "packages/runner-cloud/src/planeMerge.ts", "packages/runner-cloud/src/planePush.ts", "packages/runner-cloud/src/register.ts", "packages/runner-cloud/src/revoke.ts", "packages/runner-cloud/src/rotate.ts", "packages/runner-cloud/src/sandboxCommands.ts", "packages/runner-cloud/src/setupJobs.ts", "packages/runner-cloud/src/setupPush.ts", "packages/runner-cloud/src/setupReissue.ts", "packages/runner-cloud/src/stateCarry.ts", "packages/runner-cloud/src/verifyRunnerRequest.ts", "packages/runner-cloud/src/wake.ts", "packages/runner-protocol/src/httpSignature.ts"];
+    const allowed = ["packages/runner-cloud/src/claim.ts", "packages/runner-cloud/src/deployOrder.ts", "packages/runner-cloud/src/deviceFlow.ts", "packages/runner-cloud/src/done.ts", "packages/runner-cloud/src/engineCommands.ts", "packages/runner-cloud/src/engineDecide.ts", "packages/runner-cloud/src/engineDials.ts", "packages/runner-cloud/src/ghLogin.ts", "packages/runner-cloud/src/gitTicket.ts", "packages/runner-cloud/src/handoff.ts", "packages/runner-cloud/src/heartbeat.ts", "packages/runner-cloud/src/hello.ts", "packages/runner-cloud/src/index.ts", "packages/runner-cloud/src/ingestEngineEvents.ts", "packages/runner-cloud/src/ingestEvents.ts", "packages/runner-cloud/src/machineJob.ts", "packages/runner-cloud/src/machineLogin.ts", "packages/runner-cloud/src/memoryProposals.ts", "packages/runner-cloud/src/planeMerge.ts", "packages/runner-cloud/src/planePush.ts", "packages/runner-cloud/src/register.ts", "packages/runner-cloud/src/revoke.ts", "packages/runner-cloud/src/rotate.ts", "packages/runner-cloud/src/sandboxCommands.ts", "packages/runner-cloud/src/setupJobs.ts", "packages/runner-cloud/src/setupPush.ts", "packages/runner-cloud/src/setupReissue.ts", "packages/runner-cloud/src/stateCarry.ts", "packages/runner-cloud/src/verifyRunnerRequest.ts", "packages/runner-cloud/src/wake.ts", "packages/runner-protocol/src/httpSignature.ts"];
     expect(filesWith(/withRunnerSession|verifyRunnerRequest|verifySelfSignedRequest/)).toEqual(allowed);
   });
 
@@ -181,6 +181,11 @@ describe("a runner-signed request is not a session (every route outside api/runn
       () => fleetReposHandler(signedNext(`${ORIGIN}/api/runners/x/repos`), "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e"),
       () => fleetRemoveHandler(signedNext(`${ORIGIN}/api/runners/x/remove`), "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e"),
       // D#845 MC-8a: the Claude sign-in link's five routes are session routes; a runner signature and an API token are no session.
+      // D#845 ON-19c: the GitHub sign-in relay's four person routes are session routes too.
+      ...[ghLoginStartHandler, ghLoginReadHandler, ghLoginCancelHandler, ghLogoutHandler].flatMap((handler) => [
+        () => handler(signedNext(`${ORIGIN}/api/runners/x/gh-login`), "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e"),
+        () => handler(signedNext(`${ORIGIN}/api/runners/x/gh-login`, { authorization: "Bearer fxat_notarealtoken" }), "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e"),
+      ]),
       ...[claudeLoginStartHandler, claudeLoginReadHandler, claudeLoginCodeHandler, claudeLoginCancelHandler, claudeLogoutHandler].flatMap((handler) => [
         () => handler(signedNext(`${ORIGIN}/api/runners/x/claude-login`), "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e"),
         () => handler(signedNext(`${ORIGIN}/api/runners/x/claude-login`, { authorization: "Bearer fxat_notarealtoken" }), "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e"),

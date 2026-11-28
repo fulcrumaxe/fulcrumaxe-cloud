@@ -57,6 +57,7 @@ import { chooseEngine, reasonChangeLine, RESTART_LINE, selectSandbox, UNWIRED_LI
 import { RUNNER_BUILD_CAPABILITIES, RUNNER_PROTOCOL_VERSION, RUNNER_VERSION } from "../version.js";
 import { createSandboxCommandReceiver } from "../daemon/sandboxCommands.js";
 import { createClaudeLoginRunner, type ClaudeLoginHost } from "../daemon/claudeLogin.js";
+import { createGhLoginRunner } from "../daemon/ghLogin.js";
 import { createMachineCommandReceiver } from "../daemon/machineCommands.js";
 import { createInventoryReporter } from "../daemon/sandboxInventory.js";
 import { createBridgeApply, type EngineBridgeCommandOptions } from "./engineBridge.js";
@@ -75,7 +76,7 @@ import { computeConflictAttestation } from "../daemon/conflictAttest.js";
 import { createPlaneBaseLedger, createPlanePushHook, type PlaneBaseLedger } from "../daemon/planePush.js";
 import { createPlanePushGithub } from "../daemon/planePushGithub.js";
 import { createPlaneMergeHandler } from "../daemon/planeMerge.js";
-import { CONFLICT_FACTS_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, ENGINE_LEASE_HELLO_CAPABILITY, HEARTBEAT_INVENTORY_HELLO_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, PLATFORM_FACT_HELLO_CAPABILITY, MACHINE_LOGIN_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, MEMORY_LIMIT_CAPABILITY, ORDERED_FACTS_CAPABILITY, OVERLAP_FACTS_CAPABILITY, PROJECT_SETUP_CAPABILITY, SANDBOX_COMMAND_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, type LimitedBy, type PreflightCode } from "@fulcrumaxe/runner-protocol";
+import { CONFLICT_FACTS_CAPABILITY, ENGINE_BRIDGE_CAPABILITY, ENGINE_LEASE_HELLO_CAPABILITY, HEARTBEAT_INVENTORY_HELLO_CAPABILITY, GH_LOGIN_CAPABILITY, KVM_FACT_HELLO_CAPABILITY, PLATFORM_FACT_HELLO_CAPABILITY, MACHINE_LOGIN_CAPABILITY, PREFLIGHT_HELLO_CAPABILITY, MEMORY_LIMIT_CAPABILITY, ORDERED_FACTS_CAPABILITY, OVERLAP_FACTS_CAPABILITY, PROJECT_SETUP_CAPABILITY, SANDBOX_COMMAND_CAPABILITY, TIP_PUBLISH_CAPABILITY, MEM_PROPOSAL_CAPABILITY, type LimitedBy, type PreflightCode } from "@fulcrumaxe/runner-protocol";
 import { createGitTransport, createPublicHeadsReader } from "@fulcrumaxe/runner-protocol/planePush";
 import { createNixShell, findNix, findTool, identityVia } from "../daemon/nixShell.js";
 import { createDepsInstaller } from "../daemon/depsInstall.js";
@@ -507,7 +508,26 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       },
       log: (line) => ctx.out(line),
     });
-    const client = createRunnerClient({ engineLease: leaseGuard, machineCommands: createMachineCommandReceiver({ keyring, runnerId: registration.runner_id, now: ctx.now, login: claudeLogin, log: (line) => ctx.out(line), statePath: path.join(ctx.stateDir, "machine-commands-state.json"), uid: ctx.uid }), origin: registration.cloud_origin, key, now: ctx.now, fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass), protocolVersion: RUNNER_PROTOCOL_VERSION, sandboxCommands: createSandboxCommandReceiver({ keyring, runnerId: registration.runner_id, now: ctx.now, log: (line) => ctx.out(line), statePath: path.join(ctx.stateDir, "sandbox-commands-state.json"), uid: ctx.uid, ...(vm === undefined ? {} : { lifecycle: daemonSandboxLifecycle(vm.sdk) }) }), ...(inventoryReporter === undefined ? {} : { sandboxInventory: inventoryReporter, heartbeatInventory: () => cloudHeartbeatInventory }),
+    // D#845 ON-19c: the GitHub sign-in relay, on the same host (its own process start) and the same commands.
+    const ghLogin = createGhLoginRunner({
+      host: host.claudeLogin,
+      managed: () => host.managedServer?.() === true,
+      platform: host.platform,
+      cloud: {
+        report: async (requestId, report) => {
+          const r = await client.ghLoginReport(requestId, report);
+          return r.kind === "recorded" ? { kind: "recorded" } : r.kind === "refused" ? { kind: "refused", status: r.status } : { kind: "error" };
+        },
+      },
+      stateDir: ctx.stateDir,
+      uid: ctx.uid,
+      after: (ms, fn) => {
+        const timer = setTimeout(fn, ms);
+        return () => clearTimeout(timer);
+      },
+      log: (line) => ctx.out(line),
+    });
+    const client = createRunnerClient({ engineLease: leaseGuard, machineCommands: createMachineCommandReceiver({ keyring, runnerId: registration.runner_id, now: ctx.now, login: claudeLogin, gh: ghLogin, log: (line) => ctx.out(line), statePath: path.join(ctx.stateDir, "machine-commands-state.json"), uid: ctx.uid }), origin: registration.cloud_origin, key, now: ctx.now, fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass), protocolVersion: RUNNER_PROTOCOL_VERSION, sandboxCommands: createSandboxCommandReceiver({ keyring, runnerId: registration.runner_id, now: ctx.now, log: (line) => ctx.out(line), statePath: path.join(ctx.stateDir, "sandbox-commands-state.json"), uid: ctx.uid, ...(vm === undefined ? {} : { lifecycle: daemonSandboxLifecycle(vm.sdk) }) }), ...(inventoryReporter === undefined ? {} : { sandboxInventory: inventoryReporter, heartbeatInventory: () => cloudHeartbeatInventory }),
       // D#845 ON-1b: the machine's load rides the claim (protocol 22 and later; the client checks that). Every build reports it: placement refuses a machine whose load it never heard, and a build that
       // waited for `project_setup_v1` never sent one (that capability is not advertised yet), so no machine could take a project. The reporter sends at most once a minute.
       hostLoad: createHostLoadReporter({ probe: hooks.probe ?? realResourceProbe({ platform: host.platform, diskPaths: [workspaceRoot, path.dirname(mirrorsRoot)], vmStatText: () => vmStat }), setupsRunning: () => machineJobDispatcher?.setupsRunning() ?? 0, now: ctx.now }), verifySignIn: () => readSignInState({ settings: () => loadSettings(stateDir).verify, home, now: () => ctx.now().getTime() }) });
@@ -779,7 +799,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       // `kvm_fact_v1` is declared only by a runner that has a KVM reading to send (a plain present or absent), so a runner without one says what it always said.
       // D#845 ON-8f2c: `project_setup_v1` is advertised only when the setup and update handlers exist further down (a microVM guest, or the host guest on the standard tier); they are built from the same two parts, which are known by now.
       const setupJobsPossible = vmDeps !== undefined || (host.engine.installCapture !== undefined && host.selfCommand !== undefined);
-      const capabilityList = async () => [...RUNNER_BUILD_CAPABILITIES.filter((c) => (c !== MACHINE_LOGIN_CAPABILITY || host.managedServer?.() === true) && (c !== PROJECT_SETUP_CAPABILITY || setupJobsPossible)), SANDBOX_COMMAND_CAPABILITY, ...(factsWithKvm?.kvm === undefined ? [] : [KVM_FACT_HELLO_CAPABILITY]), ...(platformFact === undefined ? [] : [PLATFORM_FACT_HELLO_CAPABILITY]), ...(preflightReporter === undefined ? [] : [PREFLIGHT_HELLO_CAPABILITY]), ...(inventoryReporter === undefined ? [] : [HEARTBEAT_INVENTORY_HELLO_CAPABILITY]), ...(engineLeaseArmed ? [ENGINE_LEASE_HELLO_CAPABILITY] : []), ...(await verifyLocal.capabilities())];
+      const capabilityList = async () => [...RUNNER_BUILD_CAPABILITIES.filter((c) => ((c !== MACHINE_LOGIN_CAPABILITY && c !== GH_LOGIN_CAPABILITY) || host.managedServer?.() === true) && (c !== PROJECT_SETUP_CAPABILITY || setupJobsPossible)), SANDBOX_COMMAND_CAPABILITY, ...(factsWithKvm?.kvm === undefined ? [] : [KVM_FACT_HELLO_CAPABILITY]), ...(platformFact === undefined ? [] : [PLATFORM_FACT_HELLO_CAPABILITY]), ...(preflightReporter === undefined ? [] : [PREFLIGHT_HELLO_CAPABILITY]), ...(inventoryReporter === undefined ? [] : [HEARTBEAT_INVENTORY_HELLO_CAPABILITY]), ...(engineLeaseArmed ? [ENGINE_LEASE_HELLO_CAPABILITY] : []), ...(await verifyLocal.capabilities())];
       const helloBody = async (facts: typeof factsPlain) => ({ protocol_version: RUNNER_PROTOCOL_VERSION, binary_version: RUNNER_VERSION, model_auth_present: await modelAuth(), isolation: "host_sandbox" as const, ...(facts === undefined ? {} : { facts }), capabilities: await capabilityList() });
       const firstHello = await helloMessage();
       let advertised = JSON.stringify(firstHello.capabilities);

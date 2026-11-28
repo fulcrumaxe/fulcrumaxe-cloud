@@ -222,6 +222,7 @@ describe("the refusals", () => {
 
 describe("what the build advertises", () => {
   it("twin_v1 is the last capability a runner build lists (D#845 ON-27d4c), and run.ts registers all three twin handlers", () => {
-    expect((RUNNER_BUILD_CAPABILITIES as string[]).at(-1)).toBe("twin_v1");
+    // D#845 ON-19c: `gh_login_v1` is newer and goes after it; the order is checked by index, never from the end.
+    expect((RUNNER_BUILD_CAPABILITIES as string[]).indexOf("twin_v1")).toBe((RUNNER_BUILD_CAPABILITIES as string[]).indexOf("gh_login_v1") - 1);
   });
 });

@@ -539,6 +539,8 @@ describe('audit_write / audit_write_system: append-only, unforgeable audit_log (
         '1123_state_carry.sql',
         // 1124 (D#845 MC-9b2d) re-makes 1123's machine_cleanup_issue and reads 1100's role, so it goes with them.
         '1124_state_carry_start.sql',
+        // 1125 (D#845 ON-19c) alters 1035's machine_login_requests kind check and 1070's machine_commands, and replaces 1070's machine_login_report, so it goes with them.
+        '1125_gh_login.sql',
       ];
       const AUDIT_WRITE_MIGRATIONS = allFiles.filter(
         (f) => BUILDS_ON_HELD_BACK.includes(f) || isAuditWriteMigration(readFileSync(path.join(DEFAULT_MIGRATIONS_DIR, f), 'utf8')),

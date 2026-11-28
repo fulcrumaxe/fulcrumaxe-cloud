@@ -13,6 +13,7 @@ import { randomBytes } from "node:crypto";
 import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, readSync, renameSync, unlinkSync, writeSync } from "node:fs";
 import { JobSignatureError, MACHINE_COMMANDS_PER_CLAIM, verifyMachineCommand, type JobKeyring, type MachineCommand, type MachineCommandAck } from "@fulcrumaxe/runner-protocol";
 import type { ClaudeLoginRunner, Outcome } from "./claudeLogin.js";
+import type { GhLoginRunner } from "./ghLogin.js";
 
 export interface MachineCommandReceiver {
   /** Called with a claim reply's `machine_commands`. Returns when each command has been checked and queued, not when it finished. */
@@ -86,6 +87,8 @@ export function createMachineCommandReceiver(config: {
   runnerId: string;
   now: () => Date;
   login: ClaudeLoginRunner;
+  /** D#845 ON-19c: the GitHub sign-in. Absent: its two commands are refused as unsupported. */
+  gh?: GhLoginRunner;
   log?: (line: string) => void;
   /** Where the seen ids are kept across restarts (0600). Left out, they live in memory only (tests). */
   statePath?: string;
@@ -102,6 +105,8 @@ export function createMachineCommandReceiver(config: {
     try {
       if (cmd.kind === "claude_login_start") return await config.login.start(cmd.args.request_id);
       if (cmd.kind === "claude_login_code") return await config.login.code(cmd.args.request_id);
+      if (cmd.kind === "gh_login_start") return config.gh === undefined ? { ok: false, refusal: "unsupported" } : await config.gh.start(cmd.args.request_id);
+      if (cmd.kind === "gh_logout") return config.gh === undefined ? { ok: false, refusal: "unsupported" } : await config.gh.logout();
       return await config.login.logout();
     } catch {
       // fx-swallow-ok: a handler that throws is reported as a failed command, in fixed words, with nothing of its error text
@@ -159,6 +164,7 @@ export function createMachineCommandReceiver(config: {
     async idle() {
       await chain;
       await config.login.idle();
+      await config.gh?.idle();
     },
   };
 }
