@@ -8,7 +8,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { MIN_CLAUDE_VERSION } from "../../src/engines/claude/pin.js";
-import { MACOS_PREVIEW_NOTICE, WINDOWS_UNSUPPORTED_NOTICE } from "../../src/platformSupport.js";
+import { MACOS_PREVIEW_NOTICE, WINDOWS_UNSUPPORTED_NOTICE, WSL1_CONVERT_NOTICE } from "../../src/platformSupport.js";
 import { INSTALL_COMMAND, NIXOS_CONFIG_LINE } from "../../src/sandbox/sandboxFix.js";
 import { findOnPath } from "../helpers/findOnPath.js";
 import { killAllGroups, runGrouped } from "../helpers/spawnGroup.js";
@@ -150,6 +150,8 @@ interface Options {
   nixos?: boolean;
   uid?: number;
   procVersion?: string;
+  pid1?: string | null; // what PID 1's comm file says (default systemd); null = no such file
+  wslinfo?: string; // the answer of a fake `wslinfo --networking-mode`
   arm64Mac?: boolean;
   env?: Record<string, string>;
 }
@@ -187,6 +189,9 @@ function fixture(options: Options = {}): Fixture {
   writeFileSync(osRelease, options.osRelease ?? "ID=debian\n");
   const procVersion = path.join(root, "proc-version");
   writeFileSync(procVersion, options.procVersion ?? "Linux version 6.1.0 (builder@host) (gcc)\n");
+  const pid1 = path.join(root, "pid1-comm");
+  if (options.pid1 !== null) writeFileSync(pid1, `${options.pid1 ?? "systemd"}\n`);
+  if (options.wslinfo !== undefined) writeFileSync(path.join(tools, "wslinfo"), script("wslinfo", `echo ${options.wslinfo}`), { mode: 0o755 });
   const marker = path.join(root, options.nixos === true ? "NIXOS" : "no-such-marker");
   if (options.nixos === true) writeFileSync(marker, "");
   const scriptPath = path.join(root, "install.sh");
@@ -199,6 +204,7 @@ function fixture(options: Options = {}): Fixture {
     FX_INSTALL_BASE_URL: baseUrl,
     FX_INSTALL_OS_RELEASE_FILE: osRelease,
     FX_INSTALL_PROC_VERSION_FILE: procVersion,
+    FX_INSTALL_PID1_COMM_FILE: pid1,
     FX_INSTALL_NIXOS_MARKER: marker,
     FX_TEST_LOG_DIR: logs,
     FX_TEST_UNAME_S: options.uname?.[0] ?? "Linux",
@@ -344,6 +350,7 @@ describe("install.sh static checks", () => {
     const value = (name: string): string | undefined => new RegExp(`^${name}="([^"]*)"$`, "m").exec(SCRIPT_TEXT)?.[1];
     expect(value("MIN_CLAUDE_VERSION")).toBe(MIN_CLAUDE_VERSION);
     expect(value("WINDOWS_UNSUPPORTED_NOTICE")).toBe(WINDOWS_UNSUPPORTED_NOTICE);
+    expect(value("WSL1_CONVERT_NOTICE")).toBe(WSL1_CONVERT_NOTICE);
     expect(value("MACOS_PREVIEW_NOTICE")).toBe(MACOS_PREVIEW_NOTICE);
     expect(README).toContain(WINDOWS_UNSUPPORTED_NOTICE);
     expect(README).toContain(MACOS_PREVIEW_NOTICE);
@@ -565,18 +572,73 @@ describe.each(shells)("install.sh under %s", (shellName, shellPath) => {
   });
 
   d("platforms", () => {
-    it.each([
-      ["WSL2 by /proc/version", { procVersion: "Linux version 5.15.0-microsoft-standard-WSL2 (root@x)\n" }, {}],
-      ["WSL by WSL_DISTRO_NAME", {}, { WSL_DISTRO_NAME: "Ubuntu" }],
-      ["native Windows (MINGW)", { uname: ["MINGW64_NT-10.0", "x86_64"] as [string, string] }, {}],
-    ])("refuses %s with the runner's sentence, exit 2, no request", async (_name, options, env) => {
+    const WSL2_KERNEL = "Linux version 5.15.0-microsoft-standard-WSL2 (root@x)\n";
+    const WSL1_KERNEL = "Linux version 4.4.0-19041-Microsoft (Microsoft@Microsoft.com)\n";
+    const SYSTEMD_NOTICE = "Turn on systemd for this WSL distribution: add [boot] systemd=true to /etc/wsl.conf, run wsl --shutdown in Windows, then run this installer again.";
+
+    it("refuses native Windows (MINGW) with the runner's sentence, exit 2, no request", async () => {
       serveAll();
-      const f = fixture({ withDeps: true, ...options, env });
+      const f = fixture({ withDeps: true, uname: ["MINGW64_NT-10.0", "x86_64"] });
       const r = await run(f, sh);
       expect(r.code).toBe(2);
       expect(r.stderr).toContain(WINDOWS_UNSUPPORTED_NOTICE);
       expect(requests).toEqual([]);
       nothingInstalled(f);
+    }, T);
+
+    it.each([["by /proc/version", { procVersion: WSL1_KERNEL }, {}], ["even with the WSL variables set", { procVersion: WSL1_KERNEL }, { WSL_DISTRO_NAME: "Ubuntu" }]])("refuses WSL1 %s with the table's conversion notice, exit 2, no request", async (_n, options, env) => {
+      serveAll();
+      const f = fixture({ withDeps: true, ...options, env });
+      const r = await run(f, sh);
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain(WSL1_CONVERT_NOTICE);
+      expect(requests).toEqual([]);
+      nothingInstalled(f);
+    }, T);
+
+    it.each([["a microsoft-standard kernel", { procVersion: WSL2_KERNEL }, {}], ["a custom kernel told by WSL_DISTRO_NAME", {}, { WSL_DISTRO_NAME: "Ubuntu" }]])("installs on WSL2 (%s) when systemd is PID 1", async (_n, options, env) => {
+      serveAll();
+      const f = fixture({ withDeps: true, ...options, env });
+      const r = await run(f, sh);
+      expect(r.code).toBe(0);
+      expect(r.stderr).not.toContain("mirrored");
+      expect(readFileSync(installed(f), "utf8")).toBe(artifactFor("linux-x64"));
+    }, T);
+
+    it.each([["another PID 1", "init"], ["no comm file", null]])("refuses WSL2 with %s, with the exact systemd copy, exit 2, no request", async (_n, pid1) => {
+      serveAll();
+      const f = fixture({ withDeps: true, procVersion: WSL2_KERNEL, pid1 });
+      const r = await run(f, sh);
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain(SYSTEMD_NOTICE);
+      expect(requests).toEqual([]);
+      nothingInstalled(f);
+    }, T);
+
+    it.each([["mirrored", true], ["nat", false]])("on WSL2, wslinfo saying %s: the one-line note is printed only for mirrored; the install goes on", async (answer, noted) => {
+      serveAll();
+      const f = fixture({ withDeps: true, procVersion: WSL2_KERNEL, wslinfo: answer });
+      const r = await run(f, sh);
+      expect(r.code).toBe(0);
+      expect(r.stderr.includes("WSL mirrored networking")).toBe(noted);
+    }, T);
+
+    // One mutant per branch of the WSL decision: the case that guards it must fail when the branch is cut.
+    it.each([
+      ["WSL1 refusal", 'if [ "$IS_WSL" = 1 ]; then die 2 "$WSL1_CONVERT_NOTICE"; fi', "", { procVersion: WSL1_KERNEL }, (r: Result) => r.stderr.includes(WSL1_CONVERT_NOTICE)],
+      ["systemd requirement", 'die 2 "$WSL2_SYSTEMD_NOTICE"', "true", { procVersion: WSL2_KERNEL, pid1: "init" }, (r: Result) => r.stderr.includes(SYSTEMD_NOTICE)],
+      ["WSL2 detection by kernel", "microsoft-standard|wsl2", "nomatch-standard", { procVersion: WSL2_KERNEL, pid1: "init" }, (r: Result) => r.stderr.includes(SYSTEMD_NOTICE)],
+      ["native Windows refusal", "MINGW* | MSYS* | CYGWIN* | Windows*) die 2 \"$WINDOWS_UNSUPPORTED_NOTICE\" ;;", "MINGW* | MSYS* | CYGWIN* | Windows*) OS=linux ;;", { uname: ["MINGW64_NT-10.0", "x86_64"] as [string, string] }, (r: Result) => r.stderr.includes(WINDOWS_UNSUPPORTED_NOTICE)],
+      ["mirrored note", '= mirrored ]; then', '= never ]; then', { procVersion: WSL2_KERNEL, wslinfo: "mirrored" }, (r: Result) => r.stderr.includes("WSL mirrored networking")],
+    ])("mutant: cutting the %s makes its case fail", async (_n, from, to, options, holds) => {
+      serveAll();
+      const intact = fixture({ withDeps: true, ...options });
+      expect(holds(await run(intact, sh))).toBe(true);
+      const mutated = fixture({ withDeps: true, ...options });
+      const text = readFileSync(mutated.script, "utf8");
+      expect(text.split(from)).toHaveLength(2);
+      writeFileSync(mutated.script, text.replace(from, to));
+      expect(holds(await run(mutated, sh))).toBe(false);
     }, T);
 
     it.each([[["FreeBSD", "amd64"]], [["Linux", "riscv64"]]])("refuses an unsupported machine %j with exit 2", async (uname) => {

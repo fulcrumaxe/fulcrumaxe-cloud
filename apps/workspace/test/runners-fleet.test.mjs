@@ -136,7 +136,7 @@ describe("states", () => {
     expect(factsText(readRunner(wire()))).toBe("macos · arm64 · os_sandbox");
     // D#587 B-7c: the machine reads its platform and the words of that platform's support row, which the cloud sends; a WSL2 machine is never worded as Linux, and nothing is claimed when the cloud sends no row.
     const facts = (over) => factsText(readRunner(wire({ facts: { os: "linux", arch: "x64", engine: "os_sandbox", ...over } })));
-    expect(facts({ platform: "wsl2", support: "supported as a preview, not yet verified, OS sandbox only" })).toBe("wsl2 · x64 · os_sandbox · supported as a preview, not yet verified, OS sandbox only");
+    expect(facts({ platform: "wsl2", support: "supported, OS sandbox only, NAT networking" })).toBe("wsl2 · x64 · os_sandbox · supported, OS sandbox only, NAT networking");
     expect(facts({ platform: "linux", support: "supported" })).toBe("linux · x64 · os_sandbox · supported");
     expect(facts({ platform: null, support: null })).toBe("linux · x64 · os_sandbox");
     expect(facts({ platform: "wsl2" })).not.toMatch(/\bsupported\b/);

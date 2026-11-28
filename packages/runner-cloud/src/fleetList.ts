@@ -12,7 +12,7 @@ import { readFleet, type ReportedFactsLoader } from "./readModel.js";
  */
 /**
  * D#587 B-7c: how a machine stands, in the words of the runner's own support table (`platformSupport.ts`): the row for what the runner reported (`platform`, else its `os`), so a WSL2 or macOS machine reads its row's label
- * (a preview) and never Linux's "supported". The table's markdown (bold marks, the pointer to the README) is dropped. Null when there is no row: the screen then says nothing about support.
+ * (macOS a preview) and never Linux's "supported". The table's markdown (bold marks, the pointer to the README) is dropped. Null when there is no row: the screen then says nothing about support.
  */
 export function supportText(platform: string | null, os: string): string | null {
   try {

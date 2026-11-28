@@ -95,7 +95,7 @@ describe("the hello stores the platform and the fleet read shows its row [pg]", 
   });
 
   // The fleet read: the row of the support table for `platform ?? os`, never Linux's "supported" for a WSL2 machine and never macOS's for a Linux one.
-  it("the fleet read says each machine's own row: Linux supported, WSL2 and macOS a preview, an old runner by its os, and nothing for a runner that has not reported", async () => {
+  it("the fleet read says each machine's own row: Linux and WSL2 supported, macOS a preview, an old runner by its os, and nothing for a runner that has not reported", async () => {
     const f = await seedF2(h.admin);
     const lin = await runnerOf(f);
     const wsl = await runnerOf(f);
@@ -110,7 +110,7 @@ describe("the hello stores the platform and the fleet read shows its row [pg]", 
     const rows = new Map((res.body as { runners: RunnerRow[] }).runners.map((r) => [r.id, r]));
     const support = (id: string) => rows.get(id)!.facts?.support;
     expect(support(lin.id)).toBe("supported");
-    expect(support(wsl.id)).toBe("supported as a preview, not yet verified, OS sandbox only");
+    expect(support(wsl.id)).toBe("supported, OS sandbox only, NAT networking");
     expect(support(mac.id)).toBe("supported as a preview, not yet verified");
     expect(support(old.id)).toBe("supported as a preview, not yet verified");
     expect(rows.get(wsl.id)!.facts).toMatchObject({ os: "linux", platform: "wsl2" });
