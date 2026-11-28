@@ -43,6 +43,11 @@ runner/engine/events/route.ts
 runner/git-ticket/route.ts
 runner/heartbeat/route.ts
 runner/hello/route.ts
+runner/machine-job/[job_id]/carry/begin/route.ts
+runner/machine-job/[job_id]/carry/chunk/[index]/route.ts
+runner/machine-job/[job_id]/carry/fail/route.ts
+runner/machine-job/[job_id]/carry/imported/route.ts
+runner/machine-job/[job_id]/carry/seal/route.ts
 runner/machine-job/[job_id]/progress/route.ts
 runner/machine-job/claim/route.ts
 runner/machine-login/[request_id]/code/route.ts

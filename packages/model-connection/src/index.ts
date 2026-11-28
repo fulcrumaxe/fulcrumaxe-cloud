@@ -75,11 +75,12 @@ export type { VercelStateCopy } from './vercelCopy.js';
 export { VERCEL_ERROR_COPY, VERCEL_ROTATE_COPY, vercelStateCopy } from './vercelCopy.js';
 
 // D#845 MC-2: the Hetzner Cloud token and its one reader. Only the machine_ops code path may import these (test/machineOps.static.test.ts).
-export type { ConnectCtx, HetznerCredentialView, HetznerProbeResult, HetznerTokenProbe, MachineLoginIds, MachineLoginPurpose, MachineLoginSealer, MachineOpsCtx, MachineOpsErrorCode, ManagedServerRef } from './machineOps.js';
+export type { ConnectCtx, HetznerCredentialView, HetznerProbeResult, HetznerTokenProbe, MachineLoginIds, MachineLoginPurpose, MachineLoginSealer, MachineOpsCtx, SealedStateChunk, StateCarryChunkIds, StateCarrySealer, MachineOpsErrorCode, ManagedServerRef } from './machineOps.js';
 export {
   MachineOpsError,
   connectHetznerCredential,
   createMachineLoginSealer,
+  createStateCarrySealer,
   machineKekSource,
   removeHetznerCredential,
   withHetznerToken,

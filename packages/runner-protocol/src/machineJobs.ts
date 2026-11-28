@@ -14,6 +14,7 @@ import { canonicalJson, JobSignatureError, type JobKeyring } from "./jobSignatur
 import { DEVICE_REGISTER_CAPABILITY, ENGINE_SESSION_CAPABILITY, MACHINE_LOGIN_CAPABILITY, PROJECT_SETUP_CAPABILITY, TASK_KIND_CAPABILITY, TWIN_CAPABILITY, type RunnerCapability, type TASK_KINDS } from "./job.js";
 import { MACHINE_ONBOARDING_MIN_PROTOCOL } from "./messages.js";
 import { ColdstartCode, ColdstartState } from "./coldstartStatus.js";
+import { StartCarryArgs, StopCarryArgs } from "./stateCarry.js";
 
 const safeInt = z.number().int().safe();
 const sha256Hex = z.string().regex(/^[0-9a-f]{64}$/);
@@ -88,8 +89,8 @@ export const MachineJob = z
     job("project_setup", strict({ mode: z.enum(SETUP_MODES), base_sha: z.string().regex(SHA40_PATTERN), engine: EngineReleaseRef, plan_ref: PlanRef, branch: z.string().regex(ENGINE_INSTALL_BRANCH) })),
     job("engine_update", strict({ engine: EngineReleaseRef, branch: z.string().regex(ENGINE_UPDATE_BRANCH) })),
     // Every session kind carries the operate epoch the cloud read when it issued the job (a start is never signed at 0: the first on-switch makes 1).
-    job("engine_session_start", strict({ at_sha: z.string().regex(SHA40_PATTERN), resume: z.boolean(), operate_epoch: safeInt.min(1) })),
-    job("engine_session_stop", strict({ reason: z.enum(ENGINE_STOP_REASONS), operate_epoch: safeInt.min(0) })),
+    job("engine_session_start", strict({ at_sha: z.string().regex(SHA40_PATTERN), resume: z.boolean(), operate_epoch: safeInt.min(1), carry: StartCarryArgs.optional() })),
+    job("engine_session_stop", strict({ reason: z.enum(ENGINE_STOP_REASONS), operate_epoch: safeInt.min(0), carry: StopCarryArgs.optional() })),
     job("engine_session_delete", strict({ operate_epoch: safeInt.min(0) })),
     job("project_remove", strict({ delete_sandbox: z.boolean(), removal_pr: z.boolean() })),
     // D#845 ON-27b: the first copy of a public repo's default branch into its empty private twin. The job is bound to the TWIN's repository (`repo_gh_id`, the only one a token is ever minted for) and to the twin's setup.
@@ -124,6 +125,9 @@ export const MachineJob = z
   .superRefine((j, ctx) => {
     const life = Date.parse(j.expires_at) - Date.parse(j.issued_at);
     if (!(life > 0 && life <= MACHINE_JOB_MAX_LIFE_S * 1000)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a machine job lives 1 ms to 30 min", path: ["expires_at"] });
+    // D#845 MC-9b2: a stop carries a carry only on a move; a start only when it does not resume (the new machine has no kept disk to resume).
+    if (j.kind === "engine_session_stop" && j.args.carry !== undefined && j.args.reason !== "move") ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a carry rides on a move stop only", path: ["args", "carry"] });
+    if (j.kind === "engine_session_start" && j.args.carry !== undefined && j.args.resume) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a carry rides on a start that does not resume", path: ["args", "carry"] });
     // A seed names the twin as its one target and has the twin's setup; one that names the public repository as its target is refused here and again at issue.
     if (j.kind === "twin_seed" && (j.args.private.gh_id !== j.repo_gh_id || j.args.public.gh_id === j.repo_gh_id || j.setup_id === undefined || j.requires_engine !== "any")) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a twin seed targets the private twin only, through its setup", path: ["args"] });

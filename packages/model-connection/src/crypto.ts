@@ -43,13 +43,13 @@ export interface Sealed {
  * under any other AAD fails GCM authentication and throws. Criterion 2:
  * nothing returned here is the plaintext or the DEK in the clear.
  */
-export function seal({ kek, aad }: KekAad, plaintext: string): Sealed {
+export function seal({ kek, aad }: KekAad, plaintext: string | Uint8Array): Sealed {
   const dek = randomBytes(DEK_BYTES);
 
   const nonce = randomBytes(GCM_NONCE_BYTES);
   const cipher = createCipheriv('aes-256-gcm', dek, nonce);
   cipher.setAAD(aad);
-  const ciphertext = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final(), cipher.getAuthTag()]);
+  const ciphertext = Buffer.concat([cipher.update(typeof plaintext === 'string' ? Buffer.from(plaintext, 'utf8') : plaintext), cipher.final(), cipher.getAuthTag()]);
 
   const dekNonce = randomBytes(GCM_NONCE_BYTES);
   const dekCipher = createCipheriv('aes-256-gcm', kek, dekNonce);
@@ -77,7 +77,12 @@ export function seal({ kek, aad }: KekAad, plaintext: string): Sealed {
  * before any decipher is even constructed, with the same
  * DecryptionFailedError every other failure in this function produces.
  */
-export function open({ kek, aad }: KekAad, sealed: Sealed): string {
+export function open(key: KekAad, sealed: Sealed): string {
+  return openBytes(key, sealed).toString('utf8');
+}
+
+/** `open` for a sealed byte string (D#845 MC-9b2's state chunks): the same checks and the same one failure, with the plaintext as bytes. */
+export function openBytes({ kek, aad }: KekAad, sealed: Sealed): Buffer {
   try {
     if (sealed.wrappedDek.length !== WRAPPED_DEK_BYTES) {
       throw new Error(`wrappedDek must be exactly ${WRAPPED_DEK_BYTES} bytes, got ${sealed.wrappedDek.length}`);
@@ -105,7 +110,7 @@ export function open({ kek, aad }: KekAad, sealed: Sealed): string {
     const decipher = createDecipheriv('aes-256-gcm', dek, sealed.nonce, { authTagLength: GCM_TAG_BYTES });
     decipher.setAAD(aad);
     decipher.setAuthTag(tag);
-    return Buffer.concat([decipher.update(ciphertextOnly), decipher.final()]).toString('utf8');
+    return Buffer.concat([decipher.update(ciphertextOnly), decipher.final()]);
   } catch (err) {
     throw new DecryptionFailedError(
       `model-connection: decrypt failed (tampered ciphertext, wrong KEK version/AAD, or corrupted row): ${err instanceof Error ? err.message : String(err)}`,

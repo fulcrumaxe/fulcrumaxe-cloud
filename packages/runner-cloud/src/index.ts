@@ -201,6 +201,14 @@ export {
   type SetupInstallOutcome,
 } from "./setupInstallPr.js";
 export {
+  stateCarryBeginRun,
+  stateCarryChunkPutRun,
+  stateCarryChunkTakeRun,
+  stateCarryFailRun,
+  stateCarryImportedRun,
+  stateCarrySealRun,
+} from "./stateCarry.js";
+export {
   machineJobClaimRun,
   machineJobProgressRun,
   offeredMachineJobs,

@@ -45,6 +45,11 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "token_bound_elsewhere",
   // D#845 MC-4: quote and create a Hetzner Cloud server (the failure codes stamped on a failed row are the same words).
   "token_limit",
+  // D#845 MC-9b2: the state carry's runner routes.
+  "carry_refused",
+  "carry_fetched",
+  "carry_unreadable",
+  "chunk_hash_mismatch",
   "machine_kek_unset",
   "not_configured",
   "not_connected",
